@@ -1,0 +1,27 @@
+/target/
+/.omne/
+/.omne_data/.env
+/.omne_data/tmp/
+/.omne_data/threads/
+/.omne_data/locks/
+/.omne_data/logs/
+/.omne_data/data/
+/.omne_data/state/
+/.omne_data/cache/
+/.omne_data/config/
+/.omne_data/repos/
+/.github-agent-data/
+/.codex/
+/.tmp/
+/tmp/
+/node_modules/
+__pycache__/
+*.pyc
+*.swp
+*.swo
+.DS_Store
+
+# generated git diff/patch artifacts
+*.gitdiff
+*.diff
+*.patch

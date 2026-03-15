@@ -1,0 +1,15 @@
+[package]
+name = "resources"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+i18n = ["dep:i18n"]
+prompts = []
+
+[dependencies]
+i18n = { path = "../i18n", optional = true }
+
+[dev-dependencies]
+tempfile = "3"

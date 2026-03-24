@@ -1,0 +1,14 @@
+{
+  "name": "opencode-github-action-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node ./src/index.mjs"
+  },
+  "dependencies": {
+    "@actions/core": "^1.11.1",
+    "@actions/github": "^6.0.0",
+    "@opencode-ai/sdk": "^1.1.25"
+  }
+}
+

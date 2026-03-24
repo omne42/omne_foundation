@@ -1,0 +1,114 @@
+# 日志与观测（stdout_log / stderr）
+
+本章聚焦两件事：
+
+- 如何抓到 stdio MCP server 的 stdout 交互（用于协议排查）
+- 如何理解 `mcp-jsonrpc` 的 stdout 旋转日志行为（文件命名、保留策略）
+
+## stdio 下的 stdout/stderr 约定
+
+在 `transport=stdio` 场景里：
+
+- **stdout**：通常承载 JSON-RPC 消息（MCP 协议数据）
+- **stderr**：通常承载日志（人类可读的调试输出）
+
+因此建议 MCP server 把日志写到 stderr，避免污染 stdout 的 JSON 流。
+
+## stdout_log：抓取 server stdout（并旋转落盘）
+
+`mcp-kit` 的配置字段：`servers.<name>.stdout_log`
+
+启用后，`mcp-jsonrpc` 会把“从 server stdout 读到的每一行”（非全空白行）写入文件，便于：
+
+- 复盘 MCP/JSON-RPC 往来消息
+- 排查 server 输出了非 JSON 的内容（被 client 忽略）
+- 排查消息顺序/分片/大小限制
+
+示例：
+
+```json
+{
+  "version": 1,
+  "servers": {
+    "local": {
+      "transport": "stdio",
+      "argv": ["mcp-server-bin", "--stdio"],
+      "stdout_log": {
+        "path": "./.mcp-kit/logs/mcp/server.stdout.log",
+        "max_bytes_per_part": 1048576,
+        "max_parts": 32
+      }
+    }
+  }
+}
+```
+
+约束：
+
+- 仅 `transport=stdio` 支持
+- `path` 可为相对路径（相对 `--root` 解析）
+- 默认要求 `stdout_log.path` 位于 `--root` 之下；如需写到 `--root` 外，需显式开启（CLI：`--allow-stdout-log-outside-root`；代码：`Manager::with_allow_stdout_log_outside_root(true)`）
+- 出于安全考虑，`stdout_log.path` 不允许包含任何 symlink 路径组件（含父目录/目标文件）
+- best-effort：在 unix 下新建 log 文件会尝试使用 `0600` 权限（避免默认 world-readable）
+- best-effort：在 Windows 下会尽量避免写入 reparse point，但无法可靠保证文件 ACL；请把日志写到你信任/可控的目录，并视其为敏感数据
+- `max_bytes_per_part` 最小为 `1`
+- `max_parts=0` 在 `mcp-kit` 配置里表示“不限制保留数量”（无限保留）
+
+> 注意：stdout_log 会把协议数据落盘，可能包含敏感信息。建议放到项目专用目录，并结合访问控制与清理策略使用；如需脱敏，可用 `mcp_jsonrpc::SpawnOptions.stdout_log_redactor` 在落盘前做 redaction。
+
+## 旋转文件命名规则
+
+假设 `path` 是：
+
+`./.mcp-kit/logs/mcp/server.stdout.log`
+
+当文件达到 `max_bytes_per_part` 后：
+
+- 当前的 `server.stdout.log` 会被 rename 为：
+  - `server.stdout.segment-0001.log`
+  - `server.stdout.segment-0002.log`
+  - ...
+- 然后重新创建新的 `server.stdout.log` 继续写入
+
+part 编号会从“已存在的最大编号 + 1”开始，避免覆盖历史文件。
+
+## 保留策略：max_parts
+
+在 `mcp.json v1` 配置里：
+
+- `max_parts = 0`：不限制保留数量（无限保留所有 `*.segment-XXXX.log`）
+- `max_parts = N`（N>=1）：只保留最新的 N 个 segment 文件（更老的会被删除）
+
+在 Rust API（`mcp_jsonrpc::StdoutLog`）里，等价表达是：
+
+- `max_parts: None` ↔ `max_parts = 0`
+- `max_parts: Some(N)` ↔ `max_parts = N`
+
+注意：`max_parts` 只约束 segment 文件数量；当前写入中的 base 文件（`server.stdout.log`）始终存在。
+
+## 故障现象与建议
+
+### server 把日志写到了 stdout
+
+现象：
+
+- stdout_log 中出现非 JSON 内容
+- client 会忽略无法解析的 stdout 行（不影响后续 JSON 行），但可能让排查变困难
+
+建议：
+
+- 修改 server：把日志移到 stderr
+- 或在 server 中加开关：`--log-to-stderr`
+
+### stdout_log 写入失败
+
+stdout_log 是 best-effort：
+
+- 如果写入失败，`mcp-jsonrpc` 会打印一次错误并禁用后续 stdout_log（避免影响主链路）
+
+建议：
+
+- 确保 `path` 目录可创建/可写
+- 避免把 log 路径指向不可写位置
+
+如果 stdout_log 初始化失败（例如目录创建/文件打开失败，或路径包含 symlink 组件），client 会直接返回错误并拒绝启用 stdout_log。

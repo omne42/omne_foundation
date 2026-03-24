@@ -1,0 +1,12 @@
+{
+  "name": "opencode-discord-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node ./src/index.mjs"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.1.25",
+    "discord.js": "^14.16.3"
+  }
+}

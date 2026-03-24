@@ -1,0 +1,8 @@
+[book]
+title = "notify-kit"
+description = "一个轻量的通知 Hub（Rust），用于把任意事件推送到多个通知渠道（sinks）。"
+language = "zh"
+src = "."
+
+[build]
+build-dir = "../target/mdbook"

@@ -1,0 +1,12 @@
+[book]
+title = "mcp-kit"
+description = "mcp-kit documentation (MCP client/runner toolkit)"
+language = "zh"
+src = "."
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"

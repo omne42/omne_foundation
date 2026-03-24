@@ -1,0 +1,213 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on *Keep a Changelog*, and this project adheres to *Semantic Versioning*.
+
+## [Unreleased]
+
+### Added
+- `Hub::try_notify`：当缺少 Tokio runtime 时返回错误（避免静默丢通知）。
+- `Hub::send(event).await`：提供可观测的发送结果（等待所有 sinks 完成/超时）。
+- `Hub::new_with_inflight_limit`：限制 `notify()` 的后台并发，超限会丢弃并 warning（背压/防 DoS）。
+- `HubLimits` / `Hub::new_with_limits`：把 inflight 上限与单事件 fan-out 并行度这类执行期限制从 `HubConfig` 语义中拆开，显式建模运行时背压参数。
+- `FeishuWebhookConfig`：新增 `max_chars`/`with_max_chars` 与 `enforce_public_ip`/`with_public_ip_check`。
+- `GenericWebhookConfig::new_strict` / `GenericWebhookSink::new_strict`：提供更严格的 SSRF 防护（强制 host allow-list + path 前缀 + 公网 IP 校验）。
+- `notify-kit/sound-command`：允许 `SoundSink` 执行外部命令播放提示音（默认关闭，未启用时回退为终端 bell）。
+- `bots/opencode-slack`：OpenCode 风格的 Slack Socket Mode bot 示例（thread → session）。
+- `bots/opencode-feishu`：OpenCode 风格的飞书 bot 示例（chat → session）。
+- `bots/opencode-dingtalk-stream`：OpenCode 风格的钉钉 Stream Mode bot 示例（sessionWebhook → session）。
+- `bots/opencode-github-action`：OpenCode 风格的 GitHub Actions 评论 bot 示例（Issue/PR comment → session）。
+- `bots/opencode-wecom`：OpenCode 风格的企业微信（WeCom）回调 bot 示例（消息回调 → session）。
+- `bots/opencode-discord`：OpenCode 风格的 Discord bot 示例（channel/thread → session）。
+- `bots/opencode-telegram`：OpenCode 风格的 Telegram bot 示例（chat → session，long polling）。
+- `bots/_shared/session_store`：支持设置根目录（`rootDir`；bots 可用 `OPENCODE_SESSION_STORE_ROOT`）以限制 session store 文件路径。
+- `bots/_shared/opencode`：抽取 bots 共享逻辑（`assertEnv`/response 文本拼装/tool update 解析）。
+- `bots/_shared/log`：提供 `ignoreError`（best-effort 忽略错误）与 `OPENCODE_BOT_VERBOSE` 可选日志输出。
+- `bots/_shared/bootstrap`：抽取 bots 通用初始化（limiter + session store）。
+- CI: GitHub Actions workflow（`./.github/workflows/ci.yml`）。
+- Docs: 刷新 `docs/README.md`/`docs/concepts.md` 的内置 sinks 列表；`.gitignore` 忽略 `node_modules/`。
+- Docs: 新增 mdBook 本地预览（含搜索）（`docs/book.toml` + `./scripts/docs.sh`）。
+- Docs: 新增 `llms.txt` 聚合文档（`./scripts/build-llms-txt.sh` 生成）。
+- Docs: 新增 `docs/llms.md` 与 `docs/changelog.md`。
+- Docs: 新增 `docs/bots.md`，集中说明 OpenCode 风格 bot 示例。
+- Docs: 新增 `docs/examples.md`（Examples / Recipes）与 sinks 速览矩阵。
+- New sinks:
+  - `SlackWebhookSink`：Slack Incoming Webhook（text）。
+  - `DiscordWebhookSink`：Discord webhook（text）。
+  - `TelegramBotSink`：Telegram Bot API（sendMessage）。
+  - `DingTalkWebhookSink`：钉钉群机器人 webhook（text，可选签名）。
+  - `WeComWebhookSink`：企业微信群机器人 webhook（text）。
+  - `GitHubCommentSink`：GitHub Issue/PR 评论（text）。
+  - `ServerChanSink`：Server酱（ServerChan）推送（text）。
+  - `PushPlusSink`：PushPlus 推送（text）。
+  - `BarkSink`：Bark 推送（text）。
+  - `GenericWebhookSink`：通用 JSON webhook（默认 `{text: ...}`）。
+- `FeishuWebhookSink::new_with_secret`：支持飞书群机器人 webhook 签名（timestamp/sign）。
+- `FeishuWebhookSink::new_strict` / `new_with_secret_strict`：在构造阶段额外做一次 DNS 公网 IP 校验。
+
+### Changed
+- release: bump workspace package version to `1.0.0`.
+- env helper: 推荐公开路径调整为 `notify_kit::env::build_hub_from_standard_env(...)` / `notify_kit::env::StandardEnvHubOptions`；root-level re-export 仅保留兼容用途并已标记为 deprecated。
+- docs: 明确 env helper 是 convenience helper，而不是库级强制 env 协议。
+- Webhook/API sinks: `select_http_client` 在命中过期 `pinned client` 条目时会先清理再进入刷新流程，减少失败重建场景下的无效缓存驻留与后续冗余检查。
+- `DiscordWebhookSink` / `GenericWebhookSink` / `GitHubCommentSink`：在成功响应路径增加“有界响应体排空”（仅在可判定小响应体时），提升 HTTP 连接复用率并减少高频发送场景下的额外建连开销。
+- `Hub`：内部 `enabled_kinds` 索引从 `BTreeSet` 查找切换为 `HashSet`（保持对外配置类型不变），降低高频 `notify/send` kind 过滤路径的查找复杂度。
+- `bots/_shared/opencode`：`buildResponseText` 改为收集文本分片后一次性 `join("\n")`，避免大量分片时字符串 `+=` 反复扩容与拷贝。
+- `Hub`：在仅配置 1 个 sink 的常见场景走单 sink 快路径，避免 `FuturesUnordered` 调度开销，降低发送热路径 CPU 与分配成本。
+- `bots/_shared/opencode`：`runEventSubscriptionLoop` 的 in-flight 结果等待改为“单次回调 + 已完成队列”模式，避免高吞吐场景下重复 `Promise.race(inflight)` 造成的额外 Promise 监听与 CPU/内存开销。
+- `bots/_shared/opencode`：`runEventSubscriptionLoop` 的已完成结果队列改为游标出队并按需压缩，避免 burst 场景下 `Array.shift()` 的 O(n) 复制开销。
+- `bots/_shared/opencode`：`runEventSubscriptionLoop` 的成功事件完成记录改为零分配标记（仅失败路径构造错误对象），减少高吞吐场景下的瞬时对象分配与 GC 压力。
+- `bots/_shared/session_store`：`maxEntries` 驱逐路径改为直接复用 `Map.entries().next()` 的键值对，减少一次额外 `Map.get` 查找开销。
+- `bots/_shared/session_store`：legacy object 格式加载改为逐键遍历，避免 `Object.entries(...)` 一次性复制大对象，降低启动期峰值内存占用。
+- `dingtalk` sink：`timestamp/sign` 参数清理在“无命中”场景下改为零分配快路径，避免构造阶段不必要的 query 克隆与字符串拷贝。
+- `TelegramBotSink`：发送 payload 的 JSON 对象改为按已知字段数预分配 `serde_json::Map` 容量，减少发送热路径的小对象扩容。
+- `sinks/text`：当剩余字符预算已不足以容纳分隔符与后续内容时提前短路，避免继续执行无效的字段截断计算，减少小预算场景的额外 CPU 开销。
+- `sinks/text`：为 ASCII 文本截断与拼接补充快路径，减少常见英文消息在 `truncate_chars`/`push_str` 热路径上的逐字符扫描开销。
+- `Hub`：`send()` 热路径改为直接借用内部状态，移除一次冗余 `Arc` clone，减少高频发送场景的原子引用计数开销。
+- `dingtalk` sink：`timestamp/sign` query 清理改为单次扫描 URL 查询参数，减少构造阶段的重复解析开销。
+- `BarkSink` / `PushPlusSink` / `FeishuWebhookSink`：JSON payload 构造改为按已知字段数预分配 `serde_json::Map` 容量，减少发送热路径的小对象扩容。
+- `bots/_shared/opencode`：`buildResponseText` 改为单次遍历拼接文本，减少 `filter/map/join` 中间数组分配，降低高频消息路径的瞬时内存开销。
+- `Hub`：sink 失败聚合仅在失败数大于 1 时排序，减少单失败场景的无效排序开销。
+- `sinks/text`：在文本拼接达到 `max_chars`（含 `0`）后立即短路返回，避免继续遍历 body/tags，降低小预算截断场景的额外 CPU 开销。
+- Webhook/API sinks: `pinned client` 写缓存路径移除同 key 的冗余二次命中检查（构建锁已保证互斥），减少热路径写锁持有时长与一次额外 map 读取。
+- `Webhook/API sinks`：`build_http_client_pinned_async` 改为直接借用 URL host（`&str`），减少 pinned client 构建路径的一次临时 `String` 分配。
+- `dingtalk` sink：仅在确实存在 `timestamp/sign` 参数时才重写 webhook query，减少构造阶段的无效扫描与重编码开销。
+- `Hub::notify` / `Hub::send`：在无 sink 场景提前返回，避免不必要的 Tokio runtime 探测与 semaphore 开销。
+- `Webhook/API sinks`：`pinned client` 缓存命中快路径不再触发 build-lock 清理，减少高命中场景下的全局互斥锁竞争。
+- Webhook/API sinks: DNS 并发门控的 permit 生命周期收敛到“实际 DNS 查询”阶段，减少解析后地址校验阶段对并发额度的占用。
+- Webhook/API sinks: 统一复用 `dns lookup timeout` 文案的静态缓存，减少超时错误路径的重复字符串分配。
+- Webhook/API sinks: `pinned client` 缓存淘汰候选改为单次 key 克隆，降低缓存接近上限时的额外分配。
+- Webhook/API sinks: DNS 并发门控改为借用式 `SemaphorePermit`，减少每次 DNS 预检的 `Arc` 引用计数开销。
+- Webhook/API sinks: 发送请求时改为借用 `Url` 字符串（`as_str()`），减少热路径的 `Url` 克隆开销。
+- `dingtalk` sink：签名 URL 的 `timestamp/sign` 参数清理前移到构造阶段，发送热路径不再重复扫描并重建 query 参数。
+- `sinks/text`：`truncate_chars` 的省略号截断改为单次字符扫描，减少长文本截断时的重复遍历开销。
+- `Hub`：无 sink 时增加快速返回；失败聚合路径预分配 `Vec`/`String`，减少常见错误路径的动态分配。
+- `Hub`：失败列表改为按需分配（不再按 sink 总数预分配），降低成功热路径的瞬时内存分配。
+- `BarkSink` / `PushPlusSink`：将配置项空白规范化前移到构造阶段，避免发送热路径重复 `trim`。
+- `Hub`：sink 发送调度从额外 `Box::pin` 包装改为直接 async future，减少每个 sink 发送路径的一次堆分配。
+- `Hub`：sink 并发发送从“按 chunk 全量等待”调整为“固定并发窗口持续补位”，在保持并发上限与错误聚合语义不变的前提下提升多 sink 混合延迟场景的吞吐。
+- `HubConfig`：默认 `per_sink_timeout` 从 `2s` 调整为 `5s`，避免 HTTP sinks 默认超时与 DNS 预检叠加导致的误超时。
+- `Hub`：`notify/try_notify` 日志路径不再为 `Event.kind` 进行多余的 `String` 克隆；过载丢弃路径也避免提前分配 `Arc<Event>`。
+- `Hub`：sink 发送热路径改为借用 `&Event` 透传（不再为每次通知构造 `Arc<Event>` 并做额外引用计数），并在 `send()` 的空 sink 场景跳过 semaphore 获取。
+- `Hub`：聚合 sink 错误消息时改为直接写入 `String`（减少临时 `format!` 分配）。
+- `Hub`：sink 执行结果归一化改为单路径表达式（timeout/panic），减少发送热路径中的分支与临时匹配开销。
+- `Hub`：在构造阶段缓存 sink 名称，并保留 `Sink::name()` panic 的失败语义（`<unknown>: sink panicked`），减少发送热路径重复名称获取与 panic 捕获开销。
+- Webhook/API sinks: 文本响应体解码优先走 `String::from_utf8`，在合法 UTF-8 常见路径下避免一次额外拷贝，降低瞬时内存占用。
+- Webhook/API sinks: DNS 解析结果去重时基于迭代器容量提示预分配容器，减少多地址返回场景下的扩容开销。
+- `ServerChanSink::new`：URL 二次校验改为直接借用 `&str`，移除冗余临时 `String` 分配。
+- `FeishuWebhookSink`：限制 webhook URL（`https` + host allowlist），禁用重定向，错误信息不再包含响应 body。
+- All built-in webhook sinks: 校验 URL path 前缀；消息构造改为“有上限”的截断与 tag cap；解析 JSON response 时限制最大读取大小（默认 `16KiB`）。
+- Webhook/API sinks: 默认启用 DNS 公网 IP 校验（发送前执行，可关闭）。
+- `GenericWebhookSink`：关闭 DNS 公网 IP 校验时，要求同时配置 `allowed_hosts`（减少 SSRF 风险）。
+- `bots/_shared/limiter`：队列出队从 `Array.shift()` 改为游标 + 周期压缩，避免高积压时的 O(n) 复制开销。
+- `bots/_shared/session_store`：`load()` 恢复历史 entries 时改为仅统计驱逐数量，避免每条记录都创建临时 `evicted` 数组，降低大文件启动场景的瞬时分配与 GC 压力。
+- `BarkSink`：JSON Content-Type 判定改为无分配大小写比较，避免每次请求都创建临时小写字符串。
+- `sinks/text`：字段截断在“未发生截断”的常见路径改为复用借用字符串，减少临时 `String` 分配与拷贝。
+- `bots/opencode-slack` / `bots/opencode-feishu` / `bots/opencode-wecom` / `bots/opencode-dingtalk-stream`：tool update 路径改为 `sessionId` 反向索引查找，避免每次事件线性扫描全部会话。
+- Docs: 统一为 mdBook 文档（`./scripts/docs.sh` 本地预览/测试）。
+- Docs: 文档 Rust 代码示例统一标注为 `edition2024`。
+- Docs: mdBook 安装命令统一使用 `cargo install mdbook --locked`（更可复现）。
+- Dev: 在提交门禁中增加 bot 示例的 Node.js 语法校验（不要求安装依赖）。
+- Docs: 重构 `docs/SUMMARY.md` 的信息架构（Overview / Getting Started / Guides / Reference / Sinks）。
+- Docs: `./scripts/docs.sh` 允许透传 mdBook 参数（便于容器/远程预览）。
+- Docs: `llms.txt` 生成时会剔除 mdBook 的隐藏行（`# ...`），减少噪音。
+- Dev: `githooks/pre-commit` 新增严格门禁（`scripts/pre-commit-check.sh`），提交前执行 clippy（`-D warnings`）与生产目标关键 lint（`unwrap/expect`、`let _ =` 忽略 must_use、冗余 clone）。
+
+### Fixed
+- Webhook/API sinks: 修复 `pinned client` 过期后若刷新失败（如 DNS 超时）时，过期缓存条目可能长期残留的问题，并新增回归测试覆盖该路径。
+- `ServerChanSink`：修复 SC3 `send_key` 边界校验缺口；`sctp{uid}t`（缺少后缀 code）现在会在构造阶段被拒绝，避免生成无效目标 URL 后在发送期失败。
+- Webhook/API sinks: IPv6 公网 IP 判定补齐 `100::/64`（discard-only）与 `2001:2::/48`（benchmarking）保留网段，避免 SSRF 防护误放行。
+- `bots/_shared/opencode`：修复 `runEventSubscriptionLoop` 在“快速事件流 + handler 快速完成/失败”时，已完成结果可能在 race 落败分支被提前消费并丢弃的问题；该问题会导致错误延迟/丢失重连信号，并可能引发已完成结果队列持续增长。
+- `bots/_shared/opencode`：修复 `runEventSubscriptionLoop` 在“事件流快于 handler 完成”时重复对同一 in-flight Promise 挂接 race 监听导致的回调堆积问题，降低长期运行进程的瞬时内存增长风险。
+- `bots/_shared/opencode`：修复 `runEventSubscriptionLoop` 在 `onEvent` 以 falsy 值（如 `undefined`）拒绝时，未进入错误清理路径的问题；现在会正确触发 `iterator.return()` 并保留真实错误语义，避免订阅资源残留与误报 `stream ended`。
+- `bots/_shared/opencode`：`withTimeout` 现在会将“任务函数同步抛错”统一收敛为 Promise 拒绝，修复该边界场景绕过统一超时/错误处理路径的问题。
+- `PushPlusSink`：当 API 错误响应已包含 `msg` 时，不再附带“response body omitted”的矛盾文案。
+- `TelegramBotSink`：当 API 错误响应已包含 `error_code`/`description` 时，不再附带“response body omitted”的矛盾文案。
+- `sinks/text`：修复极小 `max_chars` 预算下可能输出尾部孤立换行符（如仅剩 1 个字符预算时尝试追加 body/tag）的格式错误。
+- `bots/_shared/session_store`：`atomicWriteUtf8` 在临时文件写入失败时会清理 `.tmp` 文件，避免连续写失败场景残留临时文件累积。
+- `bots/_shared/session_store`：空白/空文件现在按“无数据”处理，避免启动时重复输出 JSON 解析错误并减少无效异常路径开销。
+- `dingtalk` sink：当启用签名但原始 webhook URL 不含 `timestamp/sign` 时，不再无条件重写 query，避免原始参数编码被不必要地规范化导致的潜在兼容性问题。
+- `Hub::send`：无 sink 时即使当前不在 Tokio runtime 中也会直接成功返回（no-op），避免误报 `NoTokioRuntime`。
+- `Hub::try_notify`：无 sink 时改为直接返回 `Ok(())`，避免空配置场景下出现不必要的 `NoTokioRuntime` / `Overloaded`。
+- `DingTalkWebhookSink` / `FeishuWebhookSink`：`secret` 在构造阶段统一去除首尾空白，修复“配置含空白导致签名错误、发送失败”的问题。
+- `GenericWebhookSink`：`payload_field` / `allowed_hosts` / `path_prefix` 现在会在构造阶段去除首尾空白，避免配置含空白时误判 host/path 或生成错误字段名。
+- `GitHubCommentSink` / `TelegramBotSink` / `BarkSink` / `PushPlusSink`：关键配置（token、chat_id、device_key 等）现在会在构造阶段去除首尾空白，修复“校验通过但请求参数含空白导致发送失败”的问题。
+- `bots/_shared/session_store`：删除不存在 key 时不再标记 dirty 并触发 flush，避免无效磁盘写入与多余 I/O。
+- `bots/_shared/session_store`：进程收到 `SIGINT`/`SIGTERM` 时，flush 后改用信号语义退出码（130/143），避免中断流程被误报为成功退出。
+- `SlackWebhookSink` / `DiscordWebhookSink` / `BarkSink`：当错误信息已包含响应摘要时，不再附加“response body omitted”的矛盾文案。
+- `BarkSink`：当 API 错误信息已包含 `message` 摘要时，不再附带“response body omitted”的矛盾文案。
+- `Hub`：在提升并发发送吞吐后，失败汇总顺序仍按 sink 配置顺序稳定输出（避免并发完成顺序导致错误列表抖动）。
+- `SoundSink`：外部命令会被回收（避免僵尸进程累积）。
+- `SoundSink`：等待子进程改为使用 Tokio 的 blocking pool（避免线程创建失败导致 panic）。
+- `SoundSink`：拒绝空 program 的错误配置。
+- `FeishuWebhookConfig`/`FeishuWebhookSink`：`Debug` 输出不再泄露完整 webhook URL。
+- `SoundSink`：调整测试模块位置以通过 clippy（`items_after_test_module`）。
+- `SoundSink`：移除无用 `mut` 以通过 clippy（`unused_mut`）。
+- `SlackWebhookSink`：2xx 响应时会读取并校验响应 body（避免 200 + 错误文本被误判为成功）。
+- `dingtalk` / `wecom` / `feishu` sinks：2xx 响应但 body 非 JSON/读取失败时不再误判为成功（解析失败会返回错误）。
+- `BarkSink`：补充 API 级错误判断（当响应为 JSON 且包含 `code` 时），并在非 2xx 时附带截断后的响应摘要。
+- `DiscordWebhookSink` / `GenericWebhookSink`：非 2xx 时附带截断后的响应摘要，便于定位问题。
+- `serverchan` sink：错误信息不再回显第三方返回的 message（保持低敏感）。
+- `Hub`：sink task panic 时错误聚合现在会保留 sink 名称（便于定位）。
+- `Hub`：聚合 sink 结果时不再为 sink 名称分配 `String`（减少堆分配）。
+- `Hub`：`Sink::name()` panic 现在会被捕获并聚合为 `<unknown>: sink panicked`，避免单个 sink 触发整个发送流程 panic。
+- Webhook/API sinks: 修复 `enforce_public_ip` 打开时未实际使用 pinned client 的问题。
+- Webhook/API sinks: 公网 IP 判定现在会正确处理 IPv4-mapped IPv6（例如 `::ffff:127.0.0.1`），避免绕过 SSRF 防护。
+- Webhook/API sinks: 公网 IP 判定现在会识别 NAT64 well-known prefix `64:ff9b::/96`，按嵌入的 IPv4 再判定（兼容 DNS64 且避免绕过 SSRF 防护）。
+- Webhook/API sinks: 公网 IP 判定现在会识别 6to4 `2002::/16`，按嵌入的 IPv4 再判定（避免绕过 SSRF 防护）。
+- Webhook/API sinks: 公网 IP 判定现在会拒绝 IPv4-compatible IPv6（`::/96`），避免特殊地址表示绕过公网 IP 校验。
+- Webhook/API sinks: IPv6 公网 IP 判定现在会拒绝 site-local `fec0::/10`（例如 `fec0::1`）。
+- Webhook/API sinks: IPv4 公网 IP 判定补齐更多 RFC6890 特殊用途网段（例如 `192.0.0.0/24`、`192.88.99.0/24`）。
+- Webhook/API sinks: `dns lookup timeout` 错误现在会注明 DNS 超时上限为 `2s`（`min(timeout, 2s)`）。
+- Webhook/API sinks: `dns lookup failed` 错误现在会保留底层错误信息（便于排障）。
+- Webhook/API sinks: DNS 公网 IP 预检的超时预算现在按“总时限”生效（信号量等待 + DNS 查询共享同一 budget），避免高并发下超时被阶段性叠加放大。
+- Webhook/API sinks: `decode json failed` 错误现在会保留底层解析错误信息（便于排障）。
+- Webhook/API sinks: URL path 前缀校验改为“段边界匹配”（例如 `/send` 不再匹配 `/sendMessage`），减少误放行。
+- Webhook/API sinks: DNS 解析结果去重改为 `HashSet`（避免 O(n²) 扫描）。
+- API: 公共签名统一使用 `notify_kit::Result` / `notify_kit::Error`；其中 `notify_kit::Error` 现在是对 `anyhow::Error` 的薄封装（避免在公共 API 中暴露 `anyhow` 类型）。
+- Webhook/API sinks: 收敛严格模式下的同步 DNS 预检实现，移除 per-host inflight/cache（仍保持有界并发与超时）。
+- Webhook/API sinks: 严格模式同步 DNS 预检在 thread spawn 失败时会保留底层错误信息（便于排障）。
+- `FeishuWebhookSink::new_strict` / `new_with_secret_strict`：严格模式下禁止关闭公网 IP 校验。
+- `bots/opencode-feishu`：修正 Feishu SDK 的 ESM 导入与事件名（`im.message.receive_v1`），并启用 callback challenge 自动处理。
+- `bots/opencode-github-action`：修正示例安装命令为 `npm install`（仓库未提供 lockfile，避免 `npm ci` 失败）。
+- `bots/opencode-github-action`：当 OpenCode prompt 返回 error 时会 fail（避免发布空响应评论）。
+- `bots/opencode-wecom`：回调解密后校验 receiver（corp id），并加强 PKCS7 padding 校验。
+- `bots/opencode-wecom`：校验解密后的 `msgLen` 边界，避免越界读取。
+- `bots/opencode-dingtalk-stream`：校验 `sessionWebhook` 为 https 且 host 属于钉钉域名（降低 SSRF 风险）。
+- `bots/opencode-wecom`：增加 timestamp 时间窗与 nonce 去重（降低重放风险）。
+- `bots/opencode-wecom`：签名比较使用 timingSafeEqual，并对 replay cache 增加容量上限（避免 DoS / 内存增长）。
+- `bots/opencode-wecom`：SHA1 hex 解析增加长度快速判断并用手写 hex 校验替代正则（避免超长输入触发正则扫描）。
+- Webhook/API sinks: DNS 公网 IP 校验增加超时与并发限制，避免阻塞/线程池耗尽，并对 pinned client 做短 TTL 缓存以减少重复解析。
+- Webhook/API sinks: DNS 公网 IP 校验：timeout 后将 permit 生命周期绑定到实际解析任务（防止持续 timeout 时产生无界 blocking 任务/线程），并在 timeout 路径上清理 inflight 条目避免 map 增长，同时为失败/超时结果增加短 TTL 负缓存。
+- Webhook/API sinks: `pinned client` 构建锁在失败路径下会及时移除对应 `Weak` 条目，避免失败 host 累积导致静态锁表增长。
+- Webhook/API sinks: `pinned client` 构建锁在任务取消路径也会及时清理，避免取消请求导致静态锁表残留增长。
+- Webhook/API sinks: `pinned client` 缓存键改为使用完整 `Duration`，修复亚毫秒超时被毫秒截断后发生错误 client 复用的问题。
+- `SlackWebhookSink` / `DiscordWebhookSink` / `GenericWebhookSink` / `BarkSink`：读取响应 body 失败时仍保留 HTTP status 错误上下文。
+- `GitHubCommentSink` / `TelegramBotSink` / `DingTalkWebhookSink` / `WeComWebhookSink` / `FeishuWebhookSink` / `ServerChanSink` / `PushPlusSink`：非 2xx 时会读取并截断响应 body 后再返回错误，避免错误路径因未消费响应体导致连接复用下降，并提升定位信息。
+- `BarkSink`：当响应看起来像 JSON 时，即使 Content-Type 缺失/错误也会尝试解析。
+- `bots/opencode-telegram`：支持 `OPENCODE_SESSION_STORE_PATH` 以持久化 chat → session 映射（可选）。
+- `bots/_shared/session_store`：`rootDir` 校验加强（防 symlink 逃逸；flush 前二次校验 realpath）。
+- `bots/_shared/session_store`：flush 失败在非 verbose 下也会输出一次性 warning（避免静默失败）。
+- `bots/_shared/session_store`：退出 hook 支持多个 store 实例（避免只 flush 第一个）。
+- `bots/_shared/session_store`：`close()` 会取消 debounce 并触发一次 flush（返回 Promise），同时解除 exit hook 注册（避免短生命周期 store 累积 flush 回调）。
+- `bots/_shared/opencode`：`runEventSubscriptionLoop` 在并发未打满且事件流暂时阻塞时，也会及时消费 `onEvent` 失败并触发重连（避免卡死在单次订阅）。
+- `bots/_shared/opencode`：`runEventSubscriptionLoop` 在 handler 失败提前退出时会吞掉未完成 `next()` 的晚到拒绝，避免重连窗口出现未处理 Promise 拒绝告警。
+- `FeishuWebhookSink`：严格模式下的构造期 DNS 公网 IP 校验增加超时 + 并发限制（避免 DNS 卡死导致初始化阻塞/线程堆积）。
+- `FeishuWebhookSink`：严格模式下的构造期 DNS 公网 IP 校验增加 inflight 去重 + TTL 缓存，并对 pinned client cache 增加容量上限（避免重复/无界增长）。
+- `bots/_shared/log`：verbose 模式输出错误 stack（更易排障）。
+- Docs: 修复 `./scripts/docs.sh test` 偶发的重复 rmeta 导致的 snippet 编译失败。
+
+## [0.1.0] - 2026-01-31
+
+### Added
+- `notify-kit` crate：提供 `Hub` + `Sink` 抽象。
+- `sound` sink：终端 bell / 自定义播放命令。
+- `feishu` sink：飞书 webhook（text 消息）。
+- `HubConfig`：支持可选 kind allow-list 与 per-sink timeout。
+
+### Changed
+- `Event.kind` 改为字符串（通用事件类型，不绑定具体业务域）。
+- 移除库内置的通知环境变量解析（交由上层 integration 负责）。
+
+### Fixed

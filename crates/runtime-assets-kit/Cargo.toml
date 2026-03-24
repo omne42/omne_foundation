@@ -1,0 +1,19 @@
+[package]
+name = "runtime-assets-kit"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+i18n = ["dep:i18n-kit"]
+prompts = []
+
+[dependencies]
+i18n-kit = { path = "../i18n-kit", optional = true }
+omne-systems-fs-primitives = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

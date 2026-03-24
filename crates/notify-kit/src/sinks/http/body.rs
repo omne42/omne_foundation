@@ -1,0 +1,301 @@
+use crate::sinks::text::truncate_chars;
+
+use super::client::sanitize_reqwest_error;
+
+pub(crate) const DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 16 * 1024;
+const RESPONSE_BODY_DRAIN_LIMIT_BYTES: usize = 64 * 1024;
+const ERROR_RESPONSE_SUMMARY_MAX_CHARS: usize = 200;
+
+pub(crate) async fn read_json_body_limited(
+    resp: reqwest::Response,
+    max_bytes: usize,
+) -> crate::Result<serde_json::Value> {
+    let buf = read_body_bytes_limited(resp, max_bytes).await?;
+    serde_json::from_slice(&buf).map_err(|err| anyhow::anyhow!("decode json failed: {err}").into())
+}
+
+pub(crate) async fn read_text_body_limited(
+    resp: reqwest::Response,
+    max_bytes: usize,
+) -> crate::Result<String> {
+    let (buf, truncated) = read_body_bytes_truncated(resp, max_bytes).await?;
+    Ok(decode_text_body_lossy(buf, truncated))
+}
+
+pub(crate) fn response_body_read_error(
+    label: &str,
+    status: reqwest::StatusCode,
+    err: &crate::Error,
+) -> crate::Error {
+    anyhow::anyhow!("{label}: {status} (failed to read response body: {err})").into()
+}
+
+pub(crate) fn http_status_text_error(
+    context: &str,
+    status: reqwest::StatusCode,
+    body: &str,
+) -> crate::Error {
+    let summary = truncate_chars(body.trim(), ERROR_RESPONSE_SUMMARY_MAX_CHARS);
+    if summary.is_empty() {
+        return anyhow::anyhow!("{context} http error: {status} (response body omitted)").into();
+    }
+
+    anyhow::anyhow!("{context} http error: {status}, response={summary}").into()
+}
+
+pub(crate) async fn ensure_http_success(
+    resp: reqwest::Response,
+    context: &str,
+) -> crate::Result<()> {
+    let status = resp.status();
+    if status.is_success() {
+        try_drain_response_body_for_reuse(resp).await;
+        return Ok(());
+    }
+
+    let body = read_text_body_limited(resp, DEFAULT_MAX_RESPONSE_BODY_BYTES)
+        .await
+        .map_err(|err| response_body_read_error(&format!("{context} http error"), status, &err))?;
+    Err(http_status_text_error(context, status, &body))
+}
+
+pub(crate) async fn read_json_body_after_http_success(
+    resp: reqwest::Response,
+    context: &str,
+) -> crate::Result<serde_json::Value> {
+    let status = resp.status();
+    if !status.is_success() {
+        let body = read_text_body_limited(resp, DEFAULT_MAX_RESPONSE_BODY_BYTES)
+            .await
+            .map_err(|err| {
+                response_body_read_error(&format!("{context} http error"), status, &err)
+            })?;
+        return Err(http_status_text_error(context, status, &body));
+    }
+
+    read_json_body_limited(resp, DEFAULT_MAX_RESPONSE_BODY_BYTES).await
+}
+
+async fn try_drain_response_body_for_reuse(mut resp: reqwest::Response) {
+    let Some(content_length) = resp.content_length() else {
+        return;
+    };
+    if content_length == 0 || content_length > RESPONSE_BODY_DRAIN_LIMIT_BYTES as u64 {
+        return;
+    }
+    drain_response_body_limited(&mut resp, RESPONSE_BODY_DRAIN_LIMIT_BYTES).await;
+}
+
+fn decode_text_body_lossy(buf: Vec<u8>, truncated: bool) -> String {
+    let mut out = match String::from_utf8(buf) {
+        Ok(text) => text,
+        Err(err) => String::from_utf8_lossy(&err.into_bytes()).into_owned(),
+    };
+    if truncated {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("[truncated]");
+    }
+    out
+}
+
+async fn read_body_bytes_limited(
+    mut resp: reqwest::Response,
+    max_bytes: usize,
+) -> crate::Result<Vec<u8>> {
+    if max_bytes == 0 {
+        drain_response_body_limited(&mut resp, RESPONSE_BODY_DRAIN_LIMIT_BYTES).await;
+        return Err(anyhow::anyhow!("response body too large (response body omitted)").into());
+    }
+
+    let mut cap_hint = 0usize;
+    if let Some(len) = resp.content_length() {
+        if len > max_bytes as u64 {
+            drain_response_body_limited(&mut resp, RESPONSE_BODY_DRAIN_LIMIT_BYTES).await;
+            return Err(anyhow::anyhow!("response body too large (response body omitted)").into());
+        }
+        cap_hint = content_length_capacity_hint(len, max_bytes);
+    }
+
+    let mut buf = Vec::with_capacity(cap_hint);
+    while let Some(chunk) = resp.chunk().await.map_err(|err| {
+        anyhow::anyhow!(
+            "read response body failed ({})",
+            sanitize_reqwest_error(&err)
+        )
+    })? {
+        if chunk.len() > max_bytes.saturating_sub(buf.len()) {
+            drain_response_body_limited(&mut resp, RESPONSE_BODY_DRAIN_LIMIT_BYTES).await;
+            return Err(anyhow::anyhow!("response body too large (response body omitted)").into());
+        }
+        buf.extend_from_slice(&chunk);
+    }
+
+    Ok(buf)
+}
+
+async fn read_body_bytes_truncated(
+    mut resp: reqwest::Response,
+    max_bytes: usize,
+) -> crate::Result<(Vec<u8>, bool)> {
+    if max_bytes == 0 {
+        drain_response_body_limited(&mut resp, RESPONSE_BODY_DRAIN_LIMIT_BYTES).await;
+        return Ok((Vec::new(), true));
+    }
+
+    let mut truncated = false;
+    let mut cap_hint = 0usize;
+    if let Some(len) = resp.content_length() {
+        if len > max_bytes as u64 {
+            truncated = true;
+        }
+        cap_hint = content_length_capacity_hint(len, max_bytes);
+    }
+
+    let mut buf = Vec::with_capacity(cap_hint);
+    while let Some(chunk) = resp.chunk().await.map_err(|err| {
+        anyhow::anyhow!(
+            "read response body failed ({})",
+            sanitize_reqwest_error(&err)
+        )
+    })? {
+        if buf.len() >= max_bytes {
+            truncated = true;
+            break;
+        }
+
+        let remaining = max_bytes - buf.len();
+        if chunk.len() > remaining {
+            buf.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+
+        buf.extend_from_slice(&chunk);
+    }
+
+    if truncated {
+        drain_response_body_limited(&mut resp, RESPONSE_BODY_DRAIN_LIMIT_BYTES).await;
+    }
+
+    Ok((buf, truncated))
+}
+
+async fn drain_response_body_limited(resp: &mut reqwest::Response, mut remaining: usize) {
+    while remaining > 0 {
+        let Ok(Some(chunk)) = resp.chunk().await else {
+            break;
+        };
+        remaining = remaining.saturating_sub(chunk.len());
+    }
+}
+
+fn content_length_capacity_hint(content_length: u64, max_bytes: usize) -> usize {
+    usize::try_from(content_length)
+        .ok()
+        .map_or(max_bytes, |len| len.min(max_bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_text_body_lossy_reuses_valid_utf8_buffer() {
+        let bytes = b"ok".to_vec();
+        let ptr = bytes.as_ptr();
+        let out = decode_text_body_lossy(bytes, false);
+        assert_eq!(out, "ok");
+        assert_eq!(out.as_ptr(), ptr);
+    }
+
+    #[test]
+    fn decode_text_body_lossy_handles_invalid_utf8() {
+        let out = decode_text_body_lossy(vec![0xff, b'a'], false);
+        assert_eq!(out, "\u{fffd}a");
+    }
+
+    #[test]
+    fn decode_text_body_lossy_marks_truncated_output() {
+        let out = decode_text_body_lossy(b"line".to_vec(), true);
+        assert_eq!(out, "line\n[truncated]");
+    }
+
+    #[test]
+    fn http_status_text_error_uses_omitted_for_empty_body() {
+        let err =
+            http_status_text_error("discord webhook", reqwest::StatusCode::BAD_REQUEST, "   ");
+        assert_eq!(
+            err.to_string(),
+            "discord webhook http error: 400 Bad Request (response body omitted)"
+        );
+    }
+
+    #[test]
+    fn http_status_text_error_truncates_body_summary() {
+        let long_body = "x".repeat(300);
+        let err = http_status_text_error(
+            "generic webhook",
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            &long_body,
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with("generic webhook http error: 500 Internal Server Error, response="),
+            "{msg}"
+        );
+        assert!(msg.ends_with("..."), "{msg}");
+    }
+
+    #[test]
+    fn read_json_body_after_http_success_returns_json_on_success() {
+        let listener = match std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)) {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "skipping read_json_body_after_http_success_returns_json_on_success: loopback bind not permitted in this environment: {err}"
+                );
+                return;
+            }
+            Err(err) => panic!("bind listener: {err}"),
+        };
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let mut buf = [0u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let response = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Type: application/json\r\n",
+                "Content-Length: 11\r\n",
+                "Connection: close\r\n",
+                "\r\n",
+                "{\"ok\":true}"
+            );
+            std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write response");
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let client = reqwest::Client::builder().build().expect("build client");
+            let resp = client
+                .get(format!("http://{addr}/"))
+                .send()
+                .await
+                .expect("send request");
+
+            let body = read_json_body_after_http_success(resp, "test api")
+                .await
+                .expect("json body");
+            assert_eq!(body["ok"].as_bool(), Some(true));
+        });
+
+        server.join().expect("server thread");
+    }
+}

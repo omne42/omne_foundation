@@ -1,0 +1,13 @@
+{
+  "name": "opencode-wecom-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node ./src/index.mjs"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.1.25",
+    "fast-xml-parser": "^4.5.3"
+  }
+}
+

@@ -1,4 +1,5 @@
 /target/
+**/target/
 /.omne/
 /.omne_data/.env
 /.omne_data/tmp/
@@ -15,13 +16,21 @@
 /.tmp/
 /tmp/
 /node_modules/
+**/node_modules/
+**/docs/book/
 __pycache__/
 *.pyc
 *.swp
 *.swo
 .DS_Store
+**/*.rs.bk
 
 # generated git diff/patch artifacts
 *.gitdiff
 *.diff
 *.patch
+
+# legacy error-kit bak artifacts
+/bak/error-kit/Cargo.lock
+/bak/error-kit/target/
+/bak/error-kit/wip/

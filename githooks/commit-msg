@@ -7,6 +7,28 @@ if [[ -z "$msg_file" || ! -f "$msg_file" ]]; then
   exit 1
 fi
 
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+
+branch="$(git -C "$repo_root" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+if [[ -n "$branch" && "$branch" != "HEAD" ]]; then
+  ok=0
+  case "$branch" in
+    main|master) ok=1 ;;
+    feat/*|fix/*|docs/*|refactor/*|perf/*|test/*|chore/*|build/*|ci/*|revert/*) ok=1 ;;
+  esac
+  if [[ "$ok" -ne 1 ]]; then
+    cat >&2 <<EOF
+commit-msg: invalid branch name: $branch
+
+Branch must be:
+  - main or master
+  - or start with one of:
+    feat/, fix/, docs/, refactor/, perf/, test/, chore/, build/, ci/, revert/
+EOF
+    exit 1
+  fi
+fi
+
 first_line="$(head -n 1 "$msg_file" | tr -d '\r')"
 
 case "$first_line" in
@@ -33,9 +55,14 @@ Examples:
   feat(secret): add vault-backed resolver
   fix(i18n): normalize unknown locale fallback
   docs(repo): describe release workflow
-  refactor(resources)!: split bootstrap surface
+  refactor(runtime-assets)!: split bootstrap surface
 EOF
   echo >&2
   echo "Got: $first_line" >&2
   exit 1
 fi
+
+python3 "$repo_root/scripts/version_policy/__main__.py" \
+  --hook commit-msg \
+  --repo-root "$repo_root" \
+  --commit-msg-file "$msg_file"

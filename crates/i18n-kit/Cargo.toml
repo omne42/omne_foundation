@@ -1,0 +1,17 @@
+[package]
+name = "i18n-kit"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+structured-text-kit = { path = "../structured-text-kit" }
+omne-systems-fs-primitives = { workspace = true }
+serde = "1"
+serde_json = { version = "1", features = ["raw_value"] }
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"

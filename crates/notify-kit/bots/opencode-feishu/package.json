@@ -1,0 +1,12 @@
+{
+  "name": "opencode-feishu-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node ./src/index.mjs"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.58.0",
+    "@opencode-ai/sdk": "^1.1.25"
+  }
+}

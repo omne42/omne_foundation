@@ -1,0 +1,17 @@
+[package]
+name = "structured-text-protocol"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+structured-text-kit = { path = "../structured-text-kit" }
+schemars = "0.8"
+serde.workspace = true
+thiserror.workspace = true
+ts-rs = { version = "11", features = ["serde-json-impl", "no-serde-warnings"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

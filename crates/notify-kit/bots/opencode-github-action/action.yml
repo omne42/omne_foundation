@@ -1,0 +1,13 @@
+name: "opencode-github-action (example)"
+description: "Minimal OpenCode-style GitHub Actions bot example (comment -> opencode session -> comment reply)."
+runs:
+  using: "composite"
+  steps:
+    - name: Install deps
+      shell: bash
+      working-directory: crates/notify-kit/bots/opencode-github-action
+      run: npm install
+    - name: Run bot
+      shell: bash
+      working-directory: crates/notify-kit/bots/opencode-github-action
+      run: node ./src/index.mjs

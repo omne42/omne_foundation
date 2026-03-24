@@ -1,0 +1,72 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+from check_common.context import (
+    CheckContext,
+    clear_directory_contents,
+    command_exists,
+    require_command,
+    run_command,
+)
+
+
+def _run_llms_check(ctx: CheckContext, crate_root: Path) -> None:
+    run_command(
+        ctx,
+        [ctx.python_executable, crate_root / "scripts" / "build-llms-txt.py", "--check"],
+        cwd=crate_root,
+    )
+
+
+def _run_docs_test(ctx: CheckContext, crate_root: Path) -> None:
+    docs_target_dir = ctx.repo_root / "target" / "mdbook-test" / "notify-kit"
+    docs_target_dir.mkdir(parents=True, exist_ok=True)
+    clear_directory_contents(docs_target_dir)
+
+    env = {"CARGO_TARGET_DIR": str(docs_target_dir)}
+    run_command(
+        ctx,
+        ["cargo", "build", "--manifest-path", crate_root / "Cargo.toml"],
+        cwd=ctx.repo_root,
+        env=env,
+        use_workaround=True,
+    )
+    run_command(
+        ctx,
+        ["mdbook", "test", "-L", docs_target_dir / "debug" / "deps", crate_root / "docs"],
+        cwd=ctx.repo_root,
+        use_workaround=True,
+    )
+
+
+def _run_bot_syntax_checks(ctx: CheckContext, bots_root: Path) -> None:
+    if not bots_root.is_dir():
+        return
+
+    if not command_exists("node"):
+        print(
+            "pre-commit: skipping notify-kit bot syntax checks because node is not installed",
+            file=sys.stderr,
+        )
+        return
+
+    entrypoints = sorted(bots_root.glob("*/src/index.js")) + sorted(
+        bots_root.glob("*/src/index.mjs")
+    )
+    for entrypoint in entrypoints:
+        run_command(ctx, ["node", "--check", entrypoint], cwd=ctx.repo_root)
+
+
+def run_notify_kit_asset_checks(ctx: CheckContext) -> None:
+    crate_root = ctx.repo_root / "crates" / "notify-kit"
+    docs_dir = crate_root / "docs"
+    if not docs_dir.is_dir():
+        return
+
+    print("pre-commit: running notify-kit asset checks", file=sys.stderr)
+    require_command("mdbook", "notify-kit docs")
+    _run_llms_check(ctx, crate_root)
+    _run_docs_test(ctx, crate_root)
+    _run_bot_syntax_checks(ctx, crate_root / "bots")

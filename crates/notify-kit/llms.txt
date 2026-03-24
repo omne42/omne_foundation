@@ -1,0 +1,2173 @@
+# notify-kit
+
+This file is an LLM-friendly bundle of the `notify-kit` documentation and examples.
+
+- Source of truth: `docs/` + `bots/`
+- Regenerate: `./scripts/build-llms-txt.sh`
+
+
+---
+## docs/README.md
+
+# notify-kit
+
+一个轻量的通知 Hub（Rust），用于把任意事件推送到多个通知渠道（sinks）。
+
+> 这是 `mdBook` 文档（入口：`docs/README.md`，目录：`docs/SUMMARY.md`）。
+
+## 你将获得什么
+
+- **统一出口**：用 `Hub` 把事件广播到多个 sink。
+- **不阻塞主流程**：`Hub::notify` fire-and-forget；每个 sink 都有超时上限。
+- **可扩展**：通过实现 `Sink` trait 接入任意渠道（Discord/Slack/Email/桌面通知…）。
+- **安全意识**：对 webhook URL 进行限制；Debug 输出默认脱敏。
+
+## 当前内置 sinks
+
+内置 sinks：
+
+- `sound`：终端 bell（默认）或执行外部播放命令
+- `feishu`：飞书群机器人 webhook（text，可选签名）
+- `github`：GitHub Issues/PR 评论（text）
+- `slack`：Slack Incoming Webhook（text）
+- `discord`：Discord webhook（text）
+- `telegram`：Telegram Bot API（sendMessage）
+- `serverchan`：Server酱（ServerChan）
+- `pushplus`：PushPlus
+- `bark`：Bark
+- `webhook`：通用 JSON webhook
+- `dingtalk`：钉钉群机器人 webhook（text，可选签名）
+- `wecom`：企业微信群机器人 webhook（text）
+
+## 适用场景
+
+- CLI 工具：任务完成/失败时提示音 + 群通知
+- 服务端：关键流程失败时告警到 IM（同时保留本地提示作为 fallback）
+- agent / automation：把内部事件（turn/message/approval）路由到不同通知渠道
+
+## 非适用场景（建议用更重的方案）
+
+- 需要强投递保证、持久化队列、重试/退避策略、去重与合并等“可靠消息系统”
+- 需要高吞吐（每秒大量事件）并且强一致的通知顺序控制
+
+## 兼容性
+
+- Rust edition：2024
+- MSRV：Rust `1.85`
+
+## 快速导航
+
+- 入门： [快速开始](getting-started.md)
+- 示例： [Examples / Recipes](examples.md)
+- 概念： [核心概念](concepts.md)
+- API： [Hub](api/hub.md)、[Event](api/event.md)、[Sink](api/sink.md)
+- 内置 sinks： [内置 Sinks](sinks/README.md)
+- Bots： [Bots（交互式集成示例）](bots.md)
+- 集成： [集成与配置](integration.md)
+- 安全： [安全](security.md)
+- LLM 入口： [llms.txt](llms.md)
+
+下一步：从 [快速开始](getting-started.md) 开始。
+
+---
+## docs/concepts.md
+
+# 核心概念
+
+## Event（事件）
+
+`Event` 是你想“通知出去”的信息载体，包含：
+
+- `kind`: 事件类型（字符串），用于过滤/路由（例如 `turn_completed`）
+- `severity`: 严重级别（Info/Success/Warning/Error）
+- `title`: 标题（必填）
+- `body`: 可选正文
+- `tags`: 结构化键值（例如 `thread_id=t1`、`repo=xxx`）
+
+### `kind` 命名建议
+
+- 推荐 `snake_case`（例如 `turn_completed`、`approval_requested`）
+- 推荐稳定：把它当作“对外契约”，尽量不要频繁改名（便于订阅与统计）
+- 推荐少而精：kind 过多会导致过滤难维护；把细节放到 `tags`/`body`
+
+### `tags` 使用建议
+
+- 放结构化、低敏感的信息（例如 id、类型、阶段）
+- value 尽量短（更适合在 IM/通知卡片里展示）
+- 不要把 token / webhook / 个人隐私信息塞进 tags
+
+## Sink（通知渠道）
+
+`Sink` 是一个抽象的“发送器”，负责把 `Event` 投递到某个外部系统/媒介。
+
+- 内置：见 [内置 Sinks](sinks/README.md)
+- 扩展：实现 `Sink` trait 即可接入任何渠道
+
+## Hub（通知中心）
+
+`Hub` 组合了：
+
+- `enabled_kinds`: 可选 allow-list（只允许指定 `kind` 的事件）
+- `per_sink_timeout`: 每个 sink 的超时上限（兜底避免卡住）
+- `sinks`: 一组 `Arc<dyn Sink>`
+
+发送逻辑：
+
+- 逐个 sink 并发发送
+- 每个 sink 单独超时
+- 汇总错误（如有）
+
+---
+## docs/design.md
+
+# 设计说明
+
+## 目标
+
+- **轻量**：作为基础库，依赖尽量少、集成成本低
+- **可扩展**：通过 `Sink` 抽象接入任意通知渠道
+- **不阻塞**：默认 `notify()` 不影响主流程；`send()` 也有 per-sink timeout 兜底
+- **安全意识**：对 webhook 做限制；避免在日志中泄露敏感信息
+
+## 非目标
+
+- 不把“统一的环境变量协议”作为核心抽象（交由上层 integration 层决定）
+- 不追求复杂的重试/队列/投递保证（可在上层或自定义 sink 中实现）
+
+补充说明：
+
+- 库中提供的 `notify_kit::env::build_hub_from_standard_env(...)` / `notify_kit::env::StandardEnvHubOptions` 只是 convenience helper，用于快速接线或复用一套简单约定。
+- 它们不改变整体分层：配置协议依然属于 integration layer，而不是 `notify-kit` 的核心职责。
+- root-level re-export 仅保留兼容入口，并已标记为 deprecated；文档与新接入代码应统一使用 `notify_kit::env::...` 路径。
+
+## 并发模型
+
+当 `Hub::send(event).await` 执行时：
+
+- 对每个 sink 生成一个并发任务
+- 每个任务都被 `tokio::time::timeout(per_sink_timeout, ...)` 包裹
+- 所有结果被 join 并聚合错误，最终以 `notify_kit::Error` 返回
+
+---
+## docs/security.md
+
+# 安全
+
+## 外部命令执行（SoundSink）
+
+`SoundConfig.command_argv` 会执行外部命令：
+
+- 需要启用 crate feature：`notify-kit/sound-command`
+- 仅应由**本机受信任配置**提供
+- 不要把不可信数据拼接到 argv（避免命令执行风险）
+
+## Webhook（Feishu/Slack/Discord/钉钉/企微）
+
+Webhook URL 属于敏感信息：
+
+- 不要写入日志/错误信息/Debug 输出
+- 使用配置系统安全存储（例如 secrets manager / 环境变量注入）
+- 本库对 URL 做了 scheme/host/port/credentials 限制以降低 SSRF 风险
+
+目前内置的 webhook sinks 允许的 host（精确匹配）：
+
+- Feishu：`open.feishu.cn` / `open.larksuite.com`
+- Slack：`hooks.slack.com`
+- Discord：`discord.com` / `discordapp.com`
+- 钉钉：`oapi.dingtalk.com`
+- 企业微信：`qyapi.weixin.qq.com`
+- Telegram：固定为 `api.telegram.org`
+
+### 为什么要限制 host / 禁用重定向？
+
+Webhook 发送本质是“服务端发起 HTTP 请求”。如果 URL 可被不可信输入影响，会引入 SSRF 风险。
+
+本库的策略是：
+
+- **允许的域名做 allow-list**（只放行官方 webhook 域名）
+- **禁用重定向**（避免被 30x 绕过 allow-list）
+- **校验 URL path 前缀**（避免误配到同域其它 endpoint）
+- **错误信息保持低敏感**（不输出 body、不输出完整 URL）
+
+## GenericWebhookSink（通用 webhook）
+
+`GenericWebhookSink` 可以向任意 HTTPS URL 发送 JSON（如果不设置 `allowed_hosts`），因此当 URL 可被不可信输入影响时，依然存在 SSRF 风险（即使做了公网 IP 校验）。
+
+建议：
+
+- 尽量配置 `allowed_hosts` + `path_prefix`（把它们视为安全边界）
+- 优先使用 `GenericWebhookSink::new_strict`（强制 `allowed_hosts`/`path_prefix`，且禁止关闭公网 IP 校验）
+- 不要把 webhook URL 当作用户输入/可回显的字段
+
+### DNS 解析结果必须是公网 IP（默认启用）
+
+为降低 DNS 污染 / DNS rebinding / 内网解析等风险，内置 HTTP sinks 默认会在发送前做一次 DNS 解析校验：
+
+- 若解析到私网/loopback/link-local，会拒绝发送
+- 校验通过后，会把本次解析结果固定到该次请求的 DNS overrides（降低“校验后被 rebinding”的 TOCTOU 风险）
+- 可通过各 sink 的 `with_public_ip_check(false)` 关闭（Feishu 的 `*_strict` 额外会在构造时也校验一次）
+
+补充说明：
+
+- “公网 IP”的判定是一个**保守**实现：除了私网/loopback/link-local，也会拒绝部分 RFC6890 中的特殊用途网段（例如 `192.0.0.0/24`、`192.88.99.0/24`）。
+- 对 IPv6，会把 `::ffff:x.y.z.w`（IPv4-mapped）以及部分过渡机制前缀按**嵌入的 IPv4**再做一次判定（例如 NAT64 well-known prefix `64:ff9b::/96`、6to4 `2002::/16`）。
+- 该判定不保证覆盖所有 IPv6 过渡/翻译前缀（例如自定义 NAT64 前缀）；在特殊网络环境可能出现误拒/漏判。把 URL 当作安全边界：优先用严格模式（allow-list + path 前缀），必要时只在受信任场景关闭公网 IP 校验。
+
+注意：这是一个“更严格、更保守”的策略；在无网络/DNS 不可用时可能导致发送失败。`*_strict` 构造函数会把校验提前到构造阶段。
+
+## GitHub API（GitHubCommentSink）
+
+`GitHubCommentSink` 使用 GitHub token 调用 `api.github.com`：
+
+- token 属于敏感信息：不要写入日志/错误信息/Debug 输出
+- 建议用最小权限的 token（只授予目标仓库的必要写权限）
+
+## 国内推送平台（ServerChan/PushPlus/Bark）
+
+这些 sinks 通常需要 token / send_key / device_key：
+
+- 属于敏感信息：不要写入日志/错误信息/Debug 输出
+- 建议用最小权限/最小范围的 key（能发通知即可）
+
+## DoS / 噪音控制
+
+为了避免异常大消息或事件洪泛导致内存/网络放大，本库内置 sinks 会对内容做截断与上限：
+
+- 文本总长度：按 sink 的 `max_chars`（或内置默认）截断并追加 `...`
+- tags 数量与 tag key/value 长度：超出会截断/忽略（避免极端情况下构建超大 payload）
+- JSON response：只会读取有限大小（默认 `16KiB`），并且错误信息不会包含 response body
+
+另外，`Hub::notify` 内部有一个固定的 inflight 限制；超过上限会丢弃并 `warn`（避免无界 spawn 造成 DoS）。
+
+## 错误信息与敏感数据
+
+实现自定义 sink 时，建议：
+
+- 错误信息避免包含 token、完整 URL、用户隐私数据
+- `Debug` 输出对敏感字段做脱敏
+
+## Event 内容也是敏感数据
+
+`Event.title/body/tags` 由上层业务提供，可能包含：
+
+- 用户输入
+- 仓库路径/机器信息
+- 错误堆栈
+
+在实现 sink 时，建议把“对外发送的内容”当作需要审计的出口：
+
+- 限制最大长度
+- 对高敏感字段做删减/脱敏
+- 必要时引入 allow-list（只发部分 kind）
+
+---
+## docs/llms.md
+
+# llms.txt（给 Cursor / Copilot / Claude 等）
+
+本仓库提供一个 **LLM 友好**的文档打包文件：`llms.txt`。
+
+它会把 `docs/`（按 `docs/SUMMARY.md` 顺序）以及 `bots/*/README.md` 组合成一个大文件，方便你把“仓库说明 + 文档 + 示例”一次性喂给大模型做问答/检索/生成代码。
+
+## 如何生成
+
+在仓库根目录执行：
+
+```bash
+./scripts/build-llms-txt.sh
+```
+
+生成后的文件路径：
+
+- `./llms.txt`
+
+## 如何使用
+
+一个推荐的提问模板：
+
+```text
+Documentation:
+
+{paste llms.txt here}
+
+---
+
+Based on the above documentation, answer the following:
+
+{your question}
+```
+
+## 注意事项
+
+- `llms.txt` 会去掉 mdBook Rust 代码块里以 `#` 开头的隐藏行（减少噪音）。
+- `llms.txt` 可能包含你在 `docs/` / `bots/` 里写的示例配置；请避免把真实 token / webhook URL 写进文档。
+
+
+---
+## docs/changelog.md
+
+# Changelog
+
+{{#include ../CHANGELOG.md}}
+
+
+---
+## docs/getting-started.md
+
+# 快速开始
+
+本章给出最小可运行示例，并解释 `notify` 与 `send` 的差异。
+
+## 安装
+
+如果你通过 crates.io 使用：
+
+```toml
+[dependencies]
+notify-kit = "0.1"
+```
+
+如果你通过 Git / monorepo 引用：
+
+```toml
+[dependencies]
+notify-kit = { path = "/path/to/omne_foundation/crates/notify-kit" }
+```
+
+> 以上版本与路径仅为示例；请按你的项目实际情况调整。
+
+## 一个可运行的 `main.rs` 示例
+
+`Hub::notify` 需要在 **Tokio runtime** 中调用（否则会丢弃并 `tracing::warn!`）。
+
+```rust,no_run,edition2024
+use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::time::Duration;
+
+use notify_kit::{
+    Event, Hub, HubConfig, HubLimits, Severity, Sink, SoundConfig, SoundSink, TryNotifyError,
+};
+
+fn main() -> notify_kit::Result<()> {
+    // 组合多个 sinks（示例只启用 sound）
+    let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(SoundSink::new(SoundConfig { command_argv: None }))];
+
+    // 可选：只允许一部分 kind
+    let enabled_kinds: Option<BTreeSet<String>> =
+        Some(BTreeSet::from(["turn_completed".to_string(), "approval_requested".to_string()]));
+
+    let hub = Hub::new(
+        HubConfig {
+            enabled_kinds,
+            per_sink_timeout: Duration::from_secs(5),
+        },
+        sinks,
+    );
+
+    // `notify-kit` 需要在 Tokio runtime 中运行；这里用一个最小 runtime 来演示。
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
+        // fire-and-forget（不关心结果）
+        hub.notify(Event::new("turn_completed", Severity::Success, "done"));
+
+        // 可观测结果（等待所有 sinks）
+        hub.send(Event::new("turn_completed", Severity::Success, "done (awaited)"))
+            .await?;
+
+        // 如果你处在“不确定是否有 Tokio runtime”的代码路径中：
+        match hub.try_notify(Event::new("turn_completed", Severity::Success, "done (try_notify)")) {
+            Ok(()) => {}
+            Err(TryNotifyError::NoTokioRuntime) => {
+                // 这里不要 panic：notify 只是附加能力。
+                // 你可以选择：记录日志、降级为 stdout、暂存到队列里、或忽略。
+                tracing::debug!("no tokio runtime; notification skipped");
+            }
+            Err(TryNotifyError::Overloaded) => {
+                // 运行时限流生效：说明当前 Hub 已经处于忙碌状态。
+                // 这里同样建议降级处理，而不是影响主流程。
+                tracing::debug!("hub overloaded; notification skipped");
+            }
+        }
+
+        Ok::<_, notify_kit::Error>(())
+    })?;
+
+    Ok(())
+}
+```
+
+如果你需要调节运行时背压，而不是语义配置，可以改用 `HubLimits`：
+
+```rust,no_run,edition2024
+use std::sync::Arc;
+
+use notify_kit::{Hub, HubConfig, HubLimits, SoundConfig, SoundSink};
+
+let hub = Hub::new_with_limits(
+    HubConfig::default(),
+    vec![Arc::new(SoundSink::new(SoundConfig { command_argv: None }))],
+    HubLimits::default()
+        .with_max_inflight_events(64)
+        .with_max_sink_sends_in_parallel(8),
+);
+```
+
+## 我该用 `notify` 还是 `send`？
+
+- `notify(event)`: fire-and-forget（spawn 后台任务并立即返回）
+- `try_notify(event) -> Result<(), TryNotifyError>`: 同 `notify`，但可检测「缺少 Tokio runtime」
+- `send(event).await -> notify_kit::Result<()>`: 等待所有 sinks 完成/超时，并聚合错误信息
+
+## 常见模式
+
+### 同时启用多个 sinks
+
+```rust,no_run,edition2024
+use std::sync::Arc;
+
+use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink, Sink, SoundConfig, SoundSink};
+
+let mut sinks: Vec<Arc<dyn Sink>> = Vec::new();
+// 本地提示音
+sinks.push(Arc::new(SoundSink::new(SoundConfig { command_argv: None })));
+// 飞书 webhook（注意：webhook URL 属于敏感信息，请用安全配置注入）
+sinks.push(Arc::new(FeishuWebhookSink::new(FeishuWebhookConfig::new(
+    "https://open.feishu.cn/open-apis/bot/v2/hook/xxx",
+))?));
+```
+
+### 事件过滤（只发你关心的 kind）
+
+```rust,no_run,edition2024
+use std::collections::BTreeSet;
+use std::time::Duration;
+
+use notify_kit::HubConfig;
+
+let enabled_kinds = BTreeSet::from(["turn_completed".to_string(), "message_received".to_string()]);
+let cfg = HubConfig {
+    enabled_kinds: Some(enabled_kinds),
+    per_sink_timeout: Duration::from_secs(5),
+};
+```
+
+这里的 `HubConfig` 只描述过滤与超时。像 inflight 上限、单事件 fan-out 并行度这类运行时限制，放到 `HubLimits` 中更合适。
+
+---
+## docs/examples.md
+
+# Examples / Recipes
+
+这里提供一些可复制的使用片段，用于把 `notify-kit` 快速接入到你的 CLI/服务端/CI/agent 系统中。
+
+> 这些例子关注“调用方式与模式”，具体环境变量解析/配置管理建议放在你的 integration 层完成。
+
+## 1) CLI：任务完成时响铃（并可在终端里配置 Dock/任务栏闪烁）
+
+```rust,no_run,edition2024
+use std::sync::Arc;
+
+use notify_kit::{Event, Hub, HubConfig, Severity, SoundConfig, SoundSink};
+
+let hub = Hub::new(
+    HubConfig::default(),
+    vec![Arc::new(SoundSink::new(SoundConfig { command_argv: None }))],
+);
+
+let rt = tokio::runtime::Builder::new_current_thread()
+    .enable_time()
+    .build()
+    .expect("build tokio runtime");
+rt.block_on(hub.send(Event::new("task_done", Severity::Success, "done")))?;
+```
+
+提示：如果你希望“macOS Dock/Windows 任务栏闪一下”，通常需要在终端设置里开启 Visual Bell / Bounce（见 [SoundSink](sinks/sound.md)）。
+
+## 2) 服务端：关键错误同时发到多个渠道
+
+```rust,no_run,edition2024
+use std::sync::Arc;
+
+use notify_kit::{Event, Hub, HubConfig, Severity, SoundConfig, SoundSink};
+use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+
+let sink_sound = Arc::new(SoundSink::new(SoundConfig { command_argv: None }));
+let sink_feishu = Arc::new(FeishuWebhookSink::new(FeishuWebhookConfig::new(
+    "https://open.feishu.cn/open-apis/bot/v2/hook/...",
+))?);
+
+let hub = Hub::new(HubConfig::default(), vec![sink_sound, sink_feishu]);
+let rt = tokio::runtime::Builder::new_current_thread()
+    .enable_time()
+    .build()
+    .expect("build tokio runtime");
+rt.block_on(hub.send(
+    Event::new("fatal", Severity::Error, "service crashed").with_body("trace id: ..."),
+))?;
+```
+
+## 3) CI：失败时发到通用 webhook
+
+```rust,no_run,edition2024
+use std::sync::Arc;
+
+use notify_kit::{Event, Hub, HubConfig, Severity};
+use notify_kit::{GenericWebhookConfig, GenericWebhookSink};
+
+let sink = Arc::new(GenericWebhookSink::new_strict(GenericWebhookConfig::new_strict(
+    "https://example.com/webhook/notify",
+    "/webhook/",
+    vec!["example.com".into()],
+))?);
+
+let hub = Hub::new(HubConfig::default(), vec![sink]);
+let rt = tokio::runtime::Builder::new_current_thread()
+    .enable_time()
+    .build()
+    .expect("build tokio runtime");
+rt.block_on(hub.send(Event::new("ci_failed", Severity::Error, "build failed")))?;
+```
+
+## 4) Agent：只打开少数事件（kind allow-list）
+
+```rust,no_run,edition2024
+use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::time::Duration;
+
+use notify_kit::{Event, Hub, HubConfig, Severity, SoundConfig, SoundSink};
+
+let enabled_kinds = BTreeSet::from(["turn_completed".to_string(), "approval_requested".to_string()]);
+let hub = Hub::new(
+    HubConfig {
+        enabled_kinds: Some(enabled_kinds),
+        per_sink_timeout: Duration::from_secs(5),
+    },
+    vec![Arc::new(SoundSink::new(SoundConfig { command_argv: None }))],
+);
+
+hub.notify(Event::new("turn_completed", Severity::Success, "done"));
+hub.notify(Event::new("debug_noise", Severity::Info, "ignored"));
+```
+
+---
+## docs/integration.md
+
+# 集成与配置
+
+本库**不规定**统一的环境变量协议；配置应由上层应用负责（例如解析 env，然后构造 sinks + Hub）。
+
+如果你只想快速接线，库里也提供了：
+
+- `notify_kit::env::build_hub_from_standard_env(...)`
+- `notify_kit::env::StandardEnvHubOptions`
+
+它们是 convenience helper，不是强制协议，也不改变推荐分层。
+
+补充说明：
+
+- root-level 的兼容 re-export 仅用于平滑迁移，并已标记为 deprecated。
+- 新代码与文档示例应优先使用 `notify_kit::env::...` 路径。
+
+## 一个推荐的配置层结构
+
+```text
+your-app
+  ├─ config (env/cli/file)
+  ├─ notify (integration layer)
+  └─ business logic
+```
+
+在 integration layer 中：
+
+1) 解析配置（例如 `NOTIFY_SOUND=1`、`NOTIFY_FEISHU_WEBHOOK_URL=...`）
+2) 构造 sinks（`SoundSink`、`FeishuWebhookSink`、自定义 sinks）
+3) 构造 `Hub` 并注入到业务逻辑
+
+补充建议：
+
+- `HubConfig` 放过滤、超时这类语义配置
+- `HubLimits` 放 inflight 上限、sink fan-out 并行度这类执行期限制
+
+## 一个参考的 env/CLI 协议（示例）
+
+下面是一个“够用且可维护”的例子，你可以按需裁剪：
+
+- `MYAPP_NOTIFY_SOUND=1`
+- `MYAPP_NOTIFY_FEISHU_WEBHOOK_URL=...`
+- `MYAPP_NOTIFY_EVENTS=turn_completed,approval_requested,message_received`
+- `MYAPP_NOTIFY_TIMEOUT_MS=2000`
+
+对应到 integration 层的伪代码：
+
+```rust,no_run,edition2024
+use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::time::Duration;
+
+use notify_kit::{
+    FeishuWebhookConfig, FeishuWebhookSink, Hub, HubConfig, HubLimits, Sink, SoundConfig,
+    SoundSink,
+};
+
+fn build_hub_from_env() -> notify_kit::Result<Hub> {
+    let mut sinks: Vec<Arc<dyn Sink>> = Vec::new();
+
+    if std::env::var("MYAPP_NOTIFY_SOUND").ok().as_deref() == Some("1") {
+        sinks.push(Arc::new(SoundSink::new(SoundConfig { command_argv: None })));
+    }
+
+    if let Ok(url) = std::env::var("MYAPP_NOTIFY_FEISHU_WEBHOOK_URL") {
+        sinks.push(Arc::new(FeishuWebhookSink::new(FeishuWebhookConfig::new(url))?));
+    }
+
+    let enabled_kinds = std::env::var("MYAPP_NOTIFY_EVENTS")
+        .ok()
+        .map(|s| s.split(',').filter(|x| !x.trim().is_empty()).map(|x| x.trim().to_string()).collect::<BTreeSet<_>>());
+
+    let per_sink_timeout = std::env::var("MYAPP_NOTIFY_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(5));
+
+    Ok(Hub::new_with_limits(
+        HubConfig {
+            enabled_kinds,
+            per_sink_timeout,
+        },
+        sinks,
+        HubLimits::default(),
+    ))
+}
+```
+
+如果你采用库自带的 env helper，建议通过 `notify_kit::env::build_hub_from_standard_env(...)` 访问，并把它当成 bootstrap helper：能减少样板代码，但不妨碍你在自己的 integration layer 继续包装、替换或扩展。
+
+## 与 omne-agent 的集成（示例）
+
+`omne-agent` 仓库（目录名为 `omne-agent/`）内的 `omne-agent-app-server` notify integration 负责解析 `OMNE_AGENT_NOTIFY_*` 并构造 Hub。
+
+```bash
+cd ../omne-agent
+
+export OMNE_AGENT_NOTIFY_SOUND=1
+# export OMNE_AGENT_NOTIFY_FEISHU_WEBHOOK_URL="..."
+# export OMNE_AGENT_NOTIFY_EVENTS="turn_completed,approval_requested,message_received"
+
+cargo run -p omne-agent-app-server --features notify
+```
+
+---
+## docs/bots.md
+
+# Bots（交互式集成示例）
+
+`notify-kit` 的核心是 Rust 通知库（`Hub` + `sinks`），用于把事件推送到外部渠道。
+
+本仓库也提供少量“上层 bot / 集成示例”，用于把某个平台的消息桥接到 OpenCode 会话（session）：
+
+- Slack：`bots/opencode-slack`（Socket Mode）
+- Discord：`bots/opencode-discord`（Gateway）
+- Telegram：`bots/opencode-telegram`（long polling）
+- 飞书：`bots/opencode-feishu`（事件订阅 Webhook）
+- 钉钉：`bots/opencode-dingtalk-stream`（Stream Mode）
+- GitHub：`bots/opencode-github-action`（GitHub Actions：issue/pr 评论触发）
+- 企微：`bots/opencode-wecom`（企业微信自建应用回调）
+
+这些 bot 都遵循同一个最小模式：
+
+1) 把对话上下文（thread/chat/sessionWebhook）映射为 OpenCode session
+2) 把用户消息转发到 `session.prompt`
+3) 把模型回复与 tool 完成状态回帖到同一对话中
+
+## 快速开始
+
+直接看各 bot 的 README：
+
+- `bots/opencode-slack/README.md`
+- `bots/opencode-discord/README.md`
+- `bots/opencode-telegram/README.md`
+- `bots/opencode-feishu/README.md`
+- `bots/opencode-dingtalk-stream/README.md`
+- `bots/opencode-github-action/README.md`
+- `bots/opencode-wecom/README.md`
+
+## 重要说明
+
+- 这些示例默认用内存映射；可通过 `OPENCODE_SESSION_STORE_PATH` 启用简单文件持久化（适合 demo/单实例），生产环境建议用 DB/KV。
+- 部分“回贴/发消息”失败会被 best-effort 忽略以保证主流程；可设置 `OPENCODE_BOT_VERBOSE=1`（或 `DEBUG=1`）输出被忽略的错误日志。
+- 为避免路径误用，session store 支持设置根目录：`OPENCODE_SESSION_STORE_ROOT`（store path 必须在该目录下）。
+- `OPENCODE_SESSION_STORE_ROOT` 是 best-effort 安全带而不是沙箱；仍应避免把不可信输入直接拼接到 store path，并避免用 symlink 等方式把路径指向 rootDir 之外。
+- 对于飞书/钉钉/企微等平台：**“群机器人 webhook”通常只能发消息**，想做“交互式 bot”需要使用事件订阅/Stream/回调机制。
+
+---
+## docs/api/README.md
+
+# API
+
+本章按类型介绍 `notify-kit` 的核心 API。建议同时参考 Rustdoc（`cargo doc`）。
+
+## 主要类型
+
+- `Hub` / `HubConfig`：通知中心与配置
+- `Event` / `Severity`：事件数据结构与严重级别
+- `Sink`：通知渠道抽象
+- `SoundSink` / `SoundConfig`：本地提示音/终端 bell
+- `FeishuWebhookSink` / `FeishuWebhookConfig`：飞书 webhook（text / post 富文本，支持 Markdown 图片上传）
+
+---
+## docs/api/hub.md
+
+# Hub
+
+`Hub` 是通知中心：把一个 `Event` 广播到多个 sinks。
+
+## 构造
+
+```rust,no_run,edition2024
+use std::sync::Arc;
+use notify_kit::{Hub, HubConfig, SoundConfig, SoundSink};
+
+let hub = Hub::new(
+    HubConfig::default(),
+    vec![Arc::new(SoundSink::new(SoundConfig { command_argv: None }))],
+);
+```
+
+如果你需要对 `notify()` 的后台并发做背压（避免事件洪泛导致无界 spawn），可以用：
+
+```rust,no_run,edition2024
+use std::sync::Arc;
+use notify_kit::{Hub, HubConfig, SoundConfig, SoundSink};
+
+let hub = Hub::new_with_inflight_limit(
+    HubConfig::default(),
+    vec![Arc::new(SoundSink::new(SoundConfig { command_argv: None }))],
+    32,
+);
+```
+
+当 inflight 超过上限时，`notify()` 会丢弃该条通知并记录 warning；`send().await` 会等待额度释放。
+
+如果你还需要限制“单个事件扇出时，最多同时发送多少个 sink”，可以显式传入 `HubLimits`：
+
+```rust,no_run,edition2024
+use std::sync::Arc;
+use notify_kit::{Hub, HubConfig, HubLimits, SoundConfig, SoundSink};
+
+let hub = Hub::new_with_limits(
+    HubConfig::default(),
+    vec![Arc::new(SoundSink::new(SoundConfig { command_argv: None }))],
+    HubLimits::default()
+        .with_max_inflight_events(32)
+        .with_max_sink_sends_in_parallel(4),
+);
+```
+
+## HubConfig
+
+- `enabled_kinds: Option<BTreeSet<String>>`
+  - `None`：不过滤
+  - `Some(set)`：仅允许 set 内 kind
+- `per_sink_timeout: Duration`
+  - 默认 `5s`
+  - 作为兜底，避免任何 sink 卡住调用方
+
+`HubConfig` 只表达“Hub 的语义配置”，例如过滤和超时。
+
+## HubLimits
+
+- `max_inflight_events: usize`
+  - 默认 `128`
+  - 控制 Hub 内同时在途的事件数量（`notify()` 后台任务和 `send().await` 都受影响）
+- `max_sink_sends_in_parallel: usize`
+  - 默认 `16`
+  - 控制单个事件 fan-out 时，最多并行发送多少个 sinks
+
+`HubLimits` 表达的是“执行期限制 / 背压策略”，故意与 `HubConfig` 分开，避免配置职责混杂。
+
+推荐通过 `HubLimits::default().with_...(...)` 逐项覆盖，而不是把它当成业务语义配置对象来扩展。
+
+一个更完整的配置示例：
+
+```rust,no_run,edition2024
+use std::collections::BTreeSet;
+use std::time::Duration;
+
+use notify_kit::HubConfig;
+
+let enabled_kinds = BTreeSet::from(["turn_completed".to_string(), "approval_requested".to_string()]);
+let cfg = HubConfig {
+    enabled_kinds: Some(enabled_kinds),
+    per_sink_timeout: Duration::from_secs(5),
+};
+```
+
+## 发送接口
+
+- `notify(event)`: fire-and-forget；无 runtime 时会丢弃并记录 warning
+- `try_notify(event)`: 同上，但缺少 runtime 时返回 `TryNotifyError::NoTokioRuntime`
+- `send(event).await`: 等待所有 sinks 完成/超时；失败时聚合错误并返回
+
+## 行为细节
+
+- **kind 被禁用时是 no-op**：即使没有 Tokio runtime 也不会报错（直接返回）。
+- **并发发送**：`send().await` 会并发调用多个 sinks，并受 `HubLimits.max_sink_sends_in_parallel` 限制。
+- **每个 sink 单独超时**：由 `per_sink_timeout` 控制；超时会被视为该 sink 失败。
+- **错误聚合**：当一个或多个 sinks 失败时，会返回一个聚合错误，内容类似：
+
+```text
+one or more sinks failed:
+- feishu: timeout after 5s
+- sound: boom
+```
+
+---
+## docs/api/event.md
+
+# Event
+
+```rust,no_run,edition2024
+use notify_kit::{Event, Severity};
+
+let event = Event::new("turn_completed", Severity::Success, "done")
+    .with_body("all good")
+    .with_tag("thread_id", "t1");
+```
+
+## 字段约定（建议）
+
+- `kind`：推荐使用 `snake_case`，并保持稳定（便于过滤与统计）
+- `title`：一句话总结
+- `body`：可放更长的上下文（可为空）
+- `tags`：放结构化信息，便于 sink 以不同方式呈现
+
+## 组合建议
+
+一个实用的习惯是：
+
+- `title`：永远保持“一行可读”
+- `body`：放更长的细节（例如错误堆栈、上下文摘要）
+- `tags`：放结构化字段（例如 `thread_id`、`repo`、`step`、`elapsed_ms`）
+
+## Severity
+
+- `Info`：一般信息
+- `Success`：成功完成
+- `Warning`：需要关注但不致命
+- `Error`：失败或需要立即处理
+
+---
+## docs/api/sink.md
+
+# Sink
+
+`Sink` 是你扩展通知渠道的核心抽象：
+
+```rust,no_run,edition2024
+use std::future::Future;
+use std::pin::Pin;
+
+use notify_kit::Event;
+
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+pub trait Sink: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, notify_kit::Result<()>>;
+}
+```
+
+## 设计要点
+
+- `send(&Event)` 是异步的；使用 boxed future 可以避免额外宏依赖（例如 `async-trait`）。
+- `Hub` 会并发调用每个 sink，并对每个 sink 做超时包裹（`per_sink_timeout`）。
+
+## 实现模板
+
+```rust,no_run,edition2024
+use std::future::Future;
+use std::pin::Pin;
+
+use notify_kit::{Event, Sink};
+
+pub struct MySink;
+
+impl Sink for MySink {
+    fn name(&self) -> &'static str {
+        "my_sink"
+    }
+
+    fn send<'a>(
+        &'a self,
+        event: &'a Event,
+    ) -> Pin<Box<dyn Future<Output = notify_kit::Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let _ = event;
+            Ok(())
+        })
+    }
+}
+```
+
+## 最佳实践
+
+- `name()`：用于日志与聚合错误信息，保持稳定且可读。
+- `send()`：避免阻塞；优先使用异步 IO（或把阻塞工作转移到专用线程池）。
+- 超时：`Hub` 会做兜底超时；如果你的 sink 需要更细粒度控制，可以在 sink 内部再做一次超时/重试。
+- 取消：`Hub` 的超时会 drop 你的 future；请确保 drop 不会泄露敏感信息或导致资源泄露。
+- 错误信息：避免泄露敏感信息（token/webhook/用户数据）；`Debug` 输出建议默认脱敏。
+
+---
+## docs/sinks/README.md
+
+# 内置 Sinks
+
+本章介绍 `notify-kit` 内置的 sinks，并给出常见配置示例。
+
+内置 sinks：
+
+- 速览（字段/能力可能随版本演进；以各 sink 章节为准）：
+
+| sink | 发送对象 | 认证/必填 | 备注 |
+| --- | --- | --- | --- |
+| `sound` | 本机终端 | 无 / `command_argv`（可选） | 终端 bell 可触发 Visual Bell / Dock/任务栏提示（取决于终端设置） |
+| `feishu` | 飞书群机器人 | `webhook_url`（可选签名 secret） | host allow-list + 可选公网 IP 校验 |
+| `dingtalk` | 钉钉群机器人 | `webhook_url`（可选签名 secret） | host allow-list + 可选公网 IP 校验 |
+| `wecom` | 企业微信群机器人 | `webhook_url` | host allow-list + 可选公网 IP 校验 |
+| `slack` | Slack Incoming Webhook | `webhook_url` | host allow-list + 可选公网 IP 校验 |
+| `discord` | Discord Webhook | `webhook_url` | host allow-list + 可选公网 IP 校验 |
+| `telegram` | Telegram Bot API | `bot_token` + `chat_id` | 走官方 API 域名 |
+| `github` | GitHub 评论 | `token` + `repo/issue` | 走 GitHub API |
+| `serverchan` | ServerChan | `send_key` | 走官方 API |
+| `pushplus` | PushPlus | `token` | 走官方 API |
+| `bark` | Bark | `device_key` | 走官方 API |
+| `webhook` | 通用 webhook | `url`（建议 strict） | 非 strict 模式请只用于可信配置 |
+
+- `sound`：终端 bell / 外部命令
+- `feishu`：飞书 webhook
+- `github`：GitHub 评论（Issues/PR）
+- `slack`：Slack Incoming Webhook
+- `discord`：Discord webhook
+- `telegram`：Telegram Bot API
+- `serverchan`：Server酱（ServerChan）
+- `pushplus`：PushPlus
+- `bark`：Bark
+- `webhook`：通用 JSON webhook
+- `dingtalk`：钉钉 webhook
+- `wecom`：企业微信 webhook
+
+如果你需要额外渠道（Email/Push/自建系统…），请看 [自定义 Sink](custom.md)。
+
+---
+## docs/sinks/sound.md
+
+# SoundSink
+
+`SoundSink` 提供两种模式：
+
+1) 默认：向 stderr 写入终端 bell（`\u{0007}`）
+2) 自定义：执行外部命令播放提示音
+
+## 终端 bell（默认）
+
+```rust,no_run,edition2024
+use notify_kit::{SoundConfig, SoundSink};
+
+let sink = SoundSink::new(SoundConfig { command_argv: None });
+```
+
+不同 `Severity` 会对应不同次数的 bell（用于区分提示强度）。
+
+### 让 macOS / Windows “闪一下”
+
+`SoundSink` 的默认行为是写入终端 bell（`\u{0007}`）。很多终端都支持把 bell 映射成“闪屏/标签闪烁/Dock 或任务栏提示”：
+
+- macOS Terminal.app：Settings → Profiles → Advanced → Bell（Visual bell / Bounce Dock icon）
+- iTerm2：Preferences → Profiles → Terminal → Notifications / Bells
+- Windows Terminal：Settings（启用/配置 Visual bell，或由系统/终端实现提示行为）
+
+`notify-kit` 只负责发出 bell；是否“闪”取决于你的终端/系统设置。
+
+## 外部命令
+
+> 需要启用 crate feature：`notify-kit/sound-command`。
+
+```rust,no_run,edition2024
+use notify_kit::{SoundConfig, SoundSink};
+
+let sink = SoundSink::new(SoundConfig {
+    command_argv: Some(vec!["afplay".into(), "/System/Library/Sounds/Glass.aiff".into()]),
+});
+```
+
+### 多平台提示
+
+外部命令完全由你决定，本库只负责 spawn：
+
+- macOS：`afplay <path>`
+- Linux（示例）：`paplay <path>` / `aplay <path>`
+- Windows：可用任意你习惯的播放器/脚本（例如 powershell）
+
+建议把命令作为**本机配置**管理，而不是写死在代码里。
+
+注意：
+
+- 外部命令会被 spawn，并在后台线程中 wait 回收进程（避免僵尸进程累积）。
+- `command_argv` 属于**本机受信任配置**；不要把不可信输入拼到 argv 里。
+- 如果你的配置可能来自远程/不可信来源（例如 bot、服务端动态配置），建议禁用外部命令模式，只使用默认 bell。
+
+---
+## docs/sinks/feishu.md
+
+# FeishuWebhookSink
+
+`FeishuWebhookSink` 通过飞书群机器人 webhook 发送消息（可选签名），支持：
+
+- 默认 `text` 消息
+- 对 `Event.body` 中的 Markdown 自动转 `post` 富文本
+- Markdown 图片（`![alt](...)`）可选自动上传为飞书图片并内嵌显示
+
+## 构造
+
+```rust,no_run,edition2024
+use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+
+let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx");
+let sink = FeishuWebhookSink::new(cfg)?;
+```
+
+默认发送前会做 DNS 公网 IP 校验；如果你希望在 **构造阶段** 也校验一次（可能导致无网络时构造失败），可以用：
+
+```rust,no_run,edition2024
+use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+
+let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx");
+let sink = FeishuWebhookSink::new_strict(cfg)?;
+```
+
+## 签名（可选）
+
+如果群机器人开启了 “签名校验”，可以用：
+
+```rust,no_run,edition2024
+use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+
+let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx");
+let sink = FeishuWebhookSink::new_with_secret(cfg, "your_secret")?;
+```
+
+每次发送会自动填充 `timestamp` / `sign` 字段，并且不会在 `Debug`/错误信息中泄露 secret 或完整 webhook URL。
+
+如果你需要同时启用签名 + DNS 公网 IP 校验，并且希望在 **构造阶段** 也校验一次，可以用：
+
+```rust,no_run,edition2024
+use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+
+let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx");
+let sink = FeishuWebhookSink::new_with_secret_strict(cfg, "your_secret")?;
+```
+
+## 超时
+
+`FeishuWebhookConfig` 自带一个 HTTP timeout（默认 `2s`）。此外，`Hub` 也会对每个 sink 做兜底超时：
+
+- 建议：`HubConfig.per_sink_timeout` ≥ `FeishuWebhookConfig.timeout`
+- 如果你把 `Hub` 的超时设得更小，那么即使 HTTP 还没超时，也会被 `Hub` 先中断（drop future）
+
+## 消息长度
+
+`FeishuWebhookConfig.max_chars` 用于限制文本内容长度（默认 `4000`，超出会截断并追加 `...`）：
+
+```rust,no_run,edition2024
+use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+
+let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx")
+    .with_max_chars(1000);
+let sink = FeishuWebhookSink::new(cfg)?;
+```
+
+## DNS 公网 IP 校验开关
+
+为降低 SSRF/DNS 污染风险，默认发送前会做一次 DNS 公网 IP 校验；如确有需要可关闭：
+
+```rust,no_run,edition2024
+use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+
+let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx")
+    .with_public_ip_check(false);
+let sink = FeishuWebhookSink::new(cfg)?;
+```
+
+## 安全约束（重要）
+
+为降低 SSRF/凭据泄露风险，本库会对 webhook URL 做限制：
+
+- 必须是 `https`
+- 不允许携带 username/password
+- host 仅允许：
+  - `open.feishu.cn`
+  - `open.larksuite.com`
+- path 必须以 `/open-apis/bot/v2/hook/` 开头
+- 不允许 `localhost` 或 IP
+- 如显式指定端口，仅允许 `443`
+- 禁用重定向（redirect）
+- `Debug` 输出默认脱敏（不会泄露完整 webhook URL）
+
+## 输出格式
+
+默认 text 模式下，文本内容由以下部分组成（按顺序）：
+
+1) `title`
+2) `body`（如果存在且非空）
+3) 每个 tag：`key=value`（逐行）
+
+当 `body` 是 Markdown 且启用富文本（默认启用）时：
+
+- 使用飞书 `post` 结构发送
+- 链接会映射为可点击富文本链接
+- 图片：
+  - 未配置应用凭据时：降级为可读文本 + 原链接
+  - 配置了应用凭据时：自动上传并以内嵌图片显示
+
+## Markdown 图片上传（可选）
+
+如果你希望 Markdown 图片真正显示为“图片”而不是链接，需要提供应用凭据：
+
+```rust,no_run,edition2024
+use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+
+let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx")
+    .with_app_credentials("cli_xxx", "app_secret_xxx")
+    .with_image_upload_max_bytes(10 * 1024 * 1024);
+let sink = FeishuWebhookSink::new(cfg)?;
+```
+
+说明：
+
+- 图片 URL 仅支持 `https`
+- 本地文件路径默认禁用；如确实需要，可显式调用 `.with_local_image_files(true)` 后再读取并上传
+- 上传失败时不会中断整条消息，自动回退为文本链接表示
+
+## 错误信息（刻意保持“低敏感”）
+
+为避免泄露敏感信息：
+
+- 请求失败时的错误会被简化为类别（例如 `timeout/connect/request/...`）
+- 非 2xx 的响应不会包含 response body（避免 body 中包含内部信息）
+
+---
+## docs/sinks/github.md
+
+# GitHubCommentSink
+
+`GitHubCommentSink` 会通过 GitHub REST API 在指定的 Issue / Pull Request 下创建一条评论（纯文本）。
+
+## 构造
+
+```rust,no_run,edition2024
+use notify_kit::{GitHubCommentConfig, GitHubCommentSink};
+
+let cfg = GitHubCommentConfig::new("owner", "repo", 123, "ghp_xxx");
+let sink = GitHubCommentSink::new(cfg)?;
+```
+
+## Token 权限
+
+建议使用最小权限的 token：
+
+- 对目标仓库具备 `issues:write`（PR 评论也走 issues API）
+
+## 超时
+
+`GitHubCommentConfig` 自带 HTTP timeout（默认 `2s`）。此外，`Hub` 也会对每个 sink 做兜底超时：
+
+- 建议：`HubConfig.per_sink_timeout` ≥ `GitHubCommentConfig.timeout`
+
+## 安全与隐私
+
+- 固定请求 `https://api.github.com`，不会打印 token
+- `Debug` 输出默认脱敏（不会泄露 token）
+- 非 2xx 的响应不会包含 response body（避免泄露多余信息）
+
+---
+## docs/sinks/slack.md
+
+# SlackWebhookSink
+
+`SlackWebhookSink` 通过 Slack Incoming Webhook 发送 **text** 消息。
+
+## 构造
+
+```rust,no_run,edition2024
+use std::time::Duration;
+
+use notify_kit::{SlackWebhookConfig, SlackWebhookSink};
+
+let cfg = SlackWebhookConfig::new("https://hooks.slack.com/services/xxx")
+    .with_timeout(Duration::from_secs(2))
+    .with_max_chars(4000)
+    // 可选：关闭 DNS 公网 IP 校验（默认开启；无网络/DNS 不可用时可能导致发送失败）
+    .with_public_ip_check(false);
+
+let sink = SlackWebhookSink::new(cfg)?;
+```
+
+## 安全约束（重要）
+
+为降低 SSRF/凭据泄露风险，本库会对 webhook URL 做限制：
+
+- 必须是 `https`
+- 不允许携带 username/password
+- host 仅允许：`hooks.slack.com`
+- path 必须以 `/services/` 开头
+- 不允许 `localhost` 或 IP
+- 如显式指定端口，仅允许 `443`
+- 禁用重定向（redirect）
+- `Debug` 输出默认脱敏（不会泄露完整 webhook URL）
+
+## 输出格式
+
+文本内容由以下部分组成（按顺序）：
+
+1) `title`
+2) `body`（如果存在且非空）
+3) 每个 tag：`key=value`（逐行）
+
+## 长度限制
+
+`SlackWebhookConfig.max_chars` 用于限制最终消息长度（超出会截断并追加 `...`）。
+
+---
+## docs/sinks/discord.md
+
+# DiscordWebhookSink
+
+`DiscordWebhookSink` 通过 Discord webhook 发送 **text** 消息。
+
+## 构造
+
+```rust,no_run,edition2024
+use std::time::Duration;
+
+use notify_kit::{DiscordWebhookConfig, DiscordWebhookSink};
+
+let cfg = DiscordWebhookConfig::new("https://discord.com/api/webhooks/xxx")
+    .with_timeout(Duration::from_secs(2))
+    .with_max_chars(2000)
+    // 可选：关闭 DNS 公网 IP 校验（默认开启；无网络/DNS 不可用时可能导致发送失败）
+    .with_public_ip_check(false);
+
+let sink = DiscordWebhookSink::new(cfg)?;
+```
+
+## 安全约束（重要）
+
+为降低 SSRF/凭据泄露风险，本库会对 webhook URL 做限制：
+
+- 必须是 `https`
+- 不允许携带 username/password
+- host 仅允许：`discord.com` / `discordapp.com`
+- path 必须以 `/api/webhooks/` 开头
+- 不允许 `localhost` 或 IP
+- 如显式指定端口，仅允许 `443`
+- 禁用重定向（redirect）
+- `Debug` 输出默认脱敏（不会泄露完整 webhook URL）
+
+## 输出格式
+
+文本内容由以下部分组成（按顺序）：
+
+1) `title`
+2) `body`（如果存在且非空）
+3) 每个 tag：`key=value`（逐行）
+
+## 长度限制
+
+`DiscordWebhookConfig.max_chars` 用于限制最终消息长度（超出会截断并追加 `...`）。
+
+---
+## docs/sinks/telegram.md
+
+# TelegramBotSink
+
+`TelegramBotSink` 通过 Telegram Bot API（`sendMessage`）发送文本消息。
+
+## 构造
+
+```rust,no_run,edition2024
+use std::time::Duration;
+
+use notify_kit::{TelegramBotConfig, TelegramBotSink};
+
+let cfg = TelegramBotConfig::new("bot_token", "chat_id")
+    .with_timeout(Duration::from_secs(2))
+    .with_max_chars(4096);
+
+let sink = TelegramBotSink::new(cfg)?;
+```
+
+## 安全约束（重要）
+
+- Bot token 属于敏感信息：`Debug`/错误信息不会输出 token。
+- 发送 endpoint 固定为官方域名：`api.telegram.org`（不支持自定义 base_url，避免 SSRF）。
+
+## 输出格式
+
+文本内容由以下部分组成（按顺序）：
+
+1) `title`
+2) `body`（如果存在且非空）
+3) 每个 tag：`key=value`（逐行）
+
+## 长度限制
+
+`TelegramBotConfig.max_chars` 用于限制最终消息长度（超出会截断并追加 `...`）。
+
+---
+## docs/sinks/serverchan.md
+
+# ServerChanSink
+
+`ServerChanSink` 通过 Server酱（ServerChan）API 发送推送（纯文本）。
+
+支持：
+
+- Turbo（`SCT...`）：`sctapi.ftqq.com`
+- SC3（`sctp{uid}t...`）：`{uid}.push.ft07.com`
+
+## 构造
+
+```rust,no_run,edition2024
+use notify_kit::{ServerChanConfig, ServerChanSink};
+
+let cfg = ServerChanConfig::new("SCTxxxxxxxxxxxxxxxx");
+let sink = ServerChanSink::new(cfg)?;
+```
+
+## 超时
+
+`ServerChanConfig` 自带 HTTP timeout（默认 `2s`）。此外，`Hub` 也会对每个 sink 做兜底超时：
+
+- 建议：`HubConfig.per_sink_timeout` ≥ `ServerChanConfig.timeout`
+
+## 安全提示
+
+- `send_key` 属于敏感信息：不要写入日志/错误信息/Debug 输出。
+- 默认会做 DNS 公网 IP 校验（可通过 `with_public_ip_check(false)` 关闭）。
+- 错误信息刻意保持低敏感：不会包含 response body（也不会回显第三方返回的 message）。
+
+---
+## docs/sinks/pushplus.md
+
+# PushPlusSink
+
+`PushPlusSink` 通过 PushPlus API 发送推送（纯文本）。
+
+## 构造
+
+```rust,no_run,edition2024
+use notify_kit::{PushPlusConfig, PushPlusSink};
+
+let cfg = PushPlusConfig::new("your_token");
+let sink = PushPlusSink::new(cfg)?;
+```
+
+可选：设置 channel / topic / template：
+
+```rust,no_run,edition2024
+use notify_kit::{PushPlusConfig, PushPlusSink};
+
+let cfg = PushPlusConfig::new("your_token")
+    .with_channel("wechat")
+    .with_template("txt")
+    .with_topic("my_topic");
+let sink = PushPlusSink::new(cfg)?;
+```
+
+## 超时
+
+`PushPlusConfig` 自带 HTTP timeout（默认 `2s`）。此外，`Hub` 也会对每个 sink 做兜底超时：
+
+- 建议：`HubConfig.per_sink_timeout` ≥ `PushPlusConfig.timeout`
+
+## 安全提示
+
+- `token` 属于敏感信息：不要写入日志/错误信息/Debug 输出。
+- 默认会做 DNS 公网 IP 校验（可通过 `with_public_ip_check(false)` 关闭）。
+
+---
+## docs/sinks/bark.md
+
+# BarkSink
+
+`BarkSink` 通过 Bark API v2 发送推送（纯文本）。
+
+## 构造
+
+```rust,no_run,edition2024
+use notify_kit::{BarkConfig, BarkSink};
+
+let cfg = BarkConfig::new("your_device_key");
+let sink = BarkSink::new(cfg)?;
+```
+
+可选：设置 group：
+
+```rust,no_run,edition2024
+use notify_kit::{BarkConfig, BarkSink};
+
+let cfg = BarkConfig::new("your_device_key").with_group("opencode");
+let sink = BarkSink::new(cfg)?;
+```
+
+## 超时
+
+`BarkConfig` 自带 HTTP timeout（默认 `2s`）。此外，`Hub` 也会对每个 sink 做兜底超时：
+
+- 建议：`HubConfig.per_sink_timeout` ≥ `BarkConfig.timeout`
+
+## 安全提示
+
+- `device_key` 属于敏感信息：不要写入日志/错误信息/Debug 输出。
+- 默认会做 DNS 公网 IP 校验（可通过 `with_public_ip_check(false)` 关闭）。
+
+---
+## docs/sinks/webhook.md
+
+# GenericWebhookSink
+
+`GenericWebhookSink` 会向指定 URL POST 一个 JSON payload（默认 `{ "text": "..." }`）。
+
+## 构造
+
+```rust,no_run,edition2024
+use notify_kit::{GenericWebhookConfig, GenericWebhookSink};
+
+let cfg = GenericWebhookConfig::new("https://example.com/webhook");
+let sink = GenericWebhookSink::new(cfg)?;
+```
+
+可选：修改字段名、限制 URL path 前缀、限制允许的 host：
+
+```rust,no_run,edition2024
+use notify_kit::{GenericWebhookConfig, GenericWebhookSink};
+
+let cfg = GenericWebhookConfig::new("https://example.com/hooks/notify")
+    .with_payload_field("content")
+    .with_path_prefix("/hooks/")
+    .with_allowed_hosts(vec!["example.com".to_string()]);
+let sink = GenericWebhookSink::new(cfg)?;
+```
+
+## 严格模式（推荐）
+
+如果 webhook URL 可能来自**不可信输入/远程配置**，建议使用严格模式：强制配置 `allowed_hosts` + `path_prefix`，并且不能关闭 DNS 公网 IP 校验：
+
+```rust,no_run,edition2024
+use notify_kit::{GenericWebhookConfig, GenericWebhookSink};
+
+let cfg = GenericWebhookConfig::new_strict(
+    "https://example.com/hooks/notify",
+    "/hooks/",
+    vec!["example.com".to_string()],
+);
+let sink = GenericWebhookSink::new_strict(cfg)?;
+```
+
+## 安全提示
+
+- 默认会做 DNS 公网 IP 校验（可通过 `with_public_ip_check(false)` 关闭；出于安全考虑，关闭时必须同时配置 `allowed_hosts`）。
+- 如果你使用 `allowed_hosts`，建议把它视为安全边界（不要从不可信输入构造）；不确定时用上面的严格模式。
+
+---
+## docs/sinks/dingtalk.md
+
+# DingTalkWebhookSink
+
+`DingTalkWebhookSink` 通过钉钉群机器人 webhook 发送 **text** 消息（可选签名）。
+
+## 构造
+
+```rust,no_run,edition2024
+use std::time::Duration;
+
+use notify_kit::{DingTalkWebhookConfig, DingTalkWebhookSink};
+
+let cfg = DingTalkWebhookConfig::new("https://oapi.dingtalk.com/robot/send?access_token=xxx")
+    .with_timeout(Duration::from_secs(2))
+    .with_max_chars(4000)
+    // 可选：关闭 DNS 公网 IP 校验（默认开启；无网络/DNS 不可用时可能导致发送失败）
+    .with_public_ip_check(false);
+
+let sink = DingTalkWebhookSink::new(cfg)?;
+```
+
+## 签名（可选）
+
+如果群机器人开启了 “加签”，可以用：
+
+```rust,no_run,edition2024
+use notify_kit::{DingTalkWebhookConfig, DingTalkWebhookSink};
+
+let cfg = DingTalkWebhookConfig::new("https://oapi.dingtalk.com/robot/send?access_token=xxx")
+    .with_secret("your_secret")
+    // 可选：关闭 DNS 公网 IP 校验（默认开启；无网络/DNS 不可用时可能导致发送失败）
+    .with_public_ip_check(false);
+
+let sink = DingTalkWebhookSink::new(cfg)?;
+```
+
+每次发送会自动为 URL 追加 `timestamp` / `sign` 参数，并且不会在 `Debug`/错误信息中泄露 secret 或完整 webhook URL。
+
+## 安全约束（重要）
+
+为降低 SSRF/凭据泄露风险，本库会对 webhook URL 做限制：
+
+- 必须是 `https`
+- 不允许携带 username/password
+- host 仅允许：`oapi.dingtalk.com`
+- path 必须以 `/robot/send` 开头
+- 不允许 `localhost` 或 IP
+- 如显式指定端口，仅允许 `443`
+- 禁用重定向（redirect）
+- `Debug` 输出默认脱敏（不会泄露完整 webhook URL）
+
+## 输出格式
+
+文本内容由以下部分组成（按顺序）：
+
+1) `title`
+2) `body`（如果存在且非空）
+3) 每个 tag：`key=value`（逐行）
+
+## 长度限制
+
+`DingTalkWebhookConfig.max_chars` 用于限制最终消息长度（超出会截断并追加 `...`）。
+
+---
+## docs/sinks/wecom.md
+
+# WeComWebhookSink
+
+`WeComWebhookSink` 通过企业微信群机器人 webhook 发送 **text** 消息。
+
+## 构造
+
+```rust,no_run,edition2024
+use std::time::Duration;
+
+use notify_kit::{WeComWebhookConfig, WeComWebhookSink};
+
+let cfg = WeComWebhookConfig::new("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx")
+    .with_timeout(Duration::from_secs(2))
+    .with_max_chars(2000)
+    // 可选：关闭 DNS 公网 IP 校验（默认开启；无网络/DNS 不可用时可能导致发送失败）
+    .with_public_ip_check(false);
+
+let sink = WeComWebhookSink::new(cfg)?;
+```
+
+## 安全约束（重要）
+
+为降低 SSRF/凭据泄露风险，本库会对 webhook URL 做限制：
+
+- 必须是 `https`
+- 不允许携带 username/password
+- host 仅允许：`qyapi.weixin.qq.com`
+- path 必须以 `/cgi-bin/webhook/send` 开头
+- 不允许 `localhost` 或 IP
+- 如显式指定端口，仅允许 `443`
+- 禁用重定向（redirect）
+- `Debug` 输出默认脱敏（不会泄露完整 webhook URL）
+
+## 输出格式
+
+文本内容由以下部分组成（按顺序）：
+
+1) `title`
+2) `body`（如果存在且非空）
+3) 每个 tag：`key=value`（逐行）
+
+## 长度限制
+
+`WeComWebhookConfig.max_chars` 用于限制最终消息长度（超出会截断并追加 `...`）。
+
+---
+## docs/sinks/custom.md
+
+# 自定义 Sink
+
+实现 `Sink` trait 即可扩展任何通知渠道。
+
+`Sink::send` 的返回值是一个 boxed future。你不需要引用 `notify-kit` 内部的别名，
+直接返回 `Pin<Box<dyn Future<...>>>` 即可。
+
+## 一个最小例子：打印到 stderr
+
+```rust,no_run,edition2024
+use std::future::Future;
+use std::pin::Pin;
+
+use notify_kit::{Event, Sink};
+
+#[derive(Debug)]
+struct StderrSink;
+
+impl Sink for StderrSink {
+    fn name(&self) -> &'static str {
+        "stderr"
+    }
+
+    fn send<'a>(
+        &'a self,
+        event: &'a Event,
+    ) -> Pin<Box<dyn Future<Output = notify_kit::Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            eprintln!("[{}] {}", event.kind, event.title);
+            Ok(())
+        })
+    }
+}
+```
+
+## 常见实现模式
+
+- **Webhook / HTTP**：用 `reqwest` 发送请求；禁用重定向、限制域名、设置 timeout。
+- **消息队列**：把 `Event` 序列化后投递到 MQ，再由异步 worker 批量发送到外部系统。
+- **节流/合并**：高频事件（例如进度更新）可以在 sink 内按时间窗口合并，减少噪音。
+- **幂等/去重**：用 `(kind, tags...)` 生成 key，短时间内去重，避免重复通知。
+
+## 什么时候该做一个新的 crate？
+
+如果你的 sink 依赖较重（SMTP/SDK/复杂鉴权），推荐放到独立 crate：
+
+- `notify-kit` 保持轻量与通用
+- 你的项目按需引入相关 sink crate
+
+## 测试建议
+
+自定义 sink 通常很适合用“收集器”来做单元测试：
+
+- 在 sink 内部用 `Mutex<Vec<Event>>` 收集收到的事件
+- 测试时调用 `hub.send(event).await`，断言收集到的内容
+
+---
+## docs/faq.md
+
+# FAQ / 排错
+
+## 为什么 `notify()` 没有任何效果？
+
+最常见原因：当前线程不在 Tokio runtime 中。
+
+- `Hub::notify` 在无 runtime 时会丢弃通知并 `tracing::warn!`
+- 如果你想显式检测，请使用 `Hub::try_notify`
+
+## 为什么 `try_notify()` 返回了 `NoTokioRuntime`？
+
+`try_notify()` 内部会调用 `tokio::runtime::Handle::try_current()`：
+
+- 若当前线程不在 Tokio runtime 内，会返回 `NoTokioRuntime`
+- 这是有意为之：通知是附加能力，不应让调用方被迫引入 runtime 或 panic
+
+## `send()` 返回了 timeout？
+
+`HubConfig.per_sink_timeout` 是每个 sink 的兜底超时：
+
+- 调大 `per_sink_timeout`
+- 或优化/拆分你的 sink（避免单次发送太慢）
+
+## `send()` 返回了聚合错误，我该怎么处理？
+
+聚合错误代表“至少一个 sink 失败了”。常见处理方式：
+
+- 对关键通知：把 `hub.send(event).await?` 当作必须成功的步骤（失败则上报/重试）
+- 对非关键通知：记录 warning 并继续主流程（例如 `tracing::warn!(...)`）
+
+## Feishu webhook 报 host is not allowed？
+
+本库只允许 `open.feishu.cn` / `open.larksuite.com`：
+
+- 确认你使用的是群机器人 webhook 的标准域名
+- 不支持自定义代理域名（避免 SSRF 风险）
+
+## 如何让 TUI 在回复完成后让终端“闪一下”（macOS/Windows）？
+
+思路：在“回复完成”事件上触发 `SoundSink` 的终端 bell（`\u{0007}`）。
+
+- `notify-kit` 侧：使用 `SoundSink`（默认就是 bell）。
+- 终端/系统侧：需要你在终端设置里启用 Visual Bell / Dock/任务栏提示（不同终端选项不同，见 [SoundSink](sinks/sound.md)）。
+
+本仓库不包含具体 TUI 应用；你需要在你的 TUI 项目里在“reply completed / turn completed”处调用 `hub.notify(...)`。
+
+---
+## docs/development.md
+
+# 开发
+
+## 质量门禁
+
+离线检查：
+
+```bash
+CARGO_NET_OFFLINE=true ./scripts/gate.sh
+```
+
+提交前严格检查（由 `githooks/pre-commit` 自动执行）：
+
+```bash
+./scripts/pre-commit-check.sh
+```
+
+常用命令：
+
+```bash
+cargo fmt --all --manifest-path Cargo.toml -- --check
+cargo test --manifest-path Cargo.toml
+```
+
+## 目录结构
+
+- `src/`：库实现
+- `docs/`：mdBook 文档（本目录）
+- `scripts/gate.sh`：格式化/编译门禁
+- `scripts/pre-commit-check.sh`：提交前严格检查（clippy + 关键 lint）
+
+## 文档维护
+
+- 改动文档：直接编辑 `docs/*.md`
+- 目录结构：编辑 `docs/SUMMARY.md`
+
+## 本地预览（mdBook）
+
+本目录使用 `SUMMARY.md` 作为目录。你可以用 mdBook 本地预览（含搜索）：
+
+```bash
+./scripts/docs.sh serve
+```
+
+传参示例（容器/远程访问）：
+
+```bash
+./scripts/docs.sh serve --hostname 0.0.0.0 --port 3000
+```
+
+编译 Rust 代码片段（mdBook `test`）：
+
+```bash
+./scripts/docs.sh test
+```
+
+首次使用需要安装：
+
+```bash
+cargo install mdbook --locked
+```
+
+## LLM 友好文档（llms.txt）
+
+为了让 LLM/agent 更容易“看懂仓库文档”，我们提供了一个聚合文件：`llms.txt`。
+
+更新后请重新生成：
+
+```bash
+./scripts/build-llms-txt.sh
+```
+
+---
+## bots/README.md
+
+# Bots
+
+本目录用于存放“交互式 bot / 集成程序”（例如 OpenCode 的 Slack bot）。
+
+> `notify-kit` 的核心仍然是 Rust 通知库（`Hub` + `sinks`）。这里的 bot 只是“上层集成示例”，用于把某个系统的事件/消息桥接到通知/会话系统。
+
+## opencode-slack
+
+OpenCode 风格的 Slack bot（Socket Mode）：把 Slack thread 映射为会话，并在 thread 里输出会话分享链接与工具执行更新。
+
+见：`bots/opencode-slack/README.md`
+
+## opencode-feishu
+
+OpenCode 风格的飞书（Lark/Feishu）事件订阅 bot：把群聊映射为会话，并在群里输出会话分享链接与工具执行更新。
+
+见：`bots/opencode-feishu/README.md`
+
+## opencode-discord
+
+OpenCode 风格的 Discord bot（Gateway）：把 channel/thread 映射为会话，并在 channel 中输出会话分享链接与工具执行更新。
+
+见：`bots/opencode-discord/README.md`
+
+## opencode-telegram
+
+OpenCode 风格的 Telegram bot（long polling）：把 chat 映射为会话，并在 chat 中输出会话分享链接与工具执行更新。
+
+见：`bots/opencode-telegram/README.md`
+
+## opencode-dingtalk-stream
+
+OpenCode 风格的钉钉 Stream Mode bot：把会话（sessionWebhook）映射为会话，并在群里输出会话分享链接与工具执行更新。
+
+见：`bots/opencode-dingtalk-stream/README.md`
+
+## opencode-github-action
+
+OpenCode 风格的 GitHub Actions 评论 bot 示例：把 Issue/PR 评论桥接到 OpenCode session，并把回复回贴到 GitHub。
+
+见：`bots/opencode-github-action/README.md`
+
+## opencode-wecom
+
+OpenCode 风格的企业微信（WeCom）回调 bot 示例：通过“自建应用”的回调接收消息，桥接到 OpenCode session，并把回复发回企业微信。
+
+见：`bots/opencode-wecom/README.md`
+
+---
+## bots/opencode-dingtalk-stream/README.md
+
+# opencode-dingtalk-stream
+
+一个最小可用的钉钉 Stream Mode 交互式 bot 示例，用于桥接 OpenCode 会话：
+
+- 会话（sessionWebhook）→ session（首次消息创建会话并回贴分享链接）
+- 群聊内持续对话（把用户消息发给 session.prompt）
+- tool 完成时在群里提示（通过 event.subscribe 监听 `message.part.updated`）
+- `/test` 命令回显
+
+## 依赖
+
+- Node.js 18+（建议 20+）
+- 一个启用 Stream Mode 的钉钉机器人（应用）
+
+## 配置
+
+环境变量：
+
+- `DINGTALK_CLIENT_ID`
+- `DINGTALK_CLIENT_SECRET`
+
+## 运行
+
+```bash
+cd bots/opencode-dingtalk-stream
+npm install
+npm start
+```
+
+## 说明
+
+- 该 bot 会在本地启动一个 OpenCode server（端口随机）。默认在内存中维护 sessionWebhook → session 的映射；如设置 `OPENCODE_SESSION_STORE_PATH`（例如 `.opencode/sessions.json`），会把映射持久化到文件，重启后可恢复（可选：用 `OPENCODE_SESSION_STORE_ROOT` 限制 store 路径根目录）。
+
+---
+## bots/opencode-discord/README.md
+
+# opencode-discord
+
+一个最小可用的 Discord 交互式 bot 示例，用于桥接 OpenCode 会话：
+
+- channel/thread → session（首次消息创建会话并回贴分享链接）
+- 持续对话（把用户消息发给 `session.prompt`）
+- tool 完成时提示（通过 `event.subscribe` 监听 `message.part.updated`）
+- `/test` 命令回显
+
+## 依赖
+
+- Node.js 18+（建议 20+）
+- 一个 Discord Bot（需要开启 Message Content Intent）
+
+## 配置
+
+环境变量：
+
+- `DISCORD_BOT_TOKEN`
+
+在 Discord Developer Portal 中：
+
+- 为你的 bot 启用 **Message Content Intent**（否则收不到 `message.content`）
+
+## 运行
+
+```bash
+cd bots/opencode-discord
+npm install
+npm start
+```
+
+## 说明
+
+- 该 bot 会在本地启动一个 OpenCode server（端口随机）。默认在内存中维护 channel → session 的映射；如设置 `OPENCODE_SESSION_STORE_PATH`（例如 `.opencode/sessions.json`），会把映射持久化到文件，重启后可恢复（可选：用 `OPENCODE_SESSION_STORE_ROOT` 限制 store 路径根目录）。
+
+---
+## bots/opencode-feishu/README.md
+
+# opencode-feishu
+
+一个最小可用的飞书（Feishu/Lark）交互式 bot 示例，用于桥接 OpenCode 会话：
+
+- 群聊（chat）→ session（首次消息创建会话并回贴分享链接）
+- 群聊内持续对话（把用户消息发给 session.prompt）
+- tool 完成时在群里提示（通过 event.subscribe 监听 `message.part.updated`）
+- `/test` 命令回显
+
+## 依赖
+
+- Node.js 18+（建议 20+）
+- 一个飞书开放平台应用（机器人），启用事件订阅
+
+## 配置
+
+环境变量：
+
+- `FEISHU_APP_ID`
+- `FEISHU_APP_SECRET`
+- `FEISHU_VERIFICATION_TOKEN`
+- `FEISHU_ENCRYPT_KEY`（可选；如果你的事件订阅启用了加密）
+- `PORT`（可选；默认 `3000`）
+
+在飞书开放平台后台配置：
+
+- 事件订阅回调地址：`https://<your-host>/webhook/event`
+- 订阅事件：`im.message.receive_v1`
+
+> 注意：该示例通过 HTTP 接收事件回调，你需要把服务暴露到公网（或用内网穿透）。
+
+## 运行
+
+```bash
+cd bots/opencode-feishu
+npm install
+npm start
+```
+
+## 说明
+
+- 该 bot 会在本地启动一个 OpenCode server（端口随机）。默认在内存中维护 chat → session 的映射；如设置 `OPENCODE_SESSION_STORE_PATH`（例如 `.opencode/sessions.json`），会把映射持久化到文件，重启后可恢复（可选：用 `OPENCODE_SESSION_STORE_ROOT` 限制 store 路径根目录）。
+
+---
+## bots/opencode-github-action/README.md
+
+# opencode-github-action
+
+一个最小可用的 GitHub Actions “评论 bot / 集成示例”，用于把 GitHub Issue/PR 评论桥接到 OpenCode session：
+
+- Issue/PR comment → session（每次运行创建新 session 并回贴分享链接）
+- 把用户指令转发到 `session.prompt`
+- 把模型回复作为评论（或 review comment reply）发回 GitHub
+
+## 依赖
+
+- GitHub Actions runner（或本地 Node.js 20+）
+- `GITHUB_TOKEN`（用来读线程 + 发评论）
+- 你的 OpenCode server/模型所需的环境变量（按你自己的 OpenCode 配置来）
+
+## 触发方式
+
+默认只在评论中包含以下标记时才会运行：
+
+- `/oc`
+- `/opencode`
+
+示例：
+
+```text
+/opencode explain this issue
+```
+
+```text
+请帮我补上错误处理 /oc
+```
+
+## 使用（推荐：workflow 直接运行脚本）
+
+在你的仓库里添加 `.github/workflows/opencode.yml`（示例）：
+
+```yml
+name: opencode
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  opencode:
+    if: |
+      contains(github.event.comment.body, '/oc') ||
+      contains(github.event.comment.body, '/opencode')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run opencode GitHub bot
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 按你的 OpenCode 配置注入模型/Provider API key（示例）：
+          # OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          cd bots/opencode-github-action
+          npm install
+          npm start
+```
+
+## 说明
+
+- 这是“示例实现”：为了保持简单，默认每次触发都会创建新 session（不做持久化映射）。
+- PR review comment 事件会优先以 “reply” 的形式回复到对应 review comment。
+
+---
+## bots/opencode-slack/README.md
+
+# opencode-slack
+
+一个最小可用的 Slack 交互式 bot（Socket Mode），实现 OpenCode `packages/slack` 的核心行为：
+
+- Slack thread → session（首次消息创建会话并回贴分享链接）
+- thread 内持续对话（把用户消息发给 session.prompt）
+- tool 完成时在 thread 内提示（通过 event.subscribe 监听 `message.part.updated`）
+- `/test` 命令回显
+
+## 依赖
+
+- Node.js 18+（建议 20+）
+- 一个启用 Socket Mode 的 Slack App
+
+## 配置
+
+在 Slack App 中配置并安装到 workspace，至少需要：
+
+- Socket Mode enabled
+- OAuth scopes：
+  - `chat:write`
+  - `app_mentions:read`
+  - `channels:history`
+  - `groups:history`
+
+环境变量（放到 `.env` 或你的部署系统中）：
+
+- `SLACK_BOT_TOKEN`
+- `SLACK_SIGNING_SECRET`
+- `SLACK_APP_TOKEN`
+
+## 运行
+
+```bash
+cd bots/opencode-slack
+npm install
+npm start
+```
+
+## 说明
+
+- 该 bot 会在本地启动一个 OpenCode server（端口随机）。默认在内存中维护 thread → session 的映射；如设置 `OPENCODE_SESSION_STORE_PATH`（例如 `.opencode/sessions.json`），会把映射持久化到文件，重启后可恢复（可选：用 `OPENCODE_SESSION_STORE_ROOT` 限制 store 路径根目录）。
+- 如需把事件/通知转发到飞书/钉钉/企微等平台，建议由你的上层系统订阅/采集事件后调用 `notify-kit` 的对应 sink 发送。
+
+---
+## bots/opencode-telegram/README.md
+
+# opencode-telegram
+
+一个最小可用的 Telegram 交互式 bot 示例（long polling），用于桥接 OpenCode 会话：
+
+- chat → session（首次消息创建会话并回贴分享链接）
+- 持续对话（把用户消息发给 `session.prompt`）
+- tool 完成时提示（通过 `event.subscribe` 监听 `message.part.updated`）
+- `/test` 命令回显
+
+## 依赖
+
+- Node.js 18+（建议 20+）
+- 一个 Telegram Bot（通过 BotFather 获取 token）
+
+## 配置
+
+环境变量：
+
+- `TELEGRAM_BOT_TOKEN`
+
+## 运行
+
+```bash
+cd bots/opencode-telegram
+npm install
+npm start
+```
+
+## 说明
+
+- 该 bot 使用 long polling 拉取 `getUpdates`；更适合本地/轻量部署。
+- 默认在内存中维护 chat → session 的映射；如设置 `OPENCODE_SESSION_STORE_PATH`（例如 `.opencode/sessions.json`），会把映射持久化到文件，重启后可恢复（可选：用 `OPENCODE_SESSION_STORE_ROOT` 限制 store 路径根目录）。
+
+---
+## bots/opencode-wecom/README.md
+
+# opencode-wecom
+
+一个最小可用的企业微信（WeCom）交互式 bot 示例：通过“自建应用”的回调（Callback）接收消息，把用户消息桥接到 OpenCode session，并把回复发回企业微信。
+
+- 用户消息 → session（首次消息创建会话并回贴分享链接）
+- 持续对话（把用户消息发给 `session.prompt`）
+- tool 完成时提示（通过 `event.subscribe` 监听 `message.part.updated`）
+- `/test` 命令回显
+
+## 依赖
+
+- Node.js 18+（建议 20+）
+- 一个企业微信自建应用（需要启用接收消息并配置回调 URL）
+
+## 配置
+
+环境变量：
+
+- `WECOM_CORP_ID`：企业 ID（corpid）
+- `WECOM_CORP_SECRET`：应用 secret
+- `WECOM_AGENT_ID`：应用 AgentId
+- `WECOM_TOKEN`：回调 Token（用于签名校验）
+- `WECOM_ENCODING_AES_KEY`：回调 EncodingAESKey（43 位 base64 字符串）
+- `PORT`（可选；默认 `3000`）
+
+可选行为开关：
+
+- `WECOM_SESSION_SCOPE`：`user`（默认）或 `chat`。决定“一个 session 绑定到用户还是群聊（如果回调里有 ChatId）”
+- `WECOM_REPLY_TO`：`user`（默认）或 `chat`。如果你确认 `ChatId` 可用于 `appchat/send`，可切到 `chat` 把回复发到群聊。
+
+## 在企业微信后台配置
+
+在“应用管理 → 自建应用 → 接收消息”里配置：
+
+- 回调 URL：`https://<your-host>/webhook/wecom`
+- Token：填 `WECOM_TOKEN`
+- EncodingAESKey：填 `WECOM_ENCODING_AES_KEY`
+
+> 注意：企业微信回调通常需要公网可访问（或内网穿透）。
+
+## 运行
+
+```bash
+cd bots/opencode-wecom
+npm install
+npm start
+```
+
+## 说明
+
+- 默认在内存中维护映射；如设置 `OPENCODE_SESSION_STORE_PATH`（例如 `.opencode/sessions.json`），会把映射持久化到文件，重启后可恢复（可选：用 `OPENCODE_SESSION_STORE_ROOT` 限制 store 路径根目录）。
+- 为降低重放风险，回调会做 timestamp 时间窗校验 + nonce 去重；当前去重缓存是内存级的（重启会清空）。

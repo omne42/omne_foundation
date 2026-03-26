@@ -11,6 +11,7 @@
 
 ### Changed
 - release: bump workspace package version to `0.1.0`.
+- `mcp-kit`：untrusted `streamable_http` 连接现在会把已校验的公网 DNS 结果绑定到实际 HTTP 连接，避免 DNS rebinding / TOCTOU 绕过。
 - `mcp-kit`：`SharedManager` 在 JSON-RPC 错误后的清理路径现在会按连接实例身份校验后再断连，避免旧 handle 的失败清理误删并发重连后的新连接；并补充替换连接场景的回归测试。
 - `mcp-kit`：通用配置文件读取、大小上限、no-follow regular-file 约束与 rooted path canonicalize 现在下沉复用 `config-kit`，`mcp-kit` 自身只保留 MCP 领域模型与校验。
 - `mcp-kit`：`ServerNameError` 现在暴露稳定的 `error-kit::ErrorRecord` 映射，补齐 machine-readable 错误码、类别与重试语义。

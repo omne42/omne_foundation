@@ -90,6 +90,8 @@ impl Default for SpawnOptions {
 pub struct StreamableHttpOptions {
     /// Extra HTTP headers to include on all requests.
     pub headers: HashMap<String, String>,
+    /// Whether untrusted transports must pin the validated public IP set into the actual socket.
+    pub enforce_public_ip: bool,
     /// Optional timeout applied while establishing HTTP connections.
     pub connect_timeout: Option<Duration>,
     /// Optional timeout applied to individual HTTP POST request/response bodies.
@@ -110,6 +112,7 @@ impl Default for StreamableHttpOptions {
     fn default() -> Self {
         Self {
             headers: HashMap::new(),
+            enforce_public_ip: false,
             connect_timeout: Some(Duration::from_secs(10)),
             request_timeout: None,
             follow_redirects: false,

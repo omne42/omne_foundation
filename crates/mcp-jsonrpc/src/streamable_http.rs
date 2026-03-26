@@ -7,7 +7,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use http_kit::{
     HttpClientOptions, body_preview_json, build_http_client_with_options, drain_response_body,
-    read_response_body_preview_text, redact_reqwest_error,
+    read_response_body_preview_text, redact_reqwest_error, select_http_client_with_options,
 };
 use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
@@ -109,6 +109,14 @@ fn jsonrpc_response_id_from_line(line: &[u8]) -> Result<Option<Value>, serde_jso
         Some(Value::String(id)) => Some(Value::String(id)),
         Some(Value::Number(id)) => Some(Value::Number(id)),
         Some(Value::Null) => Some(Value::Null),
+        _ => None,
+    })
+}
+
+fn jsonrpc_request_id_from_line(line: &[u8]) -> Result<Option<crate::Id>, serde_json::Error> {
+    Ok(match jsonrpc_response_id_from_line(line)? {
+        Some(Value::String(id)) => Some(crate::Id::String(id)),
+        Some(Value::Number(id)) => id.as_i64().map(crate::Id::Integer),
         _ => None,
     })
 }
@@ -226,6 +234,7 @@ impl Client {
         let request_timeout = http_options.request_timeout;
         let follow_redirects = http_options.follow_redirects;
         let error_body_preview_bytes = http_options.error_body_preview_bytes;
+        let enforce_public_ip = http_options.enforce_public_ip;
 
         let mut headers = reqwest::header::HeaderMap::new();
         for (key, value) in http_options.headers {
@@ -244,18 +253,31 @@ impl Client {
             headers.insert(name, value);
         }
 
-        let http_client = build_http_client_with_options(&HttpClientOptions {
+        let http_options = HttpClientOptions {
             connect_timeout,
             default_headers: headers,
             follow_redirects,
             // Avoid automatic proxy environment variable loading by default.
             no_proxy: true,
             ..Default::default()
-        })
-        .map_err(|err| {
+        };
+
+        let http_client = build_http_client_with_options(&http_options).map_err(|err| {
             Error::protocol(
                 ProtocolErrorKind::InvalidInput,
                 format!("build http client failed: {err}"),
+            )
+        })?;
+        let sse_url = reqwest::Url::parse(sse_url).map_err(|err| {
+            Error::protocol(
+                ProtocolErrorKind::InvalidInput,
+                format!("invalid sse url: {err}"),
+            )
+        })?;
+        let post_url = reqwest::Url::parse(post_url).map_err(|err| {
+            Error::protocol(
+                ProtocolErrorKind::InvalidInput,
+                format!("invalid post url: {err}"),
             )
         })?;
 
@@ -271,28 +293,45 @@ impl Client {
             Arc::new(tokio::sync::Mutex::new(None));
 
         let (sse_wake_tx, sse_wake_rx) = mpsc::channel::<()>(1);
-        let sse_resp = try_connect_sse(&http_client, sse_url, connect_timeout, &session_id).await?;
+        let sse_client = select_http_client_with_options(
+            &http_client,
+            &http_options,
+            &sse_url,
+            enforce_public_ip,
+        )
+        .await
+        .map_err(|err| {
+            Error::protocol(
+                ProtocolErrorKind::StreamableHttp,
+                format!("select http client failed: {err}"),
+            )
+        })?;
+        let sse_resp =
+            try_connect_sse(&sse_client, sse_url.as_str(), connect_timeout, &session_id).await?;
 
-        let post_url = post_url.to_string();
         let http_client_post = http_client.clone();
+        let http_options_post = http_options.clone();
         let writer_post = writer.clone();
         let session_id_post = session_id.clone();
         let sse_wake_post = sse_wake_tx.clone();
         let request_timeout_post = request_timeout;
         let error_body_preview_bytes_post = error_body_preview_bytes;
         let handle_post = transport_handle.clone();
+        let post_url_post = post_url.clone();
         let post_task = tokio::spawn(async move {
             HttpPostBridge {
                 bridge_read,
                 writer: writer_post,
                 handle: handle_post,
                 http_client: http_client_post,
-                post_url,
+                http_options: http_options_post,
+                post_url: post_url_post,
                 session_id: session_id_post,
                 sse_wake: sse_wake_post,
                 max_message_bytes,
                 request_timeout: request_timeout_post,
                 error_body_preview_bytes: error_body_preview_bytes_post,
+                enforce_public_ip,
             }
             .run()
             .await;
@@ -300,16 +339,36 @@ impl Client {
 
         let writer_sse = writer.clone();
         let session_id_sse = session_id.clone();
-        let sse_url = sse_url.to_string();
+        let sse_url = sse_url.clone();
         let http_client_sse = http_client.clone();
+        let http_options_sse = http_options.clone();
         let handle_sse = transport_handle;
         let sse_task = tokio::spawn(async move {
             let Some(resp) = sse_resp else {
                 let mut wake_rx = sse_wake_rx;
                 while wake_rx.recv().await.is_some() {
-                    match try_connect_sse(
+                    let sse_client = match select_http_client_with_options(
                         &http_client_sse,
+                        &http_options_sse,
                         &sse_url,
+                        enforce_public_ip,
+                    )
+                    .await
+                    {
+                        Ok(client) => client,
+                        Err(err) => {
+                            close_post_bridge(
+                                &writer_sse,
+                                &handle_sse,
+                                format!("streamable http SSE client selection failed: {err}"),
+                            )
+                            .await;
+                            return;
+                        }
+                    };
+                    match try_connect_sse(
+                        &sse_client,
+                        sse_url.as_str(),
                         connect_timeout,
                         &session_id_sse,
                     )
@@ -355,12 +414,14 @@ struct HttpPostBridge {
     writer: Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::io::DuplexStream>>>,
     handle: ClientHandle,
     http_client: reqwest::Client,
-    post_url: String,
+    http_options: HttpClientOptions,
+    post_url: reqwest::Url,
     session_id: Arc<tokio::sync::Mutex<Option<String>>>,
     sse_wake: mpsc::Sender<()>,
     max_message_bytes: usize,
     request_timeout: Option<Duration>,
     error_body_preview_bytes: usize,
+    enforce_public_ip: bool,
 }
 
 impl HttpPostBridge {
@@ -372,12 +433,14 @@ impl HttpPostBridge {
             writer,
             handle,
             http_client,
+            http_options,
             post_url,
             session_id,
             sse_wake,
             max_message_bytes,
             request_timeout,
             error_body_preview_bytes,
+            enforce_public_ip,
         } = self;
 
         let mut reader = tokio::io::BufReader::new(bridge_read);
@@ -400,8 +463,34 @@ impl HttpPostBridge {
             }
             let line = Bytes::from(line);
 
-            let mut req = http_client
-                .post(&post_url)
+            let selected_client = match select_http_client_with_options(
+                &http_client,
+                &http_options,
+                &post_url,
+                enforce_public_ip,
+            )
+            .await
+            {
+                Ok(client) => client,
+                Err(err) => {
+                    if !emit_post_bridge_error_from_line(
+                        &writer,
+                        &handle,
+                        line.as_ref(),
+                        HTTP_TRANSPORT_ERROR,
+                        format!("http client selection failed: {err}"),
+                        None,
+                    )
+                    .await
+                    {
+                        return;
+                    }
+                    continue;
+                }
+            };
+
+            let mut req = selected_client
+                .post(post_url.clone())
                 .header(
                     reqwest::header::ACCEPT,
                     "application/json, text/event-stream",
@@ -421,13 +510,11 @@ impl HttpPostBridge {
                 Some(timeout) => match tokio::time::timeout(timeout, send).await {
                     Ok(resp) => resp,
                     Err(_) => {
-                        if !emit_post_bridge_error_from_line(
+                        if !emit_wait_timeout_from_line(
                             &writer,
                             &handle,
                             line.as_ref(),
-                            HTTP_TRANSPORT_ERROR,
                             "http request timed out".to_string(),
-                            None,
                         )
                         .await
                         {
@@ -489,17 +576,8 @@ impl HttpPostBridge {
                         .map(|chunk| chunk.map_err(io::Error::other));
                     let reader = StreamReader::new(stream);
                     let mut reader = tokio::io::BufReader::new(reader);
-                    let pump = sse_pump_to_writer(&mut reader, &writer, max_message_bytes, true);
-                    let pump = match request_timeout {
-                        Some(timeout) => match tokio::time::timeout(timeout, pump).await {
-                            Ok(result) => result,
-                            Err(_) => Err(io::Error::new(
-                                io::ErrorKind::TimedOut,
-                                "http response stream timed out",
-                            )),
-                        },
-                        None => pump.await,
-                    };
+                    let pump =
+                        sse_pump_to_writer(&mut reader, &writer, max_message_bytes, true).await;
                     if pump.is_err()
                         && !emit_post_bridge_error_from_line(
                             &writer,
@@ -542,13 +620,11 @@ impl HttpPostBridge {
                         {
                             Ok(body) => body,
                             Err(_) => {
-                                if !emit_post_bridge_error_from_line(
+                                if !emit_wait_timeout_from_line(
                                     &writer,
                                     &handle,
                                     line.as_ref(),
-                                    HTTP_TRANSPORT_ERROR,
                                     "http response timed out".to_string(),
-                                    None,
                                 )
                                 .await
                                 {
@@ -766,6 +842,44 @@ async fn emit_post_bridge_error_from_line(
         }
     };
     emit_post_bridge_error(writer, handle, id, code, message, data).await
+}
+
+async fn emit_wait_timeout_from_line(
+    writer: &Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::io::DuplexStream>>>,
+    handle: &ClientHandle,
+    line: &[u8],
+    message: String,
+) -> bool {
+    let id = match jsonrpc_request_id_from_line(line) {
+        Ok(id) => id,
+        Err(err) => {
+            close_post_bridge(
+                writer,
+                handle,
+                format!("streamable http POST bridge received invalid JSON from client: {err}"),
+            )
+            .await;
+            return false;
+        }
+    };
+
+    let Some(id) = id else {
+        close_post_bridge(
+            writer,
+            handle,
+            format!("streamable http notification timed out: {message}"),
+        )
+        .await;
+        return false;
+    };
+
+    if let Some(tx) = crate::lock_pending(&handle.pending).remove(&id) {
+        let _ = tx.send(Err(Error::protocol(
+            ProtocolErrorKind::WaitTimeout,
+            message,
+        )));
+    }
+    true
 }
 
 async fn close_post_bridge(

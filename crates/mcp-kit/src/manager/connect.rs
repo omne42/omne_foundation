@@ -203,6 +203,7 @@ async fn connect_streamable_http_transport(
         &resolved_urls.post_url,
         mcp_jsonrpc::StreamableHttpOptions {
             headers,
+            enforce_public_ip: ctx.trust_mode != TrustMode::Trusted,
             request_timeout: Some(ctx.request_timeout),
             ..Default::default()
         },

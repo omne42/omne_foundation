@@ -360,6 +360,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::thread;
+    #[cfg(unix)]
+    use std::{os::unix::fs::symlink, os::unix::net::UnixListener};
 
     use super::*;
 
@@ -597,6 +599,83 @@ mod tests {
             assert!(err.to_string().contains("regular file"), "{err:#}");
 
             let _ = std::fs::remove_dir_all(path);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_image_files_reject_symlinks() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("unix epoch")
+                .as_nanos();
+            let target = std::env::temp_dir().join(format!(
+                "notify-kit-feishu-local-image-target-{}-{unique}.png",
+                std::process::id()
+            ));
+            let link = std::env::temp_dir().join(format!(
+                "notify-kit-feishu-local-image-link-{}-{unique}.png",
+                std::process::id()
+            ));
+            std::fs::write(&target, b"png").expect("write symlink target");
+            symlink(&target, &link).expect("create symlink");
+
+            let sink = FeishuWebhookSink::new(
+                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+                    .with_app_credentials("app_id", "app_secret")
+                    .with_local_image_files(true),
+            )
+            .expect("build sink");
+
+            let err = sink
+                .load_image(link.to_str().expect("utf8 path"))
+                .await
+                .expect_err("symlinks should be rejected");
+            assert!(err.to_string().contains("must not be a symlink"), "{err:#}");
+
+            let _ = std::fs::remove_file(link);
+            let _ = std::fs::remove_file(target);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_image_files_reject_unix_socket_paths() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("unix epoch")
+                .as_nanos();
+            let path = std::path::PathBuf::from(format!(
+                "/tmp/nk-feishu-{unique:x}-{}.sock",
+                std::process::id()
+            ));
+            let listener = UnixListener::bind(&path).expect("create unix socket");
+
+            let sink = FeishuWebhookSink::new(
+                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+                    .with_app_credentials("app_id", "app_secret")
+                    .with_local_image_files(true),
+            )
+            .expect("build sink");
+
+            let err = sink
+                .load_image(path.to_str().expect("utf8 path"))
+                .await
+                .expect_err("unix socket paths should be rejected");
+            assert!(err.to_string().contains("regular file"), "{err:#}");
+
+            drop(listener);
+            let _ = std::fs::remove_file(path);
         });
     }
 

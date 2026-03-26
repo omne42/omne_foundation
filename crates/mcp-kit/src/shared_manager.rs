@@ -126,10 +126,11 @@ impl SharedManager {
         &self,
         operation: &'static str,
         server_name: &str,
+        cwd: Option<&Path>,
     ) -> anyhow::Result<Option<crate::manager::PreparedConnectedClient>> {
         self.lock_for_async_op(operation)
             .await?
-            .try_prepare_connected_client(server_name)
+            .try_prepare_connected_client(server_name, cwd)
     }
 
     async fn ensure_connected(
@@ -142,7 +143,7 @@ impl SharedManager {
         let _gate = self.lock_connect_gate(operation, server_name).await?;
 
         if self
-            .try_prepare_connected_client(operation, server_name)
+            .try_prepare_connected_client(operation, server_name, Some(cwd))
             .await?
             .is_some()
         {
@@ -174,9 +175,9 @@ impl SharedManager {
 
         match install.run(client, child).await {
             Ok(completed) => {
-                self.lock_for_async_op(operation)
-                    .await?
-                    .commit_connection_install(completed);
+                let mut manager = self.lock_for_async_op(operation).await?;
+                manager.commit_connection_install(completed);
+                manager.record_connection_cwd(prepared.server_name_key.as_str(), &prepared.cwd);
                 Ok(())
             }
             Err(err) => {
@@ -218,7 +219,7 @@ impl SharedManager {
                 .await?;
             self.lock_for_async_op("disconnect_and_wait")
                 .await?
-                .prepare_disconnect_for_wait(server_name)
+                .prepare_disconnect_for_wait_with_cwd_cleanup(server_name)
         };
         disconnect.wait_with_timeout(timeout, on_timeout).await
     }
@@ -232,7 +233,7 @@ impl SharedManager {
         cwd: &Path,
     ) -> anyhow::Result<Value> {
         if let Some(prepared) = self
-            .try_prepare_connected_client("request", server_name)
+            .try_prepare_connected_client("request", server_name, Some(cwd))
             .await?
         {
             let result = Manager::request_raw_handle(
@@ -248,7 +249,7 @@ impl SharedManager {
                     let disconnect = self
                         .lock_for_async_op("request_cleanup")
                         .await?
-                        .prepare_disconnect_for_wait_if_connection(
+                        .prepare_disconnect_for_wait_if_connection_with_cwd_cleanup(
                             &prepared.server_name,
                             prepared.connection_id,
                         );
@@ -270,7 +271,7 @@ impl SharedManager {
         params: Option<Value>,
     ) -> anyhow::Result<Value> {
         let Some(prepared) = self
-            .try_prepare_connected_client("request_connected", server_name)
+            .try_prepare_connected_client("request_connected", server_name, None)
             .await?
         else {
             anyhow::bail!("mcp server not connected: {}", server_name.trim());
@@ -290,7 +291,7 @@ impl SharedManager {
                 let disconnect = self
                     .lock_for_async_op("request_connected_cleanup")
                     .await?
-                    .prepare_disconnect_for_wait_if_connection(
+                    .prepare_disconnect_for_wait_if_connection_with_cwd_cleanup(
                         &prepared.server_name,
                         prepared.connection_id,
                     );
@@ -356,7 +357,7 @@ impl SharedManager {
         cwd: &Path,
     ) -> anyhow::Result<()> {
         if let Some(prepared) = self
-            .try_prepare_connected_client("notify", server_name)
+            .try_prepare_connected_client("notify", server_name, Some(cwd))
             .await?
         {
             let result = Manager::notify_raw_handle(
@@ -374,7 +375,7 @@ impl SharedManager {
                     let disconnect = self
                         .lock_for_async_op("notify_cleanup")
                         .await?
-                        .prepare_disconnect_for_wait_if_connection(
+                        .prepare_disconnect_for_wait_if_connection_with_cwd_cleanup(
                             &prepared.server_name,
                             prepared.connection_id,
                         );
@@ -396,7 +397,7 @@ impl SharedManager {
         params: Option<Value>,
     ) -> anyhow::Result<()> {
         let Some(prepared) = self
-            .try_prepare_connected_client("notify_connected", server_name)
+            .try_prepare_connected_client("notify_connected", server_name, None)
             .await?
         else {
             anyhow::bail!("mcp server not connected: {}", server_name.trim());
@@ -418,7 +419,7 @@ impl SharedManager {
                 let disconnect = self
                     .lock_for_async_op("notify_connected_cleanup")
                     .await?
-                    .prepare_disconnect_for_wait_if_connection(
+                    .prepare_disconnect_for_wait_if_connection_with_cwd_cleanup(
                         &prepared.server_name,
                         prepared.connection_id,
                     );
@@ -801,7 +802,7 @@ mod tests {
         let shared = manager.into_shared();
 
         let prepared = shared
-            .try_prepare_connected_client("stale_cleanup_prepare", "srv")
+            .try_prepare_connected_client("stale_cleanup_prepare", "srv", None)
             .await
             .unwrap()
             .expect("prepared old connection");

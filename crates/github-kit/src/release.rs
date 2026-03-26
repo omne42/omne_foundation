@@ -1,4 +1,6 @@
-use http_kit::{read_json_body_after_http_success, send_reqwest};
+use http_kit::{
+    read_json_body_after_http_success, redact_url_for_error, redact_url_str, send_reqwest,
+};
 use serde::Deserialize;
 
 use crate::client::{GitHubApiRequestOptions, apply_github_api_headers};
@@ -38,10 +40,11 @@ pub async fn fetch_latest_release<S: AsRef<str>>(
         let url = match build_latest_release_url(trimmed, owner, name) {
             Ok(url) => url,
             Err(err) => {
-                errors.push(format!("{trimmed} -> {err}"));
+                errors.push(format!("{} -> {err}", redact_url_str(trimmed)));
                 continue;
             }
         };
+        let redacted_url = redact_url_for_error(&url);
 
         let response = match send_reqwest(
             apply_github_api_headers(client.get(url.clone()), options),
@@ -51,7 +54,7 @@ pub async fn fetch_latest_release<S: AsRef<str>>(
         {
             Ok(response) => response,
             Err(err) => {
-                errors.push(format!("{url} -> {err}"));
+                errors.push(format!("{redacted_url} -> {err}"));
                 continue;
             }
         };
@@ -60,14 +63,14 @@ pub async fn fetch_latest_release<S: AsRef<str>>(
         {
             Ok(json) => json,
             Err(err) => {
-                errors.push(format!("{url} -> {err}"));
+                errors.push(format!("{redacted_url} -> {err}"));
                 continue;
             }
         };
 
         match serde_json::from_value::<GitHubRelease>(json) {
             Ok(release) => return Ok(release),
-            Err(err) => errors.push(format!("{url} -> invalid json: {err}")),
+            Err(err) => errors.push(format!("{redacted_url} -> invalid json: {err}")),
         }
     }
 
@@ -189,6 +192,27 @@ mod tests {
         assert_eq!(release.tag_name, "v2.0.0");
         assert_eq!(release.assets[0].name, "asset.tar.gz");
         handle.join().expect("mock server thread");
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_release_redacts_sensitive_api_base_details_in_errors() {
+        let client = reqwest::Client::new();
+
+        let err = fetch_latest_release(
+            &client,
+            &["http://user:topsecret@127.0.0.1:9/api?token=top"],
+            "cli/cli",
+            GitHubApiRequestOptions::new(),
+        )
+        .await
+        .expect_err("unreachable base should fail");
+
+        let message = err.to_string();
+        assert!(message.contains("127.0.0.1"), "{message}");
+        assert!(!message.contains("user"), "{message}");
+        assert!(!message.contains("topsecret"), "{message}");
+        assert!(!message.contains("token=top"), "{message}");
+        assert!(!message.contains("/api"), "{message}");
     }
 
     struct MockHttpResponse {

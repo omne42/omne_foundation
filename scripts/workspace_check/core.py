@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import subprocess
 from pathlib import Path
 
 from check_common.context import CheckContext, run_command
@@ -14,11 +16,24 @@ def has_cargo_workspace(ctx: CheckContext) -> bool:
     return (ctx.repo_root / "Cargo.toml").is_file()
 
 
+def workspace_member_packages(ctx: CheckContext) -> list[str]:
+    metadata = subprocess.check_output(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+        cwd=ctx.repo_root,
+        text=True,
+    )
+    data = json.loads(metadata)
+    return [package["name"] for package in data["packages"]]
+
+
 def run_local_checks(ctx: CheckContext) -> None:
     run_docs_system_checks(ctx)
+    fmt_command = ["cargo", "fmt", "--", "--check"]
+    for package in workspace_member_packages(ctx):
+        fmt_command.extend(["-p", package])
     run_command(
         ctx,
-        ["cargo", "fmt", "--all", "--", "--check"],
+        fmt_command,
         cwd=ctx.repo_root,
     )
     run_command(

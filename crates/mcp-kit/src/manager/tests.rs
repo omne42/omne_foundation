@@ -204,6 +204,15 @@ async fn try_prepare_connected_client_rejects_different_cwd_context() {
         .await
         .unwrap();
 
+    let connected_cwd = std::env::current_dir()
+        .expect("current dir")
+        .join("workspace")
+        .join("a");
+    let other_cwd = std::env::current_dir()
+        .expect("current dir")
+        .join("workspace")
+        .join("b");
+
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
         .with_trust_mode(TrustMode::Trusted);
     let server_name = ServerName::parse("srv").unwrap();
@@ -216,9 +225,9 @@ async fn try_prepare_connected_client_rejects_different_cwd_context() {
             handler_tasks: Vec::new(),
         },
     );
-    manager.record_connection_cwd("srv", Path::new("/workspace/a"));
+    manager.record_connection_cwd("srv", &connected_cwd);
 
-    let err = match manager.try_prepare_connected_client("srv", Some(Path::new("/workspace/b"))) {
+    let err = match manager.try_prepare_connected_client("srv", Some(&other_cwd)) {
         Ok(_) => panic!("different cwd should be rejected"),
         Err(err) => err,
     };
@@ -228,7 +237,7 @@ async fn try_prepare_connected_client_rejects_different_cwd_context() {
     );
 
     let prepared = manager
-        .try_prepare_connected_client("srv", Some(Path::new("/workspace/a")))
+        .try_prepare_connected_client("srv", Some(&connected_cwd))
         .unwrap()
         .expect("matching cwd should reuse connection");
     assert_eq!(prepared.server_name, "srv");

@@ -8,3 +8,6 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ### Added
 - Introduced `error-protocol` as the schema and wire-format layer for `error-kit`.
+
+### Changed
+- Forward-compatible protocol mapping for `ErrorCategory` / `ErrorRetryAdvice` now degrades unknown runtime variants to explicit `unknown` DTO values instead of panicking.

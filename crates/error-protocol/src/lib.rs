@@ -24,6 +24,7 @@ pub enum ErrorCategoryData {
     Unavailable,
     ExternalDependency,
     Internal,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -32,6 +33,7 @@ pub enum ErrorCategoryData {
 pub enum ErrorRetryAdviceData {
     DoNotRetry,
     Retryable,
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -65,7 +67,7 @@ impl From<ErrorCategory> for ErrorCategoryData {
             ErrorCategory::Unavailable => Self::Unavailable,
             ErrorCategory::ExternalDependency => Self::ExternalDependency,
             ErrorCategory::Internal => Self::Internal,
-            _ => unreachable!("unsupported non-exhaustive ErrorCategory variant"),
+            _ => Self::Unknown,
         }
     }
 }
@@ -83,6 +85,7 @@ impl From<ErrorCategoryData> for ErrorCategory {
             ErrorCategoryData::Unavailable => Self::Unavailable,
             ErrorCategoryData::ExternalDependency => Self::ExternalDependency,
             ErrorCategoryData::Internal => Self::Internal,
+            ErrorCategoryData::Unknown => Self::Internal,
         }
     }
 }
@@ -92,7 +95,7 @@ impl From<ErrorRetryAdvice> for ErrorRetryAdviceData {
         match value {
             ErrorRetryAdvice::DoNotRetry => Self::DoNotRetry,
             ErrorRetryAdvice::Retryable => Self::Retryable,
-            _ => unreachable!("unsupported non-exhaustive ErrorRetryAdvice variant"),
+            _ => Self::Unknown,
         }
     }
 }
@@ -102,6 +105,7 @@ impl From<ErrorRetryAdviceData> for ErrorRetryAdvice {
         match value {
             ErrorRetryAdviceData::DoNotRetry => Self::DoNotRetry,
             ErrorRetryAdviceData::Retryable => Self::Retryable,
+            ErrorRetryAdviceData::Unknown => Self::DoNotRetry,
         }
     }
 }
@@ -207,6 +211,38 @@ mod tests {
         .expect_err("invalid code should be rejected");
 
         assert!(matches!(err, ErrorDataError::InvalidCode(_)));
+    }
+
+    #[test]
+    fn unknown_protocol_category_falls_back_to_internal() {
+        let error = ErrorRecord::try_from(ErrorData {
+            code: "secret.lookup_failed".to_string(),
+            category: ErrorCategoryData::Unknown,
+            retry_advice: ErrorRetryAdviceData::Retryable,
+            user_text: StructuredTextData::Freeform {
+                text: "plain error".to_string(),
+            },
+            diagnostic_text: None,
+        })
+        .expect("unknown category should not fail");
+
+        assert_eq!(error.category(), ErrorCategory::Internal);
+    }
+
+    #[test]
+    fn unknown_protocol_retry_advice_falls_back_to_do_not_retry() {
+        let error = ErrorRecord::try_from(ErrorData {
+            code: "secret.lookup_failed".to_string(),
+            category: ErrorCategoryData::Unavailable,
+            retry_advice: ErrorRetryAdviceData::Unknown,
+            user_text: StructuredTextData::Freeform {
+                text: "plain error".to_string(),
+            },
+            diagnostic_text: None,
+        })
+        .expect("unknown retry advice should not fail");
+
+        assert_eq!(error.retry_advice(), ErrorRetryAdvice::DoNotRetry);
     }
 
     #[test]

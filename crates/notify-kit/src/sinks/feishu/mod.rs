@@ -125,7 +125,7 @@ pub struct FeishuWebhookSink {
     allow_local_image_files: bool,
     image_upload_max_bytes: usize,
     app_credentials: Option<FeishuAppCredentials>,
-    tenant_access_token: tokio::sync::Mutex<TenantAccessTokenState>,
+    tenant_access_token: Arc<tokio::sync::Mutex<TenantAccessTokenState>>,
 }
 
 #[derive(Debug)]
@@ -228,7 +228,7 @@ impl FeishuWebhookSink {
             allow_local_image_files: config.allow_local_image_files,
             image_upload_max_bytes: config.image_upload_max_bytes,
             app_credentials,
-            tenant_access_token: tokio::sync::Mutex::new(TenantAccessTokenState::Empty),
+            tenant_access_token: Arc::new(tokio::sync::Mutex::new(TenantAccessTokenState::Empty)),
         })
     }
 
@@ -266,7 +266,7 @@ impl FeishuWebhookSink {
             allow_local_image_files: config.allow_local_image_files,
             image_upload_max_bytes: config.image_upload_max_bytes,
             app_credentials,
-            tenant_access_token: tokio::sync::Mutex::new(TenantAccessTokenState::Empty),
+            tenant_access_token: Arc::new(tokio::sync::Mutex::new(TenantAccessTokenState::Empty)),
         })
     }
 
@@ -358,6 +358,7 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
     use std::thread;
 
     use super::*;
@@ -693,6 +694,82 @@ mod tests {
 
         server.join().expect("join server");
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cancelled_token_refresh_resets_state_and_allows_retry() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let (first_hit_tx, first_hit_rx) = tokio::sync::oneshot::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut first_stream, _) = listener.accept().expect("accept first connection");
+            let mut buf = [0_u8; 1024];
+            let _ = first_stream.read(&mut buf).expect("read first request");
+            first_hit_tx.send(()).expect("signal first request");
+            release_first_rx.recv().expect("release first request");
+            drop(first_stream);
+
+            let (mut second_stream, _) = listener.accept().expect("accept second connection");
+            let _ = second_stream.read(&mut buf).expect("read second request");
+            let body = r#"{"code":0,"tenant_access_token":"token-after-retry","expires_in":7200}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            second_stream
+                .write_all(response.as_bytes())
+                .expect("write second response");
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            let mut sink = FeishuWebhookSink::new(
+                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+                    .with_app_credentials("app_id", "app_secret"),
+            )
+            .expect("build sink");
+            sink.webhook_url =
+                reqwest::Url::parse(&format!("http://{addr}/open-apis/bot/v2/hook/x"))
+                    .expect("parse local webhook url");
+            sink.enforce_public_ip = false;
+
+            let sink = Arc::new(sink);
+            let refresh_task = tokio::spawn({
+                let sink = Arc::clone(&sink);
+                async move { sink.ensure_tenant_access_token().await }
+            });
+
+            first_hit_rx.await.expect("wait for first token request");
+            refresh_task.abort();
+            let _ = refresh_task.await;
+            release_first_tx.send(()).expect("release first request");
+
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let guard = sink.tenant_access_token.lock().await;
+                    if matches!(&*guard, TenantAccessTokenState::Empty) {
+                        break;
+                    }
+                    drop(guard);
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("refresh cancellation should reset token state");
+
+            let token = sink
+                .ensure_tenant_access_token()
+                .await
+                .expect("retry should fetch a fresh token");
+            assert_eq!(token, "token-after-retry");
+        });
+
+        server.join().expect("join server");
     }
 
     #[test]

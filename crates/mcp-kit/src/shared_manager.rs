@@ -248,7 +248,10 @@ impl SharedManager {
                     let disconnect = self
                         .lock_for_async_op("request_cleanup")
                         .await?
-                        .prepare_disconnect_for_wait(&prepared.server_name);
+                        .prepare_disconnect_for_wait_if_connection(
+                            &prepared.server_name,
+                            prepared.connection_id,
+                        );
                     disconnect.wait_for_jsonrpc_error_cleanup().await;
                 }
             }
@@ -287,7 +290,10 @@ impl SharedManager {
                 let disconnect = self
                     .lock_for_async_op("request_connected_cleanup")
                     .await?
-                    .prepare_disconnect_for_wait(&prepared.server_name);
+                    .prepare_disconnect_for_wait_if_connection(
+                        &prepared.server_name,
+                        prepared.connection_id,
+                    );
                 disconnect.wait_for_jsonrpc_error_cleanup().await;
             }
         }
@@ -368,7 +374,10 @@ impl SharedManager {
                     let disconnect = self
                         .lock_for_async_op("notify_cleanup")
                         .await?
-                        .prepare_disconnect_for_wait(&prepared.server_name);
+                        .prepare_disconnect_for_wait_if_connection(
+                            &prepared.server_name,
+                            prepared.connection_id,
+                        );
                     disconnect.wait_for_jsonrpc_error_cleanup().await;
                 }
             }
@@ -409,7 +418,10 @@ impl SharedManager {
                 let disconnect = self
                     .lock_for_async_op("notify_connected_cleanup")
                     .await?
-                    .prepare_disconnect_for_wait(&prepared.server_name);
+                    .prepare_disconnect_for_wait_if_connection(
+                        &prepared.server_name,
+                        prepared.connection_id,
+                    );
                 disconnect.wait_for_jsonrpc_error_cleanup().await;
             }
         }
@@ -694,6 +706,136 @@ mod tests {
         assert!(!clone.is_connected("srv").await.unwrap());
 
         server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn shared_manager_stale_cleanup_does_not_disconnect_replacement_connection() {
+        let (old_client_stream, old_server_stream) = tokio::io::duplex(1024);
+        let (old_client_read, old_client_write) = tokio::io::split(old_client_stream);
+        let (old_server_read, mut old_server_write) = tokio::io::split(old_server_stream);
+
+        let old_server_task = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(old_server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            let init_id = init_value["id"].clone();
+
+            let init_response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": init_id,
+                "result": { "serverInfo": { "name": "old" } },
+            });
+            let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+            init_response_line.push('\n');
+            old_server_write
+                .write_all(init_response_line.as_bytes())
+                .await
+                .unwrap();
+            old_server_write.flush().await.unwrap();
+
+            let initialized_line = lines.next_line().await.unwrap().unwrap();
+            let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+            assert_eq!(initialized_value["method"], "notifications/initialized");
+
+            let eof = lines.next_line().await.unwrap();
+            assert!(
+                eof.is_none(),
+                "old connection should be closed during replacement"
+            );
+        });
+
+        let (new_client_stream, new_server_stream) = tokio::io::duplex(1024);
+        let (new_client_read, new_client_write) = tokio::io::split(new_client_stream);
+        let (new_server_read, mut new_server_write) = tokio::io::split(new_server_stream);
+
+        let new_server_task = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(new_server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            let init_id = init_value["id"].clone();
+
+            let init_response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": init_id,
+                "result": { "serverInfo": { "name": "new" } },
+            });
+            let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+            init_response_line.push('\n');
+            new_server_write
+                .write_all(init_response_line.as_bytes())
+                .await
+                .unwrap();
+            new_server_write.flush().await.unwrap();
+
+            let initialized_line = lines.next_line().await.unwrap().unwrap();
+            let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+            assert_eq!(initialized_value["method"], "notifications/initialized");
+
+            let request_line = lines.next_line().await.unwrap().unwrap();
+            let request_value: Value = serde_json::from_str(&request_line).unwrap();
+            assert_eq!(request_value["method"], "ping");
+            let request_id = request_value["id"].clone();
+
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": { "ok": true },
+            });
+            let mut response_line = serde_json::to_string(&response).unwrap();
+            response_line.push('\n');
+            new_server_write
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            new_server_write.flush().await.unwrap();
+        });
+
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted);
+        manager
+            .connect_io("srv", old_client_read, old_client_write)
+            .await
+            .unwrap();
+        let shared = manager.into_shared();
+
+        let prepared = shared
+            .try_prepare_connected_client("stale_cleanup_prepare", "srv")
+            .await
+            .unwrap()
+            .expect("prepared old connection");
+
+        {
+            let mut manager = shared
+                .lock_for_async_op("replace_connection")
+                .await
+                .unwrap();
+            assert!(manager.disconnect("srv"));
+            manager
+                .connect_io("srv", new_client_read, new_client_write)
+                .await
+                .unwrap();
+        }
+
+        let disconnect = {
+            let mut manager = shared.lock_for_async_op("stale_cleanup").await.unwrap();
+            manager.prepare_disconnect_for_wait_if_connection(
+                &prepared.server_name,
+                prepared.connection_id,
+            )
+        };
+        disconnect.wait_for_jsonrpc_error_cleanup().await;
+
+        assert!(
+            shared.is_connected("srv").await.unwrap(),
+            "stale cleanup should not remove the replacement connection"
+        );
+        let result = shared.request_connected("srv", "ping", None).await.unwrap();
+        assert_eq!(result, serde_json::json!({ "ok": true }));
+
+        old_server_task.await.unwrap();
+        new_server_task.await.unwrap();
     }
 
     #[tokio::test]

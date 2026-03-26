@@ -176,6 +176,7 @@ impl PreparedConnectionInstall {
             init_result,
             mismatch_update,
             connection: Connection {
+                id: super::next_connection_id(),
                 child,
                 client,
                 handler_tasks,
@@ -299,6 +300,22 @@ impl Manager {
         }
     }
 
+    pub(crate) fn prepare_disconnect_for_wait_if_connection(
+        &mut self,
+        server_name: &str,
+        connection_id: u64,
+    ) -> PreparedDisconnect {
+        let server_name = super::normalize_server_name_lookup(server_name).to_string();
+        let connection = self.remove_cached_connection_if_matches(&server_name, connection_id);
+        if connection.is_some() {
+            self.clear_connection_side_state(&server_name, true);
+        }
+        PreparedDisconnect {
+            server_name,
+            connection,
+        }
+    }
+
     pub(super) fn clear_connection_side_state(
         &mut self,
         server_name: &str,
@@ -313,6 +330,21 @@ impl Manager {
 
     pub(super) fn remove_cached_connection(&mut self, server_name: &str) -> Option<Connection> {
         self.conns.remove(server_name)
+    }
+
+    fn remove_cached_connection_if_matches(
+        &mut self,
+        server_name: &str,
+        connection_id: u64,
+    ) -> Option<Connection> {
+        let should_remove = self
+            .conns
+            .get(server_name)
+            .is_some_and(|conn| conn.id() == connection_id);
+        if should_remove {
+            return self.conns.remove(server_name);
+        }
+        None
     }
 
     pub(super) fn reap_connection_child_best_effort(conn: &mut Connection) {

@@ -225,6 +225,7 @@ async fn disconnect_reaps_child_best_effort() {
     manager.conns.insert(
         server_name.clone(),
         Connection {
+            id: next_connection_id(),
             child: Some(child),
             client,
             handler_tasks: Vec::new(),
@@ -945,6 +946,7 @@ async fn session_notify_timeout_is_bounded_when_close_path_blocks() {
     .unwrap();
 
     let connection = Connection {
+        id: next_connection_id(),
         child: None,
         client,
         handler_tasks: Vec::new(),
@@ -1019,6 +1021,7 @@ async fn session_notify_timeout_returns_without_waiting_for_close_budget() {
     .unwrap();
 
     let connection = Connection {
+        id: next_connection_id(),
         child: None,
         client,
         handler_tasks: Vec::new(),
@@ -1093,6 +1096,7 @@ async fn session_notify_timeout_marks_closed_once_with_first_reason() {
     .unwrap();
 
     let connection = Connection {
+        id: next_connection_id(),
         child: None,
         client,
         handler_tasks: Vec::new(),
@@ -3156,6 +3160,7 @@ async fn connection_wait_aborts_remaining_handler_tasks_after_first_join_error()
     });
 
     let conn = Connection {
+        id: next_connection_id(),
         child: None,
         client,
         handler_tasks: vec![panic_task, slow_task],
@@ -3297,6 +3302,7 @@ async fn connection_wait_with_timeout_uses_single_deadline_budget() {
     }
 
     let conn = Connection {
+        id: next_connection_id(),
         child: None,
         client,
         handler_tasks,
@@ -3385,6 +3391,7 @@ async fn connection_wait_with_timeout_kill_still_kills_detached_child_when_close
         .expect("spawn child");
 
     let conn = Connection {
+        id: next_connection_id(),
         child: Some(child),
         client,
         handler_tasks: Vec::new(),

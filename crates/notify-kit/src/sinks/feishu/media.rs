@@ -33,6 +33,54 @@ pub(super) struct LoadedImage {
     pub(super) content_type: String,
 }
 
+struct TenantAccessTokenRefreshGuard {
+    state: std::sync::Arc<tokio::sync::Mutex<super::TenantAccessTokenState>>,
+    notify: std::sync::Arc<tokio::sync::Notify>,
+    armed: bool,
+}
+
+impl TenantAccessTokenRefreshGuard {
+    fn new(
+        state: std::sync::Arc<tokio::sync::Mutex<super::TenantAccessTokenState>>,
+        notify: std::sync::Arc<tokio::sync::Notify>,
+    ) -> Self {
+        Self {
+            state,
+            notify,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TenantAccessTokenRefreshGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+
+        let state = std::sync::Arc::clone(&self.state);
+        let notify = std::sync::Arc::clone(&self.notify);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            drop(handle.spawn(async move {
+                let mut guard = state.lock().await;
+                if matches!(
+                    &*guard,
+                    super::TenantAccessTokenState::Refreshing(current)
+                        if std::sync::Arc::ptr_eq(current, &notify)
+                ) {
+                    *guard = super::TenantAccessTokenState::Empty;
+                }
+                drop(guard);
+                notify.notify_waiters();
+            }));
+        }
+    }
+}
+
 impl FeishuWebhookSink {
     pub(super) async fn resolve_single_image_key(&self, src: &str) -> Option<String> {
         self.app_credentials.as_ref()?;
@@ -244,13 +292,24 @@ impl FeishuWebhookSink {
                         }
                     }
 
+                    let mut refresh_guard = TenantAccessTokenRefreshGuard::new(
+                        std::sync::Arc::clone(&self.tenant_access_token),
+                        std::sync::Arc::clone(&notify),
+                    );
                     let result = self.fetch_tenant_access_token(&credentials).await;
                     let mut guard = self.tenant_access_token.lock().await;
-                    *guard = match &result {
-                        Ok(cache) => super::TenantAccessTokenState::Ready(cache.clone()),
-                        Err(_) => super::TenantAccessTokenState::Empty,
-                    };
+                    if matches!(
+                        &*guard,
+                        super::TenantAccessTokenState::Refreshing(current)
+                            if std::sync::Arc::ptr_eq(current, &notify)
+                    ) {
+                        *guard = match &result {
+                            Ok(cache) => super::TenantAccessTokenState::Ready(cache.clone()),
+                            Err(_) => super::TenantAccessTokenState::Empty,
+                        };
+                    }
                     drop(guard);
+                    refresh_guard.disarm();
                     notify.notify_waiters();
                     return result.map(|cache| cache.token);
                 }

@@ -44,6 +44,11 @@ pub(crate) use handlers::is_in_manager_handler_scope;
 pub(crate) use streamable_http_validation::should_disconnect_after_jsonrpc_error;
 
 static NEXT_MANAGER_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_CONNECTION_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_connection_id() -> u64 {
+    NEXT_CONNECTION_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 fn parse_server_name_anyhow(server_name: &str) -> anyhow::Result<ServerName> {
     ServerName::parse(server_name)
@@ -165,6 +170,7 @@ pub struct Manager {
 }
 
 pub struct Connection {
+    id: u64,
     child: Option<Child>,
     client: mcp_jsonrpc::Client,
     handler_tasks: Vec<tokio::task::JoinHandle<()>>,
@@ -172,6 +178,7 @@ pub struct Connection {
 
 pub(crate) struct PreparedConnectedClient {
     pub server_name: String,
+    pub connection_id: u64,
     pub timeout: Duration,
     pub client: mcp_jsonrpc::ClientHandle,
 }
@@ -193,6 +200,10 @@ fn handler_task_join_error(err: tokio::task::JoinError) -> anyhow::Error {
 }
 
 impl Connection {
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
     pub fn client(&self) -> &mcp_jsonrpc::Client {
         &self.client
     }
@@ -655,6 +666,7 @@ impl Manager {
             .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?;
         Ok(Some(PreparedConnectedClient {
             server_name: server_name.to_string(),
+            connection_id: conn.id(),
             timeout: self.request_timeout,
             client: conn.client.handle(),
         }))

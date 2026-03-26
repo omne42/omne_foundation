@@ -12,10 +12,39 @@ const DEFAULT_MAX_DNS_LOOKUPS_INFLIGHT: usize = 32;
 const DEFAULT_PINNED_CLIENT_TTL: Duration = Duration::from_secs(60);
 const DEFAULT_MAX_PINNED_CLIENT_CACHE_ENTRIES: usize = 256;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct PinnedClientOptionsKey {
+    timeout: Option<Duration>,
+    connect_timeout: Option<Duration>,
+    follow_redirects: bool,
+    no_proxy: bool,
+    default_headers: Vec<(String, Vec<u8>)>,
+}
+
+impl PinnedClientOptionsKey {
+    fn from_options(options: &HttpClientOptions) -> Self {
+        let mut default_headers = options
+            .default_headers
+            .iter()
+            .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
+            .collect::<Vec<_>>();
+        default_headers.sort();
+        Self {
+            timeout: options.timeout,
+            connect_timeout: options.connect_timeout,
+            follow_redirects: options.follow_redirects,
+            no_proxy: options.no_proxy,
+            default_headers,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct PinnedClientKey {
     host: String,
-    timeout: Duration,
+    scheme: String,
+    port: u16,
+    options: PinnedClientOptionsKey,
 }
 
 #[derive(Clone)]
@@ -129,19 +158,31 @@ fn cap_pinned_client_cache_entries(
         let Some(key) = cache
             .iter()
             .filter(|(key, _)| *key != keep)
-            .min_by(|(lhs_key, lhs_val), (rhs_key, rhs_val)| {
-                (lhs_val.expires_at, lhs_key.host.as_str(), lhs_key.timeout).cmp(&(
-                    rhs_val.expires_at,
-                    rhs_key.host.as_str(),
-                    rhs_key.timeout,
-                ))
-            })
+            .min_by_key(|(key, value)| (value.expires_at, (*key).clone()))
             .map(|(key, _)| key.clone())
         else {
             break;
         };
         cache.remove(&key);
     }
+}
+
+fn pinned_client_key(
+    options: &HttpClientOptions,
+    url: &reqwest::Url,
+) -> crate::Result<PinnedClientKey> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("url must have a host"))?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| anyhow::anyhow!("url must have an explicit or known default port"))?;
+    Ok(PinnedClientKey {
+        host: host.to_string(),
+        scheme: url.scheme().to_string(),
+        port,
+        options: PinnedClientOptionsKey::from_options(options),
+    })
 }
 
 fn build_http_client_builder(options: &HttpClientOptions) -> reqwest::ClientBuilder {
@@ -216,6 +257,9 @@ async fn resolve_url_to_public_addrs_async(
         return Err(anyhow::anyhow!("url must have a host").into());
     };
 
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| anyhow::anyhow!("url must have an explicit or known default port"))?;
     let dns_timeout = timeout.min(DEFAULT_DNS_LOOKUP_TIMEOUT);
     if dns_timeout == Duration::ZERO {
         return Err(anyhow::anyhow!(dns_lookup_timeout_message()).into());
@@ -233,7 +277,7 @@ async fn resolve_url_to_public_addrs_async(
 
         tokio::time::timeout(
             remaining_dns_timeout(deadline)?,
-            tokio::net::lookup_host((host, 443)),
+            tokio::net::lookup_host((host, port)),
         )
         .await
         .map_err(|_| anyhow::anyhow!(dns_lookup_timeout_message()))?
@@ -243,28 +287,48 @@ async fn resolve_url_to_public_addrs_async(
     validate_public_addrs(lookup)
 }
 
-async fn build_http_client_pinned_async(
-    timeout: Duration,
+fn resolve_override_addrs_for_reqwest(url: &reqwest::Url, addrs: &[SocketAddr]) -> Vec<SocketAddr> {
+    if url.port().is_some() {
+        return addrs.to_vec();
+    }
+
+    addrs
+        .iter()
+        .copied()
+        .map(|mut addr| {
+            addr.set_port(0);
+            addr
+        })
+        .collect()
+}
+
+fn build_http_client_pinned_with_addrs(
+    options: &HttpClientOptions,
     url: &reqwest::Url,
+    addrs: &[SocketAddr],
 ) -> crate::Result<reqwest::Client> {
     let host = url
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("url must have a host"))?;
-
-    let addrs = resolve_url_to_public_addrs_async(url, timeout).await?;
-
-    build_http_client_builder(&HttpClientOptions {
-        timeout: Some(timeout),
-        ..Default::default()
-    })
-    .resolve_to_addrs(host, &addrs)
-    .build()
-    .map_err(|err| anyhow::anyhow!("build reqwest client: {err}").into())
+    let addrs = resolve_override_addrs_for_reqwest(url, addrs);
+    build_http_client_builder(options)
+        .resolve_to_addrs(host, &addrs)
+        .build()
+        .map_err(|err| anyhow::anyhow!("build reqwest client: {err}").into())
 }
 
-pub async fn select_http_client(
+async fn build_http_client_pinned_async(
+    options: &HttpClientOptions,
+    url: &reqwest::Url,
+) -> crate::Result<reqwest::Client> {
+    let lookup_timeout = options.timeout.unwrap_or(DEFAULT_DNS_LOOKUP_TIMEOUT);
+    let addrs = resolve_url_to_public_addrs_async(url, lookup_timeout).await?;
+    build_http_client_pinned_with_addrs(options, url, &addrs)
+}
+
+pub async fn select_http_client_with_options(
     base_client: &reqwest::Client,
-    timeout: Duration,
+    options: &HttpClientOptions,
     url: &reqwest::Url,
     enforce_public_ip: bool,
 ) -> crate::Result<reqwest::Client> {
@@ -272,13 +336,7 @@ pub async fn select_http_client(
         return Ok(base_client.clone());
     }
 
-    let host = url
-        .host_str()
-        .ok_or_else(|| anyhow::anyhow!("url must have a host"))?;
-    let key = PinnedClientKey {
-        host: host.to_string(),
-        timeout,
-    };
+    let key = pinned_client_key(options, url)?;
 
     let lookup_now = Instant::now();
     let should_cleanup_expired_cache_entry = {
@@ -330,7 +388,7 @@ pub async fn select_http_client(
         if let Some(client) = cached_client {
             Ok(client)
         } else {
-            let client = build_http_client_pinned_async(timeout, url).await?;
+            let client = build_http_client_pinned_async(options, url).await?;
             let now = Instant::now();
             {
                 let mut cache = pinned_client_cache().write().await;
@@ -360,9 +418,42 @@ pub async fn select_http_client(
     result
 }
 
+pub async fn select_http_client(
+    base_client: &reqwest::Client,
+    timeout: Duration,
+    url: &reqwest::Url,
+    enforce_public_ip: bool,
+) -> crate::Result<reqwest::Client> {
+    select_http_client_with_options(
+        base_client,
+        &HttpClientOptions {
+            timeout: Some(timeout),
+            ..Default::default()
+        },
+        url,
+        enforce_public_ip,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
     use super::*;
+
+    fn timeout_only_options(timeout: Duration) -> HttpClientOptions {
+        HttpClientOptions {
+            timeout: Some(timeout),
+            ..Default::default()
+        }
+    }
+
+    fn pinned_key_for_timeout(url: &reqwest::Url, timeout: Duration) -> PinnedClientKey {
+        pinned_client_key(&timeout_only_options(timeout), url).expect("build pinned client key")
+    }
 
     #[test]
     fn remaining_dns_timeout_accepts_future_deadline() {
@@ -381,16 +472,87 @@ mod tests {
 
     #[test]
     fn pinned_client_key_keeps_sub_millisecond_timeout_precision() {
-        let host = "example.com".to_string();
-        let lhs = PinnedClientKey {
-            host: host.clone(),
-            timeout: Duration::from_micros(500),
-        };
-        let rhs = PinnedClientKey {
-            host,
-            timeout: Duration::from_micros(900),
-        };
+        let url = reqwest::Url::parse("https://example.com/webhook").expect("parse url");
+        let lhs = pinned_key_for_timeout(&url, Duration::from_micros(500));
+        let rhs = pinned_key_for_timeout(&url, Duration::from_micros(900));
         assert_ne!(lhs, rhs);
+    }
+
+    #[test]
+    fn pinned_client_key_distinguishes_port_and_default_headers() {
+        let https = reqwest::Url::parse("https://example.com/webhook").expect("parse https url");
+        let http = reqwest::Url::parse("http://example.com/webhook").expect("parse http url");
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-test", reqwest::header::HeaderValue::from_static("one"));
+
+        let with_headers = pinned_client_key(
+            &HttpClientOptions {
+                timeout: Some(Duration::from_secs(1)),
+                default_headers: headers,
+                ..Default::default()
+            },
+            &https,
+        )
+        .expect("key with headers");
+        let without_headers = pinned_key_for_timeout(&https, Duration::from_secs(1));
+        let different_port = pinned_key_for_timeout(&http, Duration::from_secs(1));
+
+        assert_ne!(with_headers, without_headers);
+        assert_ne!(without_headers, different_port);
+    }
+
+    #[test]
+    fn resolve_override_addrs_uses_scheme_default_port_when_url_has_no_explicit_port() {
+        let url = reqwest::Url::parse("http://example.com/webhook").expect("parse url");
+        let addrs =
+            resolve_override_addrs_for_reqwest(&url, &[SocketAddr::from(([203, 0, 113, 10], 80))]);
+        assert_eq!(addrs, vec![SocketAddr::from(([203, 0, 113, 10], 0))]);
+    }
+
+    #[test]
+    fn build_http_client_pinned_with_addrs_preserves_default_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let mut buf = [0_u8; 2048];
+            let read = stream.read(&mut buf).expect("read request");
+            let request = String::from_utf8_lossy(&buf[..read]);
+            assert!(
+                request.contains("x-test-header: pinned\r\n"),
+                "request should keep default headers: {request}"
+            );
+
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .expect("write response");
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime");
+        rt.block_on(async {
+            let mut default_headers = reqwest::header::HeaderMap::new();
+            default_headers.insert(
+                "x-test-header",
+                reqwest::header::HeaderValue::from_static("pinned"),
+            );
+            let options = HttpClientOptions {
+                timeout: Some(Duration::from_secs(1)),
+                default_headers,
+                ..Default::default()
+            };
+            let url = reqwest::Url::parse(&format!("http://example.test:{}/hook", addr.port()))
+                .expect("parse url");
+            let client = build_http_client_pinned_with_addrs(&options, &url, &[addr])
+                .expect("build pinned client");
+
+            let response = client.get(url).send().await.expect("send request");
+            assert!(response.status().is_success());
+        });
+
+        server.join().expect("join server");
     }
 
     #[test]
@@ -403,10 +565,7 @@ mod tests {
         rt.block_on(async {
             let url =
                 reqwest::Url::parse("https://lock-cleanup.invalid/webhook").expect("parse url");
-            let key = PinnedClientKey {
-                host: "lock-cleanup.invalid".to_string(),
-                timeout: Duration::ZERO,
-            };
+            let key = pinned_key_for_timeout(&url, Duration::ZERO);
 
             {
                 let mut cache = pinned_client_cache().write().await;
@@ -442,10 +601,7 @@ mod tests {
             let timeout = Duration::from_secs(1);
             let url =
                 reqwest::Url::parse("https://lock-cancel.invalid/webhook").expect("parse url");
-            let key = PinnedClientKey {
-                host: "lock-cancel.invalid".to_string(),
-                timeout,
-            };
+            let key = pinned_key_for_timeout(&url, timeout);
 
             {
                 let mut cache = pinned_client_cache().write().await;
@@ -508,10 +664,7 @@ mod tests {
             let timeout = Duration::ZERO;
             let url = reqwest::Url::parse("https://expired-cache-cleanup.invalid/webhook")
                 .expect("parse url");
-            let key = PinnedClientKey {
-                host: "expired-cache-cleanup.invalid".to_string(),
-                timeout,
-            };
+            let key = pinned_key_for_timeout(&url, timeout);
 
             {
                 let mut cache = pinned_client_cache().write().await;

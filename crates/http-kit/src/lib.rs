@@ -17,7 +17,7 @@ pub use body::{
 };
 pub use client::{
     HttpClientOptions, build_http_client, build_http_client_with_options, select_http_client,
-    send_reqwest,
+    select_http_client_with_options, send_reqwest,
 };
 pub use error::{Error, Result};
 pub use http_probe::{

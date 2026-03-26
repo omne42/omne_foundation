@@ -26,29 +26,6 @@ jobs:
       - name: Prepare workspace temp dir
         run: mkdir -p .tmp
 
-      - name: Create workspace temp dir
-        run: mkdir -p .tmp
-
-      - name: Checkout omne-runtime
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/omne-runtime
-          ref: main
-          token: ${{ secrets.OMNE_REPO_READ_TOKEN || github.token }}
-          path: _deps/omne-runtime
-          fetch-depth: 1
-
-      - name: Move omne-runtime into sibling layout
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf ../omne-runtime
-          mv _deps/omne-runtime ../omne-runtime
-          test -f ../omne-runtime/Cargo.toml
-          test -f ../omne-runtime/crates/omne-fs-primitives/Cargo.toml
-          test -f ../omne-runtime/crates/omne-process-primitives/Cargo.toml
-          rmdir _deps 2>/dev/null || true
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.88.0
@@ -93,29 +70,6 @@ jobs:
       - name: Prepare workspace temp dir
         run: mkdir -p .tmp
 
-      - name: Create workspace temp dir
-        run: mkdir -p .tmp
-
-      - name: Checkout omne-runtime
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/omne-runtime
-          ref: main
-          token: ${{ secrets.OMNE_REPO_READ_TOKEN || github.token }}
-          path: _deps/omne-runtime
-          fetch-depth: 1
-
-      - name: Move omne-runtime into sibling layout
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf ../omne-runtime
-          mv _deps/omne-runtime ../omne-runtime
-          test -f ../omne-runtime/Cargo.toml
-          test -f ../omne-runtime/crates/omne-fs-primitives/Cargo.toml
-          test -f ../omne-runtime/crates/omne-process-primitives/Cargo.toml
-          rmdir _deps 2>/dev/null || true
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.88.0
@@ -150,29 +104,6 @@ jobs:
 
       - name: Prepare workspace temp dir
         run: mkdir -p .tmp
-
-      - name: Create workspace temp dir
-        run: mkdir -p .tmp
-
-      - name: Checkout omne-runtime
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/omne-runtime
-          ref: main
-          token: ${{ secrets.OMNE_REPO_READ_TOKEN || github.token }}
-          path: _deps/omne-runtime
-          fetch-depth: 1
-
-      - name: Move omne-runtime into sibling layout
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf ../omne-runtime
-          mv _deps/omne-runtime ../omne-runtime
-          test -f ../omne-runtime/Cargo.toml
-          test -f ../omne-runtime/crates/omne-fs-primitives/Cargo.toml
-          test -f ../omne-runtime/crates/omne-process-primitives/Cargo.toml
-          rmdir _deps 2>/dev/null || true
 
       - uses: dtolnay/rust-toolchain@stable
         with:

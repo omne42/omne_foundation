@@ -28,9 +28,10 @@ def workspace_member_packages(ctx: CheckContext) -> list[str]:
 
 def run_local_checks(ctx: CheckContext) -> None:
     run_docs_system_checks(ctx)
-    fmt_command = ["cargo", "fmt", "--", "--check"]
+    fmt_command = ["cargo", "fmt"]
     for package in workspace_member_packages(ctx):
         fmt_command.extend(["-p", package])
+    fmt_command.extend(["--", "--check"])
     run_command(
         ctx,
         fmt_command,

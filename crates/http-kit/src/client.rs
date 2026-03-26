@@ -779,6 +779,74 @@ mod tests {
     }
 
     #[test]
+    fn build_http_client_pinned_with_addrs_allows_same_host_redirects_and_keeps_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = thread::spawn(move || {
+            for expected_path in ["/redirect", "/final"] {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                let mut buf = [0_u8; 2048];
+                let read = stream.read(&mut buf).expect("read request");
+                let request = String::from_utf8_lossy(&buf[..read]);
+
+                assert!(
+                    request.starts_with(&format!("GET {expected_path} HTTP/1.1\r\n")),
+                    "unexpected request line: {request}"
+                );
+                assert!(
+                    request.contains("x-test-header: pinned\r\n"),
+                    "request should keep default headers across same-host redirects: {request}"
+                );
+
+                let response = if expected_path == "/redirect" {
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://public.example:{}/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        addr.port()
+                    )
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                        .to_string()
+                };
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime");
+        rt.block_on(async {
+            let mut default_headers = reqwest::header::HeaderMap::new();
+            default_headers.insert(
+                "x-test-header",
+                reqwest::header::HeaderValue::from_static("pinned"),
+            );
+            let url =
+                reqwest::Url::parse(&format!("http://public.example:{}/redirect", addr.port()))
+                    .expect("parse url");
+            let client = build_http_client_pinned_with_addrs(
+                &HttpClientOptions {
+                    timeout: Some(Duration::from_secs(1)),
+                    default_headers,
+                    follow_redirects: true,
+                    ..Default::default()
+                },
+                &url,
+                &[addr],
+            )
+            .expect("build pinned client");
+
+            let response = client.get(url).send().await.expect("same-host redirect");
+            assert!(response.status().is_success());
+        });
+
+        server.join().expect("join server");
+    }
+
+    #[test]
     fn select_http_client_cleans_build_lock_on_error() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

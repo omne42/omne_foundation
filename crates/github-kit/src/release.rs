@@ -215,6 +215,27 @@ mod tests {
         assert!(!message.contains("/api"), "{message}");
     }
 
+    #[tokio::test]
+    async fn fetch_latest_release_redacts_invalid_api_base_before_request() {
+        let client = reqwest::Client::new();
+
+        let err = fetch_latest_release(
+            &client,
+            &["http://user:topsecret@[::1]:99999/api?token=top"],
+            "cli/cli",
+            GitHubApiRequestOptions::new(),
+        )
+        .await
+        .expect_err("invalid api base should fail");
+
+        let message = err.to_string();
+        assert!(message.contains("<redacted>"), "{message}");
+        assert!(!message.contains("user"), "{message}");
+        assert!(!message.contains("topsecret"), "{message}");
+        assert!(!message.contains("token=top"), "{message}");
+        assert!(!message.contains("/api"), "{message}");
+    }
+
     struct MockHttpResponse {
         expected_path: String,
         expected_headers: Vec<(String, String)>,

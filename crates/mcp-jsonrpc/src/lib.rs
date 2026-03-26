@@ -1239,36 +1239,36 @@ impl Client {
             .await
             .is_err()
         {
-            if let WaitOnTimeout::Kill { kill_timeout } = on_timeout
-                && let Some(child) = &mut self.child
-            {
-                let child_id = child.id();
-                if let Err(err) = child.start_kill() {
-                    return match child.try_wait() {
-                        Ok(Some(status)) => Ok(Some(status)),
-                        Ok(None) => Err(Error::protocol(
+            if let WaitOnTimeout::Kill { kill_timeout } = on_timeout {
+                if let Some(child) = &mut self.child {
+                    let child_id = child.id();
+                    if let Err(err) = child.start_kill() {
+                        return match child.try_wait() {
+                            Ok(Some(status)) => Ok(Some(status)),
+                            Ok(None) => Err(Error::protocol(
+                                ProtocolErrorKind::WaitTimeout,
+                                format!(
+                                    "wait timed out after {timeout:?} while closing client; failed to kill child (id={child_id:?}): {err}"
+                                ),
+                            )),
+                            Err(try_wait_err) => Err(Error::protocol(
+                                ProtocolErrorKind::WaitTimeout,
+                                format!(
+                                    "wait timed out after {timeout:?} while closing client; failed to kill child (id={child_id:?}): {err}; try_wait failed: {try_wait_err}"
+                                ),
+                            )),
+                        };
+                    }
+                    return match tokio::time::timeout(kill_timeout, child.wait()).await {
+                        Ok(status) => Ok(Some(status?)),
+                        Err(_) => Err(Error::protocol(
                             ProtocolErrorKind::WaitTimeout,
                             format!(
-                                "wait timed out after {timeout:?} while closing client; failed to kill child (id={child_id:?}): {err}"
-                            ),
-                        )),
-                        Err(try_wait_err) => Err(Error::protocol(
-                            ProtocolErrorKind::WaitTimeout,
-                            format!(
-                                "wait timed out after {timeout:?} while closing client; failed to kill child (id={child_id:?}): {err}; try_wait failed: {try_wait_err}"
+                                "wait timed out after {timeout:?} while closing client; killed child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
                             ),
                         )),
                     };
                 }
-                return match tokio::time::timeout(kill_timeout, child.wait()).await {
-                    Ok(status) => Ok(Some(status?)),
-                    Err(_) => Err(Error::protocol(
-                        ProtocolErrorKind::WaitTimeout,
-                        format!(
-                            "wait timed out after {timeout:?} while closing client; killed child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
-                        ),
-                    )),
-                };
             }
 
             return Err(Error::protocol(

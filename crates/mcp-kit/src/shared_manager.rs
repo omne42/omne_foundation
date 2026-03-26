@@ -511,7 +511,6 @@ impl SharedManager {
 mod tests {
     #[cfg(unix)]
     use std::collections::BTreeMap;
-    #[cfg(unix)]
     use std::path::Path;
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
@@ -710,6 +709,63 @@ mod tests {
         assert!(!clone.is_connected("srv").await.unwrap());
 
         server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn shared_manager_request_rejects_different_cwd_context() {
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let server_task = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            let init_id = init_value["id"].clone();
+
+            let init_response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": init_id,
+                "result": { "serverInfo": { "name": "demo" } },
+            });
+            let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+            init_response_line.push('\n');
+            server_write
+                .write_all(init_response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let initialized_line = lines.next_line().await.unwrap().unwrap();
+            let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+            assert_eq!(initialized_value["method"], "notifications/initialized");
+
+            let eof = lines.next_line().await.unwrap();
+            assert!(eof.is_none(), "expected EOF after test completes");
+        });
+
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted);
+        manager
+            .connect_io("srv", client_read, client_write)
+            .await
+            .unwrap();
+        manager.record_connection_cwd("srv", Path::new("/workspace/a"));
+
+        let shared = manager.into_shared();
+        let config = crate::Config::new(crate::ClientConfig::default(), Default::default());
+        let err = shared
+            .request(&config, "srv", "ping", None, Path::new("/workspace/b"))
+            .await
+            .expect_err("different cwd should be rejected");
+        assert!(
+            err.to_string().contains("cannot be reused for cwd="),
+            "{err:#}"
+        );
+        assert!(shared.is_connected("srv").await.unwrap());
+        drop(shared);
+        server_task.await.unwrap();
     }
 
     #[tokio::test]

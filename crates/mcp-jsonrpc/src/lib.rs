@@ -504,6 +504,7 @@ fn protocol_error_user_text(kind: ProtocolErrorKind) -> StructuredText {
 pub enum Id {
     String(String),
     Integer(i64),
+    Unsigned(u64),
 }
 
 type PendingRequests = Arc<Mutex<HashMap<Id, oneshot::Sender<Result<Value, Error>>>>>;
@@ -1806,10 +1807,20 @@ fn take_cancelled_request_id(cancelled_request_ids: &CancelledRequestIds, id: &I
 fn type_mismatch_candidate_id(id: &Id) -> Option<Id> {
     match id {
         Id::Integer(value) => Some(Id::String(value.to_string())),
-        Id::String(value) => match value.parse::<i64>() {
-            Ok(parsed) if parsed.to_string() == *value => Some(Id::Integer(parsed)),
-            _ => None,
-        },
+        Id::Unsigned(value) => Some(Id::String(value.to_string())),
+        Id::String(value) => parse_stringified_numeric_id(value),
+    }
+}
+
+fn parse_stringified_numeric_id(value: &str) -> Option<Id> {
+    match value.parse::<i64>() {
+        Ok(parsed) if parsed.to_string() == value => return Some(Id::Integer(parsed)),
+        _ => {}
+    }
+
+    match value.parse::<u64>() {
+        Ok(parsed) if parsed.to_string() == value => Some(Id::Unsigned(parsed)),
+        _ => None,
     }
 }
 
@@ -1873,12 +1884,10 @@ fn error_response_id_or_null(value: Value) -> Value {
 fn parse_id_owned(value: Value) -> Option<Id> {
     match value {
         Value::String(value) => Some(Id::String(value)),
-        Value::Number(value) => value.as_i64().map(Id::Integer).or_else(|| {
-            value
-                .as_u64()
-                .and_then(|v| i64::try_from(v).ok())
-                .map(Id::Integer)
-        }),
+        Value::Number(value) => value
+            .as_i64()
+            .map(Id::Integer)
+            .or_else(|| value.as_u64().map(Id::Unsigned)),
         _ => None,
     }
 }
@@ -2381,6 +2390,19 @@ mod cancelled_request_ids_tests {
     }
 
     #[test]
+    fn cancelled_request_id_type_mismatch_consumes_large_unsigned_counterpart_entry() {
+        let cancelled_request_ids = Arc::new(Mutex::new(CancelledRequestIdsState::default()));
+        let id = Id::Unsigned(u64::MAX);
+
+        remember_cancelled_request_id(&cancelled_request_ids, &id);
+        assert!(take_cancelled_request_id_type_mismatch(
+            &cancelled_request_ids,
+            &Id::String(u64::MAX.to_string())
+        ));
+        assert!(!take_cancelled_request_id(&cancelled_request_ids, &id));
+    }
+
+    #[test]
     fn cancelled_request_id_duplicate_insert_refreshes_recency() {
         let cancelled_request_ids = Arc::new(Mutex::new(CancelledRequestIdsState::default()));
         let id = Id::Integer(1);
@@ -2477,6 +2499,30 @@ mod response_routing_tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn handle_response_routes_large_unsigned_numeric_id() {
+        let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
+        let cancelled_request_ids = Arc::new(Mutex::new(CancelledRequestIdsState::default()));
+
+        let (tx, rx) = oneshot::channel();
+        lock_pending(&pending).insert(Id::Unsigned(u64::MAX), tx);
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": u64::MAX,
+            "result": { "ok": true }
+        });
+
+        handle_response(&pending, &cancelled_request_ids, response).expect("handle response");
+
+        let result = rx
+            .blocking_recv()
+            .expect("pending response channel")
+            .expect("result payload expected");
+        assert_eq!(result, serde_json::json!({ "ok": true }));
+        assert!(lock_pending(&pending).is_empty());
     }
 }
 

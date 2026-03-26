@@ -185,13 +185,46 @@ fn pinned_client_key(
     })
 }
 
-fn build_http_client_builder(options: &HttpClientOptions) -> reqwest::ClientBuilder {
-    let mut builder = reqwest::Client::builder()
-        .redirect(if options.follow_redirects {
-            reqwest::redirect::Policy::limited(10)
+fn redirect_policy(follow_redirects: bool) -> reqwest::redirect::Policy {
+    if follow_redirects {
+        reqwest::redirect::Policy::limited(10)
+    } else {
+        reqwest::redirect::Policy::none()
+    }
+}
+
+fn pinned_redirect_policy(url: &reqwest::Url, follow_redirects: bool) -> reqwest::redirect::Policy {
+    if !follow_redirects {
+        return reqwest::redirect::Policy::none();
+    }
+
+    let Some(initial_host) = url.host_str().map(str::to_owned) else {
+        return reqwest::redirect::Policy::none();
+    };
+
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= 10 {
+            return attempt.error("too many redirects");
+        }
+
+        let Some(next_host) = attempt.url().host_str() else {
+            return attempt.error("redirect target host missing");
+        };
+
+        if next_host.eq_ignore_ascii_case(&initial_host) {
+            attempt.follow()
         } else {
-            reqwest::redirect::Policy::none()
-        })
+            attempt.error("redirect target host changed under public-ip pinning")
+        }
+    })
+}
+
+fn build_http_client_builder_with_policy(
+    options: &HttpClientOptions,
+    redirect_policy: reqwest::redirect::Policy,
+) -> reqwest::ClientBuilder {
+    let mut builder = reqwest::Client::builder()
+        .redirect(redirect_policy)
         .default_headers(options.default_headers.clone());
 
     if options.no_proxy {
@@ -205,6 +238,10 @@ fn build_http_client_builder(options: &HttpClientOptions) -> reqwest::ClientBuil
     }
 
     builder
+}
+
+fn build_http_client_builder(options: &HttpClientOptions) -> reqwest::ClientBuilder {
+    build_http_client_builder_with_policy(options, redirect_policy(options.follow_redirects))
 }
 
 pub fn build_http_client(timeout: Duration) -> crate::Result<reqwest::Client> {
@@ -311,10 +348,13 @@ fn build_http_client_pinned_with_addrs(
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("url must have a host"))?;
     let addrs = resolve_override_addrs_for_reqwest(url, addrs);
-    build_http_client_builder(options)
-        .resolve_to_addrs(host, &addrs)
-        .build()
-        .map_err(|err| anyhow::anyhow!("build reqwest client: {err}").into())
+    build_http_client_builder_with_policy(
+        options,
+        pinned_redirect_policy(url, options.follow_redirects),
+    )
+    .resolve_to_addrs(host, &addrs)
+    .build()
+    .map_err(|err| anyhow::anyhow!("build reqwest client: {err}").into())
 }
 
 async fn build_http_client_pinned_async(
@@ -332,6 +372,10 @@ pub async fn select_http_client_with_options(
     url: &reqwest::Url,
     enforce_public_ip: bool,
 ) -> crate::Result<reqwest::Client> {
+    // `reqwest::Client` does not expose a safe way to clone its opaque builder state while
+    // swapping in per-host DNS pinning. The pinned path therefore rebuilds a client from the
+    // supported `HttpClientOptions`; callers that need settings to survive pinning must express
+    // them there instead of relying on extra state hidden inside `base_client`.
     if !enforce_public_ip {
         return Ok(base_client.clone());
     }
@@ -553,6 +597,83 @@ mod tests {
         });
 
         server.join().expect("join server");
+    }
+
+    #[test]
+    fn build_http_client_pinned_with_addrs_rejects_cross_host_redirects() {
+        let redirect_listener = TcpListener::bind("127.0.0.1:0").expect("bind redirect listener");
+        let redirect_addr = redirect_listener
+            .local_addr()
+            .expect("redirect listener addr");
+        let blocked_listener = TcpListener::bind("127.0.0.1:0").expect("bind blocked listener");
+        let blocked_addr = blocked_listener
+            .local_addr()
+            .expect("blocked listener addr");
+
+        let redirect_server = thread::spawn(move || {
+            let (mut stream, _) = redirect_listener.accept().expect("accept redirect request");
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{}/private\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                blocked_addr.port()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write redirect response");
+        });
+
+        let blocked_server = thread::spawn(move || {
+            blocked_listener
+                .set_nonblocking(true)
+                .expect("set nonblocking");
+            let deadline = Instant::now() + Duration::from_millis(300);
+            loop {
+                match blocked_listener.accept() {
+                    Ok(_) => panic!("redirect target should not be contacted"),
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            return;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("accept failed: {err}"),
+                }
+            }
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime");
+        rt.block_on(async {
+            let url = reqwest::Url::parse(&format!(
+                "http://public.example:{}/redirect",
+                redirect_addr.port()
+            ))
+            .expect("parse url");
+            let client = build_http_client_pinned_with_addrs(
+                &HttpClientOptions {
+                    timeout: Some(Duration::from_secs(1)),
+                    follow_redirects: true,
+                    ..Default::default()
+                },
+                &url,
+                &[redirect_addr],
+            )
+            .expect("build pinned client");
+
+            let err = client
+                .get(url)
+                .send()
+                .await
+                .expect_err("cross-host redirect should fail");
+            assert!(
+                err.is_redirect() || err.is_request(),
+                "unexpected redirect error classification: {err}"
+            );
+        });
+
+        redirect_server.join().expect("join redirect server");
+        blocked_server.join().expect("join blocked server");
     }
 
     #[test]

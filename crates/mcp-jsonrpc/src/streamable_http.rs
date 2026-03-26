@@ -116,7 +116,10 @@ fn jsonrpc_response_id_from_line(line: &[u8]) -> Result<Option<Value>, serde_jso
 fn jsonrpc_request_id_from_line(line: &[u8]) -> Result<Option<crate::Id>, serde_json::Error> {
     Ok(match jsonrpc_response_id_from_line(line)? {
         Some(Value::String(id)) => Some(crate::Id::String(id)),
-        Some(Value::Number(id)) => id.as_i64().map(crate::Id::Integer),
+        Some(Value::Number(id)) => id
+            .as_i64()
+            .map(crate::Id::Integer)
+            .or_else(|| id.as_u64().map(crate::Id::Unsigned)),
         _ => None,
     })
 }
@@ -1121,6 +1124,13 @@ mod tests {
 
         let missing = jsonrpc_response_id_from_line(br#"{"method":"ping"}"#).expect("valid json");
         assert!(missing.is_none());
+    }
+
+    #[test]
+    fn jsonrpc_request_id_accepts_large_unsigned_numeric_ids() {
+        let payload = format!(r#"{{"jsonrpc":"2.0","id":{}}}"#, u64::MAX);
+        let id = jsonrpc_request_id_from_line(payload.as_bytes()).expect("valid json");
+        assert_eq!(id, Some(crate::Id::Unsigned(u64::MAX)));
     }
 
     #[test]

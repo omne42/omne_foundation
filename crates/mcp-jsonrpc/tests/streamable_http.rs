@@ -166,7 +166,7 @@ async fn streamable_http_allows_initial_sse_405_and_retries_after_202() {
         }
     });
 
-    let url = format!("http://{}/mcp", addr);
+    let url = format!("http://{addr}/mcp");
     let client = mcp_jsonrpc::Client::connect_streamable_http(&url)
         .await
         .expect("connect streamable http");

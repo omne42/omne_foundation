@@ -34,3 +34,6 @@ __pycache__/
 /bak/error-kit/Cargo.lock
 /bak/error-kit/target/
 /bak/error-kit/wip/
+.artifact
+/artifact/
+/artifacts/

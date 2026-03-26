@@ -216,9 +216,7 @@ async fn try_prepare_connected_client_rejects_different_cwd_context() {
             handler_tasks: Vec::new(),
         },
     );
-    manager
-        .connection_cwds
-        .insert(server_name, PathBuf::from("/workspace/a"));
+    manager.record_connection_cwd("srv", Path::new("/workspace/a"));
 
     let err = match manager.try_prepare_connected_client("srv", Some(Path::new("/workspace/b"))) {
         Ok(_) => panic!("different cwd should be rejected"),
@@ -257,9 +255,7 @@ async fn prepare_transport_connect_rejects_different_cwd_context() {
             handler_tasks: Vec::new(),
         },
     );
-    manager
-        .connection_cwds
-        .insert(server_name.clone(), PathBuf::from("/workspace/a"));
+    manager.record_connection_cwd("srv", Path::new("/workspace/a"));
 
     let mut servers = std::collections::BTreeMap::new();
     servers.insert(

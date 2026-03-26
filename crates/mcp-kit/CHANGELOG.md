@@ -12,6 +12,7 @@
 ### Changed
 - release: bump workspace package version to `0.1.0`.
 - `mcp-kit`：补充 `SharedManager` 的 `cwd` 复用保护回归测试，锁住“同名 server 不同 cwd 复用必须显式报错”的约束。
+- `mcp-kit`：稳定 `cwd` 连接缓存回归测试在 Windows 上的路径语义，改为使用进程当前目录下的绝对路径构造用例，避免把 Windows 的驱动器根相对路径误当作可复用的同一路径。
 - `mcp-kit`：untrusted `streamable_http` 连接现在会把已校验的公网 DNS 结果绑定到实际 HTTP 连接，避免 DNS rebinding / TOCTOU 绕过。
 - `mcp-kit`：`SharedManager` 在 JSON-RPC 错误后的清理路径现在会按连接实例身份校验后再断连，避免旧 handle 的失败清理误删并发重连后的新连接；并补充替换连接场景的回归测试。
 - `mcp-kit`：连接缓存现在会绑定首次建立连接时的 `cwd` 上下文；当同名 server 试图从不同 `cwd` 复用现有连接时，会显式报错而不是静默复用旧工作目录与占位符展开结果。

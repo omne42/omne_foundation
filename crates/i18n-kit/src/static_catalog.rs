@@ -1,8 +1,9 @@
-use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 
 use super::catalog::Catalog;
+use super::catalog_json::parse_json_catalog_text_map;
+use super::catalog_state::{CatalogState, LocaleCatalogMap};
 use super::locale::Locale;
 use super::translation::{TranslationCatalog, TranslationResolution};
 
@@ -62,12 +63,9 @@ impl std::error::Error for StaticCatalogError {
     }
 }
 
-type ParsedCatalogMap = BTreeMap<Locale, BTreeMap<String, Arc<str>>>;
-
 #[derive(Debug)]
 pub struct StaticJsonCatalog {
-    default_locale: Locale,
-    parsed: ParsedCatalogMap,
+    state: CatalogState,
 }
 
 impl StaticJsonCatalog {
@@ -77,20 +75,12 @@ impl StaticJsonCatalog {
     ) -> Result<Self, StaticCatalogError> {
         let parsed = parse_static_catalog(default_locale, locales)?;
         Ok(Self {
-            default_locale,
-            parsed,
+            state: CatalogState::new(default_locale, parsed),
         })
     }
 
-    fn parsed_locales(&self) -> &ParsedCatalogMap {
-        &self.parsed
-    }
-
     fn lookup_catalog_text(&self, locale: Locale, key: &str) -> Option<Arc<str>> {
-        self.parsed_locales()
-            .get(&locale)
-            .and_then(|texts| texts.get(key))
-            .cloned()
+        self.state.lookup(locale, key)
     }
 }
 
@@ -100,10 +90,7 @@ impl TranslationCatalog for StaticJsonCatalog {
             return TranslationResolution::Exact(value);
         }
 
-        let fallback = self.default_locale;
-        if fallback != locale
-            && let Some(value) = self.lookup_catalog_text(fallback, key)
-        {
+        if let Some(value) = self.state.lookup_default(locale, key) {
             return TranslationResolution::Fallback(value);
         }
 
@@ -117,15 +104,15 @@ impl Catalog for StaticJsonCatalog {
     }
 
     fn default_locale(&self) -> Locale {
-        self.default_locale
+        self.state.default_locale()
     }
 
     fn available_locales(&self) -> Vec<Locale> {
-        self.parsed_locales().keys().copied().collect()
+        self.state.available_locales()
     }
 
     fn locale_enabled(&self, locale: Locale) -> bool {
-        self.parsed_locales().contains_key(&locale)
+        self.state.locale_enabled(locale)
     }
 }
 
@@ -150,10 +137,10 @@ macro_rules! static_json_catalog {
 fn parse_static_catalog(
     default_locale: Locale,
     locales: &[StaticJsonLocale],
-) -> Result<ParsedCatalogMap, StaticCatalogError> {
-    let mut parsed = BTreeMap::new();
+) -> Result<LocaleCatalogMap, StaticCatalogError> {
+    let mut parsed = LocaleCatalogMap::new();
     for source in locales.iter().filter(|source| source.enabled) {
-        let texts = crate::dynamic::parse_json_catalog_text_map(source.json).map_err(|error| {
+        let texts = parse_json_catalog_text_map(source.json).map_err(|error| {
             StaticCatalogError::InvalidLocaleJson {
                 locale: source.locale,
                 error,

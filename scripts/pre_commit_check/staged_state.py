@@ -15,6 +15,7 @@ class StagedState:
     non_changelog_count: int
     changed_crate_dirs: tuple[str, ...]
     crate_dirs_with_non_changelog_changes: tuple[str, ...]
+    needs_policy_meta_assets: bool
     needs_mcp_assets: bool
     needs_notify_assets: bool
 
@@ -22,6 +23,18 @@ class StagedState:
 def is_changelog_path(path: str) -> bool:
     return path == "CHANGELOG.md" or (
         path.startswith("crates/") and path.endswith("/CHANGELOG.md")
+    )
+
+
+def needs_policy_meta_assets(path: str) -> bool:
+    return path in {
+        "crates/policy-meta/Cargo.toml",
+        "crates/policy-meta/README.md",
+        "crates/policy-meta/SPEC.md",
+    } or path.startswith("crates/policy-meta/src/") or path.startswith(
+        "crates/policy-meta/schema/"
+    ) or path.startswith("crates/policy-meta/bindings/") or path.startswith(
+        "crates/policy-meta/profiles/"
     )
 
 
@@ -92,6 +105,7 @@ def collect_staged_state(ctx: CheckContext) -> StagedState:
         non_changelog_count=non_changelog_count,
         changed_crate_dirs=changed_crate_dirs,
         crate_dirs_with_non_changelog_changes=crate_dirs_with_non_changelog_changes,
+        needs_policy_meta_assets=any(needs_policy_meta_assets(path) for path in paths),
         needs_mcp_assets=any(needs_mcp_assets(path) for path in paths),
         needs_notify_assets=any(needs_notify_assets(path) for path in paths),
     )

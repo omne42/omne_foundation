@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TrustMode {
     /// Default: treat local config as untrusted and refuse "unsafe" actions
@@ -14,37 +12,15 @@ pub enum TrustMode {
 pub struct UntrustedStreamableHttpPolicy {
     /// When true (default), only allow `https://` URLs in untrusted mode.
     pub require_https: bool,
-    /// When false (default), reject `localhost`, `*.localhost`, `*.local`, and `*.localdomain`
-    /// domains, as well as single-label hosts (no `.`).
-    pub allow_localhost: bool,
-    /// When false (default), reject loopback/link-local/private IP literals.
-    pub allow_private_ips: bool,
-    /// When true, perform a DNS resolution check and reject hostnames that resolve to non-global
-    /// IPs (unless `allow_private_ips` is also enabled).
-    ///
-    /// Default: true (DNS lookups enabled, fail-closed by default).
-    pub dns_check: bool,
-    /// DNS lookup timeout (default: 2s). Only used when `dns_check` is enabled.
-    pub dns_timeout: Duration,
-    /// When true, DNS lookup failures/timeouts are ignored (fail-open).
-    ///
-    /// Default: false (fail-closed).
-    pub dns_fail_open: bool,
-    /// Optional host allowlist. When non-empty, only these hosts (or their subdomains)
-    /// are allowed in untrusted mode.
-    pub allowed_hosts: Vec<String>,
+    /// Shared HTTP egress policy for host/IP/DNS restrictions in untrusted mode.
+    pub outbound: http_kit::UntrustedOutboundPolicy,
 }
 
 impl Default for UntrustedStreamableHttpPolicy {
     fn default() -> Self {
         Self {
             require_https: true,
-            allow_localhost: false,
-            allow_private_ips: false,
-            dns_check: true,
-            dns_timeout: Duration::from_secs(2),
-            dns_fail_open: false,
-            allowed_hosts: Vec::new(),
+            outbound: http_kit::UntrustedOutboundPolicy::default(),
         }
     }
 }

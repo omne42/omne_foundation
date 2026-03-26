@@ -73,22 +73,10 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     allow_private_ip: bool,
 
-    /// Enable DNS checks for streamable_http hostnames in untrusted mode.
-    ///
-    /// Deprecated compatibility flag: DNS checks are already enabled by default.
-    ///
-    /// When enabled, hostnames that resolve to non-global IPs are rejected unless
-    /// `--allow-private-ip` is also set.
-    ///
-    /// DNS lookup failures/timeouts are treated as errors (fail-closed) unless
-    /// `--dns-fail-open` is set.
-    #[arg(long, default_value_t = false)]
-    dns_check: bool,
-
     /// Disable DNS checks (enabled by default).
     ///
     /// WARNING: This can re-introduce SSRF risk via hostnames resolving to non-global IPs.
-    #[arg(long, default_value_t = false, conflicts_with = "dns_check")]
+    #[arg(long, default_value_t = false)]
     no_dns_check: bool,
 
     /// DNS lookup timeout in milliseconds.
@@ -195,14 +183,6 @@ async fn main() -> anyhow::Result<()> {
 
     let config = mcp_kit::Config::load(&root, cli.config.clone()).await?;
 
-    let effective_dns_check = !cli.no_dns_check;
-
-    if !cli.trust && cli.dns_check {
-        eprintln!(
-            "NOTE: --dns-check is already the default in untrusted mode; the flag is kept for compatibility."
-        );
-    }
-
     if cli.trust {
         eprintln!("WARNING: --trust disables the default safety restrictions.");
         eprintln!("  - Allows spawning local processes / connecting unix sockets from config.");
@@ -264,25 +244,25 @@ async fn main() -> anyhow::Result<()> {
             policy.require_https = false;
         }
         if cli.allow_localhost {
-            policy.allow_localhost = true;
+            policy.outbound.allow_localhost = true;
         }
         if cli.allow_private_ip {
-            policy.allow_private_ips = true;
+            policy.outbound.allow_private_ips = true;
         }
         if cli.no_dns_check {
-            policy.dns_check = false;
+            policy.outbound.dns_check = false;
         }
-        if effective_dns_check {
-            policy.dns_check = true;
+        if !cli.no_dns_check {
+            policy.outbound.dns_check = true;
             if let Some(timeout_ms) = cli.dns_timeout_ms {
-                policy.dns_timeout = Duration::from_millis(timeout_ms);
+                policy.outbound.dns_timeout = Duration::from_millis(timeout_ms);
             }
             if cli.dns_fail_open {
-                policy.dns_fail_open = true;
+                policy.outbound.dns_fail_open = true;
             }
         }
         if !cli.allow_host.is_empty() {
-            policy.allowed_hosts.clone_from(&cli.allow_host);
+            policy.outbound.allowed_hosts.clone_from(&cli.allow_host);
         }
         manager = manager.with_untrusted_streamable_http_policy(policy);
     }

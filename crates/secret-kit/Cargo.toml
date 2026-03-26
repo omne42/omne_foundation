@@ -7,9 +7,10 @@ edition = "2024"
 workspace = true
 
 [dependencies]
+error-kit = { path = "../error-kit" }
 structured-text-kit = { path = "../structured-text-kit" }
-omne-systems-fs-primitives = { workspace = true }
-omne-systems-process-primitives = { workspace = true }
+omne-fs-primitives = { workspace = true }
+omne-process-primitives = { workspace = true }
 serde_json = "1"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt", "rt-multi-thread", "sync", "time"] }
 zeroize = "1"

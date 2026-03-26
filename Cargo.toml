@@ -1,13 +1,22 @@
 [workspace]
 members = [
+  "crates/config-kit",
   "crates/structured-text-kit",
   "crates/structured-text-protocol",
+  "crates/error-kit",
+  "crates/error-protocol",
+  "crates/github-kit",
+  "crates/http-kit",
+  "crates/log-kit",
   "crates/i18n-kit",
+  "crates/i18n-runtime-kit",
   "crates/mcp-jsonrpc",
   "crates/mcp-kit",
   "crates/notify-kit",
-  "crates/runtime-assets-kit",
+  "crates/policy-meta",
+  "crates/prompt-kit",
   "crates/secret-kit",
+  "crates/text-assets-kit",
 ]
 resolver = "2"
 
@@ -22,15 +31,17 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
 libc = "0.2"
-omne-systems-fs-primitives = { path = "../omne-systems-runtime/crates/omne-systems-fs-primitives" }
-omne-systems-process-primitives = { path = "../omne-systems-runtime/crates/process-primitives" }
+omne-fs-primitives = { path = "../omne-runtime/crates/omne-fs-primitives" }
+omne-process-primitives = { path = "../omne-runtime/crates/omne-process-primitives" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 tempfile = "3"
 thiserror = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "time", "sync", "io-util", "io-std", "signal", "net"] }
 tokio-util = { version = "0.7", features = ["io"] }
+toml = "0.8"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

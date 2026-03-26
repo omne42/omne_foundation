@@ -2670,7 +2670,10 @@ async fn untrusted_manager_refuses_streamable_http_url_credentials() {
 async fn untrusted_manager_refuses_streamable_http_hostname_resolving_to_non_global_ip_by_default()
 {
     let policy = UntrustedStreamableHttpPolicy {
-        allow_localhost: true,
+        outbound: http_kit::UntrustedOutboundPolicy {
+            allow_localhost: true,
+            ..Default::default()
+        },
         ..Default::default()
     };
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
@@ -2721,7 +2724,10 @@ fn untrusted_policy_allows_http_when_configured() {
 #[test]
 fn untrusted_policy_allows_private_ip_when_configured() {
     let policy = UntrustedStreamableHttpPolicy {
-        allow_private_ips: true,
+        outbound: http_kit::UntrustedOutboundPolicy {
+            allow_private_ips: true,
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -2753,7 +2759,10 @@ fn untrusted_policy_allows_6to4_when_embedded_ipv4_is_public() {
 #[test]
 fn untrusted_policy_enforces_allowlist_when_set() {
     let policy = UntrustedStreamableHttpPolicy {
-        allowed_hosts: vec!["example.com".to_string()],
+        outbound: http_kit::UntrustedOutboundPolicy {
+            allowed_hosts: vec!["example.com".to_string()],
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -2770,8 +2779,11 @@ fn untrusted_policy_enforces_allowlist_when_set() {
 #[tokio::test]
 async fn untrusted_policy_dns_check_blocks_localhost_without_allow_private_ip() {
     let policy = UntrustedStreamableHttpPolicy {
-        allow_localhost: true,
-        dns_check: true,
+        outbound: http_kit::UntrustedOutboundPolicy {
+            allow_localhost: true,
+            dns_check: true,
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -2786,9 +2798,12 @@ async fn untrusted_policy_dns_check_blocks_localhost_without_allow_private_ip() 
 #[tokio::test]
 async fn untrusted_policy_dns_check_allows_localhost_with_allow_private_ip() {
     let policy = UntrustedStreamableHttpPolicy {
-        allow_localhost: true,
-        allow_private_ips: true,
-        dns_check: true,
+        outbound: http_kit::UntrustedOutboundPolicy {
+            allow_localhost: true,
+            allow_private_ips: true,
+            dns_check: true,
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -2801,8 +2816,11 @@ async fn untrusted_policy_dns_check_allows_localhost_with_allow_private_ip() {
 #[tokio::test]
 async fn untrusted_policy_dns_check_fails_closed_on_lookup_failure_or_timeout() {
     let policy = UntrustedStreamableHttpPolicy {
-        dns_check: true,
-        dns_timeout: Duration::from_nanos(1),
+        outbound: http_kit::UntrustedOutboundPolicy {
+            dns_check: true,
+            dns_timeout: Duration::from_nanos(1),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -2831,9 +2849,12 @@ async fn untrusted_policy_dns_check_fails_closed_on_lookup_failure_or_timeout() 
 #[tokio::test]
 async fn untrusted_policy_dns_check_can_fail_open_on_lookup_timeout() {
     let policy = UntrustedStreamableHttpPolicy {
-        dns_check: true,
-        dns_fail_open: true,
-        dns_timeout: Duration::from_nanos(1),
+        outbound: http_kit::UntrustedOutboundPolicy {
+            dns_check: true,
+            dns_fail_open: true,
+            dns_timeout: Duration::from_nanos(1),
+            ..Default::default()
+        },
         ..Default::default()
     };
 

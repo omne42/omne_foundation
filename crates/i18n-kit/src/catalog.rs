@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use super::locale::Locale;
-use super::locale_selection::{LocaleRequest, ResolveLocaleError, resolve_locale_request};
+use super::locale_error::ResolveLocaleError;
+use super::locale_resolution::{LocaleRequest, resolve_locale_request};
 use super::translation::{TranslationCatalog, TranslationResolution};
 
 pub trait Catalog: TranslationCatalog {

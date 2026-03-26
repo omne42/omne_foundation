@@ -9,11 +9,11 @@ use self::media::{
 };
 use crate::Event;
 use crate::sinks::crypto::hmac_sha256_base64;
-use crate::sinks::http::{
+use crate::sinks::{BoxFuture, Sink};
+use http_kit::{
     build_http_client, parse_and_validate_https_url, read_json_body_after_http_success, redact_url,
     redact_url_str, select_http_client, send_reqwest, validate_url_path_prefix,
 };
-use crate::sinks::{BoxFuture, Sink};
 
 const FEISHU_MAX_CHARS: usize = 4000;
 const FEISHU_DEFAULT_IMAGE_UPLOAD_MAX_BYTES: usize = 10 * 1024 * 1024;
@@ -299,11 +299,11 @@ impl FeishuWebhookSink {
             .enable_all()
             .build()
             .map_err(|err| anyhow::anyhow!("build tokio runtime: {err}"))?;
-        rt.block_on(async move {
+        Ok(rt.block_on(async move {
             select_http_client(&client, timeout, &webhook_url, true)
                 .await
                 .map(|_| ())
-        })
+        })?)
     }
 }
 

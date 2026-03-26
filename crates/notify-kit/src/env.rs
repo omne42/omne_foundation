@@ -63,27 +63,26 @@ fn build_hub_from_env<F>(options: StandardEnvHubOptions, get: &F) -> anyhow::Res
 where
     F: Fn(&str) -> Option<String>,
 {
-    const OMNE_NOTIFY_SOUND_ENV: &str = "OMNE_NOTIFY_SOUND";
-    const OMNE_NOTIFY_WEBHOOK_URL_ENV: &str = "OMNE_NOTIFY_WEBHOOK_URL";
-    const OMNE_NOTIFY_WEBHOOK_FIELD_ENV: &str = "OMNE_NOTIFY_WEBHOOK_FIELD";
-    const OMNE_NOTIFY_FEISHU_WEBHOOK_URL_ENV: &str = "OMNE_NOTIFY_FEISHU_WEBHOOK_URL";
-    const OMNE_NOTIFY_SLACK_WEBHOOK_URL_ENV: &str = "OMNE_NOTIFY_SLACK_WEBHOOK_URL";
-    const OMNE_NOTIFY_TIMEOUT_MS_ENV: &str = "OMNE_NOTIFY_TIMEOUT_MS";
-    const OMNE_NOTIFY_EVENTS_ENV: &str = "OMNE_NOTIFY_EVENTS";
+    const NOTIFY_SOUND_ENV: &str = "NOTIFY_SOUND";
+    const NOTIFY_WEBHOOK_URL_ENV: &str = "NOTIFY_WEBHOOK_URL";
+    const NOTIFY_WEBHOOK_FIELD_ENV: &str = "NOTIFY_WEBHOOK_FIELD";
+    const NOTIFY_FEISHU_WEBHOOK_URL_ENV: &str = "NOTIFY_FEISHU_WEBHOOK_URL";
+    const NOTIFY_SLACK_WEBHOOK_URL_ENV: &str = "NOTIFY_SLACK_WEBHOOK_URL";
+    const NOTIFY_TIMEOUT_MS_ENV: &str = "NOTIFY_TIMEOUT_MS";
+    const NOTIFY_EVENTS_ENV: &str = "NOTIFY_EVENTS";
 
-    let sound_enabled =
-        env_bool(OMNE_NOTIFY_SOUND_ENV, get).unwrap_or(options.default_sound_enabled);
-    let timeout = parse_timeout_ms_env(OMNE_NOTIFY_TIMEOUT_MS_ENV, get)
-        .with_context(|| format!("invalid {OMNE_NOTIFY_TIMEOUT_MS_ENV}"))?;
+    let sound_enabled = env_bool(NOTIFY_SOUND_ENV, get).unwrap_or(options.default_sound_enabled);
+    let timeout = parse_timeout_ms_env(NOTIFY_TIMEOUT_MS_ENV, get)
+        .with_context(|| format!("invalid {NOTIFY_TIMEOUT_MS_ENV}"))?;
 
     let mut sinks: Vec<Arc<dyn Sink>> = Vec::new();
     if sound_enabled {
         sinks.push(Arc::new(SoundSink::new(SoundConfig { command_argv: None })));
     }
 
-    if let Some(url) = env_nonempty(OMNE_NOTIFY_WEBHOOK_URL_ENV, get) {
+    if let Some(url) = env_nonempty(NOTIFY_WEBHOOK_URL_ENV, get) {
         let mut cfg = GenericWebhookConfig::new(url).with_timeout(timeout);
-        if let Some(field) = env_nonempty(OMNE_NOTIFY_WEBHOOK_FIELD_ENV, get) {
+        if let Some(field) = env_nonempty(NOTIFY_WEBHOOK_FIELD_ENV, get) {
             cfg = cfg.with_payload_field(field);
         }
         sinks.push(Arc::new(
@@ -91,14 +90,14 @@ where
         ));
     }
 
-    if let Some(url) = env_nonempty(OMNE_NOTIFY_FEISHU_WEBHOOK_URL_ENV, get) {
+    if let Some(url) = env_nonempty(NOTIFY_FEISHU_WEBHOOK_URL_ENV, get) {
         let cfg = FeishuWebhookConfig::new(url).with_timeout(timeout);
         sinks.push(Arc::new(
             FeishuWebhookSink::new(cfg).context("build feishu sink")?,
         ));
     }
 
-    if let Some(url) = env_nonempty(OMNE_NOTIFY_SLACK_WEBHOOK_URL_ENV, get) {
+    if let Some(url) = env_nonempty(NOTIFY_SLACK_WEBHOOK_URL_ENV, get) {
         let cfg = SlackWebhookConfig::new(url).with_timeout(timeout);
         sinks.push(Arc::new(
             SlackWebhookSink::new(cfg).context("build slack sink")?,
@@ -108,13 +107,13 @@ where
     if sinks.is_empty() {
         if options.require_sink {
             anyhow::bail!(
-                "no notification sinks configured (enable {OMNE_NOTIFY_SOUND_ENV}=1 or provide webhook envs)"
+                "no notification sinks configured (enable {NOTIFY_SOUND_ENV}=1 or provide webhook envs)"
             );
         }
         return Ok(None);
     }
 
-    let enabled_kinds = get(OMNE_NOTIFY_EVENTS_ENV).and_then(|raw| {
+    let enabled_kinds = get(NOTIFY_EVENTS_ENV).and_then(|raw| {
         let set = raw
             .split(',')
             .map(str::trim)
@@ -142,7 +141,7 @@ mod tests {
 
     #[test]
     fn build_hub_from_standard_env_uses_sound_when_enabled() {
-        let env = HashMap::from([(String::from("OMNE_NOTIFY_SOUND"), String::from("1"))]);
+        let env = HashMap::from([(String::from("NOTIFY_SOUND"), String::from("1"))]);
 
         let hub = build_hub_from_env(StandardEnvHubOptions::default(), &|key| {
             env.get(key).cloned()

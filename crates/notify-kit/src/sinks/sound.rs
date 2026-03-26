@@ -6,6 +6,10 @@ use tokio::process::Command;
 
 use crate::Event;
 use crate::event::Severity;
+#[cfg(not(feature = "sound-command"))]
+use crate::log::warn_sound_command_disabled_fallback;
+#[cfg(feature = "sound-command")]
+use crate::log::warn_sound_command_exited_non_zero;
 use crate::sinks::{BoxFuture, Sink};
 
 #[cfg(not(feature = "sound-command"))]
@@ -69,12 +73,7 @@ impl SoundSink {
             .map_err(|err| anyhow::anyhow!("wait sound command {program}: {err}"))?;
 
         if !status.success() {
-            tracing::warn!(
-                sink = "sound",
-                program = %program,
-                status = ?status,
-                "sound command exited non-zero"
-            );
+            warn_sound_command_exited_non_zero(program, &status.to_string());
         }
         Ok(())
     }
@@ -97,10 +96,7 @@ impl Sink for SoundSink {
                 #[cfg(not(feature = "sound-command"))]
                 {
                     if !WARNED_SOUND_COMMAND_DISABLED.swap(true, Ordering::Relaxed) {
-                        tracing::warn!(
-                            sink = "sound",
-                            "sound command_argv configured but feature \"sound-command\" is disabled; falling back to terminal bell"
-                        );
+                        warn_sound_command_disabled_fallback();
                     }
                     Self::send_terminal_bell(event)?;
                     return Ok(());

@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use crate::Event;
-use crate::sinks::http::{
+use crate::sinks::text::{TextLimits, format_event_body_and_tags_limited, truncate_chars};
+use crate::sinks::{BoxFuture, Sink};
+use http_kit::{
     build_http_client, parse_and_validate_https_url, read_json_body_after_http_success, redact_url,
     select_http_client, send_reqwest, validate_url_path_prefix,
 };
-use crate::sinks::text::{TextLimits, format_event_body_and_tags_limited, truncate_chars};
-use crate::sinks::{BoxFuture, Sink};
 
 const PUSHPLUS_ALLOWED_HOSTS: [&str; 1] = ["www.pushplus.plus"];
 

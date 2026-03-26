@@ -173,7 +173,10 @@ pub(crate) async fn resolve_secret_spec(
 ) -> Result<SecretString> {
     match spec {
         SecretSpec::Env { key } => context.environment().get_secret(key).ok_or_else(|| {
-            SecretError::lookup(structured_text!("error_detail.auth.missing_env_var", "key" => key))
+            SecretError::lookup(structured_text!(
+                "error_detail.secret.missing_env_var",
+                "key" => key
+            ))
         }),
         SecretSpec::File { path } => read_secret_file(Path::new(path)).await,
         other => {

@@ -23,6 +23,12 @@ impl From<anyhow::Error> for Error {
     }
 }
 
+impl From<http_kit::Error> for Error {
+    fn from(err: http_kit::Error) -> Self {
+        Self(anyhow::Error::new(err))
+    }
+}
+
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
         Self(anyhow::Error::from(err))

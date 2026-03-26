@@ -1,0 +1,19 @@
+[package]
+name = "policy-meta"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Canonical policy metadata semantics and generated artifacts shared across Omne repositories."
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+schemars = "0.8"
+serde.workspace = true
+serde_json.workspace = true
+ts-rs = { version = "11", features = ["serde-json-impl", "no-serde-warnings"] }
+
+[dev-dependencies]
+serde_yaml = "0.9"

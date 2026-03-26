@@ -1,21 +1,27 @@
 use super::*;
 use std::path::PathBuf;
 
-#[cfg(unix)]
 #[tokio::test]
-async fn load_denies_mcpservers_indirection_via_symlink_file() {
+async fn load_rejects_mcpservers_wrapper() {
     let dir = tempfile::tempdir().unwrap();
-    let outside = tempfile::tempdir().unwrap();
     tokio::fs::write(
-        outside.path().join("servers.json"),
+        dir.path().join("mcp.json"),
         r#"{ "mcpServers": { "a": { "command": "echo", "args": ["hi"] } } }"#,
     )
     .await
     .unwrap();
 
-    let link = dir.path().join("servers.json");
-    std::os::unix::fs::symlink(outside.path().join("servers.json"), &link).unwrap();
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("mcpServers") && msg.contains("no longer accepted"),
+        "err={msg}"
+    );
+}
 
+#[tokio::test]
+async fn load_rejects_mcpservers_path_wrapper() {
+    let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(
         dir.path().join("mcp.json"),
         r#"{ "mcpServers": "servers.json" }"#,
@@ -25,62 +31,25 @@ async fn load_denies_mcpservers_indirection_via_symlink_file() {
 
     let err = Config::load(dir.path(), None).await.unwrap_err();
     let msg = format!("{err:#}");
-    assert!(msg.contains("escapes root"), "err={msg}");
+    assert!(
+        msg.contains("mcpServers") && msg.contains("no longer accepted"),
+        "err={msg}"
+    );
 }
 
-#[cfg(unix)]
 #[tokio::test]
-async fn load_denies_mcpservers_indirection_via_symlink_dir() {
+async fn load_rejects_legacy_server_map_without_version() {
     let dir = tempfile::tempdir().unwrap();
-    let outside = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        outside.path().join("servers.json"),
-        r#"{ "mcpServers": { "a": { "command": "echo", "args": ["hi"] } } }"#,
-    )
-    .await
-    .unwrap();
-
-    let link_dir = dir.path().join("linkdir");
-    std::os::unix::fs::symlink(outside.path(), &link_dir).unwrap();
-
     tokio::fs::write(
         dir.path().join("mcp.json"),
-        r#"{ "mcpServers": "linkdir/servers.json" }"#,
+        r#"{ "filesystem": { "command": "npx", "args": ["-y", "echo", "hi"] } }"#,
     )
     .await
     .unwrap();
 
     let err = Config::load(dir.path(), None).await.unwrap_err();
     let msg = format!("{err:#}");
-    assert!(msg.contains("escapes root"), "err={msg}");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn load_allows_mcpservers_indirection_via_symlink_dir_within_root() {
-    let dir = tempfile::tempdir().unwrap();
-
-    let real_dir = dir.path().join("real_dir");
-    tokio::fs::create_dir_all(&real_dir).await.unwrap();
-    tokio::fs::write(
-        real_dir.join("servers.json"),
-        r#"{ "mcpServers": { "a": { "command": "echo", "args": ["hi"] } } }"#,
-    )
-    .await
-    .unwrap();
-
-    let link_dir = dir.path().join("linkdir");
-    std::os::unix::fs::symlink(&real_dir, &link_dir).unwrap();
-
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{ "mcpServers": "linkdir/servers.json" }"#,
-    )
-    .await
-    .unwrap();
-
-    let cfg = Config::load(dir.path(), None).await.unwrap();
-    assert!(cfg.servers().contains_key("a"));
+    assert!(msg.contains("missing `version`"), "err={msg}");
 }
 
 #[cfg(unix)]
@@ -135,24 +104,6 @@ async fn load_required_errors_when_missing() {
     let dir = tempfile::tempdir().unwrap();
     let err = Config::load_required(dir.path(), None).await.unwrap_err();
     assert!(err.to_string().contains("not found"), "err={err:#}");
-}
-
-#[tokio::test]
-async fn load_denies_mcpservers_indirection_cycle() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{ "mcpServers": "mcp.json" }"#,
-    )
-    .await
-    .unwrap();
-
-    let err = Config::load(dir.path(), None).await.unwrap_err();
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("indirection") && msg.contains("cycle"),
-        "err={msg}"
-    );
 }
 
 #[tokio::test]
@@ -582,6 +533,23 @@ async fn load_parses_streamable_http_transport() {
 }
 
 #[tokio::test]
+async fn load_denies_v1_streamable_http_with_noncanonical_headers_field() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "url": "https://example.com/mcp", "headers": { "X-Test": "1" } } } }"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(
+        format!("{err:#}").contains("unknown field `headers`"),
+        "err={err:#}"
+    );
+}
+
+#[tokio::test]
 async fn load_parses_streamable_http_transport_with_split_urls() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(
@@ -686,81 +654,17 @@ async fn load_denies_unix_transport_with_empty_argv() {
 }
 
 #[tokio::test]
-async fn load_parses_claude_code_style_dot_mcp_json() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join(".mcp.json"),
-        r#"{
-  "filesystem": {
-    "command": "npx",
-    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-    "env": { "LOG_LEVEL": "debug" }
-  }
-}"#,
-    )
-    .await
-    .unwrap();
-
-    let cfg = Config::load(dir.path(), None).await.unwrap();
-    let server = cfg.servers().get("filesystem").unwrap();
-    assert_eq!(cfg.path().unwrap(), &dir.path().join(".mcp.json"));
-    assert_eq!(server.transport(), Transport::Stdio);
-    assert_eq!(
-        server.argv(),
-        &[
-            "npx".to_string(),
-            "-y".to_string(),
-            "@modelcontextprotocol/server-filesystem".to_string(),
-            "/tmp".to_string()
-        ]
-    );
-    assert_eq!(
-        server.env().get("LOG_LEVEL").map(String::as_str),
-        Some("debug")
-    );
-}
-
-#[tokio::test]
-async fn load_parses_cursor_mcp_servers_wrapper() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{
-  "$schema": "https://cursor.com/mcp.schema.json",
-  "mcpServers": {
-    "litellm": {
-      "url": "http://example.com/mcp",
-      "type": "http",
-      "headers": { "X-Test": "1" }
-    }
-  }
-}"#,
-    )
-    .await
-    .unwrap();
-
-    let cfg = Config::load(dir.path(), None).await.unwrap();
-    let server = cfg.servers().get("litellm").unwrap();
-    assert_eq!(server.transport(), Transport::StreamableHttp);
-    assert_eq!(server.url(), Some("http://example.com/mcp"));
-    assert_eq!(
-        server.http_headers().get("X-Test").map(String::as_str),
-        Some("1")
-    );
-}
-
-#[tokio::test]
 async fn load_denies_streamable_http_with_invalid_http_header_name() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(
         dir.path().join("mcp.json"),
         r#"{
-  "$schema": "https://cursor.com/mcp.schema.json",
-  "mcpServers": {
+  "version": 1,
+  "servers": {
     "litellm": {
+      "transport": "streamable_http",
       "url": "http://example.com/mcp",
-      "type": "http",
-      "headers": { "Bad Header": "1" }
+      "http_headers": { "Bad Header": "1" }
     }
   }
 }"#,
@@ -781,12 +685,12 @@ async fn load_denies_streamable_http_with_invalid_http_header_value() {
     tokio::fs::write(
         dir.path().join("mcp.json"),
         r#"{
-  "$schema": "https://cursor.com/mcp.schema.json",
-  "mcpServers": {
+  "version": 1,
+  "servers": {
     "litellm": {
+      "transport": "streamable_http",
       "url": "http://example.com/mcp",
-      "type": "http",
-      "headers": { "X-Test": "1\n2" }
+      "http_headers": { "X-Test": "1\n2" }
     }
   }
 }"#,
@@ -808,11 +712,11 @@ async fn load_denies_streamable_http_with_invalid_env_http_header_name() {
     tokio::fs::write(
         dir.path().join("mcp.json"),
         r#"{
-  "$schema": "https://cursor.com/mcp.schema.json",
-  "mcpServers": {
+  "version": 1,
+  "servers": {
     "litellm": {
+      "transport": "streamable_http",
       "url": "http://example.com/mcp",
-      "type": "http",
       "env_http_headers": { "Bad Header": "TOKEN" }
     }
   }
@@ -867,59 +771,7 @@ async fn load_denies_streamable_http_with_stdout_log_in_v1_format() {
 }
 
 #[tokio::test]
-async fn load_denies_unix_transport_with_stdout_log_in_external_format() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{
-  "mcpServers": {
-    "sock": {
-      "unix_path": "/tmp/mcp.sock",
-      "stdout_log": { "path": "" }
-    }
-  }
-}"#,
-    )
-    .await
-    .unwrap();
-
-    let err = Config::load(dir.path(), None).await.unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("stdout_log is not supported for transport=unix"),
-        "err={err:#}"
-    );
-    assert!(!msg.contains("invalid stdout_log config"), "err={err:#}");
-}
-
-#[tokio::test]
-async fn load_denies_streamable_http_with_stdout_log_in_external_format() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{
-  "mcpServers": {
-    "litellm": {
-      "url": "http://example.com/mcp",
-      "stdout_log": { "path": "" }
-    }
-  }
-}"#,
-    )
-    .await
-    .unwrap();
-
-    let err = Config::load(dir.path(), None).await.unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("stdout_log is not supported for transport=streamable_http"),
-        "err={err:#}"
-    );
-    assert!(!msg.contains("invalid stdout_log config"), "err={err:#}");
-}
-
-#[tokio::test]
-async fn load_parses_mcp_servers_wrapper_even_with_version_string() {
+async fn load_rejects_plugin_json_mcpservers_wrapper() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(
         dir.path().join("plugin.json"),
@@ -937,61 +789,39 @@ async fn load_parses_mcp_servers_wrapper_even_with_version_string() {
     .await
     .unwrap();
 
-    let cfg = Config::load(dir.path(), Some(PathBuf::from("plugin.json")))
+    let err = Config::load(dir.path(), Some(PathBuf::from("plugin.json")))
         .await
-        .unwrap();
-    assert_eq!(cfg.path().unwrap(), &dir.path().join("plugin.json"));
-    let server = cfg.servers().get("filesystem").unwrap();
-    assert_eq!(server.transport(), Transport::Stdio);
-    assert_eq!(
-        server.argv(),
-        &[
-            "npx".to_string(),
-            "-y".to_string(),
-            "echo".to_string(),
-            "hi".to_string()
-        ]
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("mcpServers") && msg.contains("no longer accepted"),
+        "err={msg}"
     );
 }
 
 #[tokio::test]
-async fn load_parses_mcp_servers_wrapper_even_with_version_number() {
+async fn load_rejects_plugin_json_with_unknown_top_level_fields() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(
         dir.path().join("plugin.json"),
         r#"{
   "name": "my-plugin",
   "version": 1,
-  "mcpServers": {
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "echo", "hi"]
-    }
-  }
+  "servers": {}
 }"#,
     )
     .await
     .unwrap();
 
-    let cfg = Config::load(dir.path(), Some(PathBuf::from("plugin.json")))
+    let err = Config::load(dir.path(), Some(PathBuf::from("plugin.json")))
         .await
-        .unwrap();
-    assert_eq!(cfg.path().unwrap(), &dir.path().join("plugin.json"));
-    let server = cfg.servers().get("filesystem").unwrap();
-    assert_eq!(server.transport(), Transport::Stdio);
-    assert_eq!(
-        server.argv(),
-        &[
-            "npx".to_string(),
-            "-y".to_string(),
-            "echo".to_string(),
-            "hi".to_string()
-        ]
-    );
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("unknown field `name`"), "err={msg}");
 }
 
 #[tokio::test]
-async fn load_parses_mcp_servers_path_to_dot_mcp_json() {
+async fn load_rejects_plugin_json_mcpservers_path_wrapper() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(
         dir.path().join("plugin.json"),
@@ -1003,56 +833,14 @@ async fn load_parses_mcp_servers_path_to_dot_mcp_json() {
     )
     .await
     .unwrap();
-    tokio::fs::write(
-        dir.path().join(".mcp.json"),
-        r#"{
-  "filesystem": {
-    "command": "npx",
-    "args": ["-y", "echo", "hi"]
-  }
-}"#,
-    )
-    .await
-    .unwrap();
-
-    let cfg = Config::load(dir.path(), Some(PathBuf::from("plugin.json")))
+    let err = Config::load(dir.path(), Some(PathBuf::from("plugin.json")))
         .await
-        .unwrap();
-    assert_eq!(cfg.path().unwrap(), &dir.path().join(".mcp.json"));
-    let server = cfg.servers().get("filesystem").unwrap();
-    assert_eq!(server.transport(), Transport::Stdio);
-    assert_eq!(
-        server.argv(),
-        &[
-            "npx".to_string(),
-            "-y".to_string(),
-            "echo".to_string(),
-            "hi".to_string()
-        ]
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("mcpServers") && msg.contains("no longer accepted"),
+        "err={msg}"
     );
-}
-
-#[tokio::test]
-async fn load_denies_cursor_mcp_servers_type_transport_conflict() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{
-  "$schema": "https://cursor.com/mcp.schema.json",
-  "mcpServers": {
-    "bad": {
-      "type": "http",
-      "command": "npx",
-      "args": ["-y", "echo", "hi"]
-    }
-  }
-}"#,
-    )
-    .await
-    .unwrap();
-
-    let err = Config::load(dir.path(), None).await.unwrap_err();
-    assert!(err.to_string().contains("conflicts"));
 }
 
 #[tokio::test]
@@ -1117,32 +905,15 @@ async fn load_denies_duplicate_server_names_after_trim_in_v1() {
 }
 
 #[tokio::test]
-async fn load_denies_duplicate_server_names_after_trim_in_external_format() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{
-  "srv": { "command": "echo", "args": ["a"] },
-  " srv ": { "command": "echo", "args": ["b"] }
-}"#,
-    )
-    .await
-    .unwrap();
-
-    let err = Config::load(dir.path(), None).await.unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("duplicate mcp server name after normalization"),
-        "err={err:#}"
-    );
-}
-
-#[tokio::test]
 async fn load_override_path_is_fail_closed() {
     let dir = tempfile::tempdir().unwrap();
     let err = Config::load(dir.path(), Some(PathBuf::from("missing.json")))
         .await
         .unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("stat") || msg.contains("read"), "err={msg}");
+    assert!(
+        msg.contains("required config layer mcp config not found"),
+        "err={msg}"
+    );
+    assert!(msg.contains("missing.json"), "err={msg}");
 }

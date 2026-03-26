@@ -1,0 +1,15 @@
+[package]
+name = "i18n-runtime-kit"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+i18n-kit = { path = "../i18n-kit" }
+structured-text-kit = { path = "../structured-text-kit" }
+text-assets-kit = { path = "../text-assets-kit" }
+
+[dev-dependencies]
+tempfile = "3"

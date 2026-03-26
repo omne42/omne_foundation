@@ -1,9 +1,9 @@
 use std::time::Duration;
 
 use crate::Event;
-use crate::sinks::http::{build_http_client, ensure_http_success, redact_url, send_reqwest};
 use crate::sinks::text::{TextLimits, format_event_text_limited};
 use crate::sinks::{BoxFuture, Sink};
+use http_kit::{build_http_client, ensure_http_success, redact_url, send_reqwest};
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
 
@@ -174,7 +174,7 @@ impl Sink for GitHubCommentSink {
                 "github comment",
             )
             .await?;
-            ensure_http_success(resp, "github comment").await
+            Ok(ensure_http_success(resp, "github comment").await?)
         })
     }
 }

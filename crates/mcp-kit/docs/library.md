@@ -18,7 +18,7 @@ let config = mcp_kit::Config::load(&root, None).await?;
 
 - 默认会按顺序发现（相对 `root`）：`./.mcp.json` → `./mcp.json`。
 - 你也可以传入 `Some(path)` 覆盖（绝对路径或相对 `root` 的路径）。
-- 对 `mcp.json v1`：schema 为 fail-closed，未知字段会报错（`deny_unknown_fields`）；对 `.mcp.json` / `mcpServers` 兼容格式：best-effort（会忽略未支持字段）。
+- `Config::load` 只接受 canonical `mcp.json v1`；未知字段、缺少 `version`、`mcpServers` wrapper 等都会 fail-closed 报错。
 
 详情见 [`配置`](config.md)。
 

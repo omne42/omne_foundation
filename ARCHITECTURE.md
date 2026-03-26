@@ -8,7 +8,7 @@
 - crate 之间的主要依赖方向是什么
 - 应该去哪里找更具体的事实来源
 
-详细的 crate 说明已经拆到 [`docs/crates/`](./docs/crates/README.md)。
+详细的 crate 说明已经拆到 [`docs/crates/README.md`](./docs/crates/README.md) 和各 crate 自己的 `README.md`。
 
 ## 读图规则
 
@@ -20,16 +20,33 @@ A -> B   表示 A 依赖 B
 
 ## 顶层分层
 
-### 1. 结构化文本语义层
+### 1. 跨仓库策略契约层
+
+- `policy-meta`
+
+这一层处理“跨仓库共享的策略字段和契约到底是什么”：
+
+- canonical policy field names 与枚举语义
+- JSON Schema / TypeScript 绑定
+- baseline profile artifacts
+
+这里刻意只沉淀 contract，不实现决策引擎：
+
+- `policy-meta` 不负责审批、sandbox 或命令执行逻辑。
+- 它的目的，是让多个仓库共享同一份稳定 policy vocabulary，而不是重复发明各自的字段集合。
+
+### 2. 文本与观测语义层
 
 - `structured-text-kit`
 - `structured-text-protocol`
+- `log-kit`
 - `i18n-kit`
 
 这一层处理“用户可见结构化文本是什么，以及如何跨边界表示它”：
 
 - `structured-text-kit` 定义 `StructuredText` / `CatalogText`
 - `structured-text-protocol` 把结构化文本映射到 JSON Schema / TypeScript DTO
+- `log-kit` 建模日志文本与日志级别
 - `i18n-kit` 按 locale/catalog/template 把结构化文本渲染成最终文本
 
 这里有一个需要显式说明的边界选择：
@@ -38,17 +55,42 @@ A -> B   表示 A 依赖 B
 - `structured-text-kit` 只建模“catalog-backed 或 freeform 的用户可见结构化文本”。
 - 它不是 IM 消息、进程间通信消息、事件总线消息，也不是通用消息系统。
 
-### 2. 运行时输入层
+### 3. 配置与运行时输入层
 
-- `runtime-assets-kit`
+- `config-kit`
+- `text-assets-kit`
+- `i18n-runtime-kit`
+- `prompt-kit`
 - `secret-kit`
 
-这一层处理“运行时如何安全地拿到输入”：
+这一层处理“配置与运行时输入如何被安全拿到、解析和组织”：
 
-- i18n / prompts 等文本资源如何 bootstrap、落盘、回滚、懒加载
+- 配置文件如何被安全读取、识别格式、层叠与解释
+- 通用文本资源如何安全地 bootstrap、落盘、回滚、扫描和读取
+- i18n catalog 如何从 runtime 目录加载、重载并暴露 lazy/global handle
+- prompt 文本目录如何 bootstrap 并以惰性句柄对外提供
 - secret 如何通过统一 `secret://` 规范解析
 
-### 3. 传输与会话层
+这里有一个当前需要明确的边界：
+
+- `prompt-kit` 目前只承接 prompt 目录 bootstrap / lazy access 这一窄适配层。
+- 更高层的 prompt bundle identity 与 agent instruction composition 尚未形成共享 crate。
+- 相关判断见 [`docs/定义/prompt领域定位.md`](./docs/定义/prompt领域定位.md)。
+
+### 4. HTTP foundation 层
+
+- `http-kit`
+- `github-kit`
+
+这一层处理“如何以共享方式构建和约束 HTTP 出站能力”：
+
+- HTTP client 构建与选择
+- 响应体有界读取、preview 与错误收口
+- URL 校验与脱敏
+- untrusted outbound policy、IP 分类与 DNS 后校验
+- GitHub API 请求头、release metadata DTO 与 latest release 获取
+
+### 5. 传输与会话层
 
 - `mcp-jsonrpc`
 - `mcp-kit`
@@ -58,32 +100,55 @@ A -> B   表示 A 依赖 B
 - JSON-RPC transport
 - MCP config / initialize / manager / session / security model
 
-### 4. 通知层
+### 6. 通知层
 
 - `notify-kit`
 
-这一层独立处理“如何把统一事件投递到外部通知渠道”。
+这一层处理“如何把统一事件投递到外部通知渠道”：
+
+- 渠道路由、并发发送、超时和错误聚合
+- 共享复用 `http-kit` 的 HTTP 能力和 `log-kit` 的文本日志原语
 
 ## 主要依赖方向
 
 当前 workspace 内部可总结成下面这张简图：
 
 ```text
+policy-meta            -> (no internal foundation deps)
+
 structured-text-protocol -> structured-text-kit
+log-kit                -> structured-text-kit
 i18n-kit              -> structured-text-kit
 secret-kit            -> structured-text-kit
 
-runtime-assets-kit    -> i18n-kit        (feature = "i18n")
+config-kit            -> (no internal foundation deps)
+text-assets-kit      -> (no internal foundation deps)
+i18n-runtime-kit     -> text-assets-kit
+i18n-runtime-kit     -> i18n-kit
+prompt-kit           -> text-assets-kit
 
+github-kit           -> http-kit
+mcp-jsonrpc           -> http-kit
+mcp-kit               -> config-kit
+mcp-kit               -> http-kit
 mcp-kit              -> mcp-jsonrpc
 
-notify-kit           -> (no workspace crate dependency)
+notify-kit           -> http-kit
+notify-kit           -> log-kit
+notify-kit           -> structured-text-kit
 ```
 
 补充说明：
 
-- `runtime-assets-kit` 依赖 `i18n-kit`，不是反过来。
-- `notify-kit` 当前是独立域，不依赖 workspace 内其他 crate。
+- `policy-meta` 当前不依赖其他 foundation crate，主要为 `omne-agent`、`omne-runtime` 等外部 workspace 提供共享 contract。
+- `config-kit` 只承接通用配置边界：格式识别、有界读取、路径 canonicalize、strict allowed-format typed parse、layer merge；不拥有产品级 config schema。
+- `http-kit` 是通用 HTTP foundation，不承载 GitHub API schema、镜像 / 网关候选策略或其他上层产品语义。
+- `github-kit` 建立在 `http-kit` 之上，只负责纯 GitHub API client 能力；它不拥有来源优先级、资产选择或安装编排。
+- `text-assets-kit` 刻意不依赖 `i18n-kit`，保持通用文本资源/runtime fs adapter 边界。
+- `i18n-runtime-kit` 建立在 `text-assets-kit` 和 `i18n-kit` 之上，承接目录型 i18n adapter 与 lazy/global handle。
+- `prompt-kit` 建立在 `text-assets-kit` 之上，当前只承接 prompt 目录 bootstrap 与惰性访问这一窄适配层，不是 prompt 模板、版本和缓存的统一抽象。
+- `mcp-jsonrpc` 和 `mcp-kit` 共享 `http-kit`，而不是各自重复实现 HTTP client/body/outbound policy 逻辑。
+- `notify-kit` 依赖 `http-kit` 和 `log-kit`，但通知域语义仍独立于 MCP 和 i18n。
 - `mcp-jsonrpc` 是 transport 层，`mcp-kit` 在其上增加 MCP 语义和配置管理。
 - `i18n-kit` 和 `secret-kit` 依赖的是结构化文本原语，不是错误处理流程。
 
@@ -92,7 +157,7 @@ notify-kit           -> (no workspace crate dependency)
 这个 workspace 目前遵循几条简单边界原则：
 
 - 一个 crate 只承载一个稳定领域，不把上层应用语义硬塞进 foundation。
-- 协议传输、结构化文本语义、资源加载、secret 解析、通知投递分开建模。
+- 配置边界、协议传输、结构化文本语义、资源加载、secret 解析、通知投递分开建模。
 - 能由上层应用决定的策略，不下沉到基础 crate。
 - 约束优先放在边界处，crate 内部实现保持足够自由。
 
@@ -100,13 +165,15 @@ notify-kit           -> (no workspace crate dependency)
 
 workspace 级文档现在按“渐进式披露”组织：
 
+- [`AGENTS.md`](./AGENTS.md)
+  - 根入口地图，先看这里
 - [`docs/README.md`](./docs/README.md)
   - 文档地图，先看这里
 - `docs/规范/<topic>.md`
   - workspace 级版本、兼容、发布等治理规则
 - [`docs/crates/README.md`](./docs/crates/README.md)
   - crate 索引
-- `docs/crates/<crate>.md`
+- `crates/<crate>/README.md`
   - 每个 crate 的领域、边界、范围、结构设计
 - `crates/mcp-kit/docs/`
   - `mcp-kit` 的详细专题文档
@@ -117,8 +184,9 @@ workspace 级文档现在按“渐进式披露”组织：
 
 为了避免文档重新退化成“一个巨大的总览文件”，根级文档按下面的规则维护：
 
+- `AGENTS.md` 只保留根入口和硬边界，不承载细节。
 - `ARCHITECTURE.md` 只保留 workspace 级地图，不堆实现细节。
 - `docs/README.md` 只做入口导航，不重复 crate 细节。
 - 版本、兼容、发布等规则写入 `docs/规范/<topic>.md`。
-- crate 事实写入对应的 `docs/crates/<crate>.md`。
-- crate 专题细节优先放到 crate 自己的 `docs/` 或 `README.md`。
+- crate 事实写入对应的 `crates/<crate>/README.md`。
+- crate 专题细节优先放到 crate 自己的 `docs/`。

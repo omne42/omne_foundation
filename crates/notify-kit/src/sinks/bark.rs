@@ -1,13 +1,13 @@
 use std::time::Duration;
 
 use crate::Event;
-use crate::sinks::http::{
+use crate::sinks::text::{TextLimits, format_event_body_and_tags_limited, truncate_chars};
+use crate::sinks::{BoxFuture, Sink};
+use http_kit::{
     DEFAULT_MAX_RESPONSE_BODY_BYTES, build_http_client, http_status_text_error,
     parse_and_validate_https_url, read_text_body_limited, redact_url, response_body_read_error,
     select_http_client, send_reqwest, validate_url_path_prefix,
 };
-use crate::sinks::text::{TextLimits, format_event_body_and_tags_limited, truncate_chars};
-use crate::sinks::{BoxFuture, Sink};
 
 const BARK_ALLOWED_HOSTS: [&str; 1] = ["api.day.app"];
 
@@ -181,7 +181,7 @@ impl Sink for BarkSink {
                 let body = read_text_body_limited(resp, DEFAULT_MAX_RESPONSE_BODY_BYTES)
                     .await
                     .map_err(|err| response_body_read_error("bark http error", status, &err))?;
-                return Err(http_status_text_error("bark", status, &body));
+                return Err(http_status_text_error("bark", status, &body).into());
             }
 
             let content_type_is_json = resp

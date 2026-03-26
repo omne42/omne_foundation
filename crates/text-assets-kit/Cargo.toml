@@ -1,0 +1,13 @@
+[package]
+name = "text-assets-kit"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+omne-fs-primitives = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

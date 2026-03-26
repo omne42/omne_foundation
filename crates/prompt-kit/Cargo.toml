@@ -1,0 +1,13 @@
+[package]
+name = "prompt-kit"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+text-assets-kit = { path = "../text-assets-kit" }
+
+[dev-dependencies]
+tempfile = "3"

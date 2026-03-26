@@ -1,0 +1,4 @@
+version: 1
+risk_profile: danger
+write_scope: full_access
+execution_isolation: none

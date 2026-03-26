@@ -8,6 +8,7 @@ use futures_util::FutureExt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use crate::event::Event;
+use crate::log::{warn_hub_notify_dropped, warn_hub_notify_failed};
 use crate::sinks::Sink;
 
 const DEFAULT_MAX_INFLIGHT_EVENTS: usize = 128;
@@ -168,16 +169,12 @@ impl Hub {
         }
 
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            tracing::warn!(
-                sink = "hub",
-                kind = %event.kind,
-                "notify dropped: no tokio runtime"
-            );
+            warn_hub_notify_dropped(event.kind.as_str(), "no_tokio_runtime");
             return;
         };
 
         if let Err(event) = self.try_notify_spawn(handle, event) {
-            tracing::warn!(sink = "hub", kind = %event.kind, "notify dropped: overloaded");
+            warn_hub_notify_dropped(event.kind.as_str(), "overloaded");
         }
     }
 
@@ -245,7 +242,7 @@ impl Hub {
         handle.spawn(async move {
             let _permit = permit;
             if let Err(err) = inner.send(&event).await {
-                tracing::warn!(sink = "hub", kind = %event.kind, "notify failed: {err}");
+                warn_hub_notify_failed(event.kind.as_str(), &err.to_string());
             }
         });
         Ok(())

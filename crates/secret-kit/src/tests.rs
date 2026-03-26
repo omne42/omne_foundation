@@ -27,6 +27,10 @@ fn assert_catalog_text_arg(text: &StructuredText, name: &str, expected: Option<&
     assert_eq!(catalog(text).text_arg(name), expected);
 }
 
+fn assert_secret_error_code(error: &SecretError, expected: &str) {
+    assert_eq!(error.error_code().as_str(), expected);
+}
+
 #[cfg(not(windows))]
 fn assert_catalog_arg_missing(text: &StructuredText, name: &str) {
     assert_eq!(catalog(text).arg(name), None);
@@ -1134,12 +1138,12 @@ async fn resolve_secret_rejects_builtin_program_override_without_absolute_path()
     let err = resolve_secret_text("secret://vault/secret/demo?field=token", &env)
         .await
         .unwrap_err();
-    let SecretError::AuthCommand(text) = err else {
-        panic!("expected auth command error");
+    let SecretError::Command(text) = err else {
+        panic!("expected secret command error");
     };
     assert_catalog_code(
         &text,
-        "error_detail.auth.command_program_override_not_absolute",
+        "error_detail.secret.command_program_override_not_absolute",
     );
     assert_catalog_text_arg(&text, "program", Some("vault"));
 }
@@ -1159,12 +1163,12 @@ async fn resolve_secret_rejects_builtin_program_override_with_wrong_basename() {
     let err = resolve_secret_text("secret://vault/secret/demo?field=token", &env)
         .await
         .unwrap_err();
-    let SecretError::AuthCommand(text) = err else {
-        panic!("expected auth command error");
+    let SecretError::Command(text) = err else {
+        panic!("expected secret command error");
     };
     assert_catalog_code(
         &text,
-        "error_detail.auth.command_program_override_invalid_name",
+        "error_detail.secret.command_program_override_invalid_name",
     );
     assert_catalog_text_arg(&text, "program", Some("vault"));
     assert_catalog_text_arg(
@@ -1190,12 +1194,12 @@ async fn resolve_secret_accepts_builtin_program_override_with_case_insensitive_n
     let err = resolve_secret_text("secret://vault/secret/demo?field=token", &env)
         .await
         .unwrap_err();
-    let SecretError::AuthCommand(text) = err else {
-        panic!("expected auth command error");
+    let SecretError::Command(text) = err else {
+        panic!("expected secret command error");
     };
     assert_ne!(
         catalog(&text).code(),
-        "error_detail.auth.command_program_override_invalid_name"
+        "error_detail.secret.command_program_override_invalid_name"
     );
 }
 
@@ -1215,12 +1219,12 @@ async fn resolve_secret_rejects_builtin_program_override_with_unix_script_suffix
     let err = resolve_secret_text("secret://vault/secret/demo?field=token", &env)
         .await
         .unwrap_err();
-    let SecretError::AuthCommand(text) = err else {
-        panic!("expected auth command error");
+    let SecretError::Command(text) = err else {
+        panic!("expected secret command error");
     };
     assert_catalog_code(
         &text,
-        "error_detail.auth.command_program_override_invalid_name",
+        "error_detail.secret.command_program_override_invalid_name",
     );
     assert_catalog_text_arg(&text, "program", Some("vault"));
     assert_catalog_text_arg(
@@ -1590,10 +1594,10 @@ async fn run_secret_command_uses_single_command_env_snapshot_for_timeout() -> Re
     let err = run_secret_command(&cmd, &SnapshotTimeoutEnv)
         .await
         .unwrap_err();
-    let SecretError::AuthCommand(text) = err else {
-        panic!("expected auth command error");
+    let SecretError::Command(text) = err else {
+        panic!("expected secret command error");
     };
-    assert_catalog_code(&text, "error_detail.auth.command_timeout");
+    assert_catalog_code(&text, "error_detail.secret.command_timeout");
     Ok(())
 }
 
@@ -1677,10 +1681,10 @@ async fn run_secret_command_uses_single_command_env_snapshot_for_timeout() -> Re
     let err = run_secret_command(&cmd, &SnapshotTimeoutEnv)
         .await
         .unwrap_err();
-    let SecretError::AuthCommand(text) = err else {
-        panic!("expected auth command error");
+    let SecretError::Command(text) = err else {
+        panic!("expected secret command error");
     };
-    assert_catalog_code(&text, "error_detail.auth.command_timeout");
+    assert_catalog_code(&text, "error_detail.secret.command_timeout");
     Ok(())
 }
 
@@ -1732,7 +1736,7 @@ fn default_get_command_env_os_matches_windows_variable_names_case_insensitively(
         }
     }
 
-    let value = PairBackedEnv.get_command_env_os(OsStr::new("ditto_secret_command_timeout_ms"));
+    let value = PairBackedEnv.get_command_env_os(OsStr::new("secret_command_timeout_ms"));
 
     assert_eq!(value.as_deref(), Some(OsStr::new("25")));
 }
@@ -1798,10 +1802,10 @@ async fn secret_command_runner_rejects_non_utf8_stdout() -> Result<()> {
         json_key: None,
     };
     let err = run_secret_command(&cmd, &env).await.unwrap_err();
-    let SecretError::AuthCommand(text) = err else {
-        panic!("expected auth command error");
+    let SecretError::Command(text) = err else {
+        panic!("expected secret command error");
     };
-    assert_catalog_code(&text, "error_detail.auth.command_stdout_not_utf8");
+    assert_catalog_code(&text, "error_detail.secret.command_stdout_not_utf8");
     assert_catalog_text_arg(&text, "program", Some("sh"));
     Ok(())
 }
@@ -1829,10 +1833,10 @@ async fn secret_command_runner_rejects_oversized_stdout_before_timeout() -> Resu
         json_key: None,
     };
     let err = run_secret_command(&cmd, &env).await.unwrap_err();
-    let SecretError::AuthCommand(text) = err else {
-        panic!("expected auth command error");
+    let SecretError::Command(text) = err else {
+        panic!("expected secret command error");
     };
-    assert_catalog_code(&text, "error_detail.auth.command_stdout_too_large");
+    assert_catalog_code(&text, "error_detail.secret.command_stdout_too_large");
     assert_catalog_text_arg(
         &text,
         "max_bytes",
@@ -1845,10 +1849,7 @@ async fn secret_command_runner_rejects_oversized_stdout_before_timeout() -> Resu
 #[tokio::test]
 async fn secret_command_runner_times_out() -> Result<()> {
     let env = TestEnv {
-        vars: BTreeMap::from([(
-            "DITTO_SECRET_COMMAND_TIMEOUT_MS".to_string(),
-            "10".to_string(),
-        )]),
+        vars: BTreeMap::from([("SECRET_COMMAND_TIMEOUT_MS".to_string(), "10".to_string())]),
         ..TestEnv::default()
     };
     let cmd = SecretCommand {
@@ -1858,10 +1859,10 @@ async fn secret_command_runner_times_out() -> Result<()> {
         json_key: None,
     };
     let err = run_secret_command(&cmd, &env).await.unwrap_err();
-    let SecretError::AuthCommand(text) = err else {
-        panic!("expected auth command error");
+    let SecretError::Command(text) = err else {
+        panic!("expected secret command error");
     };
-    assert_catalog_code(&text, "error_detail.auth.command_timeout");
+    assert_catalog_code(&text, "error_detail.secret.command_timeout");
     Ok(())
 }
 
@@ -1880,16 +1881,16 @@ async fn secret_command_runner_discards_stderr_from_errors() -> Result<()> {
     };
     let err = run_secret_command(&cmd, &env).await.unwrap_err();
     let rendered = err.to_string();
-    let SecretError::AuthCommand(text) = &err else {
-        panic!("expected auth command error");
+    let SecretError::Command(text) = &err else {
+        panic!("expected secret command error");
     };
-    assert_catalog_code(text, "error_detail.auth.command_failed_status");
+    assert_catalog_code(text, "error_detail.secret.command_failed_status");
     assert_eq!(catalog(text).unsigned_arg("stderr_bytes"), Some(14));
     assert_catalog_arg_missing(text, "stderr_hint");
     assert!(!rendered.contains("leaked-secret"));
     assert!(!rendered.contains("stderr="));
     assert!(rendered.contains("stderr_bytes=14"));
-    assert!(rendered.contains("error_detail.auth.command_failed_status"));
+    assert!(rendered.contains("error_detail.secret.command_failed_status"));
     Ok(())
 }
 
@@ -1907,11 +1908,11 @@ async fn secret_command_runner_classifies_safe_stderr_failures() -> Result<()> {
         json_key: None,
     };
     let err = run_secret_command(&cmd, &env).await.unwrap_err();
-    let SecretError::AuthCommand(text) = &err else {
-        panic!("expected auth command error");
+    let SecretError::Command(text) = &err else {
+        panic!("expected secret command error");
     };
 
-    assert_catalog_code(text, "error_detail.auth.command_failed_status");
+    assert_catalog_code(text, "error_detail.secret.command_failed_status");
     assert_eq!(catalog(text).text_arg("stderr_hint"), Some("auth"));
     assert_eq!(catalog(text).unsigned_arg("stderr_bytes"), Some(18));
     Ok(())
@@ -2480,10 +2481,10 @@ fn all_secret_error_variants_expose_structured_text() {
         .expect_err("invalid json should fail");
     assert_catalog_code(json_err.structured_text(), "error_detail.secret.json_error");
 
-    let lookup_err = SecretError::lookup(structured_text!("error_detail.auth.missing_env_var"));
+    let lookup_err = SecretError::lookup(structured_text!("error_detail.secret.missing_env_var"));
     assert_catalog_code(
         lookup_err.structured_text(),
-        "error_detail.auth.missing_env_var",
+        "error_detail.secret.missing_env_var",
     );
 
     let invalid_spec = invalid_response!("error_detail.secret.scheme_missing");
@@ -2492,10 +2493,39 @@ fn all_secret_error_variants_expose_structured_text() {
         "error_detail.secret.scheme_missing",
     );
 
-    let auth_err = auth_command_error!("error_detail.auth.command_timeout");
+    let command_err = secret_command_error!("error_detail.secret.command_timeout");
     assert_catalog_code(
-        auth_err.structured_text(),
-        "error_detail.auth.command_timeout",
+        command_err.structured_text(),
+        "error_detail.secret.command_timeout",
+    );
+}
+
+#[test]
+fn secret_error_maps_to_error_record_metadata() {
+    let error = SecretError::lookup(structured_text!("error_detail.secret.missing_env_var"));
+    let record = error.error_record();
+
+    assert_secret_error_code(&error, "secret.lookup");
+    assert_eq!(record.code().as_str(), "secret.lookup");
+    assert_eq!(record.category(), ErrorCategory::NotFound);
+    assert_eq!(record.retry_advice(), ErrorRetryAdvice::DoNotRetry);
+    assert_catalog_code(record.user_text(), "error_detail.secret.missing_env_var");
+    assert!(record.source().is_none());
+}
+
+#[test]
+fn secret_error_into_error_record_preserves_source() {
+    let record = SecretError::from(std::io::Error::other("boom")).into_error_record();
+
+    assert_eq!(record.code().as_str(), "secret.io");
+    assert_eq!(record.category(), ErrorCategory::ExternalDependency);
+    assert_eq!(record.retry_advice(), ErrorRetryAdvice::Retryable);
+    assert_eq!(
+        record
+            .source()
+            .expect("source should be present")
+            .to_string(),
+        "boom"
     );
 }
 
@@ -2520,7 +2550,7 @@ fn parse_rejects_unknown_query_parameter() {
 }
 
 #[test]
-fn parse_rejects_legacy_aws_provider_alias() {
+fn parse_rejects_noncanonical_aws_provider_name() {
     let err = SecretSpec::parse("secret://aws-secrets-manager/demo").unwrap_err();
     let SecretError::InvalidSpec(text) = err else {
         panic!("expected invalid spec error");
@@ -2530,7 +2560,7 @@ fn parse_rejects_legacy_aws_provider_alias() {
 }
 
 #[test]
-fn parse_rejects_legacy_gcp_provider_alias() {
+fn parse_rejects_noncanonical_gcp_provider_name() {
     let err = SecretSpec::parse("secret://gcp-secret-manager/demo").unwrap_err();
     let SecretError::InvalidSpec(text) = err else {
         panic!("expected invalid spec error");
@@ -2540,7 +2570,7 @@ fn parse_rejects_legacy_gcp_provider_alias() {
 }
 
 #[test]
-fn parse_rejects_legacy_azure_provider_alias() {
+fn parse_rejects_noncanonical_azure_provider_name() {
     let err = SecretSpec::parse("secret://azure-key-vault/demo").unwrap_err();
     let SecretError::InvalidSpec(text) = err else {
         panic!("expected invalid spec error");
@@ -2681,7 +2711,7 @@ async fn missing_env_secret_reports_lookup_error() {
     let SecretError::Lookup(text) = err else {
         panic!("expected lookup error");
     };
-    assert_catalog_code(&text, "error_detail.auth.missing_env_var");
+    assert_catalog_code(&text, "error_detail.secret.missing_env_var");
     assert_catalog_text_arg(&text, "key", Some("MISSING_SECRET"));
 }
 

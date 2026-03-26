@@ -8,11 +8,7 @@
 - `notify_kit::env::StandardEnvHubOptions`
 
 它们是 convenience helper，不是强制协议，也不改变推荐分层。
-
-补充说明：
-
-- root-level 的兼容 re-export 仅用于平滑迁移，并已标记为 deprecated。
-- 新代码与文档示例应优先使用 `notify_kit::env::...` 路径。
+公开入口固定为 `notify_kit::env::...`。
 
 ## 一个推荐的配置层结构
 
@@ -89,17 +85,16 @@ fn build_hub_from_env() -> notify_kit::Result<Hub> {
 ```
 
 如果你采用库自带的 env helper，建议通过 `notify_kit::env::build_hub_from_standard_env(...)` 访问，并把它当成 bootstrap helper：能减少样板代码，但不妨碍你在自己的 integration layer 继续包装、替换或扩展。
+它使用一套中性的 `NOTIFY_*` 约定，而不是业务前缀协议。
 
-## 与 omne-agent 的集成（示例）
+## 标准 helper 示例
 
-`omne-agent` 仓库（目录名为 `omne-agent/`）内的 `omne-agent-app-server` notify integration 负责解析 `OMNE_AGENT_NOTIFY_*` 并构造 Hub。
+如果你的应用愿意直接采用这套标准约定，可以这样接线：
 
 ```bash
-cd ../omne-agent
+export NOTIFY_SOUND=1
+# export NOTIFY_FEISHU_WEBHOOK_URL="..."
+# export NOTIFY_EVENTS="turn_completed,approval_requested,message_received"
 
-export OMNE_AGENT_NOTIFY_SOUND=1
-# export OMNE_AGENT_NOTIFY_FEISHU_WEBHOOK_URL="..."
-# export OMNE_AGENT_NOTIFY_EVENTS="turn_completed,approval_requested,message_received"
-
-cargo run -p omne-agent-app-server --features notify
+cargo run -p your-app
 ```

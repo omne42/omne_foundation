@@ -1,13 +1,13 @@
 use std::time::Duration;
 
 use crate::Event;
-use crate::sinks::http::{
+use crate::sinks::text::{TextLimits, format_event_text_limited, truncate_chars};
+use crate::sinks::{BoxFuture, Sink};
+use http_kit::{
     DEFAULT_MAX_RESPONSE_BODY_BYTES, build_http_client, http_status_text_error,
     parse_and_validate_https_url, read_text_body_limited, redact_url, redact_url_str,
     response_body_read_error, select_http_client, send_reqwest, validate_url_path_prefix,
 };
-use crate::sinks::text::{TextLimits, format_event_text_limited, truncate_chars};
-use crate::sinks::{BoxFuture, Sink};
 
 const SLACK_ALLOWED_HOSTS: [&str; 1] = ["hooks.slack.com"];
 
@@ -127,19 +127,18 @@ impl Sink for SlackWebhookSink {
                             "slack webhook api error",
                             status,
                             &err,
-                        ));
+                        )
+                        .into());
                     }
-                    return Err(response_body_read_error(
-                        "slack webhook http error",
-                        status,
-                        &err,
-                    ));
+                    return Err(
+                        response_body_read_error("slack webhook http error", status, &err).into(),
+                    );
                 }
             };
             let body = body.trim();
 
             if !status.is_success() {
-                return Err(http_status_text_error("slack webhook", status, body));
+                return Err(http_status_text_error("slack webhook", status, body).into());
             }
 
             if body.is_empty() || body.eq_ignore_ascii_case("ok") {

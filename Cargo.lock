@@ -270,6 +270,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
+name = "config-kit"
+version = "0.1.0"
+dependencies = [
+ "omne-fs-primitives",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
+ "toml",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -336,6 +349,28 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "error-kit"
+version = "0.1.0"
+dependencies = [
+ "structured-text-kit",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "error-protocol"
+version = "0.1.0"
+dependencies = [
+ "error-kit",
+ "schemars",
+ "serde",
+ "serde_json",
+ "structured-text-kit",
+ "structured-text-protocol",
+ "thiserror 1.0.69",
+ "ts-rs",
 ]
 
 [[package]]
@@ -521,6 +556,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "github-kit"
+version = "0.1.0"
+dependencies = [
+ "http-kit",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -581,6 +628,18 @@ dependencies = [
  "http",
  "http-body",
  "pin-project-lite",
+]
+
+[[package]]
+name = "http-kit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
@@ -654,12 +713,21 @@ dependencies = [
 name = "i18n-kit"
 version = "0.1.0"
 dependencies = [
- "omne-systems-fs-primitives",
  "proptest",
  "serde",
  "serde_json",
  "structured-text-kit",
  "tempfile",
+]
+
+[[package]]
+name = "i18n-runtime-kit"
+version = "0.1.0"
+dependencies = [
+ "i18n-kit",
+ "structured-text-kit",
+ "tempfile",
+ "text-assets-kit",
 ]
 
 [[package]]
@@ -873,6 +941,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
+name = "log-kit"
+version = "0.1.0"
+dependencies = [
+ "structured-text-kit",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -889,11 +966,14 @@ name = "mcp-jsonrpc"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "error-kit",
  "futures-util",
+ "http-kit",
  "libc",
  "reqwest",
  "serde",
  "serde_json",
+ "structured-text-kit",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -907,13 +987,17 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "clap",
+ "config-kit",
+ "error-kit",
  "futures-util",
+ "http-kit",
  "libc",
  "mcp-jsonrpc",
  "predicates",
  "reqwest",
  "serde",
  "serde_json",
+ "structured-text-kit",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -966,10 +1050,13 @@ dependencies = [
  "base64",
  "futures-util",
  "hmac",
+ "http-kit",
+ "log-kit",
  "pulldown-cmark",
  "reqwest",
  "serde_json",
  "sha2",
+ "structured-text-kit",
  "tokio",
  "tracing",
 ]
@@ -1012,18 +1099,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "omne-systems-fs-primitives"
+name = "omne-fs-primitives"
 version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
  "fs2",
  "libc",
+ "tempfile",
  "windows-sys 0.52.0",
 ]
 
 [[package]]
-name = "omne-systems-process-primitives"
+name = "omne-process-primitives"
 version = "0.1.0"
 dependencies = [
  "rustix",
@@ -1061,6 +1149,17 @@ name = "pin-utils"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
+
+[[package]]
+name = "policy-meta"
+version = "0.1.0"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "ts-rs",
+]
 
 [[package]]
 name = "potential_utf"
@@ -1127,6 +1226,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "prompt-kit"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "text-assets-kit",
 ]
 
 [[package]]
@@ -1373,15 +1480,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "runtime-assets-kit"
-version = "0.1.0"
-dependencies = [
- "i18n-kit",
- "omne-systems-fs-primitives",
- "tempfile",
-]
-
-[[package]]
 name = "rustc-hash"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1497,8 +1595,9 @@ dependencies = [
 name = "secret-kit"
 version = "0.1.0"
 dependencies = [
- "omne-systems-fs-primitives",
- "omne-systems-process-primitives",
+ "error-kit",
+ "omne-fs-primitives",
+ "omne-process-primitives",
  "serde_json",
  "structured-text-kit",
  "tempfile",
@@ -1567,6 +1666,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_spanned"
+version = "0.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "serde_urlencoded"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1576,6 +1684,19 @@ dependencies = [
  "itoa",
  "ryu",
  "serde",
+]
+
+[[package]]
+name = "serde_yaml"
+version = "0.9.34+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
 ]
 
 [[package]]
@@ -1738,6 +1859,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
 
 [[package]]
+name = "text-assets-kit"
+version = "0.1.0"
+dependencies = [
+ "omne-fs-primitives",
+ "tempfile",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1851,6 +1980,47 @@ dependencies = [
  "pin-project-lite",
  "tokio",
 ]
+
+[[package]]
+name = "toml"
+version = "0.8.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
+dependencies = [
+ "serde",
+ "serde_spanned",
+ "toml_datetime",
+ "toml_edit",
+]
+
+[[package]]
+name = "toml_datetime"
+version = "0.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22cddaf88f4fbc13c51aebbf5f8eceb5c7c5a9da2ac40a13519eb5b0a0e8f11c"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "toml_edit"
+version = "0.22.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
+dependencies = [
+ "indexmap",
+ "serde",
+ "serde_spanned",
+ "toml_datetime",
+ "toml_write",
+ "winnow",
+]
+
+[[package]]
+name = "toml_write"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "tower"
@@ -1992,6 +2162,12 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"
@@ -2610,6 +2786,15 @@ name = "windows_x86_64_msvc"
 version = "0.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
+
+[[package]]
+name = "winnow"
+version = "0.7.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "winx"

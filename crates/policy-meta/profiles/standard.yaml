@@ -1,0 +1,4 @@
+version: 1
+risk_profile: standard
+write_scope: workspace_write
+execution_isolation: best_effort

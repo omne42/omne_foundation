@@ -121,6 +121,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use error_kit::{ErrorCategory, ErrorCode, ErrorRecord, ErrorRetryAdvice};
 use tokio::sync::broadcast;
 use zeroize::Zeroize;
 
@@ -138,7 +139,7 @@ pub enum SecretError {
     },
     Lookup(StructuredText),
     InvalidSpec(StructuredText),
-    AuthCommand(StructuredText),
+    Command(StructuredText),
 }
 
 pub type Result<T> = std::result::Result<T, SecretError>;
@@ -296,7 +297,95 @@ impl SecretError {
             | Self::Json { text, .. }
             | Self::Lookup(text)
             | Self::InvalidSpec(text)
-            | Self::AuthCommand(text) => text,
+            | Self::Command(text) => text,
+        }
+    }
+
+    #[must_use]
+    pub fn error_code(&self) -> ErrorCode {
+        match self {
+            Self::Io { .. } => {
+                ErrorCode::try_new("secret.io").expect("literal error code should validate")
+            }
+            Self::Json { .. } => {
+                ErrorCode::try_new("secret.json").expect("literal error code should validate")
+            }
+            Self::Lookup(_) => {
+                ErrorCode::try_new("secret.lookup").expect("literal error code should validate")
+            }
+            Self::InvalidSpec(_) => ErrorCode::try_new("secret.invalid_spec")
+                .expect("literal error code should validate"),
+            Self::Command(_) => {
+                ErrorCode::try_new("secret.command").expect("literal error code should validate")
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn error_category(&self) -> ErrorCategory {
+        match self {
+            Self::Io { .. } => ErrorCategory::ExternalDependency,
+            Self::Json { .. } => ErrorCategory::InvalidInput,
+            Self::Lookup(_) => ErrorCategory::NotFound,
+            Self::InvalidSpec(_) => ErrorCategory::InvalidInput,
+            Self::Command(_) => ErrorCategory::ExternalDependency,
+        }
+    }
+
+    #[must_use]
+    pub fn retry_advice(&self) -> ErrorRetryAdvice {
+        match self {
+            Self::Io { .. } => ErrorRetryAdvice::Retryable,
+            Self::Json { .. } => ErrorRetryAdvice::DoNotRetry,
+            Self::Lookup(_) => ErrorRetryAdvice::DoNotRetry,
+            Self::InvalidSpec(_) => ErrorRetryAdvice::DoNotRetry,
+            Self::Command(_) => ErrorRetryAdvice::DoNotRetry,
+        }
+    }
+
+    #[must_use]
+    pub fn error_record(&self) -> ErrorRecord {
+        ErrorRecord::new(self.error_code(), self.structured_text().clone())
+            .with_category(self.error_category())
+            .with_retry_advice(self.retry_advice())
+    }
+
+    #[must_use]
+    pub fn into_error_record(self) -> ErrorRecord {
+        match self {
+            Self::Io { text, source } => ErrorRecord::new(
+                ErrorCode::try_new("secret.io").expect("literal error code should validate"),
+                text,
+            )
+            .with_category(ErrorCategory::ExternalDependency)
+            .with_retry_advice(ErrorRetryAdvice::Retryable)
+            .with_source(source),
+            Self::Json { text, source } => ErrorRecord::new(
+                ErrorCode::try_new("secret.json").expect("literal error code should validate"),
+                text,
+            )
+            .with_category(ErrorCategory::InvalidInput)
+            .with_retry_advice(ErrorRetryAdvice::DoNotRetry)
+            .with_source(source),
+            Self::Lookup(text) => ErrorRecord::new(
+                ErrorCode::try_new("secret.lookup").expect("literal error code should validate"),
+                text,
+            )
+            .with_category(ErrorCategory::NotFound)
+            .with_retry_advice(ErrorRetryAdvice::DoNotRetry),
+            Self::InvalidSpec(text) => ErrorRecord::new(
+                ErrorCode::try_new("secret.invalid_spec")
+                    .expect("literal error code should validate"),
+                text,
+            )
+            .with_category(ErrorCategory::InvalidInput)
+            .with_retry_advice(ErrorRetryAdvice::DoNotRetry),
+            Self::Command(text) => ErrorRecord::new(
+                ErrorCode::try_new("secret.command").expect("literal error code should validate"),
+                text,
+            )
+            .with_category(ErrorCategory::ExternalDependency)
+            .with_retry_advice(ErrorRetryAdvice::DoNotRetry),
         }
     }
 
@@ -334,12 +423,8 @@ impl Display for SecretError {
             Self::InvalidSpec(text) => {
                 write!(f, "invalid secret spec: {}", text.diagnostic_display())
             }
-            Self::AuthCommand(text) => {
-                write!(
-                    f,
-                    "secret auth command error: {}",
-                    text.diagnostic_display()
-                )
+            Self::Command(text) => {
+                write!(f, "secret command error: {}", text.diagnostic_display())
             }
         }
     }
@@ -350,7 +435,7 @@ impl StdError for SecretError {
         match self {
             Self::Io { source, .. } => Some(source),
             Self::Json { source, .. } => Some(source),
-            Self::Lookup(_) | Self::InvalidSpec(_) | Self::AuthCommand(_) => None,
+            Self::Lookup(_) | Self::InvalidSpec(_) | Self::Command(_) => None,
         }
     }
 }
@@ -375,6 +460,12 @@ impl From<serde_json::Error> for SecretError {
     }
 }
 
+impl From<SecretError> for ErrorRecord {
+    fn from(error: SecretError) -> Self {
+        error.into_error_record()
+    }
+}
+
 macro_rules! invalid_response {
     ($code:literal $(,)?) => {
         SecretError::InvalidSpec(structured_text!($code))
@@ -384,12 +475,12 @@ macro_rules! invalid_response {
     };
 }
 
-macro_rules! auth_command_error {
+macro_rules! secret_command_error {
     ($code:literal $(,)?) => {
-        SecretError::AuthCommand(structured_text!($code))
+        SecretError::Command(structured_text!($code))
     };
     ($code:literal, $($rest:tt)*) => {
-        SecretError::AuthCommand(structured_text!($code, $($rest)*))
+        SecretError::Command(structured_text!($code, $($rest)*))
     };
 }
 
@@ -437,18 +528,18 @@ pub trait SecretEnvironment: Send + Sync {
 /// This is intentionally separate from [`SecretEnvironment`]. Secret lookup is domain state;
 /// child-process environment shaping and binary resolution are runtime policy.
 pub trait SecretCommandRuntime: Send + Sync {
-    /// Targeted command-environment lookup for control-plane settings and compatibility shims.
+    /// Targeted command-environment lookup for control-plane settings and runtime overrides.
     ///
     /// This does not automatically populate spawned child processes. Use `command_env_pairs` or
     /// `command_env_os_pairs` for explicit child environment injection.
     /// Secret command timeout tuning also does not consult this hook; if you want a resolver-local
-    /// timeout, put the `DITTO_SECRET_COMMAND_TIMEOUT_*` variables into the explicit command
+    /// timeout, put the `SECRET_COMMAND_TIMEOUT_*` variables into the explicit command
     /// snapshot instead of relying on ambient process state.
     fn get_command_env(&self, key: &str) -> Option<String> {
         std::env::var(key).ok()
     }
 
-    /// Targeted command-environment lookup for control-plane settings and compatibility shims.
+    /// Targeted command-environment lookup for control-plane settings and runtime overrides.
     ///
     /// Look up a command-environment value while sharing the same explicit snapshot used for child
     /// process injection when possible.
@@ -977,8 +1068,8 @@ const MAX_SECRET_COMMAND_TIMEOUT_SECS: u64 = 300;
 const MAX_SECRET_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_SECRET_FILE_BYTES: usize = 64 * 1024;
 const MAX_SECRET_FILE_SYMLINK_DEPTH: usize = 16;
-const SECRET_COMMAND_TIMEOUT_MS_ENV: &str = "DITTO_SECRET_COMMAND_TIMEOUT_MS";
-const SECRET_COMMAND_TIMEOUT_SECS_ENV: &str = "DITTO_SECRET_COMMAND_TIMEOUT_SECS";
+const SECRET_COMMAND_TIMEOUT_MS_ENV: &str = "SECRET_COMMAND_TIMEOUT_MS";
+const SECRET_COMMAND_TIMEOUT_SECS_ENV: &str = "SECRET_COMMAND_TIMEOUT_SECS";
 
 async fn read_limited<R>(mut reader: R, max_bytes: usize) -> std::io::Result<(SecretBytes, bool)>
 where

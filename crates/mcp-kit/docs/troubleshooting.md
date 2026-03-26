@@ -20,15 +20,34 @@
 
 原因：对 `mcp.json v1` schema，`mcp-kit` 采用 fail-closed：顶层和 `servers.<name>` 都启用了 `deny_unknown_fields`。
 
-说明：如果你使用的是 Cursor/Claude Code 常见的 `.mcp.json` / `mcpServers` 兼容格式，未知字段通常会被忽略；但字段类型不匹配、缺少必要字段仍会报错。
-
 解决：删除拼写错误/未支持的字段；或升级代码以支持新字段。
+
+### unsupported legacy MCP config format: `mcpServers` wrapper is no longer accepted
+
+原因：`Config::load` 只接受 canonical `mcp.json v1`，不再兼容 `mcpServers` wrapper / `plugin.json` 等旧格式。
+
+解决：改写为 canonical `mcp.json v1`，例如把旧的 `command/args/headers` 等字段迁移到 `servers.<name>.transport/argv/http_headers/...`。
+
+### unsupported mcp.json format: missing `version` (expected v1)
+
+原因：当前不再接受“直接 server map”之类缺少顶层 `version` 的旧格式。
+
+解决：补上 canonical 顶层结构：
+
+```json
+{
+  "version": 1,
+  "servers": {
+    "server_name": { "transport": "stdio", "argv": ["bin", "--stdio"] }
+  }
+}
+```
 
 ### mcp config too large
 
 原因：出于 DoS 防护，`mcp-kit` 会对配置文件读取做大小上限（当前为 4MiB），超过会拒绝加载。
 
-解决：缩小配置文件（移除大块无关内容）；如果使用 `mcpServers: "path"` 等间接引用，确保被引用的目标文件也在大小上限内。
+解决：缩小配置文件（移除大块无关内容）。
 
 ### mcp config must be a regular file
 
@@ -85,7 +104,7 @@
 
 ### refusing to connect hostname that resolves to non-global ip in untrusted mode
 
-原因：默认启用了 `dns_check`（CLI 默认行为，`--dns-check` 仅为兼容保留参数），并且该 hostname 解析到了非公网 IP。
+原因：默认启用了 `dns_check`，并且该 hostname 解析到了非公网 IP。
 
 解决（任选其一）：
 
@@ -95,7 +114,7 @@
 
 ### refusing to connect hostname with failed/timed out dns lookup in untrusted mode
 
-原因：默认启用了 `dns_check`（CLI 默认行为，`--dns-check` 仅为兼容保留参数），但 DNS 解析失败或超时；默认策略是 fail-closed（直接拒绝连接）。
+原因：默认启用了 `dns_check`，但 DNS 解析失败或超时；默认策略是 fail-closed（直接拒绝连接）。
 
 解决（任选其一）：
 

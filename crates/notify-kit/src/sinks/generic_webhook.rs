@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use crate::Event;
-use crate::sinks::http::{
+use crate::sinks::text::{TextLimits, format_event_text_limited};
+use crate::sinks::{BoxFuture, Sink};
+use http_kit::{
     build_http_client, ensure_http_success, parse_and_validate_https_url_basic, redact_url,
     redact_url_str, select_http_client, send_reqwest, validate_url_path_prefix,
 };
-use crate::sinks::text::{TextLimits, format_event_text_limited};
-use crate::sinks::{BoxFuture, Sink};
 
 #[non_exhaustive]
 #[derive(Clone)]
@@ -337,7 +337,7 @@ impl Sink for GenericWebhookSink {
                 "generic webhook",
             )
             .await?;
-            ensure_http_success(resp, "generic webhook").await
+            Ok(ensure_http_success(resp, "generic webhook").await?)
         })
     }
 }

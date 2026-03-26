@@ -1,13 +1,12 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
+use crate::catalog_state::CatalogState;
 use crate::{Catalog, Locale, TranslationCatalog, TranslationResolution};
 
 use super::{
     DynamicCatalogError,
-    locale_sources::{
-        LocaleMap, load_locales_from_directory, load_locales_from_json, load_locales_from_sources,
-    },
+    locale_sources::{LocaleMap, load_locales_from_json, load_locales_from_sources},
 };
 
 /// Strategy for handling missing catalog keys.
@@ -24,8 +23,7 @@ pub enum FallbackStrategy {
 /// Dynamic JSON catalog loaded from files or environment at runtime.
 #[derive(Debug)]
 pub struct DynamicJsonCatalog {
-    locales: RwLock<LocaleMap>,
-    default_locale: Locale,
+    state: RwLock<CatalogState>,
     fallback_strategy: FallbackStrategy,
 }
 
@@ -38,19 +36,9 @@ impl DynamicJsonCatalog {
     #[must_use]
     pub fn empty(default_locale: Locale, fallback_strategy: FallbackStrategy) -> Self {
         Self {
-            locales: RwLock::new(LocaleMap::new()),
-            default_locale,
+            state: RwLock::new(CatalogState::new(default_locale, LocaleMap::new())),
             fallback_strategy,
         }
-    }
-
-    /// Creates an empty catalog.
-    ///
-    /// Prefer [`Self::empty`] when the unloaded state is intentional. This
-    /// compatibility constructor exists so older call sites do not break.
-    #[must_use]
-    pub fn new(default_locale: Locale, fallback_strategy: FallbackStrategy) -> Self {
-        Self::empty(default_locale, fallback_strategy)
     }
 
     fn with_locales(
@@ -59,23 +47,9 @@ impl DynamicJsonCatalog {
         fallback_strategy: FallbackStrategy,
     ) -> Self {
         Self {
-            locales: RwLock::new(locales),
-            default_locale,
+            state: RwLock::new(CatalogState::new(default_locale, locales)),
             fallback_strategy,
         }
-    }
-
-    pub fn from_directory(
-        path: &Path,
-        default_locale: Locale,
-        fallback_strategy: FallbackStrategy,
-    ) -> Result<Self, DynamicCatalogError> {
-        let locales = load_locales_from_directory(path, default_locale)?;
-        Ok(Self::with_locales(
-            locales,
-            default_locale,
-            fallback_strategy,
-        ))
     }
 
     pub fn from_json_string(
@@ -112,12 +86,6 @@ impl DynamicJsonCatalog {
         ))
     }
 
-    pub fn reload_from_directory(&self, path: &Path) -> Result<(), DynamicCatalogError> {
-        let locales = load_locales_from_directory(path, self.default_locale)?;
-        *write_unpoisoned(&self.locales) = locales;
-        Ok(())
-    }
-
     /// Reloads the catalog from caller-provided locale sources.
     ///
     /// Source labels follow the same rules as [`Self::from_locale_sources`].
@@ -126,8 +94,9 @@ impl DynamicJsonCatalog {
         I: IntoIterator<Item = (P, String)>,
         P: Into<PathBuf>,
     {
-        let locales = load_locales_from_sources(sources, self.default_locale)?;
-        *write_unpoisoned(&self.locales) = locales;
+        let default_locale = self.default_locale();
+        let locales = load_locales_from_sources(sources, default_locale)?;
+        *write_unpoisoned(&self.state) = CatalogState::new(default_locale, locales);
         Ok(())
     }
 
@@ -136,46 +105,26 @@ impl DynamicJsonCatalog {
         self.fallback_strategy
     }
 
-    fn lookup_catalog_text_in(locales: &LocaleMap, locale: Locale, key: &str) -> Option<Arc<str>> {
-        locales
-            .get(&locale)
-            .and_then(|texts| texts.get(key))
-            .cloned()
-    }
-
-    fn lookup_default_catalog_text_in(
-        &self,
-        locales: &LocaleMap,
-        locale: Locale,
-        key: &str,
-    ) -> Option<Arc<str>> {
-        (locale != self.default_locale)
-            .then(|| Self::lookup_catalog_text_in(locales, self.default_locale, key))
-            .flatten()
-    }
-
     fn lookup_catalog_text(&self, locale: Locale, key: &str) -> Option<Arc<str>> {
-        Self::lookup_catalog_text_in(&read_unpoisoned(&self.locales), locale, key)
+        read_unpoisoned(&self.state).lookup(locale, key)
     }
 }
 
 impl TranslationCatalog for DynamicJsonCatalog {
     fn resolve_shared(&self, locale: Locale, key: &str) -> TranslationResolution {
-        let locales = read_unpoisoned(&self.locales);
-        if let Some(value) = Self::lookup_catalog_text_in(&locales, locale, key) {
+        let state = read_unpoisoned(&self.state);
+        if let Some(value) = state.lookup(locale, key) {
             return TranslationResolution::Exact(value);
         }
 
         match self.fallback_strategy {
             FallbackStrategy::ReturnKey => TranslationResolution::Synthetic(Arc::<str>::from(key)),
-            FallbackStrategy::ReturnDefaultLocale => self
-                .lookup_default_catalog_text_in(&locales, locale, key)
-                .map_or(
-                    TranslationResolution::Missing,
-                    TranslationResolution::Fallback,
-                ),
+            FallbackStrategy::ReturnDefaultLocale => state.lookup_default(locale, key).map_or(
+                TranslationResolution::Missing,
+                TranslationResolution::Fallback,
+            ),
             FallbackStrategy::Both => {
-                if let Some(value) = self.lookup_default_catalog_text_in(&locales, locale, key) {
+                if let Some(value) = state.lookup_default(locale, key) {
                     TranslationResolution::Fallback(value)
                 } else {
                     TranslationResolution::Synthetic(Arc::<str>::from(key))
@@ -191,15 +140,15 @@ impl Catalog for DynamicJsonCatalog {
     }
 
     fn default_locale(&self) -> Locale {
-        self.default_locale
+        read_unpoisoned(&self.state).default_locale()
     }
 
     fn available_locales(&self) -> Vec<Locale> {
-        read_unpoisoned(&self.locales).keys().copied().collect()
+        read_unpoisoned(&self.state).available_locales()
     }
 
     fn locale_enabled(&self, locale: Locale) -> bool {
-        read_unpoisoned(&self.locales).contains_key(&locale)
+        read_unpoisoned(&self.state).locale_enabled(locale)
     }
 }
 

@@ -1,0 +1,4 @@
+version: 1
+risk_profile: safe
+write_scope: read_only
+execution_isolation: strict

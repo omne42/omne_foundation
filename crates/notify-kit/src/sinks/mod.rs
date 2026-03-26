@@ -5,7 +5,6 @@ mod discord;
 mod feishu;
 mod generic_webhook;
 mod github;
-mod http;
 mod markdown;
 mod pushplus;
 mod serverchan;

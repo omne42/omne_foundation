@@ -35,7 +35,7 @@
 4. 检查是否同时更新了 changelog。
 5. 拒绝 changelog-only 提交。
 6. 默认拒绝修改已发布 changelog 段落。
-7. 运行 workspace 级 Rust checks。
+7. 运行 workspace 级文档系统与 Rust checks。
 8. 对特定 crate 触发额外 asset checks。
 
 ## 版本策略 gate
@@ -81,17 +81,34 @@
 
 `pre-commit` 会直接执行 workspace 级 Rust 本地门禁。当前包含：
 
+- 文档系统入口检查
 - `cargo fmt --all -- --check`
 - `cargo check --workspace --all-targets --all-features`
 - `cargo test --workspace --all-features`
 
-也就是说，提交前默认要满足格式、编译和测试这三类本地门禁。
+也就是说，提交前默认要满足文档结构、格式、编译和测试这四类本地门禁。
 
 `scripts/workspace_check/` 是这里的共享实现；`scripts/check-workspace.sh` 只是保留给手动执行和 CI 复用的薄入口。
 
 ## asset checks
 
 如果 staged 文件命中某些路径，`pre-commit` 还会触发额外资产检查。
+
+### `policy-meta`
+
+当提交涉及这些内容时会触发：
+
+- `crates/policy-meta/Cargo.toml`
+- `crates/policy-meta/README.md`
+- `crates/policy-meta/SPEC.md`
+- `crates/policy-meta/src/*`
+- `crates/policy-meta/schema/*`
+- `crates/policy-meta/bindings/*`
+- `crates/policy-meta/profiles/*`
+
+对应检查包括：
+
+- `cargo run -p policy-meta --bin export-artifacts -- --check`
 
 ### `mcp-kit`
 
@@ -132,12 +149,14 @@
 除了 `local`，共享检查核心还支持：
 
 - `ci`
-- `asset-checks [all|mcp-kit|notify-kit]`
+- `docs-system`
+- `asset-checks [all|policy-meta|mcp-kit|notify-kit]`
 - `secret-kit-target <target-triple>`
 
 其中：
 
 - `ci` 在 `local` 基础上增加 `clippy` 和全量 asset checks
+- `docs-system` 只运行文档系统入口与链接约束检查
 - `secret-kit-target` 用于检查 `secret-kit` 的特定 target 编译
 
 ## `commit-msg` 当前做什么

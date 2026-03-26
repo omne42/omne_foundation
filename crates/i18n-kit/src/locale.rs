@@ -247,6 +247,7 @@ fn split_locale_codeset(value: &str) -> Option<(&str, &str)> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn is_posix_default_locale_request(value: &str) -> bool {
     let trimmed = value.trim();
     if trimmed.is_empty() {

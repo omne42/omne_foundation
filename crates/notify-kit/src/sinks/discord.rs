@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use crate::Event;
-use crate::sinks::http::{
+use crate::sinks::text::{TextLimits, format_event_text_limited};
+use crate::sinks::{BoxFuture, Sink};
+use http_kit::{
     build_http_client, ensure_http_success, parse_and_validate_https_url, redact_url,
     redact_url_str, select_http_client, send_reqwest, validate_url_path_prefix,
 };
-use crate::sinks::text::{TextLimits, format_event_text_limited};
-use crate::sinks::{BoxFuture, Sink};
 
 const DISCORD_ALLOWED_HOSTS: [&str; 2] = ["discord.com", "discordapp.com"];
 
@@ -118,7 +118,7 @@ impl Sink for DiscordWebhookSink {
                 "discord webhook",
             )
             .await?;
-            ensure_http_success(resp, "discord webhook").await
+            Ok(ensure_http_success(resp, "discord webhook").await?)
         })
     }
 }

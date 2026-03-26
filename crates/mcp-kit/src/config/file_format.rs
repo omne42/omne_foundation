@@ -44,7 +44,7 @@ pub(super) struct ServerConfigFile {
     pub(super) http_url: Option<String>,
     #[serde(default)]
     pub(super) bearer_token_env_var: Option<String>,
-    #[serde(default, alias = "headers")]
+    #[serde(default)]
     pub(super) http_headers: BTreeMap<String, String>,
     #[serde(default)]
     pub(super) env_http_headers: BTreeMap<String, String>,
@@ -52,55 +52,6 @@ pub(super) struct ServerConfigFile {
     pub(super) env: BTreeMap<String, String>,
     #[serde(default)]
     pub(super) stdout_log: Option<StdoutLogConfigFile>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub(super) enum ExternalCommandConfigFile {
-    String(String),
-    Array(Vec<String>),
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct ExternalServerConfigFile {
-    #[serde(default)]
-    pub(super) transport: Option<Transport>,
-    #[serde(rename = "type", default)]
-    pub(super) server_type: Option<String>,
-    #[serde(default)]
-    pub(super) command: Option<ExternalCommandConfigFile>,
-    #[serde(default)]
-    pub(super) args: Option<Vec<String>>,
-    #[serde(default)]
-    pub(super) argv: Option<Vec<String>>,
-    #[serde(default)]
-    pub(super) inherit_env: Option<bool>,
-    #[serde(default)]
-    pub(super) unix_path: Option<PathBuf>,
-    #[serde(default)]
-    pub(super) url: Option<String>,
-    #[serde(default)]
-    pub(super) sse_url: Option<String>,
-    #[serde(default)]
-    pub(super) http_url: Option<String>,
-    #[serde(default)]
-    pub(super) bearer_token_env_var: Option<String>,
-    #[serde(default, alias = "headers")]
-    pub(super) http_headers: BTreeMap<String, String>,
-    #[serde(default)]
-    pub(super) env_http_headers: BTreeMap<String, String>,
-    #[serde(default)]
-    pub(super) env: BTreeMap<String, String>,
-    #[serde(default)]
-    pub(super) environment: BTreeMap<String, String>,
-    #[serde(default)]
-    pub(super) stdout_log: Option<StdoutLogConfigFile>,
-    #[serde(default)]
-    pub(super) enabled: Option<bool>,
-    #[serde(default)]
-    pub(super) description: Option<String>,
-    #[serde(flatten)]
-    pub(super) extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]

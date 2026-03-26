@@ -1,9 +1,8 @@
 use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
 
-use omne_systems_fs_primitives::{
-    EntryKind, MissingRootPolicy, RootDir, open_directory_component, open_regular_file_at,
-    open_root,
+use omne_fs_primitives::{
+    Dir, MissingRootPolicy, open_directory_component, open_regular_file_at, open_root,
 };
 use structured_text_kit::structured_text;
 
@@ -19,6 +18,19 @@ struct OpenedSecretFile {
 
 struct OpenedSecretFileBlocking {
     file: std::fs::File,
+}
+
+struct SecretFileScopeRoot {
+    path: PathBuf,
+    dir: Dir,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SecretFileEntryKind {
+    Directory,
+    File,
+    Symlink,
+    Other,
 }
 
 pub(crate) async fn read_secret_file(path: &Path) -> Result<SecretString> {
@@ -81,7 +93,7 @@ fn open_secret_file_blocking(path: &Path, path_text: &str) -> Result<OpenedSecre
     Ok(OpenedSecretFileBlocking { file })
 }
 
-fn open_secret_file_scope_root(path: &Path, path_text: &str) -> Result<RootDir> {
+fn open_secret_file_scope_root(path: &Path, path_text: &str) -> Result<SecretFileScopeRoot> {
     open_root(
         secret_file_scope_root(path),
         "secret file scope",
@@ -89,6 +101,10 @@ fn open_secret_file_scope_root(path: &Path, path_text: &str) -> Result<RootDir> 
         |_, _, _, error| error,
     )
     .map_err(|error| secret_file_scope_error(path_text, error))?
+    .map(|root| SecretFileScopeRoot {
+        path: root.path().to_path_buf(),
+        dir: root.into_dir(),
+    })
     .ok_or_else(|| {
         secret_file_not_regular(
             path_text,
@@ -110,7 +126,7 @@ fn requested_secret_file_component<'a>(path: &'a Path, path_text: &str) -> Resul
 }
 
 fn open_scoped_secret_file(
-    scope_root: &RootDir,
+    scope_root: &SecretFileScopeRoot,
     requested: &Path,
     path_text: &str,
     symlink_depth: usize,
@@ -131,7 +147,8 @@ fn open_scoped_secret_file(
     }
 
     let mut current_dir = scope_root
-        .try_clone_dir()
+        .dir
+        .try_clone()
         .map_err(|error| secret_file_read_failed(path_text, error))?;
     let mut current_relative = PathBuf::new();
     let mut components = requested.components().peekable();
@@ -139,16 +156,16 @@ fn open_scoped_secret_file(
     while let Some(component) = components.next() {
         let component_path = Path::new(component.as_os_str());
         let is_last = components.peek().is_none();
-        let kind = omne_systems_fs_primitives::entry_kind_at(&current_dir, component_path)
+        let kind = secret_file_entry_kind_at(&current_dir, component_path)
             .map_err(|error| secret_file_read_failed(path_text, error))?;
 
         match kind {
-            EntryKind::Directory if !is_last => {
+            SecretFileEntryKind::Directory if !is_last => {
                 current_dir = open_directory_component(&current_dir, component_path)
                     .map_err(|error| secret_file_read_failed(path_text, error))?;
                 current_relative.push(component.as_os_str());
             }
-            EntryKind::File if is_last => {
+            SecretFileEntryKind::File if is_last => {
                 let file = open_regular_file_at(&current_dir, component_path).map_err(|error| {
                     if matches!(
                         error.kind(),
@@ -164,7 +181,7 @@ fn open_scoped_secret_file(
                 })?;
                 return Ok(file.into_std());
             }
-            EntryKind::Symlink => {
+            SecretFileEntryKind::Symlink => {
                 let target = current_dir
                     .read_link_contents(component_path)
                     .map_err(|error| secret_file_read_failed(path_text, error))?;
@@ -173,7 +190,7 @@ fn open_scoped_secret_file(
                     remainder.push(rest.as_os_str());
                 }
                 let next = resolve_scoped_secret_link_target(
-                    scope_root.path(),
+                    scope_root.path.as_path(),
                     &current_relative,
                     &target,
                     &remainder,
@@ -186,7 +203,9 @@ fn open_scoped_secret_file(
                     symlink_depth + 1,
                 );
             }
-            EntryKind::Directory | EntryKind::File | EntryKind::Other => {
+            SecretFileEntryKind::Directory
+            | SecretFileEntryKind::File
+            | SecretFileEntryKind::Other => {
                 return Err(secret_file_not_regular(
                     path_text,
                     "secret path must resolve to a regular file within its parent directory",
@@ -236,6 +255,23 @@ fn resolve_absolute_scoped_secret_link_target(
         )
     })?;
     normalize_scoped_secret_relative_path(relative, path_text)
+}
+
+fn secret_file_entry_kind_at(
+    directory: &Dir,
+    component: &Path,
+) -> std::io::Result<SecretFileEntryKind> {
+    let metadata = directory.symlink_metadata(component)?;
+    let file_type = metadata.file_type();
+    Ok(if file_type.is_symlink() {
+        SecretFileEntryKind::Symlink
+    } else if metadata.is_dir() {
+        SecretFileEntryKind::Directory
+    } else if metadata.is_file() {
+        SecretFileEntryKind::File
+    } else {
+        SecretFileEntryKind::Other
+    })
 }
 
 fn normalize_scoped_secret_relative_path(path: &Path, path_text: &str) -> Result<PathBuf> {

@@ -5,6 +5,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::StreamExt;
+use http_kit::{
+    HttpClientOptions, body_preview_json, build_http_client_with_options, drain_response_body,
+    read_response_body_preview_text, redact_reqwest_error,
+};
 use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
@@ -240,19 +244,15 @@ impl Client {
             headers.insert(name, value);
         }
 
-        let mut http_builder = reqwest::Client::builder()
+        let http_client = build_http_client_with_options(&HttpClientOptions {
+            connect_timeout,
+            default_headers: headers,
+            follow_redirects,
             // Avoid automatic proxy environment variable loading by default.
-            .no_proxy()
-            .redirect(if follow_redirects {
-                reqwest::redirect::Policy::limited(10)
-            } else {
-                reqwest::redirect::Policy::none()
-            })
-            .default_headers(headers);
-        if let Some(timeout) = connect_timeout {
-            http_builder = http_builder.connect_timeout(timeout);
-        }
-        let http_client = http_builder.build().map_err(|err| {
+            no_proxy: true,
+            ..Default::default()
+        })
+        .map_err(|err| {
             Error::protocol(
                 ProtocolErrorKind::InvalidInput,
                 format!("build http client failed: {err}"),
@@ -848,81 +848,6 @@ async fn read_response_body_limited(
     Ok(out)
 }
 
-async fn drain_response_body(resp: reqwest::Response) {
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        if chunk.is_err() {
-            break;
-        }
-    }
-}
-
-async fn read_response_body_preview_text(
-    resp: reqwest::Response,
-    max_bytes: usize,
-) -> Option<String> {
-    if max_bytes == 0 {
-        return None;
-    }
-
-    let mut out = Vec::with_capacity(max_bytes.min(4096));
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.ok()?;
-
-        let remaining = max_bytes.saturating_sub(out.len());
-        if remaining == 0 {
-            break;
-        }
-
-        let take = remaining.min(chunk.len());
-        out.extend_from_slice(&chunk[..take]);
-        if out.len() == max_bytes {
-            break;
-        }
-    }
-
-    body_preview_text(&out, max_bytes)
-}
-
-fn body_preview_json(body: &[u8], max_bytes: usize) -> Option<Value> {
-    body_preview_text(body, max_bytes).map(|preview| serde_json::json!({ "body": preview }))
-}
-
-fn body_preview_text(body: &[u8], max_bytes: usize) -> Option<String> {
-    if max_bytes == 0 || body.is_empty() {
-        return None;
-    }
-
-    // Convert only the preview window instead of the full body to avoid large temporary
-    // allocations on oversized/invalid responses.
-    let preview_len = body.len().min(max_bytes);
-    let preview = String::from_utf8_lossy(&body[..preview_len]).into_owned();
-    Some(truncate_string(preview, max_bytes))
-}
-
-fn redact_reqwest_error(err: &reqwest::Error) -> String {
-    let mut msg = err.to_string();
-    let Some(url) = err.url() else {
-        return msg;
-    };
-
-    let full = url.as_str();
-    let redacted = redact_url_for_error(url);
-    msg = msg.replace(full, &redacted);
-    msg
-}
-
-fn redact_url_for_error(url: &reqwest::Url) -> String {
-    let mut url = url.clone();
-    let _ = url.set_username("");
-    let _ = url.set_password(None);
-    url.set_path("/");
-    url.set_query(None);
-    url.set_fragment(None);
-    url.to_string()
-}
-
 async fn pump_sse(
     resp: reqwest::Response,
     writer: Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::io::DuplexStream>>>,
@@ -1064,18 +989,6 @@ async fn write_error_response(
     Ok(())
 }
 
-fn truncate_string(mut s: String, max_bytes: usize) -> String {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end = end.saturating_sub(1);
-    }
-    s.truncate(end);
-    s
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1138,7 +1051,7 @@ mod tests {
     #[test]
     fn body_preview_text_is_bounded_by_max_bytes() {
         let body = b"abcdefghijklmnopqrstuvwxyz";
-        let preview = body_preview_text(body, 8).expect("preview available");
+        let preview = http_kit::body_preview_text(body, 8).expect("preview available");
         assert_eq!(preview, "abcdefgh");
     }
 

@@ -7,10 +7,12 @@
 
 ## [Unreleased]
 
-> 计划下一个版本：`1.0.0`（包含若干 breaking changes；见下文标注）。
+> 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
-- release: bump workspace package version to `1.0.0`.
+- release: bump workspace package version to `0.1.0`.
+- `mcp-kit`：通用配置文件读取、大小上限、no-follow regular-file 约束与 rooted path canonicalize 现在下沉复用 `config-kit`，`mcp-kit` 自身只保留 MCP 领域模型与校验。
+- `mcp-kit`：`ServerNameError` 现在暴露稳定的 `error-kit::ErrorRecord` 映射，补齐 machine-readable 错误码、类别与重试语义。
 - `mcp-kit`：修复 `Manager::connect` 对 `stdout_log.path` 的相对路径处理：连接时先按 `cwd` 解析为绝对路径，再做 root 边界校验并将解析后的路径传给 `mcp-jsonrpc`，避免程序化配置传入相对路径时出现“校验与实际落盘路径不一致”的问题。
 - `mcp-jsonrpc`：优化 `stdout_log` 轮转扫描目录的热路径：先按文件名模式过滤，再对候选项执行 `file_type` 检查，减少大目录下的无效 `stat`/`file_type` 调用（行为不变）。
 - `mcp-kit`：优化 `stdout_log_path_within_root` 的路径归一化判断：支持 root/path 含等价父目录段时的稳定比较，减少边界校验误判（行为更准确）。
@@ -20,7 +22,6 @@
 - `mcp-jsonrpc`：优化入站 JSON-RPC 请求分发中的 `id` 处理：改为从消息对象中直接移动并解析 `id`，避免 `map.get + clone` 的额外拷贝；同时收口错误响应 `id` 归一化逻辑（仅允许 string/number 回显，其余返回 `null`）。行为不变。
 - `mcp-jsonrpc`：优化两条高频读取路径的初始缓冲分配策略：`read_line_limited` 现在为行缓冲预留 `4KiB` 初始容量，`streamable_http` 在未知 `Content-Length` 的响应体读取中也会使用小窗口预分配；减少高频小消息/分块响应场景下的重复扩容与分配抖动（行为不变）。
 - `mcp-kit`：修复 `Connection::wait_with_timeout` 的 child 回收边界：当 JSON-RPC close 阶段先超时且 `on_timeout=Kill` 时，仍会继续执行“detached child”的 kill/wait 流程，避免提前返回导致子进程未被回收；并补充对应回归测试。
-- `mcp-kit`：`Config::load` 的 `mcpServers` 路径跳转新增“已访问 canonical path”循环检测；循环引用现在会快速失败而不是反复读取到跳数上限，减少无效 I/O 与解析开销（行为更明确，仍保留最大跳数保护）。
 - `mcp-jsonrpc`：优化 `handle_response` 热路径：`result/error` 字段改为一次性移动解析，并在错误分支直接移动 `code/message/data`，减少 `HashMap` 重复查找与 `error.message` 额外字符串克隆；并补充响应路由回归测试（行为不变）。
 - `mcp-jsonrpc`：优化 `streamable_http` 错误 body 预览路径：无效 JSON 场景现在只对 `error_body_preview_bytes` 窗口做 UTF-8 lossy 转换，不再先把整段响应体转换为 `String` 再截断，降低大响应错误路径的瞬时内存占用；并补充预览边界测试。
 - `mcp-kit`：`Manager` 的 `stdout_log.path` root 边界判断改为先按当前工作目录绝对化 `cwd`，修复“`cwd` 为相对路径且 `stdout_log.path` 为绝对路径”时的误判拒绝问题（行为更符合预期，未放宽安全边界）。
@@ -48,17 +49,14 @@
 - `mcp-kit`：配置文件读取按已知文件大小预分配缓冲区，减少 `Config::load` 热路径上的重复扩容开销（行为不变）。
 - `mcp-jsonrpc`：诊断采样队列与 HTTP 错误 body 预览缓冲增加预分配，减少高频错误路径上的小额分配抖动（行为不变）。
 - `mcp-kit`：`Manager::connected_server_names()` 改为原地 `retain` 过滤，减少一次中间集合分配（行为不变）。
-- `mcp-kit`（BREAKING）：`UntrustedStreamableHttpPolicy` 默认 `dns_check` 从 `false` 改为 `true`（默认开启 hostname DNS 解析校验并 fail-closed）；`mcpctl` 的 DNS 相关参数语义同步调整：`--no-dns-check` 显式关闭默认校验，`--dns-timeout-ms`/`--dns-fail-open` 不再要求显式传 `--dns-check`。
-- `mcp-kit`：`mcpctl --dns-check` 明确标注为兼容性保留参数（默认已开启 DNS 校验）；同时收紧默认 DNS 回归测试断言，强制命中 `resolves to non-global ip` 分支，避免被 `localhost` 早期拒绝路径误通过。
-- Docs：统一 `mcpctl` DNS 参数文案，明确 `--dns-check` 为兼容保留参数；需要关闭 DNS 校验时应使用 `--no-dns-check`，并在 `docs/security.md` 的策略参数列表中补充该兼容语义及 `--dns-timeout-ms`/`--dns-fail-open`（同时去除 README 中重复的 `mcpctl --allow-host` 示例）。
+- `mcp-kit`（BREAKING）：`UntrustedStreamableHttpPolicy` 默认 `dns_check` 从 `false` 改为 `true`（默认开启 hostname DNS 解析校验并 fail-closed）；`mcpctl` 的 DNS 相关参数语义同步调整：`--no-dns-check` 显式关闭默认校验，`--dns-timeout-ms`/`--dns-fail-open` 直接基于默认开启的 DNS 校验生效。
 - `mcp-kit`（BREAKING）：引入 `ServerName` 新类型，并将其用于 `Config/Manager` 的 server key；`Session::new(...)` 现在要求传入 `ServerName`（避免把任意 `String` 当作已校验的 server 名称）。
 - `mcp-kit`：重构内部模块边界：`config` 拆分为 `file_format/model/load`（并抽出 `load::fs`），`manager` 抽出 `placeholders/streamable_http_validation/handlers`，并将大型 `tests` 外置，降低单文件复杂度与后续维护成本。
 - `mcp-kit`（BREAKING）：`ServerConfig` 现在按 transport 分层为 enum（`Stdio/Unix/StreamableHttp`），减少“非法字段组合”；部分仅对特定 transport 有意义的 setter 现在返回 `Result`（fail-fast）。
 - `mcp-kit`：新增 `ServerNameError`（`thiserror`，`#[non_exhaustive]`），为后续把 `anyhow` 逐步替换为结构化错误打基础。
 - `mcp-kit`：`ServerName::parse(...)` 的 rustdoc 现在明确其会对输入做 `trim()` 后再校验（行为不变，只是把语义写清楚；并修正了“ASCII whitespace”表述与实际行为不一致的问题）。
 - `mcp-kit`：`ServerName` 内部实现改为 `Arc<str>`，避免在 handler 等路径频繁 clone 时产生额外分配（API 不变）。
-- `mcp-kit`：`Config::load` 在 v1 `transport=stdio` 场景下也会校验 `env` 的 key/value 非空，避免接受不合法配置（与外部 `mcpServers` 格式行为对齐）。
-- `mcp-kit`：外部 `mcpServers` 格式的 `transport=stdio` 分支移除重复 argv 校验，统一由 `ServerConfig::stdio` 负责（行为不变）。
+- `mcp-kit`：`Config::load` 在 v1 `transport=stdio` 场景下也会校验 `env` 的 key/value 非空，避免接受不合法配置。
 - `mcp-kit`：加固 Untrusted `streamable_http` 的“非公网 IP”判定：识别 NAT64 well-known prefix（`64:ff9b::/96`）与 6to4（`2002::/16`）中嵌入的 IPv4，避免绕过 `allow_private_ips=false` 的默认出站限制；并补齐更多 RFC6890 特殊用途 IPv4 前缀拒绝规则。
 - `mcp-kit`：文档补充 `Manager::try_from_config` 的适用场景，并统一 mdbook 安装命令为 `cargo install mdbook --locked`（更可复现）。
 - Docs: README 的本地 gates 补齐 `mdbook build docs` 与 `./scripts/gen-llms-txt.sh --check`，对齐 CI。
@@ -72,13 +70,13 @@
 - `mcp-kit`：修正文档：`Manager::take_server_handler_timeout_counts()` 会重置计数但不会移除已跟踪的 server key（实现原因：handler task 持有共享计数器）；并补充单测覆盖该语义（API 不变）。
 - `mcp-jsonrpc`：stdout_log 写入失败不再直接 `eprintln!`；改为通过 `ClientHandle::stdout_log_write_error()` 暴露（失败后会禁用 stdout_log 写入）。
 - `mcp-jsonrpc`：`ClientHandle` 的 `close_reason` / `stdout_log_write_error` 内部存储从 `Mutex<Option<String>>` 改为 `OnceLock<String>`，减少锁与 poison 分支（API 不变）。
-- `mcp-kit`：`ServerConfig::validate` 在 `streamable_http` 场景下会 fail-fast 校验 `http_headers` / `env_http_headers` 的 header name/value 合法性；并将外部 `mcpServers` 格式的 streamable_http 校验收口到 `ServerConfig::validate`，避免重复规则漂移。
-- `mcp-kit`：配置加载时，`stdout_log` 只在 `transport=stdio` 分支解析（v1 `mcp.json` 与外部 `mcpServers` 格式一致）；对 `unix/streamable_http` 优先报“不支持 stdout_log”，避免先报 stdout_log 配置格式错误（更一致）。
+- `mcp-kit`：`ServerConfig::validate` 在 `streamable_http` 场景下会 fail-fast 校验 `http_headers` / `env_http_headers` 的 header name/value 合法性。
+- `mcp-kit`：配置加载时，`stdout_log` 只在 `transport=stdio` 分支解析；对 `unix/streamable_http` 优先报“不支持 stdout_log”，避免先报 stdout_log 配置格式错误（更一致）。
 - `mcp-kit`：`stdout_log.max_bytes_per_part=0` 现在会 fail-fast 拒绝（不再被钳到 1）。
 - `mcp-kit`：重构 `Config::load` 为若干小 helper 函数，降低单函数复杂度（行为不变）。
 - `mcp-kit`：进一步收口 server→client handler 的 timeout/panic 桥接逻辑，减少重复代码（行为不变）。
 - `mcp-kit`：`Manager::connect` 的 unix 分支改用 `ServerConfig` 的不变量访问器读取 `unix_path`，去除不可能发生的 `Option` 分支（行为不变）。
-- `mcp-kit`：进一步收口 v1/external transport 字段互斥校验为共享 helper，降低规则漂移风险（行为不变）。
+- `mcp-kit`：进一步收口 transport 字段互斥校验为共享 helper，降低规则漂移风险（行为不变）。
 - `mcp-kit`：补充 server→client handler 的 panic 隔离边界说明（行为不变）。
 - `mcp-kit`：整理 config loader：将重复的字段存在性判断缓存为局部变量，减少分支噪音（行为不变）。
 - `mcp-jsonrpc`：修复/稳定 `reader_eof_shuts_down_client_write_end` 单测，改为在 peer 全连接关闭后断言 client 进入 `Closed`，避免依赖平台相关的半关闭语义。
@@ -100,8 +98,7 @@
 - `mcp-jsonrpc`：新增 `Error::is_wait_timeout()`，便于在代码中判断 wait 超时错误（基于稳定 kind，不依赖具体报错文案）。
 - `mcp-kit`：`mcp.json`（v1）解析、MCP server 连接与连接缓存管理（`Config/Manager/Connection`）。
 - `mcpctl`：基于配置的 MCP CLI（list-servers/list-tools/list-resources/list-prompts/call）。
-- `mcpctl`：新增 `--dns-check`，可选启用 Untrusted 下的 hostname DNS 校验。
-- `mcpctl`：新增 `--dns-timeout-ms` 与 `--dns-fail-open`，用于调整 DNS 校验的超时与 fail-open 策略（仅在 `--dns-check` 开启时生效）。
+- `mcpctl`：新增 `--dns-timeout-ms` 与 `--dns-fail-open`，用于调整 DNS 校验的超时与 fail-open 策略。
 - `mcpctl`：新增 `--yes-trust`、`--allow-config-outside-root` 与 `--no-dns-check`（用于更显式的安全开关与边界控制）。
 - `McpRequest` / `McpNotification`：轻量 typed method trait + `Manager::{request_typed, notify_typed}`。
 - `mcp_kit::mcp`：常用 MCP methods 的轻量 typed wrapper 子集（参考 `docs/examples.md`）。
@@ -119,7 +116,6 @@
 - `Manager`：补齐 MCP 常用请求便捷方法（`ping`、`resources/templates/list`、`resources/read`、`resources/subscribe`、`resources/unsubscribe`、`prompts/get`、`logging/setLevel`、`completion/complete`）。
 - `Session`：单连接 MCP 会话（从 `Manager` 取出后可独立调用 `request/notify` 与便捷方法）。
 - `Manager::{take_session, get_or_connect_session, connect_*_session}`：支持把握手完成的会话交给上层库持有。
-- `mcp-kit`：`Config::load` 支持 Cursor/Claude Code 常见的 `.mcp.json` / `mcpServers` 兼容格式（best-effort）。
 - `mcp-jsonrpc`：`streamable_http` 兼容握手前 `GET SSE` 返回 `405`，并在 `202 Accepted`（或首次获得 `mcp-session-id`）后自动重试建立 inbound SSE。
 - Examples: add runnable `client_with_policy`, `in_memory_duplex`, `session_handoff`, and `streamable_http_split` under `crates/mcp-kit/examples/`.
 - Examples: add runnable `streamable_http_custom_options` to demonstrate custom `StreamableHttpOptions` + `Manager::connect_jsonrpc`.
@@ -137,7 +133,6 @@
 - `mcpctl`（BREAKING）：`--trust` 现在需要 `--yes-trust`；`--allow-host` 默认启用 DNS 校验（可用 `--no-dns-check` 关闭）；`--config` 默认要求在 `--root` 内（可用 `--allow-config-outside-root` 覆盖）。
 - Docs: clarify lifecycle shutdown guidance for `disconnect/take_*`, and note Windows stdout_log limitations.
 - `mcp-kit`（BREAKING）：`Manager::{connect_io, connect_jsonrpc}` 现在默认要求 `TrustMode::Trusted`；如需显式绕过可用 `*_unchecked` 变体（用于测试/受控环境）。
-- `mcp-kit`（BREAKING）：外部兼容格式中 `sse_url`/`http_url` 现在要求成对出现；单独设置会 fail-closed（单端点请用 `url`）。
 - `mcp-kit`：`Manager` 的 request/notify 错误上下文现在包含 `server=<name>`，便于多 server 场景排查。
 - `mcp_kit::mcp`（BREAKING）：`Role` 反序列化现在支持未知值（落到 `Role::Other(String)`），提升协议演进鲁棒性。
 - `mcp-jsonrpc`：streamable_http 的桥接错误默认不再回显 HTTP body 预览，并对网络错误中的 URL 做脱敏处理（减少 secrets 泄露风险）。
@@ -163,7 +158,7 @@
 - `mcp-jsonrpc`（BREAKING）：`Client::wait` 现在返回 `Result<Option<ExitStatus>, Error>`；对无 child 的 client（`connect_io/unix/streamable_http`）返回 `Ok(None)`。
 - `mcp-kit`（BREAKING）：`ServerConfig` 新增 `sse_url/http_url` 字段以支持 streamable_http 分离 URL。
 - `mcp-kit`（BREAKING）：`UntrustedStreamableHttpPolicy` 新增 `dns_check` 字段（默认关闭），用于可选启用 hostname DNS 校验。
-- `mcp_kit::mcp`（BREAKING）：无参请求/通知的 `Params` 改为 `()`；部分 list 请求的 `Params` 由 `Option<...>` 改为必填结构体；`Result` type alias 弃用，改用 `JsonValue`（或 `serde_json::Value`）。
+- `mcp_kit::mcp`（BREAKING）：无参请求/通知的 `Params` 改为 `()`；部分 list 请求的 `Params` 由 `Option<...>` 改为必填结构体；移除 `Result` type alias，统一使用 `JsonValue`（或 `serde_json::Value`）。
 - `mcp_kit::mcp`（BREAKING）：`ToolInputSchema/ToolOutputSchema` 现在会保留未知 JSON Schema 字段（`flatten` 到 `extra`）。
 - `mcp-kit`：`Session/Manager` 的无参请求不再产生 `"params": null`；typed request 的 (de)serialize 错误包含 method/server；`initialize` 会检测 `protocolVersion` mismatch。
 - `mcp-kit`（BREAKING）：server→client 的 `ServerRequestContext/ServerNotificationContext` 现在用 `Option<serde_json::Value>` 表达 `params`（保留 “省略 vs null” 语义）。
@@ -172,7 +167,7 @@
 - `mcp-jsonrpc` 的 stdout 旋转日志支持保留上限：`StdoutLog.max_parts`（`mcp-kit` 配置字段 `servers.<name>.stdout_log.max_parts`）。
 - Docs: add runnable example `crates/mcp-kit/examples/minimal_client.rs` and reference it from `docs/examples.md`.
 - Docs: clarify `StreamableHttpOptions.request_timeout` semantics in `docs/jsonrpc.md`.
-- Docs: document split `sse_url/http_url`, `--dns-check`, and updated `[DONE]` semantics for streamable_http.
+- Docs: document split `sse_url/http_url` and updated `[DONE]` semantics for streamable_http.
 - Docs: expand GitBook-style documentation under `docs/` and add `CONTRIBUTING.md`.
 - Docs: link each transport to runnable examples (`docs/transports.md`).
 - Docs: add `docs/book.toml` (mdbook) and `llms.txt` / `docs/llms.txt` (single-file doc bundle), plus a pre-commit freshness check.
@@ -188,9 +183,8 @@
 - Docs: clarify `stdout_log.max_parts` semantics for `mcp.json` vs Rust API.
 - githooks: if `mdbook` is installed, pre-commit now runs `mdbook build docs` when docs are staged, to catch rendering issues early.
 - CI: add GitHub Actions workflow (ubuntu/macos/windows) to run fmt/test/clippy/mdbook/llms checks, deriving toolchain from `Cargo.toml` `rust-version`.
-- `mcp-kit`：`mcp.json v1` 中 `http_headers` 现在也接受别名字段 `headers`（便于复用 Cursor 等配置片段）。
 - `mcpctl list-servers` 默认不输出 stdio `argv` 明文（避免把 token/key 打到终端/CI）；可用 `--show-argv` 显式开启。
-- `dns_check`（`--dns-check`）支持可配置 DNS timeout，并默认 fail-closed（失败直接拒绝连接）；如确实需要可显式开启 fail-open，并同步更新文档说明。
+- `dns_check` 支持可配置 DNS timeout，并默认 fail-closed（失败直接拒绝连接）；如确实需要可显式开启 fail-open，并同步更新文档说明。
 - `mcp-jsonrpc`：移除未使用的 `anyhow` 依赖，保持依赖最小化。
 - githooks: `pre-commit` 新增 staged Rust hygiene 检查（库代码新增行中默认拒绝 `unwrap/expect` 与 `let _ =`），并将 Rust gate 升级为 `clippy -D warnings` + `cargo test --workspace --all-features`。
 
@@ -232,9 +226,6 @@
 - `mcp-kit`：当 `initialize` 失败时会自动 abort 已挂载的 server→client handler tasks，避免遗留后台任务。
 - `mcp-kit`：`ProtocolVersionCheck` / `ProtocolVersionMismatch` 现已从 crate root 重新导出（可直接用 `mcp_kit::ProtocolVersionCheck`）。
 - `mcp-kit`：`protocol_version_mismatches` 在 `Warn` 模式下会按 server 去重更新，避免长期运行时无界增长。
-- `mcp-kit`：Cursor/Claude style 外部配置中 `type=http|sse` 与推断 transport 冲突时会 fail-closed 报错。
-- `mcp-kit`：当文件包含 `mcpServers` wrapper（例如 Claude plugin.json）时，`Config::load` 现在会优先按 wrapper 解析，而不是误判为 `mcp.json v1`。
-- `mcp-kit`：`mcpServers` 现在支持 string（指向 `./.mcp.json` 等文件路径），用于兼容 Claude plugin.json 的 `mcpServers` path 写法。
 - `mcp-kit`：配置加载读取做有界读取（防止特殊文件/无限流导致 hang），并要求配置文件为 regular file。
 - `mcp-kit`：配置读取在 unix 下使用 `O_NOFOLLOW` 并在 open 后再校验类型/大小，降低 TOCTOU 风险；缺失文件的 best-effort 读取在 open 阶段遇到 `NotFound` 会视为缺失。
 - `mcp-kit`：Trusted mode 下会展开 `${VAR}` 占位符（stdio `argv/env`、streamable_http `url/http_headers`），并支持 `${CLAUDE_PLUGIN_ROOT}` / `${MCP_ROOT}`。
@@ -243,11 +234,7 @@
 - `mcp-jsonrpc`：`Client::wait()` 现在会关闭写端/child stdin，避免“等待 stdin EOF 才退出”的 stdio server 造成 hang；reader EOF/IO error 也会触发关闭写端。
 - `mcp-jsonrpc`：stdout_log 打开时会拒绝包含 symlink 组件的路径，避免意外写入到不安全位置。
 - `mcp-jsonrpc`：unix 下 stdout_log 打开使用 `O_NOFOLLOW`（缓解 TOCTOU symlink replacement），并调整相关测试与行为说明。
-- `mcp-kit`：`mcpServers: \"path\"` 间接引用读取新增 root 边界与 canonicalize 校验，避免通过 symlink 逃逸读取 `--root` 外文件。
-- `mcp-kit`：解析 `mcpServers` 间接引用时缓存 canonical root，减少重复 canonicalize 开销。
 - `mcp-kit`：host allowlist 匹配逻辑不再做额外字符串分配（小幅减少 hot path 开销）。
-- `mcp-kit`：外部配置格式（`type=http|sse`）校验不再做额外字符串分配（小幅减少 hot path 开销）。
-- `mcp-kit`：外部配置解析对兼容字段的处理更明确（不影响行为，仅提升可读性）。
 - scripts: 加固 `scripts/gen-llms-txt.sh` 路径解析，拒绝路径穿越/符号链接导致的本机文件打包泄露风险。
 - scripts: `scripts/gen-llms-txt.sh` 在缺少 `realpath` 时允许回退到 `python`（提升在 Windows CI 环境中的兼容性）。
 - Examples: `in_memory_duplex` 现在用 `Url::from_directory_path` 生成正确的目录 `file://` URI（支持空格/非 ASCII 的 percent-encoding）。

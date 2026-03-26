@@ -4,8 +4,10 @@ import argparse
 from pathlib import Path
 
 from check_common.context import CheckContext, run_command
+from .docs_system import run_docs_system_checks
 from .mcp_kit_assets import run_mcp_kit_asset_checks
 from .notify_kit_assets import run_notify_kit_asset_checks
+from .policy_meta_assets import run_policy_meta_asset_checks
 
 
 def has_cargo_workspace(ctx: CheckContext) -> bool:
@@ -13,6 +15,7 @@ def has_cargo_workspace(ctx: CheckContext) -> bool:
 
 
 def run_local_checks(ctx: CheckContext) -> None:
+    run_docs_system_checks(ctx)
     run_command(
         ctx,
         ["cargo", "fmt", "--all", "--", "--check"],
@@ -45,8 +48,12 @@ def run_ci_checks(ctx: CheckContext) -> None:
 
 def run_asset_checks(ctx: CheckContext, scope: str = "all") -> None:
     if scope == "all":
+        run_policy_meta_asset_checks(ctx)
         run_mcp_kit_asset_checks(ctx)
         run_notify_kit_asset_checks(ctx)
+        return
+    if scope == "policy-meta":
+        run_policy_meta_asset_checks(ctx)
         return
     if scope == "mcp-kit":
         run_mcp_kit_asset_checks(ctx)
@@ -79,7 +86,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "mode",
         nargs="?",
         default="local",
-        choices=("local", "ci", "asset-checks", "secret-kit-target"),
+        choices=("local", "ci", "docs-system", "asset-checks", "secret-kit-target"),
     )
     parser.add_argument("extra", nargs="?")
     parser.add_argument(
@@ -101,6 +108,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.mode == "ci":
         run_ci_checks(ctx)
+        return 0
+    if args.mode == "docs-system":
+        run_docs_system_checks(ctx)
         return 0
     if args.mode == "asset-checks":
         run_asset_checks(ctx, args.extra or "all")

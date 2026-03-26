@@ -1,16 +1,10 @@
-use super::locale_sources::{
-    MAX_CATALOG_DIRECTORIES, MAX_CATALOG_DIRECTORY_DEPTH, MAX_CATALOG_TOTAL_BYTES,
-    MAX_LOCALE_SOURCE_BYTES, MAX_LOCALE_SOURCES,
-};
+use super::locale_sources::{MAX_CATALOG_TOTAL_BYTES, MAX_LOCALE_SOURCE_BYTES, MAX_LOCALE_SOURCES};
 use super::*;
 use crate::{Catalog, TranslationCatalog, TranslationResolution};
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
-use tempfile::TempDir;
 
 fn generated_locale(index: usize) -> String {
     let first = ((index / (26 * 26)) % 26) as u8 + b'a';
@@ -385,107 +379,6 @@ fn composed_catalog_keeps_full_miss_as_missing_without_synthetic_fallback() {
 }
 
 #[test]
-fn dynamic_catalog_loads_nested_locale_files() {
-    let temp = TempDir::new().expect("temp dir");
-    fs::create_dir_all(temp.path().join("nested")).expect("mkdir");
-    fs::write(
-        temp.path().join("nested").join("en_US.json"),
-        r#"{"greeting":"hello"}"#,
-    )
-    .expect("write nested locale");
-
-    let catalog =
-        DynamicJsonCatalog::from_directory(temp.path(), Locale::EN_US, FallbackStrategy::Both)
-            .expect("load nested catalog");
-    assert_eq!(
-        catalog.get_text(Locale::EN_US, "greeting"),
-        Some("hello".to_string())
-    );
-}
-
-#[test]
-fn dynamic_catalog_loads_many_sibling_directories() {
-    let temp = TempDir::new().expect("temp dir");
-    for index in 0..2048 {
-        fs::create_dir_all(temp.path().join(format!("dir_{index:04}"))).expect("mkdir sibling");
-    }
-    fs::write(
-        temp.path().join("dir_2047").join("en_US.json"),
-        r#"{"greeting":"hello"}"#,
-    )
-    .expect("write locale");
-
-    let catalog =
-        DynamicJsonCatalog::from_directory(temp.path(), Locale::EN_US, FallbackStrategy::Both)
-            .expect("load wide catalog");
-    assert_eq!(
-        catalog.get_text(Locale::EN_US, "greeting"),
-        Some("hello".to_string())
-    );
-}
-
-#[test]
-fn dynamic_catalog_rejects_excessive_directory_depth() {
-    let temp = TempDir::new().expect("temp dir");
-    let mut deepest = temp.path().to_path_buf();
-    for index in 0..=MAX_CATALOG_DIRECTORY_DEPTH {
-        deepest = deepest.join(format!("nested_{index:02}"));
-        fs::create_dir_all(&deepest).expect("mkdir nested");
-    }
-    fs::write(deepest.join("en_US.json"), r#"{"greeting":"hello"}"#).expect("write locale");
-
-    let err =
-        DynamicJsonCatalog::from_directory(temp.path(), Locale::EN_US, FallbackStrategy::Both)
-            .expect_err("overly deep catalogs should fail");
-
-    assert!(matches!(
-        err,
-        DynamicCatalogError::CatalogDirectoryTooDeep {
-            depth,
-            max_depth,
-            ..
-        } if depth == MAX_CATALOG_DIRECTORY_DEPTH + 1
-            && max_depth == MAX_CATALOG_DIRECTORY_DEPTH
-    ));
-}
-
-#[test]
-fn dynamic_catalog_rejects_excessive_directory_count() {
-    let temp = TempDir::new().expect("temp dir");
-    for index in 0..=MAX_CATALOG_DIRECTORIES {
-        let dir = temp.path().join(format!("dir_{index:04}"));
-        fs::create_dir_all(&dir).expect("mkdir sibling");
-        if index == 0 {
-            fs::write(dir.join("en_US.json"), r#"{"greeting":"hello"}"#).expect("write locale");
-        }
-    }
-
-    let err =
-        DynamicJsonCatalog::from_directory(temp.path(), Locale::EN_US, FallbackStrategy::Both)
-            .expect_err("catalogs with too many directories should fail");
-
-    assert!(matches!(
-        err,
-        DynamicCatalogError::TooManyCatalogDirectories { max }
-            if max == MAX_CATALOG_DIRECTORIES
-    ));
-}
-
-#[test]
-fn dynamic_catalog_errors_when_default_locale_is_missing() {
-    let temp = TempDir::new().expect("temp dir");
-    fs::write(temp.path().join("zh_CN.json"), r#"{"greeting":"nihao"}"#).expect("write locale");
-
-    let err =
-        DynamicJsonCatalog::from_directory(temp.path(), Locale::EN_US, FallbackStrategy::Both)
-            .expect_err("missing default locale should fail");
-    let DynamicCatalogError::MissingDefaultLocale(locale) = err else {
-        panic!("expected missing default locale error");
-    };
-    assert_eq!(locale, Locale::EN_US);
-}
-
-#[test]
 fn dynamic_catalog_from_json_string_requires_default_locale() {
     let err = DynamicJsonCatalog::from_json_string(
         r#"{ "fr_FR": { "greeting": "bonjour" } }"#,
@@ -674,66 +567,6 @@ fn dynamic_catalog_from_json_string_rejects_excessive_locale_count() {
 }
 
 #[test]
-fn dynamic_catalog_errors_on_duplicate_locale_files() {
-    let temp = TempDir::new().expect("temp dir");
-    fs::create_dir_all(temp.path().join("nested")).expect("mkdir");
-    fs::write(temp.path().join("en_US.json"), r#"{"greeting":"hello"}"#)
-        .expect("write root locale");
-    fs::write(
-        temp.path().join("nested").join("en_US.json"),
-        r#"{"greeting":"hi"}"#,
-    )
-    .expect("write nested locale");
-
-    let err =
-        DynamicJsonCatalog::from_directory(temp.path(), Locale::EN_US, FallbackStrategy::Both)
-            .expect_err("duplicate locale should fail");
-    assert!(matches!(
-        err,
-        DynamicCatalogError::DuplicateLocaleFile { .. }
-    ));
-}
-
-#[test]
-fn dynamic_catalog_reports_duplicate_locale_files_in_stable_path_order() {
-    let temp = TempDir::new().expect("temp dir");
-    fs::create_dir_all(temp.path().join("a")).expect("mkdir a");
-    fs::create_dir_all(temp.path().join("b")).expect("mkdir b");
-    fs::write(
-        temp.path().join("a").join("en_US.json"),
-        r#"{"greeting":"hello"}"#,
-    )
-    .expect("write a locale");
-    fs::write(
-        temp.path().join("b").join("en_US.json"),
-        r#"{"greeting":"hi"}"#,
-    )
-    .expect("write b locale");
-
-    let err =
-        DynamicJsonCatalog::from_directory(temp.path(), Locale::EN_US, FallbackStrategy::Both)
-            .expect_err("duplicate locale should fail");
-
-    let DynamicCatalogError::DuplicateLocaleFile {
-        first_path,
-        second_path,
-        ..
-    } = err
-    else {
-        panic!("expected duplicate locale file error");
-    };
-
-    assert!(
-        Path::new(&first_path).ends_with(Path::new("a").join("en_US.json")),
-        "{first_path}"
-    );
-    assert!(
-        Path::new(&second_path).ends_with(Path::new("b").join("en_US.json")),
-        "{second_path}"
-    );
-}
-
-#[test]
 fn dynamic_catalog_reload_keeps_previous_snapshot_visible_until_swap() {
     struct BlockingSources {
         entered: mpsc::Sender<()>,
@@ -829,54 +662,6 @@ fn dynamic_catalog_reload_keeps_previous_snapshot_visible_until_swap() {
 }
 
 #[test]
-fn dynamic_catalog_errors_on_invalid_locale_file_name() {
-    let temp = TempDir::new().expect("temp dir");
-    fs::write(temp.path().join("en_US.json"), r#"{"greeting":"hello"}"#)
-        .expect("write default locale");
-    fs::write(
-        temp.path().join("definitely-not-a-locale.json"),
-        r#"{"greeting":"bad"}"#,
-    )
-    .expect("write invalid locale file");
-
-    let err =
-        DynamicJsonCatalog::from_directory(temp.path(), Locale::EN_US, FallbackStrategy::Both)
-            .expect_err("invalid locale file should fail");
-
-    assert!(matches!(err, DynamicCatalogError::InvalidLocaleFileName(_)));
-}
-
-#[test]
-fn dynamic_catalog_from_directory_accepts_extensionless_names() {
-    let temp = TempDir::new().expect("temp dir");
-    fs::write(temp.path().join("en_US"), r#"{"greeting":"hello"}"#).expect("write locale");
-
-    let catalog =
-        DynamicJsonCatalog::from_directory(temp.path(), Locale::EN_US, FallbackStrategy::Both)
-            .expect("extensionless locale file should load");
-
-    assert_eq!(
-        catalog.get_text(Locale::EN_US, "greeting"),
-        Some("hello".to_string())
-    );
-}
-
-#[test]
-fn dynamic_catalog_from_directory_rejects_non_json_extensions() {
-    let temp = TempDir::new().expect("temp dir");
-    fs::write(temp.path().join("en_US.txt"), r#"{"greeting":"hello"}"#).expect("write locale");
-
-    let err =
-        DynamicJsonCatalog::from_directory(temp.path(), Locale::EN_US, FallbackStrategy::Both)
-            .expect_err("unexpected extension should be rejected");
-
-    assert!(matches!(
-        err,
-        DynamicCatalogError::InvalidLocaleFileName(path) if path.ends_with("en_US.txt")
-    ));
-}
-
-#[test]
 fn dynamic_catalog_from_locale_sources_accepts_extensionless_names() {
     let catalog = DynamicJsonCatalog::from_locale_sources(
         vec![("en_US", r#"{"greeting":"hello"}"#.to_string())],
@@ -906,154 +691,6 @@ fn dynamic_catalog_from_locale_sources_rejects_non_json_extensions() {
     ));
 }
 
-#[cfg(unix)]
-#[test]
-fn dynamic_catalog_rejects_symlinked_locale_file() {
-    use std::os::unix::fs::symlink;
-
-    let temp = TempDir::new().expect("temp dir");
-    let outside_dir = TempDir::new().expect("outside dir");
-    let outside = outside_dir.path().join("en_US.json");
-    fs::write(&outside, r#"{"greeting":"hello"}"#).expect("write outside locale");
-    symlink(&outside, temp.path().join("en_US.json")).expect("create symlink");
-
-    let error =
-        DynamicJsonCatalog::from_directory(temp.path(), Locale::EN_US, FallbackStrategy::Both)
-            .expect_err("symlinked locale file should be rejected");
-    let DynamicCatalogError::Io(error) = error else {
-        panic!("expected io error");
-    };
-    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-}
-
-#[cfg(unix)]
-#[test]
-fn dynamic_catalog_rejects_non_utf8_path_components() {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
-
-    let temp = TempDir::new().expect("temp dir");
-    let invalid = OsString::from_vec(vec![0x66, 0x6f, 0x80]);
-    let nested = temp.path().join(&invalid);
-    fs::create_dir_all(&nested).expect("mkdir invalid path");
-    fs::write(nested.join("en_US.json"), r#"{"greeting":"hello"}"#).expect("write locale");
-
-    let error =
-        DynamicJsonCatalog::from_directory(temp.path(), Locale::EN_US, FallbackStrategy::Both)
-            .expect_err("non-utf8 path should fail");
-    let DynamicCatalogError::Io(error) = error else {
-        panic!("expected io error");
-    };
-    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    assert!(error.to_string().contains("not valid UTF-8"));
-}
-
-#[cfg(unix)]
-#[test]
-fn dynamic_catalog_rejects_socket_entries() {
-    use std::os::unix::net::UnixListener;
-
-    let temp = TempDir::new().expect("temp dir");
-    fs::write(temp.path().join("en_US.json"), r#"{"greeting":"hello"}"#).expect("write locale");
-    let socket_path = temp.path().join("catalog.sock");
-    let _listener = match UnixListener::bind(&socket_path) {
-        Ok(listener) => listener,
-        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
-            eprintln!(
-                "skipping dynamic_catalog_rejects_socket_entries: unix socket bind not permitted in this environment: {err}"
-            );
-            return;
-        }
-        Err(err) => panic!("bind socket: {err}"),
-    };
-
-    let error =
-        DynamicJsonCatalog::from_directory(temp.path(), Locale::EN_US, FallbackStrategy::Both)
-            .expect_err("socket entries should fail");
-    let DynamicCatalogError::Io(error) = error else {
-        panic!("expected io error");
-    };
-    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    assert!(error.to_string().contains("regular file or directory"));
-}
-
-#[cfg(unix)]
-#[test]
-fn dynamic_catalog_rejects_symlinked_root_path() {
-    use std::os::unix::fs::symlink;
-
-    let temp = TempDir::new().expect("temp dir");
-    let outside = TempDir::new().expect("outside dir");
-    fs::write(outside.path().join("en_US.json"), r#"{"greeting":"hello"}"#).expect("write locale");
-    let root = temp.path().join("linked_root");
-    symlink(outside.path(), &root).expect("create root symlink");
-
-    let error = DynamicJsonCatalog::from_directory(&root, Locale::EN_US, FallbackStrategy::Both)
-        .expect_err("symlinked root should fail");
-    let DynamicCatalogError::Io(error) = error else {
-        panic!("expected io error");
-    };
-    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-}
-
-#[cfg(unix)]
-#[test]
-fn dynamic_catalog_rejects_root_path_with_symlinked_ancestor() {
-    use std::os::unix::fs::symlink;
-
-    let temp = TempDir::new().expect("temp dir");
-    let outside = TempDir::new().expect("outside dir");
-    fs::create_dir_all(outside.path().join("nested")).expect("mkdir nested");
-    fs::write(
-        outside.path().join("nested").join("en_US.json"),
-        r#"{"greeting":"hello"}"#,
-    )
-    .expect("write locale");
-    symlink(outside.path(), temp.path().join("linked")).expect("create ancestor symlink");
-    let root = temp.path().join("linked").join("nested");
-
-    let error = DynamicJsonCatalog::from_directory(&root, Locale::EN_US, FallbackStrategy::Both)
-        .expect_err("symlinked ancestor should fail");
-    let DynamicCatalogError::Io(error) = error else {
-        panic!("expected io error");
-    };
-    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-}
-
-#[test]
-fn dynamic_catalog_errors_when_root_directory_is_missing() {
-    let temp = TempDir::new().expect("temp dir");
-    let missing = temp.path().join("missing");
-
-    let error = DynamicJsonCatalog::from_directory(&missing, Locale::EN_US, FallbackStrategy::Both)
-        .expect_err("missing root should fail");
-    let DynamicCatalogError::Io(error) = error else {
-        panic!("expected io error");
-    };
-    assert_eq!(error.kind(), io::ErrorKind::NotFound);
-}
-
-#[test]
-fn dynamic_catalog_errors_on_duplicate_catalog_keys_in_file() {
-    let temp = TempDir::new().expect("temp dir");
-    fs::write(
-        temp.path().join("en_US.json"),
-        r#"{"greeting":"hello","greeting":"hi"}"#,
-    )
-    .expect("write locale");
-
-    let err =
-        DynamicJsonCatalog::from_directory(temp.path(), Locale::EN_US, FallbackStrategy::Both)
-            .expect_err("duplicate catalog keys should fail");
-
-    assert!(matches!(
-        err,
-        DynamicCatalogError::LocaleSourceJson { path, error }
-            if path.ends_with("en_US.json")
-                && error.to_string().contains("duplicate catalog key: greeting")
-    ));
-}
-
 #[test]
 fn dynamic_catalog_from_json_string_rejects_oversized_locale_source() {
     let oversized = "x".repeat(MAX_LOCALE_SOURCE_BYTES);
@@ -1078,26 +715,6 @@ fn dynamic_catalog_from_json_string_rejects_oversized_raw_locale_source() {
 
     let err = DynamicJsonCatalog::from_json_string(&json, Locale::EN_US, FallbackStrategy::Both)
         .expect_err("oversized raw locale source should fail");
-
-    assert!(matches!(
-        err,
-        DynamicCatalogError::LocaleSourceTooLarge {
-            max_bytes,
-            ..
-        } if max_bytes == MAX_LOCALE_SOURCE_BYTES
-    ));
-}
-
-#[test]
-fn dynamic_catalog_rejects_oversized_locale_source() {
-    let temp = TempDir::new().expect("temp dir");
-    let oversized = "x".repeat(MAX_LOCALE_SOURCE_BYTES);
-    let content = format!(r#"{{"greeting":"{oversized}"}}"#);
-    fs::write(temp.path().join("en_US.json"), content).expect("write oversized locale");
-
-    let err =
-        DynamicJsonCatalog::from_directory(temp.path(), Locale::EN_US, FallbackStrategy::Both)
-            .expect_err("oversized locale source should fail");
 
     assert!(matches!(
         err,

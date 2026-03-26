@@ -11,13 +11,13 @@
 
 - [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md)
 - [`../crates/README.md`](../crates/README.md)
-- [`../../../omne-systems-runtime/README.md`](../../../omne-systems-runtime/README.md)
-- [`../../../omne-systems-runtime/docs/workspace-crate-boundaries.md`](../../../omne-systems-runtime/docs/workspace-crate-boundaries.md)
+- [`../../../omne-runtime/README.md`](../../../omne-runtime/README.md)
+- [`../../../omne-runtime/docs/workspace-crate-boundaries.md`](../../../omne-runtime/docs/workspace-crate-boundaries.md)
 - [`../../../wsl-docs/01-博客/OpenAI/Harness Engineering：Agent 优先时代的 Codex 协作.md`](../../../wsl-docs/01-博客/OpenAI/Harness Engineering：Agent 优先时代的 Codex 协作.md)
 
 ## 定义
 
-如果把 `omne_foundation`、`omne-systems-runtime` 以及 agent 的工作环境一起看，`foundation` 指的是：
+如果把 `omne_foundation`、`omne-runtime` 以及 agent 的工作环境一起看，`foundation` 指的是：
 
 - 可被多个上层模块、工具或产品复用的基础能力
 - 具有稳定领域边界、清晰约束和明确输入输出的底层能力
@@ -83,7 +83,7 @@
 
 这些原则的目标不是“把一切抽象成公共库”，而是避免领域污染，保证基础能力可以长期复用。
 
-`omne-systems-runtime` 的边界文档进一步补充了另一条很关键的原则：
+`omne-runtime` 的边界文档进一步补充了另一条很关键的原则：
 
 - 不创建兜底式 `platform` crate，边界应按能力拆分，而不是按“都是跨平台代码”堆在一起
 
@@ -105,9 +105,14 @@
 
 例如：
 
-- `omne-systems-fs-primitives`
-- `omne-systems-process-primitives`
-- `runtime-assets-kit`
+- `omne-fs-primitives`
+- `omne-process-primitives`
+- `http-kit`
+- `i18n-kit`
+- `config-kit`
+- `text-assets-kit`
+- `i18n-runtime-kit`
+- `prompt-kit`
 - `secret-kit`
 - `mcp-kit`
 - `notify-kit`
@@ -133,7 +138,7 @@
 
 ## 更完整的分层视角
 
-如果把 `omne-systems-runtime`、`omne_foundation` 以及 agent harness 一起看，当前更完整的 `foundation` 分层至少有四层：
+如果把 `omne-runtime`、`omne_foundation` 以及 agent harness 一起看，当前更完整的 `foundation` 分层至少有四层：
 
 ### 1. systems/runtime primitives 层
 
@@ -141,8 +146,8 @@
 
 代表 crate：
 
-- `omne-systems-fs-primitives`
-- `omne-systems-process-primitives`
+- `omne-fs-primitives`
+- `omne-process-primitives`
 
 这类能力通常负责：
 
@@ -163,8 +168,8 @@
 
 代表 crate：
 
-- `omne-systems-fs`
-- `omne-systems-exec-gateway`
+- `omne-fs`
+- `omne-execution-gateway`
 
 这类能力通常负责：
 
@@ -181,8 +186,9 @@
 
 - 结构化文本与跨边界表示
 - i18n
-- 运行时文本资源
+- 通用文本资源与领域 runtime adapter
 - secret 规范与解析
+- HTTP client / body / URL / outbound policy
 - transport / session
 - notify
 
@@ -204,7 +210,7 @@
 
 ## 当前 `omne_foundation` 覆盖的基建类型
 
-如果只看 `omne_foundation` workspace，本仓库当前主要覆盖四类 `foundation` 能力：
+如果只看 `omne_foundation` workspace，本仓库当前主要覆盖五类 `foundation` 能力：
 
 ### 1. 结构化文本语义层
 
@@ -220,19 +226,51 @@
 
 这一层刻意不使用过于宽泛的 “message” 概念，避免和 IM 消息、内部通信消息、事件总线消息混淆。
 
-### 2. 运行时输入层
+### 2. 配置与运行时输入层
 
-- `runtime-assets-kit`
+- `config-kit`
+- `text-assets-kit`
+- `i18n-runtime-kit`
+- `prompt-kit`
 - `secret-kit`
 
 这一层解决的是：
 
-- 运行时文本资源如何安全 bootstrap、落盘、回滚和懒加载
+- 通用配置文件如何被安全读取、识别格式、层叠与解释
+- 通用文本资源如何安全 bootstrap、落盘、回滚、扫描和读取
+- i18n catalog 如何从 runtime 目录加载并以 lazy/global handle 形式暴露
+- prompt 文本目录如何 bootstrap 并以惰性句柄暴露
 - secret 如何通过统一规范被解析、读取和安全持有
 
-它关心的是“如何安全拿到输入”，而不是输入内容本身的业务语义。
+它关心的是“如何安全拿到输入并稳定解释输入”，而不是输入内容本身的业务语义。
 
-### 3. 传输与会话层
+需要单独强调的是：
+
+- `prompt-kit` 当前只覆盖 prompt 目录型 runtime adapter 这一窄边界。
+- 更高层的 prompt bundle identity 与 agent instruction composition，还没有形成统一共享 crate。
+- 这部分边界判断见 [`prompt领域定位.md`](./prompt领域定位.md)。
+
+### 3. HTTP foundation 层
+
+- `http-kit`
+- `github-kit`
+
+这一层解决的是：
+
+- 共享 HTTP client 如何构建和选择
+- 响应体如何有界读取、预览和收口错误
+- URL 如何校验、脱敏和约束
+- untrusted outbound 目标如何做 IP/DNS/allowlist 校验
+- GitHub API 如何以纯 client 方式获取 release metadata
+
+其中：
+
+- `http-kit` 负责通用 transport foundation
+- `github-kit` 负责纯 GitHub API client 能力
+
+这层不负责下载来源策略或安装器特有的 asset 选择 / 安装语义。
+
+### 4. 传输与会话层
 
 - `mcp-jsonrpc`
 - `mcp-kit`
@@ -245,7 +283,7 @@
 
 它负责连接和会话能力，不直接定义上层业务工作流。
 
-### 4. 通知层
+### 5. 通知层
 
 - `notify-kit`
 
@@ -254,23 +292,23 @@
 - 如何把统一事件模型路由到不同通知渠道
 - 如何在并发发送、超时和错误聚合之间取得稳定默认行为
 
-它不负责业务事件生成，也不承担可靠消息系统的语义。
+它复用共享 HTTP 与日志文本能力，但不负责业务事件生成，也不承担可靠消息系统的语义。
 
-## `omne-systems-runtime` 在整体中的位置
+## `omne-runtime` 在整体中的位置
 
-`omne-systems-runtime` 不是 `omne_foundation` 的重复实现，而是更靠近宿主机和运行时边界的一层基础设施。
+`omne-runtime` 不是 `omne_foundation` 的重复实现，而是更靠近宿主机和运行时边界的一层基础设施。
 
 从它自己的 workspace 文档可以看到，这个仓库有意拆成“两类低层复用 crate”和“两类高层策略/编排 crate”：
 
 低层复用 crate：
 
-- `omne-systems-fs-primitives`
-- `omne-systems-process-primitives`
+- `omne-fs-primitives`
+- `omne-process-primitives`
 
 高层策略/编排 crate：
 
-- `omne-systems-fs`
-- `omne-systems-exec-gateway`
+- `omne-fs`
+- `omne-execution-gateway`
 
 这说明更完整地看，`foundation` 不是只有 `kit`，还包括：
 
@@ -279,7 +317,7 @@
 - 面向通用基础领域的 reusable kits
 - 让 agent 能稳定理解和操作这些能力的 harness
 
-从依赖关系上看，`omne_foundation` 也已经直接依赖 `omne-systems-fs-primitives` 和 `omne-systems-process-primitives`，说明这两层不是平行无关，而是存在明确上下游关系。
+从依赖关系上看，`omne_foundation` 也已经直接依赖 `omne-fs-primitives` 和 `omne-process-primitives`，说明这两层不是平行无关，而是存在明确上下游关系。
 
 ## 与上层应用的关系
 
@@ -287,7 +325,7 @@
 
 - 上层应用负责业务目标和产品行为
 - `omne_foundation` 负责通用基础领域能力
-- `omne-systems-runtime` 负责更贴近系统边界的 runtime 原语与运行时编排能力
+- `omne-runtime` 负责更贴近系统边界的 runtime 原语与运行时编排能力
 - harness 层负责把知识、约束、验证和反馈循环组织成 agent 可直接使用的系统
 
 因此，`foundation` 的价值不在于替代上层，而在于降低重复建设、减少边界混乱，并让不同上层在相同原语和相同反馈系统上协作。

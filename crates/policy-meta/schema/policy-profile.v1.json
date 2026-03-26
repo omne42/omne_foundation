@@ -1,0 +1,54 @@
+{
+  "$id": "https://omne42.dev/schema/policy-profile.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Versioned preset profile built on top of the canonical policy metadata fragment.",
+  "properties": {
+    "decision": {
+      "enum": [
+        "allow",
+        "prompt",
+        "prompt_strict",
+        "deny"
+      ],
+      "type": "string"
+    },
+    "execution_isolation": {
+      "enum": [
+        "none",
+        "best_effort",
+        "strict"
+      ],
+      "type": "string"
+    },
+    "risk_profile": {
+      "enum": [
+        "safe",
+        "standard",
+        "proactive",
+        "danger"
+      ],
+      "type": "string"
+    },
+    "version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "write_scope": {
+      "enum": [
+        "read_only",
+        "workspace_write",
+        "full_access"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "execution_isolation",
+    "risk_profile",
+    "version",
+    "write_scope"
+  ],
+  "title": "PolicyProfileV1",
+  "type": "object"
+}

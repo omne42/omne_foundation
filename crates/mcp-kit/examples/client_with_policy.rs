@@ -33,19 +33,16 @@ impl Args {
                     parsed.policy.require_https = false;
                 }
                 "--allow-localhost" => {
-                    parsed.policy.allow_localhost = true;
+                    parsed.policy.outbound.allow_localhost = true;
                 }
                 "--allow-private-ip" => {
-                    parsed.policy.allow_private_ips = true;
-                }
-                "--dns-check" => {
-                    parsed.policy.dns_check = true;
+                    parsed.policy.outbound.allow_private_ips = true;
                 }
                 "--allow-host" => {
                     let host = args
                         .next()
                         .with_context(|| "missing value for --allow-host <host>")?;
-                    parsed.policy.allowed_hosts.push(host);
+                    parsed.policy.outbound.allowed_hosts.push(host);
                 }
                 _ if arg.starts_with('-') => {
                     anyhow::bail!("unknown flag: {arg} (try --help)");
@@ -74,7 +71,6 @@ fn print_help() {
         "  --allow-localhost    Allow localhost/*.localhost/*.local/*.localdomain and single-label hosts in Untrusted mode"
     );
     eprintln!("  --allow-private-ip   Allow private/loopback IP literals in Untrusted mode");
-    eprintln!("  --dns-check          Best-effort DNS check for hostnames in Untrusted mode");
     eprintln!("  --allow-host <host>  Host allowlist (repeatable), e.g. --allow-host example.com");
     eprintln!("  --help, -h           Print this help");
 }

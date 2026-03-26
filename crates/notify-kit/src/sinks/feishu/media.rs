@@ -4,8 +4,9 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 
+use crate::log::{warn_feishu_image_load_failed, warn_feishu_image_upload_failed};
 use crate::sinks::BoxFuture;
-use crate::sinks::http::{
+use http_kit::{
     DEFAULT_MAX_RESPONSE_BODY_BYTES, http_status_text_error, parse_and_validate_https_url_basic,
     read_json_body_limited, read_text_body_limited, response_body_read_error, select_http_client,
     send_reqwest,
@@ -39,7 +40,7 @@ impl FeishuWebhookSink {
         let loaded = match self.load_image(src).await {
             Ok(loaded) => loaded,
             Err(err) => {
-                tracing::warn!(image_src = %src, error = %err, "feishu image load failed");
+                warn_feishu_image_load_failed(src, &err.to_string());
                 return None;
             }
         };
@@ -47,7 +48,7 @@ impl FeishuWebhookSink {
         match self.upload_image(loaded).await {
             Ok(image_key) => Some(image_key),
             Err(err) => {
-                tracing::warn!(image_src = %src, error = %err, "feishu image upload failed");
+                warn_feishu_image_upload_failed(src, &err.to_string());
                 None
             }
         }
@@ -104,11 +105,7 @@ impl FeishuWebhookSink {
                 .map_err(|err| {
                     response_body_read_error("feishu image download http error", status, &err)
                 })?;
-            return Err(http_status_text_error(
-                "feishu image download",
-                status,
-                &body,
-            ));
+            return Err(http_status_text_error("feishu image download", status, &body).into());
         }
 
         let content_type = resp
@@ -180,7 +177,7 @@ impl FeishuWebhookSink {
                 .map_err(|err| {
                     response_body_read_error("feishu image upload http error", status, &err)
                 })?;
-            return Err(http_status_text_error("feishu image upload", status, &body));
+            return Err(http_status_text_error("feishu image upload", status, &body).into());
         }
 
         let body = read_json_body_limited(resp, DEFAULT_MAX_RESPONSE_BODY_BYTES).await?;
@@ -295,11 +292,7 @@ impl FeishuWebhookSink {
                 .map_err(|err| {
                     response_body_read_error("feishu tenant access token http error", status, &err)
                 })?;
-            return Err(http_status_text_error(
-                "feishu tenant access token",
-                status,
-                &body,
-            ));
+            return Err(http_status_text_error("feishu tenant access token", status, &body).into());
         }
 
         let body = read_json_body_limited(resp, DEFAULT_MAX_RESPONSE_BODY_BYTES).await?;

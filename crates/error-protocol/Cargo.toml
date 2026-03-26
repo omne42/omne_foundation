@@ -1,0 +1,19 @@
+[package]
+name = "error-protocol"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+error-kit = { path = "../error-kit" }
+structured-text-kit = { path = "../structured-text-kit" }
+structured-text-protocol = { path = "../structured-text-protocol" }
+schemars = "0.8"
+serde.workspace = true
+thiserror.workspace = true
+ts-rs = { version = "11", features = ["serde-json-impl", "no-serde-warnings"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -1,11 +1,9 @@
 use std::time::Duration;
 
 use crate::Event;
-use crate::sinks::http::{
-    build_http_client, read_json_body_after_http_success, redact_url, send_reqwest,
-};
 use crate::sinks::text::{TextLimits, format_event_text_limited, truncate_chars};
 use crate::sinks::{BoxFuture, Sink};
+use http_kit::{build_http_client, read_json_body_after_http_success, redact_url, send_reqwest};
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 

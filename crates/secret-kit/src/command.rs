@@ -4,7 +4,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use omne_systems_process_primitives::{
+use omne_process_primitives::{
     CleanupDisposition, ProcessTreeCleanup, configure_command_for_process_tree,
 };
 use structured_text_kit::{CatalogText, StructuredText, StructuredTextScalarArg, structured_text};
@@ -26,8 +26,8 @@ struct SecretCommandChild {
 impl SecretCommandChild {
     fn new(child: tokio::process::Child, program: &str) -> Result<Self> {
         let cleanup = ProcessTreeCleanup::new(&child).map_err(|err| {
-            auth_command_error!(
-                "error_detail.auth.command_cleanup_setup_failed",
+            secret_command_error!(
+                "error_detail.secret.command_cleanup_setup_failed",
                 "program" => program,
                 "error" => err.to_string()
             )
@@ -37,8 +37,8 @@ impl SecretCommandChild {
 
     fn take_stdout(&mut self, program: &str) -> Result<tokio::process::ChildStdout> {
         self.child.stdout.take().ok_or_else(|| {
-            auth_command_error!(
-                "error_detail.auth.command_stdout_not_captured",
+            secret_command_error!(
+                "error_detail.secret.command_stdout_not_captured",
                 "program" => program
             )
         })
@@ -46,8 +46,8 @@ impl SecretCommandChild {
 
     fn take_stderr(&mut self, program: &str) -> Result<tokio::process::ChildStderr> {
         self.child.stderr.take().ok_or_else(|| {
-            auth_command_error!(
-                "error_detail.auth.command_stderr_not_captured",
+            secret_command_error!(
+                "error_detail.secret.command_stderr_not_captured",
                 "program" => program
             )
         })
@@ -166,8 +166,8 @@ where
                 let wait_result = match wait_result {
                     Ok(status) => status,
                     Err(err) => {
-                        let err = auth_command_error!(
-                            "error_detail.auth.command_wait_failed",
+                        let err = secret_command_error!(
+                            "error_detail.secret.command_wait_failed",
                             "program" => cmd.program.as_str(),
                             "error" => err.to_string()
                         );
@@ -227,8 +227,8 @@ where
             }
             _ = &mut deadline => {
                 terminate_secret_command(&mut child, stdout_task.take(), stderr_task.take()).await;
-                return Err(auth_command_error!(
-                    "error_detail.auth.command_timeout",
+                return Err(secret_command_error!(
+                    "error_detail.secret.command_timeout",
                     "program" => cmd.program.as_str(),
                     "timeout_ms" => timeout.as_millis().to_string()
                 ));
@@ -245,8 +245,8 @@ where
     }
 
     let stdout = stdout.ok_or_else(|| {
-        auth_command_error!(
-            "error_detail.auth.command_output_read_failed",
+        secret_command_error!(
+            "error_detail.secret.command_output_read_failed",
             "program" => cmd.program.as_str(),
             "stream" => "stdout",
             "error" => "stdout not collected"
@@ -283,8 +283,8 @@ fn spawn_secret_command(
     configure_command_for_process_tree(&mut command);
 
     let child = command.spawn().map_err(|err| {
-        auth_command_error!(
-            "error_detail.auth.command_spawn_failed",
+        secret_command_error!(
+            "error_detail.secret.command_spawn_failed",
             "program" => cmd.program.as_str(),
             "error" => err.to_string()
         )
@@ -335,8 +335,8 @@ where
     };
 
     resolve_builtin_program(snapshot, provider).ok_or_else(|| {
-        auth_command_error!(
-            "error_detail.auth.command_spawn_failed",
+        secret_command_error!(
+            "error_detail.secret.command_spawn_failed",
             "program" => cmd.program.as_str(),
             "error" => format!("{} not found on ambient PATH", cmd.program.as_str())
         )
@@ -399,15 +399,15 @@ fn join_command_output_task(
 ) -> Result<(SecretBytes, bool)> {
     result
         .map_err(|err| {
-            auth_command_error!(
-                "error_detail.auth.command_reader_join_failed",
+            secret_command_error!(
+                "error_detail.secret.command_reader_join_failed",
                 "stream" => stream,
                 "error" => err.to_string()
             )
         })?
         .map_err(|err| {
-            auth_command_error!(
-                "error_detail.auth.command_output_read_failed",
+            secret_command_error!(
+                "error_detail.secret.command_output_read_failed",
                 "program" => cmd.program.as_str(),
                 "stream" => stream,
                 "error" => err.to_string()
@@ -417,13 +417,13 @@ fn join_command_output_task(
 
 fn command_output_too_large(cmd: &SecretCommand, stream: &str) -> SecretError {
     match stream {
-        "stdout" => auth_command_error!(
-            "error_detail.auth.command_stdout_too_large",
+        "stdout" => secret_command_error!(
+            "error_detail.secret.command_stdout_too_large",
             "program" => cmd.program.as_str(),
             "max_bytes" => MAX_SECRET_COMMAND_OUTPUT_BYTES.to_string()
         ),
-        "stderr" => auth_command_error!(
-            "error_detail.auth.command_stderr_too_large",
+        "stderr" => secret_command_error!(
+            "error_detail.secret.command_stderr_too_large",
             "program" => cmd.program.as_str(),
             "max_bytes" => MAX_SECRET_COMMAND_OUTPUT_BYTES.to_string()
         ),
@@ -445,8 +445,8 @@ fn validate_command_status(
 
 fn decode_command_stdout(cmd: &SecretCommand, stdout: SecretBytes) -> Result<SecretString> {
     secret_string_from_bytes(stdout, |_| {
-        auth_command_error!(
-            "error_detail.auth.command_stdout_not_utf8",
+        secret_command_error!(
+            "error_detail.secret.command_stdout_not_utf8",
             "program" => cmd.program.as_str()
         )
     })
@@ -518,16 +518,16 @@ fn validate_command_program_override(program: &str, resolved_program: &str) -> R
     };
     let override_path = Path::new(resolved_program);
     if !override_path.is_absolute() {
-        return Err(auth_command_error!(
-            "error_detail.auth.command_program_override_not_absolute",
+        return Err(secret_command_error!(
+            "error_detail.secret.command_program_override_not_absolute",
             "program" => program
         ));
     }
     if command_override_matches_provider(provider, override_path) {
         return Ok(());
     }
-    Err(auth_command_error!(
-        "error_detail.auth.command_program_override_invalid_name",
+    Err(secret_command_error!(
+        "error_detail.secret.command_program_override_invalid_name",
         "program" => program,
         "resolved_program" => resolved_program
     ))
@@ -816,7 +816,7 @@ fn command_failed_status_error(
     status: std::process::ExitStatus,
     stderr_summary: Option<&CommandStderrSummary>,
 ) -> SecretError {
-    let mut text = match CatalogText::try_new("error_detail.auth.command_failed_status") {
+    let mut text = match CatalogText::try_new("error_detail.secret.command_failed_status") {
         Ok(text) => text,
         Err(_) => unreachable!("literal command error code should always validate"),
     };
@@ -830,7 +830,7 @@ fn command_failed_status_error(
         }
     }
 
-    SecretError::AuthCommand(StructuredText::from(text))
+    SecretError::Command(StructuredText::from(text))
 }
 
 fn push_command_error_arg<V>(text: &mut CatalogText, name: &'static str, value: V)

@@ -8,17 +8,12 @@ use serde_json::{Map, Value};
 
 use crate::{McpNotification, McpRequest, Root};
 
-pub type JsonValue = Value;
-
-#[deprecated(note = "Use `JsonValue` (or `serde_json::Value`) instead.")]
-pub type Result = JsonValue;
-
 pub enum PingRequest {}
 
 impl McpRequest for PingRequest {
     const METHOD: &'static str = "ping";
     type Params = ();
-    type Result = JsonValue;
+    type Result = Value;
 }
 
 pub enum ListRootsRequest {}
@@ -340,7 +335,7 @@ pub enum SubscribeRequest {}
 impl McpRequest for SubscribeRequest {
     const METHOD: &'static str = "resources/subscribe";
     type Params = SubscribeRequestParams;
-    type Result = JsonValue;
+    type Result = Value;
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -353,7 +348,7 @@ pub enum UnsubscribeRequest {}
 impl McpRequest for UnsubscribeRequest {
     const METHOD: &'static str = "resources/unsubscribe";
     type Params = UnsubscribeRequestParams;
-    type Result = JsonValue;
+    type Result = Value;
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -441,7 +436,7 @@ pub enum SetLevelRequest {}
 impl McpRequest for SetLevelRequest {
     const METHOD: &'static str = "logging/setLevel";
     type Params = SetLevelRequestParams;
-    type Result = JsonValue;
+    type Result = Value;
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -454,7 +449,7 @@ pub enum CompleteRequest {}
 impl McpRequest for CompleteRequest {
     const METHOD: &'static str = "completion/complete";
     type Params = Value;
-    type Result = JsonValue;
+    type Result = Value;
 }
 
 pub enum InitializedNotification {}

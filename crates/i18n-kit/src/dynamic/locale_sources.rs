@@ -1,31 +1,17 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-use omne_systems_fs_primitives::{DEFAULT_TEXT_FILE_BYTES_LIMIT, DEFAULT_TEXT_TREE_BYTES_LIMIT};
 
 use crate::Locale;
+use crate::catalog_json::{parse_json_catalog_sources, parse_json_catalog_text_map};
+use crate::catalog_state::LocaleCatalogMap;
 
-use super::{
-    DynamicCatalogError, directory_loader::read_locale_sources_from_directory,
-    parse_json_catalog_sources, parse_json_catalog_text_map,
-};
+use super::DynamicCatalogError;
 
-pub(super) const MAX_LOCALE_SOURCES: usize = 256;
-pub(super) const MAX_LOCALE_SOURCE_BYTES: usize = DEFAULT_TEXT_FILE_BYTES_LIMIT;
-pub(super) const MAX_CATALOG_TOTAL_BYTES: usize = DEFAULT_TEXT_TREE_BYTES_LIMIT;
-pub(super) const MAX_CATALOG_DIRECTORIES: usize = 2048;
-pub(super) const MAX_CATALOG_DIRECTORY_DEPTH: usize = 32;
+pub const MAX_LOCALE_SOURCES: usize = 256;
+pub const MAX_LOCALE_SOURCE_BYTES: usize = 1024 * 1024;
+pub const MAX_CATALOG_TOTAL_BYTES: usize = 8 * MAX_LOCALE_SOURCE_BYTES;
 
-pub(super) type LocaleMap = BTreeMap<Locale, BTreeMap<String, Arc<str>>>;
-
-pub(super) fn load_locales_from_directory(
-    path: &Path,
-    default_locale: Locale,
-) -> Result<LocaleMap, DynamicCatalogError> {
-    let sources = read_locale_sources_from_directory(path)?;
-    load_locales_from_sources(sources, default_locale)
-}
+pub(super) type LocaleMap = LocaleCatalogMap;
 
 pub(super) fn load_locales_from_json(
     json: &str,
@@ -113,6 +99,10 @@ where
     Ok(locales)
 }
 
+pub fn validate_locale_source_path(source_path: &Path) -> Result<(), DynamicCatalogError> {
+    locale_id_from_source_path(source_path).map(|_| ())
+}
+
 fn locale_id_from_source_path(source_path: &Path) -> Result<&str, DynamicCatalogError> {
     let invalid_name =
         || DynamicCatalogError::InvalidLocaleFileName(source_path.display().to_string());
@@ -130,7 +120,7 @@ fn locale_id_from_source_path(source_path: &Path) -> Result<&str, DynamicCatalog
     }
 }
 
-pub(super) fn validate_locale_source_limits(
+pub fn validate_locale_source_limits(
     path: &Path,
     source_count: usize,
     source_bytes: usize,
@@ -163,31 +153,6 @@ fn validate_catalog_json_input(json: &str) -> Result<(), DynamicCatalogError> {
         return Err(DynamicCatalogError::CatalogTooLarge {
             bytes: json.len(),
             max_bytes: MAX_CATALOG_TOTAL_BYTES,
-        });
-    }
-
-    Ok(())
-}
-
-pub(super) fn validate_catalog_directory_count(count: usize) -> Result<(), DynamicCatalogError> {
-    if count > MAX_CATALOG_DIRECTORIES {
-        return Err(DynamicCatalogError::TooManyCatalogDirectories {
-            max: MAX_CATALOG_DIRECTORIES,
-        });
-    }
-
-    Ok(())
-}
-
-pub(super) fn validate_catalog_directory_depth(
-    path: &Path,
-    depth: usize,
-) -> Result<(), DynamicCatalogError> {
-    if depth > MAX_CATALOG_DIRECTORY_DEPTH {
-        return Err(DynamicCatalogError::CatalogDirectoryTooDeep {
-            path: path.display().to_string(),
-            depth,
-            max_depth: MAX_CATALOG_DIRECTORY_DEPTH,
         });
     }
 

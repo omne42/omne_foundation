@@ -1051,6 +1051,7 @@ dependencies = [
  "futures-util",
  "hmac",
  "http-kit",
+ "libc",
  "log-kit",
  "pulldown-cmark",
  "reqwest",

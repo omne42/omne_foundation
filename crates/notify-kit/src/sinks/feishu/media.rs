@@ -383,17 +383,21 @@ impl FeishuWebhookSink {
 
 async fn read_local_image_file(path: String, max_bytes: usize) -> crate::Result<Vec<u8>> {
     tokio::task::spawn_blocking(move || {
-        let file = std::fs::File::open(&path)
-            .map_err(|err| crate::Error::from(anyhow::anyhow!("read image file: {err}")))?;
-        let metadata = file.metadata().map_err(|err| {
+        let path = Path::new(&path);
+        let metadata = std::fs::symlink_metadata(path).map_err(|err| {
             crate::Error::from(anyhow::anyhow!("read image file metadata: {err}"))
         })?;
-        if !metadata.is_file() {
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            return Err(anyhow::anyhow!("image path must not be a symlink").into());
+        }
+        if !file_type.is_file() {
             return Err(anyhow::anyhow!("image path must be a regular file").into());
         }
         if metadata.len() > max_bytes as u64 {
             return Err(anyhow::anyhow!("image file too large for upload").into());
         }
+        let file = open_local_image_file(path)?;
 
         let mut bytes = Vec::with_capacity((metadata.len() as usize).min(max_bytes));
         file.take((max_bytes as u64).saturating_add(1))
@@ -406,6 +410,29 @@ async fn read_local_image_file(path: String, max_bytes: usize) -> crate::Result<
     })
     .await
     .map_err(|err| crate::Error::from(anyhow::anyhow!("join image file read task: {err}")))?
+}
+
+#[cfg(unix)]
+fn open_local_image_file(path: &Path) -> crate::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|err| {
+            if err.raw_os_error() == Some(libc::ELOOP) {
+                crate::Error::from(anyhow::anyhow!("image path must not be a symlink"))
+            } else {
+                crate::Error::from(anyhow::anyhow!("read image file: {err}"))
+            }
+        })
+}
+
+#[cfg(not(unix))]
+fn open_local_image_file(path: &Path) -> crate::Result<std::fs::File> {
+    std::fs::File::open(path)
+        .map_err(|err| crate::Error::from(anyhow::anyhow!("read image file: {err}")))
 }
 
 pub(super) fn read_bytes_body_limited(

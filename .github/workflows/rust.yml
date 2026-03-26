@@ -26,6 +26,9 @@ jobs:
       - name: Prepare workspace temp dir
         run: mkdir -p .tmp
 
+      - name: Create workspace temp dir
+        run: mkdir -p .tmp
+
       - name: Checkout omne-runtime
         uses: actions/checkout@v4
         with:
@@ -90,6 +93,9 @@ jobs:
       - name: Prepare workspace temp dir
         run: mkdir -p .tmp
 
+      - name: Create workspace temp dir
+        run: mkdir -p .tmp
+
       - name: Checkout omne-runtime
         uses: actions/checkout@v4
         with:
@@ -143,6 +149,9 @@ jobs:
           path: omne-runtime
 
       - name: Prepare workspace temp dir
+        run: mkdir -p .tmp
+
+      - name: Create workspace temp dir
         run: mkdir -p .tmp
 
       - name: Checkout omne-runtime

@@ -9,10 +9,6 @@ on:
 jobs:
   workspace:
     runs-on: ubuntu-latest
-    env:
-      TEMP: ${{ runner.temp }}
-      TMP: ${{ runner.temp }}
-      TMPDIR: ${{ runner.temp }}
     defaults:
       run:
         shell: bash
@@ -57,10 +53,6 @@ jobs:
           - macos-latest
           - windows-latest
     runs-on: ${{ matrix.os }}
-    env:
-      TEMP: ${{ runner.temp }}
-      TMP: ${{ runner.temp }}
-      TMPDIR: ${{ runner.temp }}
     defaults:
       run:
         shell: bash
@@ -96,10 +88,6 @@ jobs:
 
   secret-windows-target:
     runs-on: ubuntu-latest
-    env:
-      TEMP: ${{ runner.temp }}
-      TMP: ${{ runner.temp }}
-      TMPDIR: ${{ runner.temp }}
     defaults:
       run:
         shell: bash

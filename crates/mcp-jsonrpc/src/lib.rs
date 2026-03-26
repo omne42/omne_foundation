@@ -1516,10 +1516,21 @@ async fn handle_incoming_value(
     // Most traffic is a single JSON-RPC object (non-batch). Keep the common path allocation-free
     // by only allocating stack storage when we actually need to expand batch arrays.
     let mut stack = Vec::new();
-    let mut next = Some(value);
-    while let Some(value) = next.take().or_else(|| stack.pop()) {
+    let mut next = Some((value, true));
+    while let Some((value, allow_batch_expansion)) = next.take().or_else(|| stack.pop()) {
         match value {
             Value::Array(items) => {
+                if !allow_batch_expansion {
+                    let _ = responder
+                        .respond_error_raw_id(
+                            Value::Null,
+                            INVALID_REQUEST,
+                            "nested batch is not allowed",
+                            None,
+                        )
+                        .await;
+                    continue;
+                }
                 if items.is_empty() {
                     let _ = responder
                         .respond_error_raw_id(Value::Null, INVALID_REQUEST, "empty batch", None)
@@ -1527,7 +1538,7 @@ async fn handle_incoming_value(
                     continue;
                 }
                 stack.reserve(items.len());
-                stack.extend(items.into_iter().rev());
+                stack.extend(items.into_iter().rev().map(|item| (item, false)));
                 continue;
             }
             Value::Object(mut map) => {
@@ -2060,6 +2071,44 @@ mod line_limit_tests {
         assert!(is_ascii_whitespace_only(b" \t\r\n"));
         assert!(!is_ascii_whitespace_only(b"{\"jsonrpc\":\"2.0\"}"));
         assert!(!is_ascii_whitespace_only(b"\xE3\x80\x80"));
+    }
+}
+
+#[cfg(test)]
+mod incoming_value_tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn nested_batch_item_returns_invalid_request_error() {
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let client = Client::connect_io(client_read, client_write)
+            .await
+            .expect("connect client");
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        server_write
+            .write_all(br#"[[{"jsonrpc":"2.0","method":"demo"}]]"#)
+            .await
+            .expect("write nested batch");
+        server_write.write_all(b"\n").await.expect("write newline");
+        server_write.flush().await.expect("flush nested batch");
+
+        let response_line = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+            .await
+            .expect("response timeout")
+            .expect("read response")
+            .expect("response line");
+        let response: Value =
+            serde_json::from_str(&response_line).expect("parse invalid-request response");
+        assert_eq!(response["error"]["code"], -32600);
+        assert_eq!(response["error"]["message"], "nested batch is not allowed");
+        assert_eq!(response["id"], Value::Null);
+
+        drop(client);
     }
 }
 

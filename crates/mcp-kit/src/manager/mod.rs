@@ -59,6 +59,16 @@ fn normalize_server_name_lookup(server_name: &str) -> &str {
     server_name.trim()
 }
 
+fn normalize_connection_cwd(cwd: &Path) -> PathBuf {
+    if cwd.is_absolute() {
+        cwd.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(cwd)
+    }
+}
+
 pub(crate) fn contains_wait_timeout(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause
@@ -150,6 +160,7 @@ impl ServerHandlerTimeoutCounts {
 pub struct Manager {
     instance_id: u64,
     conns: HashMap<ServerName, Connection>,
+    connection_cwds: HashMap<ServerName, PathBuf>,
     init_results: HashMap<ServerName, Value>,
     client_name: String,
     client_version: String,
@@ -485,6 +496,7 @@ impl Manager {
         Self {
             instance_id: NEXT_MANAGER_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
             conns: HashMap::new(),
+            connection_cwds: HashMap::new(),
             init_results: HashMap::new(),
             client_name: client_name.into(),
             client_version: client_version.into(),
@@ -629,7 +641,12 @@ impl Manager {
     }
 
     pub fn is_connected(&mut self, server_name: &str) -> bool {
-        self.is_connected_and_alive(normalize_server_name_lookup(server_name))
+        let server_name = normalize_server_name_lookup(server_name);
+        let connected = self.is_connected_and_alive(server_name);
+        if !connected {
+            self.clear_connection_cwd(server_name);
+        }
+        connected
     }
 
     pub fn is_connected_named(&mut self, server_name: &ServerName) -> bool {
@@ -638,7 +655,13 @@ impl Manager {
 
     pub fn connected_server_names(&mut self) -> Vec<ServerName> {
         let mut names = self.conns.keys().cloned().collect::<Vec<_>>();
-        names.retain(|name| self.is_connected_and_alive(name.as_str()));
+        names.retain(|name| {
+            let connected = self.is_connected_and_alive(name.as_str());
+            if !connected {
+                self.clear_connection_cwd(name.as_str());
+            }
+            connected
+        });
         names
     }
 
@@ -651,13 +674,45 @@ impl Manager {
         self.initialize_result(server_name.as_str())
     }
 
+    pub(crate) fn record_connection_cwd(&mut self, server_name: &str, cwd: &Path) {
+        self.connection_cwds.insert(
+            parse_server_name_anyhow(server_name).expect("validated server name"),
+            normalize_connection_cwd(cwd),
+        );
+    }
+
+    pub(crate) fn clear_connection_cwd(&mut self, server_name: &str) {
+        self.connection_cwds.remove(server_name);
+    }
+
+    fn ensure_connection_cwd_matches(&self, server_name: &str, cwd: &Path) -> anyhow::Result<()> {
+        let Some(connected_cwd) = self.connection_cwds.get(server_name) else {
+            return Ok(());
+        };
+        let requested_cwd = normalize_connection_cwd(cwd);
+        if *connected_cwd == requested_cwd {
+            return Ok(());
+        }
+
+        anyhow::bail!(
+            "mcp server {server_name} is already connected under cwd={} and cannot be reused for cwd={} (disconnect first)",
+            connected_cwd.display(),
+            requested_cwd.display()
+        );
+    }
+
     pub(crate) fn try_prepare_connected_client(
         &mut self,
         server_name: &str,
+        cwd: Option<&Path>,
     ) -> anyhow::Result<Option<PreparedConnectedClient>> {
         let server_name = normalize_server_name_lookup(server_name);
         if !self.is_connected_and_alive(server_name) {
+            self.clear_connection_cwd(server_name);
             return Ok(None);
+        }
+        if let Some(cwd) = cwd {
+            self.ensure_connection_cwd_matches(server_name, cwd)?;
         }
 
         let conn = self
@@ -683,8 +738,10 @@ impl Manager {
             .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
         let server_name_key = parse_server_name_anyhow(server_name)?;
         if self.is_connected_and_alive(server_name_key.as_str()) {
+            self.ensure_connection_cwd_matches(server_name_key.as_str(), cwd)?;
             return Ok(None);
         }
+        self.clear_connection_cwd(server_name_key.as_str());
 
         server_cfg
             .validate()
@@ -703,6 +760,36 @@ impl Manager {
                 request_timeout: self.request_timeout,
             },
         }))
+    }
+
+    pub(crate) fn prepare_disconnect_for_wait_with_cwd_cleanup(
+        &mut self,
+        server_name: &str,
+    ) -> crate::manager::lifecycle::PreparedDisconnect {
+        let normalized = normalize_server_name_lookup(server_name).to_string();
+        let should_clear = self.conns.contains_key(normalized.as_str());
+        let disconnect = self.prepare_disconnect_for_wait(&normalized);
+        if should_clear {
+            self.clear_connection_cwd(&normalized);
+        }
+        disconnect
+    }
+
+    pub(crate) fn prepare_disconnect_for_wait_if_connection_with_cwd_cleanup(
+        &mut self,
+        server_name: &str,
+        connection_id: u64,
+    ) -> crate::manager::lifecycle::PreparedDisconnect {
+        let normalized = normalize_server_name_lookup(server_name).to_string();
+        let should_clear = self
+            .conns
+            .get(normalized.as_str())
+            .is_some_and(|conn| conn.id() == connection_id);
+        let disconnect = self.prepare_disconnect_for_wait_if_connection(&normalized, connection_id);
+        if should_clear {
+            self.clear_connection_cwd(&normalized);
+        }
+        disconnect
     }
 
     pub async fn connect(
@@ -729,8 +816,10 @@ impl Manager {
     {
         let server_name_key = build_server_name()?;
         if self.is_connected_and_alive(server_name_key.as_str()) {
+            self.ensure_connection_cwd_matches(server_name_key.as_str(), cwd)?;
             return Ok(());
         }
+        self.clear_connection_cwd(server_name_key.as_str());
 
         server_cfg
             .validate()
@@ -747,6 +836,7 @@ impl Manager {
 
         self.install_connection_parsed(server_name_key, client, child)
             .await?;
+        self.record_connection_cwd(server_name, cwd);
         Ok(())
     }
 
@@ -799,6 +889,7 @@ impl Manager {
         if self.is_connected_and_alive(server_name_key.as_str()) {
             return Ok(());
         }
+        self.clear_connection_cwd(server_name_key.as_str());
 
         let child = client.take_child();
         self.install_connection_parsed(server_name_key, client, child)
@@ -848,6 +939,7 @@ impl Manager {
         if self.is_connected_and_alive(server_name_key.as_str()) {
             return Ok(());
         }
+        self.clear_connection_cwd(server_name_key.as_str());
 
         let client = mcp_jsonrpc::Client::connect_io(read, write)
             .await
@@ -923,6 +1015,7 @@ impl Manager {
     pub fn disconnect(&mut self, server_name: &str) -> bool {
         let server_name = normalize_server_name_lookup(server_name);
         let removed = self.remove_cached_connection(server_name);
+        self.clear_connection_cwd(server_name);
         self.clear_connection_side_state(server_name, true);
         if let Some(mut conn) = removed {
             Self::reap_connection_child_best_effort(&mut conn);
@@ -942,7 +1035,7 @@ impl Manager {
         timeout: Duration,
         on_timeout: mcp_jsonrpc::WaitOnTimeout,
     ) -> anyhow::Result<Option<std::process::ExitStatus>> {
-        self.prepare_disconnect_for_wait(server_name)
+        self.prepare_disconnect_for_wait_with_cwd_cleanup(server_name)
             .wait_with_timeout(timeout, on_timeout)
             .await
     }
@@ -966,6 +1059,7 @@ impl Manager {
         let server_name = normalize_server_name_lookup(server_name);
         self.init_results.remove(server_name);
         let conn = self.remove_cached_connection(server_name);
+        self.clear_connection_cwd(server_name);
         if conn.is_some() {
             self.clear_connection_side_state(server_name, false);
         }
@@ -987,6 +1081,7 @@ impl Manager {
     /// `Manager::disconnect` / `Manager::disconnect_and_wait` for the same server name.
     pub fn take_session(&mut self, server_name: &str) -> Option<Session> {
         let server_name = normalize_server_name_lookup(server_name);
+        self.clear_connection_cwd(server_name);
         let Some((server_name, connection)) = self.conns.remove_entry(server_name) else {
             self.init_results.remove(server_name);
             return None;
@@ -1488,7 +1583,7 @@ impl Manager {
         method: &str,
         params: Option<Value>,
     ) -> anyhow::Result<Value> {
-        let Some(prepared) = self.try_prepare_connected_client(server_name)? else {
+        let Some(prepared) = self.try_prepare_connected_client(server_name, None)? else {
             let server_name = normalize_server_name_lookup(server_name);
             anyhow::bail!("mcp server not connected: {server_name}");
         };
@@ -1505,6 +1600,7 @@ impl Manager {
         if let Err(err) = &result {
             if should_disconnect_after_jsonrpc_error(err) {
                 self.disconnect_after_jsonrpc_error(&server_name).await;
+                self.clear_connection_cwd(&server_name);
             }
         }
 
@@ -1527,7 +1623,7 @@ impl Manager {
         method: &str,
         params: Option<Value>,
     ) -> anyhow::Result<()> {
-        let Some(prepared) = self.try_prepare_connected_client(server_name)? else {
+        let Some(prepared) = self.try_prepare_connected_client(server_name, None)? else {
             let server_name = normalize_server_name_lookup(server_name);
             anyhow::bail!("mcp server not connected: {server_name}");
         };
@@ -1544,6 +1640,7 @@ impl Manager {
         if let Err(err) = &result {
             if should_disconnect_after_jsonrpc_error(err) || contains_wait_timeout(err) {
                 self.disconnect_after_jsonrpc_error(&server_name).await;
+                self.clear_connection_cwd(&server_name);
             }
         }
 

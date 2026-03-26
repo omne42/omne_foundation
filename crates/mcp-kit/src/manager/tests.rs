@@ -195,6 +195,89 @@ fn disconnect_clears_stale_timeout_counter_without_connection() {
     assert!(!manager.server_handler_timeout_counts().contains_key("srv"));
 }
 
+#[tokio::test]
+async fn try_prepare_connected_client_rejects_different_cwd_context() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let _server_stream = server_stream;
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .unwrap();
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    let server_name = ServerName::parse("srv").unwrap();
+    manager.conns.insert(
+        server_name.clone(),
+        Connection {
+            id: 1,
+            child: None,
+            client,
+            handler_tasks: Vec::new(),
+        },
+    );
+    manager
+        .connection_cwds
+        .insert(server_name, PathBuf::from("/workspace/a"));
+
+    let err = match manager.try_prepare_connected_client("srv", Some(Path::new("/workspace/b"))) {
+        Ok(_) => panic!("different cwd should be rejected"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("cannot be reused for cwd="),
+        "{err:#}"
+    );
+
+    let prepared = manager
+        .try_prepare_connected_client("srv", Some(Path::new("/workspace/a")))
+        .unwrap()
+        .expect("matching cwd should reuse connection");
+    assert_eq!(prepared.server_name, "srv");
+}
+
+#[tokio::test]
+async fn prepare_transport_connect_rejects_different_cwd_context() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let _server_stream = server_stream;
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .unwrap();
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    let server_name = ServerName::parse("srv").unwrap();
+    manager.conns.insert(
+        server_name.clone(),
+        Connection {
+            id: 1,
+            child: None,
+            client,
+            handler_tasks: Vec::new(),
+        },
+    );
+    manager
+        .connection_cwds
+        .insert(server_name.clone(), PathBuf::from("/workspace/a"));
+
+    let mut servers = std::collections::BTreeMap::new();
+    servers.insert(
+        server_name,
+        ServerConfig::unix(PathBuf::from("/tmp/mock.sock")).unwrap(),
+    );
+    let config = Config::new(crate::ClientConfig::default(), servers);
+
+    let err = match manager.prepare_transport_connect(&config, "srv", Path::new("/workspace/b")) {
+        Ok(_) => panic!("different cwd should be rejected"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("cannot be reused for cwd="),
+        "{err:#}"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn disconnect_reaps_child_best_effort() {

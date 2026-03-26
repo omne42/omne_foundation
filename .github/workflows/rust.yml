@@ -9,6 +9,10 @@ on:
 jobs:
   workspace:
     runs-on: ubuntu-latest
+    env:
+      TEMP: ${{ runner.temp }}
+      TMP: ${{ runner.temp }}
+      TMPDIR: ${{ runner.temp }}
     defaults:
       run:
         shell: bash
@@ -23,9 +27,12 @@ jobs:
           repository: omne42/omne-runtime
           path: omne-runtime
 
+      - name: Prepare workspace temp dir
+        run: mkdir -p .tmp
+
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.85.0
+          toolchain: 1.88.0
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
@@ -50,6 +57,10 @@ jobs:
           - macos-latest
           - windows-latest
     runs-on: ${{ matrix.os }}
+    env:
+      TEMP: ${{ runner.temp }}
+      TMP: ${{ runner.temp }}
+      TMPDIR: ${{ runner.temp }}
     defaults:
       run:
         shell: bash
@@ -64,9 +75,12 @@ jobs:
           repository: omne42/omne-runtime
           path: omne-runtime
 
+      - name: Prepare workspace temp dir
+        run: mkdir -p .tmp
+
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.85.0
+          toolchain: 1.88.0
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
@@ -82,6 +96,10 @@ jobs:
 
   secret-windows-target:
     runs-on: ubuntu-latest
+    env:
+      TEMP: ${{ runner.temp }}
+      TMP: ${{ runner.temp }}
+      TMPDIR: ${{ runner.temp }}
     defaults:
       run:
         shell: bash
@@ -96,9 +114,12 @@ jobs:
           repository: omne42/omne-runtime
           path: omne-runtime
 
+      - name: Prepare workspace temp dir
+        run: mkdir -p .tmp
+
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.85.0
+          toolchain: 1.88.0
 
       - name: Install Rust Target
         run: rustup target add x86_64-pc-windows-gnu

@@ -61,8 +61,6 @@ async fn open_stdout_log_append(path: &Path) -> Result<tokio::fs::File, std::io:
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::OpenOptionsExt;
-
         // Best-effort: avoid following reparse points (including symlinks) on open.
         // This mitigates TOCTOU risks where the log path could be replaced between checks.
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;

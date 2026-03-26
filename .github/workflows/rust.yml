@@ -12,15 +12,29 @@ jobs:
     defaults:
       run:
         shell: bash
+        working-directory: omne_foundation
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: omne_foundation
+
+      - uses: actions/checkout@v4
+        with:
+          repository: omne42/omne-runtime
+          path: omne-runtime
+
+      - name: Prepare workspace temp dir
+        run: mkdir -p .tmp
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.85.0
+          toolchain: 1.88.0
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            omne_foundation -> omne_foundation/target
 
       - name: Install mdBook
         uses: taiki-e/install-action@v2
@@ -42,15 +56,29 @@ jobs:
     defaults:
       run:
         shell: bash
+        working-directory: omne_foundation
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: omne_foundation
+
+      - uses: actions/checkout@v4
+        with:
+          repository: omne42/omne-runtime
+          path: omne-runtime
+
+      - name: Prepare workspace temp dir
+        run: mkdir -p .tmp
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.85.0
+          toolchain: 1.88.0
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            omne_foundation -> omne_foundation/target
 
       - name: Test mcp crates
         run: cargo test -p mcp-jsonrpc -p mcp-kit --all-features
@@ -63,12 +91,23 @@ jobs:
     defaults:
       run:
         shell: bash
+        working-directory: omne_foundation
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: omne_foundation
+
+      - uses: actions/checkout@v4
+        with:
+          repository: omne42/omne-runtime
+          path: omne-runtime
+
+      - name: Prepare workspace temp dir
+        run: mkdir -p .tmp
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.85.0
+          toolchain: 1.88.0
 
       - name: Install Rust Target
         run: rustup target add x86_64-pc-windows-gnu

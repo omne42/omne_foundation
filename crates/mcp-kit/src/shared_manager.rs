@@ -509,6 +509,7 @@ impl SharedManager {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::collections::BTreeMap;
     #[cfg(unix)]
     use std::path::Path;
@@ -519,9 +520,11 @@ mod tests {
     use serde_json::Value;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
+    #[cfg(unix)]
+    use crate::{ClientConfig, Config, ServerConfig, ServerName};
     use crate::{
-        ClientConfig, Config, Manager, McpRequest, ProtocolVersionCheck, ServerConfig, ServerName,
-        ServerRequestHandler, ServerRequestOutcome, SharedManager, TrustMode,
+        Manager, McpRequest, ProtocolVersionCheck, ServerRequestHandler, ServerRequestOutcome,
+        SharedManager, TrustMode,
     };
 
     struct NestedRequest;

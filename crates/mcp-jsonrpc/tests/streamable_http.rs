@@ -166,7 +166,7 @@ async fn streamable_http_allows_initial_sse_405_and_retries_after_202() {
         }
     });
 
-    let url = format!("http://{}/mcp", addr);
+    let url = format!("http://{addr}/mcp");
     let client = mcp_jsonrpc::Client::connect_streamable_http(&url)
         .await
         .expect("connect streamable http");
@@ -358,7 +358,7 @@ async fn streamable_http_propagates_mcp_session_id_and_updates() {
         }
     });
 
-    let url = format!("http://{}/mcp", addr);
+    let url = format!("http://{addr}/mcp");
     let client = mcp_jsonrpc::Client::connect_streamable_http(&url)
         .await
         .expect("connect streamable http");
@@ -549,7 +549,7 @@ async fn streamable_http_retries_sse_when_session_id_changes_without_202() {
         }
     });
 
-    let url = format!("http://{}/mcp", addr);
+    let url = format!("http://{addr}/mcp");
     let client = mcp_jsonrpc::Client::connect_streamable_http(&url)
         .await
         .expect("connect streamable http");
@@ -653,7 +653,7 @@ async fn streamable_http_clamps_zero_max_message_bytes_to_minimum() {
 
     let mut options = mcp_jsonrpc::SpawnOptions::default();
     options.limits.max_message_bytes = 0;
-    let url = format!("http://{}/mcp", addr);
+    let url = format!("http://{addr}/mcp");
     let client = mcp_jsonrpc::Client::connect_streamable_http_with_options(
         &url,
         mcp_jsonrpc::StreamableHttpOptions::default(),
@@ -741,7 +741,7 @@ async fn streamable_http_post_can_return_sse_and_stops_on_done() {
         }
     });
 
-    let url = format!("http://{}/mcp", addr);
+    let url = format!("http://{addr}/mcp");
     let client = mcp_jsonrpc::Client::connect_streamable_http(&url)
         .await
         .expect("connect streamable http");
@@ -830,7 +830,7 @@ async fn streamable_http_request_timeout_surfaces_wait_timeout() {
         }
     });
 
-    let url = format!("http://{}/mcp", addr);
+    let url = format!("http://{addr}/mcp");
     let client = mcp_jsonrpc::Client::connect_streamable_http_with_options(
         &url,
         mcp_jsonrpc::StreamableHttpOptions {
@@ -925,7 +925,7 @@ async fn streamable_http_post_sse_is_not_bounded_by_request_timeout() {
         }
     });
 
-    let url = format!("http://{}/mcp", addr);
+    let url = format!("http://{addr}/mcp");
     let client = mcp_jsonrpc::Client::connect_streamable_http_with_options(
         &url,
         mcp_jsonrpc::StreamableHttpOptions {
@@ -1000,7 +1000,7 @@ async fn streamable_http_bridges_unexpected_content_type_to_jsonrpc_error() {
         }
     });
 
-    let url = format!("http://{}/mcp", addr);
+    let url = format!("http://{addr}/mcp");
     let client = mcp_jsonrpc::Client::connect_streamable_http(&url)
         .await
         .expect("connect streamable http");
@@ -1082,7 +1082,7 @@ async fn streamable_http_bridges_oversized_json_body_to_jsonrpc_error() {
         }
     });
 
-    let url = format!("http://{}/mcp", addr);
+    let url = format!("http://{addr}/mcp");
     let mut spawn_options = mcp_jsonrpc::SpawnOptions::default();
     spawn_options.limits.max_message_bytes = 256;
     let client = mcp_jsonrpc::Client::connect_streamable_http_with_options(
@@ -1156,7 +1156,7 @@ async fn streamable_http_declared_oversized_json_body_fails_without_hanging() {
         }
     });
 
-    let url = format!("http://{}/mcp", addr);
+    let url = format!("http://{addr}/mcp");
     let mut spawn_options = mcp_jsonrpc::SpawnOptions::default();
     spawn_options.limits.max_message_bytes = 256;
     let client = mcp_jsonrpc::Client::connect_streamable_http_with_options(
@@ -1240,7 +1240,7 @@ async fn streamable_http_bridges_empty_json_body_to_jsonrpc_error() {
         }
     });
 
-    let url = format!("http://{}/mcp", addr);
+    let url = format!("http://{addr}/mcp");
     let client = mcp_jsonrpc::Client::connect_streamable_http(&url)
         .await
         .expect("connect streamable http");
@@ -1348,7 +1348,7 @@ async fn streamable_http_notification_no_content_keeps_client_open() {
         }
     });
 
-    let url = format!("http://{}/mcp", addr);
+    let url = format!("http://{addr}/mcp");
     let client = mcp_jsonrpc::Client::connect_streamable_http(&url)
         .await
         .expect("connect streamable http");
@@ -1443,7 +1443,7 @@ async fn streamable_http_notification_post_failure_closes_client() {
         }
     });
 
-    let url = format!("http://{}/mcp", addr);
+    let url = format!("http://{addr}/mcp");
     let client = mcp_jsonrpc::Client::connect_streamable_http(&url)
         .await
         .expect("connect streamable http");
@@ -1528,7 +1528,7 @@ async fn streamable_http_error_without_request_timeout_does_not_hang() {
         }
     });
 
-    let url = format!("http://{}/mcp", addr);
+    let url = format!("http://{addr}/mcp");
     let client = mcp_jsonrpc::Client::connect_streamable_http_with_options(
         &url,
         mcp_jsonrpc::StreamableHttpOptions {
@@ -1598,7 +1598,7 @@ async fn streamable_http_close_aborts_transport_tasks_and_closes_sse_connection(
         disconnected_for_server.store(disconnected, Ordering::SeqCst);
     });
 
-    let url = format!("http://{}/mcp", addr);
+    let url = format!("http://{addr}/mcp");
     let client = mcp_jsonrpc::Client::connect_streamable_http(&url)
         .await
         .expect("connect streamable http");
@@ -1680,7 +1680,7 @@ async fn streamable_http_bridges_pretty_json_body() {
         }
     });
 
-    let url = format!("http://{}/mcp", addr);
+    let url = format!("http://{addr}/mcp");
     let client = mcp_jsonrpc::Client::connect_streamable_http(&url)
         .await
         .expect("connect streamable http");

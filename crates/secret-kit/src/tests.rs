@@ -994,6 +994,44 @@ async fn resolve_secret_uses_filtered_command_env_snapshot_for_builtin_providers
 }
 
 #[cfg(unix)]
+#[tokio::test]
+async fn secret_command_runner_retries_text_file_busy_spawn() -> Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault_path = dir.path().join("vault");
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&vault_path)?;
+    file.write_all(b"#!/bin/sh\nprintf ok\n")?;
+    file.sync_all()?;
+    let mut permissions = file.metadata()?.permissions();
+    permissions.set_mode(0o755);
+    file.set_permissions(permissions)?;
+    file.sync_all()?;
+
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(60));
+        drop(file);
+    });
+
+    let env = TestEnv {
+        command_programs: BTreeMap::from([(
+            "vault".to_string(),
+            vault_path.to_string_lossy().into_owned(),
+        )]),
+        ..TestEnv::default()
+    };
+
+    let value = resolve_secret_text("secret://vault/secret/demo?field=token", &env).await?;
+    writer.join().expect("join writer thread");
+    assert_eq!(value, "ok");
+    Ok(())
+}
+
+#[cfg(unix)]
 #[test]
 fn resolve_program_on_path_returns_absolute_match() {
     let dir = tempfile::tempdir().expect("tempdir");

@@ -61,8 +61,6 @@ async fn open_stdout_log_append(path: &Path) -> Result<tokio::fs::File, std::io:
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::OpenOptionsExt;
-
         // Best-effort: avoid following reparse points (including symlinks) on open.
         // This mitigates TOCTOU risks where the log path could be replaced between checks.
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
@@ -190,6 +188,17 @@ async fn rotate_log_file(base_path: &Path, mut part: u32) -> Result<u32, std::io
 
     loop {
         let rotated = parent.join(format!("{stem}.segment-{part:04}.log"));
+        match tokio::fs::symlink_metadata(&rotated).await {
+            Ok(_) => {
+                let Some(next_part) = part.checked_add(1) else {
+                    return Err(std::io::Error::other("stdout_log rotation index exhausted"));
+                };
+                part = next_part;
+                continue;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
         match tokio::fs::rename(base_path, &rotated).await {
             Ok(()) => return Ok(part.checked_add(1).unwrap_or(part)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(part),
@@ -325,7 +334,6 @@ mod tests {
         assert_eq!(out, b"abc\n");
     }
 
-    #[cfg(windows)]
     #[tokio::test]
     async fn rotate_log_file_fails_when_segment_index_exhausted() {
         let dir = tempfile::tempdir().unwrap();

@@ -6,8 +6,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use http_kit::{
-    HttpClientOptions, body_preview_json, build_http_client_with_options, drain_response_body,
-    read_response_body_preview_text, redact_reqwest_error, select_http_client_with_options,
+    HttpClientOptions, HttpClientProfile, body_preview_json, build_http_client_profile,
+    drain_response_body, read_response_body_preview_text, redact_reqwest_error,
 };
 use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
@@ -262,10 +262,10 @@ impl Client {
             ..Default::default()
         };
 
-        let http_client = build_http_client_with_options(&http_options).map_err(|err| {
+        let http_client_profile = build_http_client_profile(&http_options).map_err(|err| {
             Error::protocol(
                 ProtocolErrorKind::InvalidInput,
-                format!("build http client failed: {err}"),
+                format!("build http client profile failed: {err}"),
             )
         })?;
         let sse_url = reqwest::Url::parse(sse_url).map_err(|err| {
@@ -293,24 +293,19 @@ impl Client {
             Arc::new(tokio::sync::Mutex::new(None));
 
         let (sse_wake_tx, sse_wake_rx) = mpsc::channel::<()>(1);
-        let sse_client = select_http_client_with_options(
-            &http_client,
-            &http_options,
-            &sse_url,
-            enforce_public_ip,
-        )
-        .await
-        .map_err(|err| {
-            Error::protocol(
-                ProtocolErrorKind::StreamableHttp,
-                format!("select http client failed: {err}"),
-            )
-        })?;
+        let sse_client = http_client_profile
+            .select_for_url(&sse_url, enforce_public_ip)
+            .await
+            .map_err(|err| {
+                Error::protocol(
+                    ProtocolErrorKind::StreamableHttp,
+                    format!("select http client failed: {err}"),
+                )
+            })?;
         let sse_resp =
             try_connect_sse(&sse_client, sse_url.as_str(), connect_timeout, &session_id).await?;
 
-        let http_client_post = http_client.clone();
-        let http_options_post = http_options.clone();
+        let http_client_profile_post = http_client_profile.clone();
         let writer_post = writer.clone();
         let session_id_post = session_id.clone();
         let sse_wake_post = sse_wake_tx.clone();
@@ -323,8 +318,7 @@ impl Client {
                 bridge_read,
                 writer: writer_post,
                 handle: handle_post,
-                http_client: http_client_post,
-                http_options: http_options_post,
+                http_client_profile: http_client_profile_post,
                 post_url: post_url_post,
                 session_id: session_id_post,
                 sse_wake: sse_wake_post,
@@ -340,20 +334,15 @@ impl Client {
         let writer_sse = writer.clone();
         let session_id_sse = session_id.clone();
         let sse_url = sse_url.clone();
-        let http_client_sse = http_client.clone();
-        let http_options_sse = http_options.clone();
+        let http_client_profile_sse = http_client_profile.clone();
         let handle_sse = transport_handle;
         let sse_task = tokio::spawn(async move {
             let Some(resp) = sse_resp else {
                 let mut wake_rx = sse_wake_rx;
                 while wake_rx.recv().await.is_some() {
-                    let sse_client = match select_http_client_with_options(
-                        &http_client_sse,
-                        &http_options_sse,
-                        &sse_url,
-                        enforce_public_ip,
-                    )
-                    .await
+                    let sse_client = match http_client_profile_sse
+                        .select_for_url(&sse_url, enforce_public_ip)
+                        .await
                     {
                         Ok(client) => client,
                         Err(err) => {
@@ -413,8 +402,7 @@ struct HttpPostBridge {
     bridge_read: tokio::io::ReadHalf<tokio::io::DuplexStream>,
     writer: Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::io::DuplexStream>>>,
     handle: ClientHandle,
-    http_client: reqwest::Client,
-    http_options: HttpClientOptions,
+    http_client_profile: HttpClientProfile,
     post_url: reqwest::Url,
     session_id: Arc<tokio::sync::Mutex<Option<String>>>,
     sse_wake: mpsc::Sender<()>,
@@ -432,8 +420,7 @@ impl HttpPostBridge {
             bridge_read,
             writer,
             handle,
-            http_client,
-            http_options,
+            http_client_profile,
             post_url,
             session_id,
             sse_wake,
@@ -463,13 +450,9 @@ impl HttpPostBridge {
             }
             let line = Bytes::from(line);
 
-            let selected_client = match select_http_client_with_options(
-                &http_client,
-                &http_options,
-                &post_url,
-                enforce_public_ip,
-            )
-            .await
+            let selected_client = match http_client_profile
+                .select_for_url(&post_url, enforce_public_ip)
+                .await
             {
                 Ok(client) => client,
                 Err(err) => {

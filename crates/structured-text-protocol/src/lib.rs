@@ -61,6 +61,8 @@ pub enum CatalogArgValueData {
     Unsigned(String),
     #[serde(rename = "nested_text")]
     NestedText(Box<StructuredTextData>),
+    #[serde(rename = "unsupported")]
+    Unsupported,
 }
 
 #[derive(Debug, Error)]
@@ -71,6 +73,8 @@ pub enum StructuredTextDataError {
     InvalidSignedInteger { arg_name: String, value: String },
     #[error("catalog arg `{arg_name}` has invalid unsigned integer `{value}`")]
     InvalidUnsignedInteger { arg_name: String, value: String },
+    #[error("catalog arg `{arg_name}` uses an unsupported value kind")]
+    UnsupportedArgValue { arg_name: String },
 }
 
 impl From<&StructuredText> for StructuredTextData {
@@ -118,7 +122,7 @@ impl From<CatalogArgValueRef<'_>> for CatalogArgValueData {
             CatalogArgValueRef::NestedText(text) => {
                 Self::NestedText(Box::new(StructuredTextData::from(text)))
             }
-            _ => unreachable!("unsupported non-exhaustive CatalogArgValueRef variant"),
+            _ => Self::Unsupported,
         }
     }
 }
@@ -161,6 +165,11 @@ impl TryFrom<&StructuredTextData> for StructuredText {
                                 arg.name.clone(),
                                 StructuredText::try_from(value.as_ref())?,
                             )?;
+                        }
+                        CatalogArgValueData::Unsupported => {
+                            return Err(StructuredTextDataError::UnsupportedArgValue {
+                                arg_name: arg.name.clone(),
+                            });
                         }
                     }
                 }
@@ -244,6 +253,23 @@ mod tests {
         assert!(matches!(
             err,
             StructuredTextDataError::InvalidSignedInteger { .. }
+        ));
+    }
+
+    #[test]
+    fn unsupported_arg_value_is_rejected_diagnostically() {
+        let err = StructuredText::try_from(StructuredTextData::Catalog {
+            code: "mode_denied".to_string(),
+            args: vec![CatalogArgData {
+                name: "attempt".to_string(),
+                value: CatalogArgValueData::Unsupported,
+            }],
+        })
+        .expect_err("unsupported arg value should be rejected");
+
+        assert!(matches!(
+            err,
+            StructuredTextDataError::UnsupportedArgValue { arg_name } if arg_name == "attempt"
         ));
     }
 

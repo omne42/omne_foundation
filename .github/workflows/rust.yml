@@ -14,11 +14,11 @@ jobs:
         shell: bash
         working-directory: omne_foundation
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: omne_foundation
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: omne42/omne-runtime
           path: omne-runtime
@@ -58,11 +58,11 @@ jobs:
         shell: bash
         working-directory: omne_foundation
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: omne_foundation
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: omne42/omne-runtime
           path: omne-runtime
@@ -93,11 +93,11 @@ jobs:
         shell: bash
         working-directory: omne_foundation
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: omne_foundation
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: omne42/omne-runtime
           path: omne-runtime

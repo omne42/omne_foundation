@@ -8,3 +8,4 @@
 - Add `select_http_client_with_options(...)` and preserve pinned-client builder options/cache partitioning for timeout, connect-timeout, default headers, redirect policy, and proxy policy.
 - Reject cross-host redirects while public-IP pinning is active so an initially validated target cannot pivot into an unvalidated redirect destination.
 - Add `HttpClientProfile` so callers can reuse a single explicit `HttpClientOptions` configuration across pinned and unpinned requests without relying on opaque `reqwest::Client` state.
+- Add regression coverage for pinned-client redirect policy so same-host redirects still succeed with preserved default headers, while cross-host redirects fail with the public-IP pinning guard message.

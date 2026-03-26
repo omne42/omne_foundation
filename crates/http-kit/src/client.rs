@@ -81,6 +81,32 @@ impl Default for HttpClientOptions {
     }
 }
 
+#[derive(Clone)]
+pub struct HttpClientProfile {
+    client: reqwest::Client,
+    options: HttpClientOptions,
+}
+
+impl HttpClientProfile {
+    #[must_use]
+    pub fn client(&self) -> &reqwest::Client {
+        &self.client
+    }
+
+    #[must_use]
+    pub fn options(&self) -> &HttpClientOptions {
+        &self.options
+    }
+
+    pub async fn select_for_url(
+        &self,
+        url: &reqwest::Url,
+        enforce_public_ip: bool,
+    ) -> crate::Result<reqwest::Client> {
+        select_http_client_from_profile(self, url, enforce_public_ip).await
+    }
+}
+
 fn dns_lookup_timeout_message() -> &'static str {
     DNS_LOOKUP_TIMEOUT_MESSAGE
         .get_or_init(|| format!("dns lookup timeout (capped at {DEFAULT_DNS_LOOKUP_TIMEOUT:?})"))
@@ -259,6 +285,13 @@ pub fn build_http_client_with_options(
         .map_err(|err| anyhow::anyhow!("build reqwest client: {err}").into())
 }
 
+pub fn build_http_client_profile(options: &HttpClientOptions) -> crate::Result<HttpClientProfile> {
+    Ok(HttpClientProfile {
+        client: build_http_client_with_options(options)?,
+        options: options.clone(),
+    })
+}
+
 pub(crate) fn sanitize_reqwest_error(err: &reqwest::Error) -> &'static str {
     if err.is_timeout() {
         "timeout"
@@ -366,20 +399,10 @@ async fn build_http_client_pinned_async(
     build_http_client_pinned_with_addrs(options, url, &addrs)
 }
 
-pub async fn select_http_client_with_options(
-    base_client: &reqwest::Client,
+async fn select_pinned_http_client_with_options(
     options: &HttpClientOptions,
     url: &reqwest::Url,
-    enforce_public_ip: bool,
 ) -> crate::Result<reqwest::Client> {
-    // `reqwest::Client` does not expose a safe way to clone its opaque builder state while
-    // swapping in per-host DNS pinning. The pinned path therefore rebuilds a client from the
-    // supported `HttpClientOptions`; callers that need settings to survive pinning must express
-    // them there instead of relying on extra state hidden inside `base_client`.
-    if !enforce_public_ip {
-        return Ok(base_client.clone());
-    }
-
     let key = pinned_client_key(options, url)?;
 
     let lookup_now = Instant::now();
@@ -460,6 +483,33 @@ pub async fn select_http_client_with_options(
     build_lock_cleanup.disarm();
 
     result
+}
+
+pub async fn select_http_client_from_profile(
+    profile: &HttpClientProfile,
+    url: &reqwest::Url,
+    enforce_public_ip: bool,
+) -> crate::Result<reqwest::Client> {
+    if !enforce_public_ip {
+        return Ok(profile.client.clone());
+    }
+    select_pinned_http_client_with_options(&profile.options, url).await
+}
+
+pub async fn select_http_client_with_options(
+    base_client: &reqwest::Client,
+    options: &HttpClientOptions,
+    url: &reqwest::Url,
+    enforce_public_ip: bool,
+) -> crate::Result<reqwest::Client> {
+    if !enforce_public_ip {
+        return Ok(base_client.clone());
+    }
+
+    // `reqwest::Client` does not expose a safe way to clone its opaque builder state while
+    // swapping in per-host DNS pinning. Callers that need settings to survive pinning should
+    // prefer `HttpClientProfile`, which makes the supported reusable options explicit.
+    select_pinned_http_client_with_options(options, url).await
 }
 
 pub async fn select_http_client(
@@ -593,6 +643,58 @@ mod tests {
                 .expect("build pinned client");
 
             let response = client.get(url).send().await.expect("send request");
+            assert!(response.status().is_success());
+        });
+
+        server.join().expect("join server");
+    }
+
+    #[test]
+    fn build_http_client_profile_preserves_default_headers_for_base_client() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let mut buf = [0_u8; 2048];
+            let read = stream.read(&mut buf).expect("read request");
+            let request = String::from_utf8_lossy(&buf[..read]);
+            assert!(
+                request.contains("x-test-header: profile\r\n"),
+                "request should keep default headers: {request}"
+            );
+
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .expect("write response");
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime");
+        rt.block_on(async {
+            let mut default_headers = reqwest::header::HeaderMap::new();
+            default_headers.insert(
+                "x-test-header",
+                reqwest::header::HeaderValue::from_static("profile"),
+            );
+            let profile = build_http_client_profile(&HttpClientOptions {
+                timeout: Some(Duration::from_secs(1)),
+                default_headers,
+                ..Default::default()
+            })
+            .expect("build http client profile");
+            let url = reqwest::Url::parse(&format!("http://127.0.0.1:{}/hook", addr.port()))
+                .expect("parse url");
+
+            let response = profile
+                .select_for_url(&url, false)
+                .await
+                .expect("select base client")
+                .get(url)
+                .send()
+                .await
+                .expect("send request");
             assert!(response.status().is_success());
         });
 

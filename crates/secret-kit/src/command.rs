@@ -79,6 +79,9 @@ impl Drop for SecretCommandChild {
 
 type CommandReadTask = tokio::task::JoinHandle<std::io::Result<(SecretBytes, bool)>>;
 
+const TEXT_FILE_BUSY_RETRY_ATTEMPTS: usize = 5;
+const TEXT_FILE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(20);
+
 #[derive(Clone, Copy, Debug)]
 struct CommandStderrSummary {
     bytes: usize,
@@ -282,7 +285,7 @@ fn spawn_secret_command(
     command.stderr(std::process::Stdio::piped());
     configure_command_for_process_tree(&mut command);
 
-    let child = command.spawn().map_err(|err| {
+    let child = spawn_command_with_retry(&mut command).map_err(|err| {
         secret_command_error!(
             "error_detail.secret.command_spawn_failed",
             "program" => cmd.program.as_str(),
@@ -295,6 +298,37 @@ fn spawn_secret_command(
     let stdout_task = tokio::spawn(read_limited(stdout, MAX_SECRET_COMMAND_OUTPUT_BYTES));
     let stderr_task = tokio::spawn(read_limited(stderr, MAX_SECRET_COMMAND_OUTPUT_BYTES));
     Ok((child, stdout_task, stderr_task))
+}
+
+fn spawn_command_with_retry(
+    command: &mut tokio::process::Command,
+) -> std::io::Result<tokio::process::Child> {
+    for attempt in 0..=TEXT_FILE_BUSY_RETRY_ATTEMPTS {
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(err)
+                if should_retry_text_file_busy(&err) && attempt < TEXT_FILE_BUSY_RETRY_ATTEMPTS =>
+            {
+                std::thread::sleep(TEXT_FILE_BUSY_RETRY_DELAY);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    unreachable!("spawn retry loop should always return or error");
+}
+
+fn should_retry_text_file_busy(err: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        err.raw_os_error() == Some(26)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = err;
+        false
+    }
 }
 
 fn apply_command_env(

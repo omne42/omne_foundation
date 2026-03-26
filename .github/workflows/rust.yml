@@ -12,8 +12,16 @@ jobs:
     defaults:
       run:
         shell: bash
+        working-directory: omne_foundation
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: omne_foundation
+
+      - uses: actions/checkout@v4
+        with:
+          repository: omne42/omne-runtime
+          path: omne-runtime
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -21,6 +29,9 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            omne_foundation -> omne_foundation/target
 
       - name: Install mdBook
         uses: taiki-e/install-action@v2
@@ -42,8 +53,16 @@ jobs:
     defaults:
       run:
         shell: bash
+        working-directory: omne_foundation
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: omne_foundation
+
+      - uses: actions/checkout@v4
+        with:
+          repository: omne42/omne-runtime
+          path: omne-runtime
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -51,6 +70,9 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            omne_foundation -> omne_foundation/target
 
       - name: Test mcp crates
         run: cargo test -p mcp-jsonrpc -p mcp-kit --all-features
@@ -63,8 +85,16 @@ jobs:
     defaults:
       run:
         shell: bash
+        working-directory: omne_foundation
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: omne_foundation
+
+      - uses: actions/checkout@v4
+        with:
+          repository: omne42/omne-runtime
+          path: omne-runtime
 
       - uses: dtolnay/rust-toolchain@stable
         with:

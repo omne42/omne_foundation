@@ -398,15 +398,14 @@ impl Client {
                 };
 
                 let writer = writer_sse.clone();
-                let mut pump_task = tokio::spawn(async move {
-                    pump_sse_response(resp, writer, max_message_bytes).await
-                });
+                let mut pump_fut =
+                    std::pin::pin!(pump_sse_response(resp, writer, max_message_bytes));
 
                 loop {
                     tokio::select! {
-                        result = &mut pump_task => {
+                        result = &mut pump_fut => {
                             match result {
-                                Ok(Ok(())) => {
+                                Ok(()) => {
                                     close_post_bridge(
                                         &writer_sse,
                                         &handle_sse,
@@ -414,19 +413,11 @@ impl Client {
                                     )
                                     .await;
                                 }
-                                Ok(Err(err)) => {
-                                    close_post_bridge(
-                                        &writer_sse,
-                                        &handle_sse,
-                                        format!("streamable http SSE connection failed: {err}"),
-                                    )
-                                    .await;
-                                }
                                 Err(err) => {
                                     close_post_bridge(
                                         &writer_sse,
                                         &handle_sse,
-                                        format!("streamable http SSE task failed: {err}"),
+                                        format!("streamable http SSE connection failed: {err}"),
                                     )
                                     .await;
                                 }
@@ -436,8 +427,6 @@ impl Client {
                         wake = wake_rx.recv() => {
                             match wake {
                                 Some(SseWakeReason::SessionChanged) => {
-                                    pump_task.abort();
-                                    let _ = pump_task.await;
                                     let sse_client = match http_client_profile_sse
                                         .select_for_url(&sse_url, enforce_public_ip)
                                         .await
@@ -477,8 +466,8 @@ impl Client {
                                 }
                                 Some(SseWakeReason::Connect) => {}
                                 None => {
-                                    match pump_task.await {
-                                        Ok(Ok(())) => {
+                                    match pump_fut.await {
+                                        Ok(()) => {
                                             close_post_bridge(
                                                 &writer_sse,
                                                 &handle_sse,
@@ -486,19 +475,11 @@ impl Client {
                                             )
                                             .await;
                                         }
-                                        Ok(Err(err)) => {
-                                            close_post_bridge(
-                                                &writer_sse,
-                                                &handle_sse,
-                                                format!("streamable http SSE connection failed: {err}"),
-                                            )
-                                            .await;
-                                        }
                                         Err(err) => {
                                             close_post_bridge(
                                                 &writer_sse,
                                                 &handle_sse,
-                                                format!("streamable http SSE task failed: {err}"),
+                                                format!("streamable http SSE connection failed: {err}"),
                                             )
                                             .await;
                                         }

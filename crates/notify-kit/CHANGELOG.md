@@ -48,6 +48,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `FeishuWebhookSink::new_strict` / `new_with_secret_strict`：在构造阶段额外做一次 DNS 公网 IP 校验。
 
 ### Changed
+- `FeishuWebhookSink`：`media.rs` 的回归测试模块移动到文件末尾，以满足 workspace 级 clippy 门禁并保持新增加的丢唤醒回归测试生效。
 - `FeishuWebhookSink`：Markdown 远程图片 URL 现在默认关闭，只有显式 `with_remote_image_urls(true)` 后才会主动下载并上传；避免正文里的任意公网 URL 触发隐藏出站副作用。
 - `FeishuWebhookSink`：本地图片读取在非 Unix 平台改为 fail closed；如果平台分支无法提供 no-follow 打开语义，即使显式开启本地图片也会拒绝读取，避免退化成跟随 symlink/reparse point。
 - release: bump workspace package version to `0.1.0`.

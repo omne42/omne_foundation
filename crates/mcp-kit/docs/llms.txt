@@ -1140,7 +1140,7 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 `mcp-jsonrpc` 的 SSE pump 只关心 `data:` 字段：
 
 - 会把同一个 event 中的多行 `data:` 拼接起来（用 `\n` 连接）
-- 遇到空行表示一个 event 结束，此时把累计的 `data` 当作“一条 JSON-RPC 消息”，写入内部 JSON-RPC 读循环
+- 遇到空行表示一个 event 结束，此时把累计的 `data` 当作“一条 JSON-RPC 消息”处理后写入内部 JSON-RPC 读循环
 - 如果累计 `data` 恰好是 `[DONE]`，则认为该 SSE 流结束（仅用于 POST 返回 SSE 的响应流；主 SSE（GET）不会把 `[DONE]` 当作断开信号）
 
 简化示例：
@@ -1150,7 +1150,7 @@ data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}
 
 ```
 
-> `mcp-jsonrpc` 会把 `data:` 后面的内容原样写入 JSON-RPC 流（再由 JSON parser 解析）。
+> 如果拼接后的 `data` 已经是合法 JSON（包括 pretty/multiline JSON），`mcp-jsonrpc` 会先把它压平成单行 JSON，再写回内部按换行分帧的 JSON-RPC 流；无法解析为 JSON 的 payload 才会保持原样写回。
 
 ## POST 响应的两种形态
 

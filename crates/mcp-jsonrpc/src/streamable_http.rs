@@ -1220,6 +1220,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn normalize_sse_event_data_compacts_multiline_json_into_single_line() {
+        let normalized = normalize_sse_event_data_for_json_line(
+            br#"{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "ok": true
+  }
+}"#,
+        )
+        .expect("multiline json should normalize");
+
+        assert_eq!(
+            normalized,
+            br#"{"id":1,"jsonrpc":"2.0","result":{"ok":true}}"#
+        );
+    }
+
     #[tokio::test]
     async fn sse_pump_flushes_last_data_event_without_trailing_blank_line()
     -> Result<(), Box<dyn std::error::Error>> {

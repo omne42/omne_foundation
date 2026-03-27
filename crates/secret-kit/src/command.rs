@@ -148,7 +148,7 @@ where
     let resolved_program = resolve_command_program(cmd, env, &snapshot)?;
     let timeout = snapshot.timeout();
     let (mut child, stdout_task, stderr_task) =
-        spawn_secret_command(cmd, resolved_program, snapshot)?;
+        spawn_secret_command(cmd, resolved_program, snapshot).await?;
     let mut stdout_task = Some(stdout_task);
     let mut stderr_task = Some(stderr_task);
     let mut exit_status = None;
@@ -267,7 +267,7 @@ where
     CommandEnvSnapshot::capture("", env).timeout()
 }
 
-fn spawn_secret_command(
+async fn spawn_secret_command(
     cmd: &SecretCommand,
     resolved_program: String,
     snapshot: CommandEnvSnapshot,
@@ -285,13 +285,15 @@ fn spawn_secret_command(
     command.stderr(std::process::Stdio::piped());
     configure_command_for_process_tree(&mut command);
 
-    let child = spawn_command_with_retry(&mut command).map_err(|err| {
-        secret_command_error!(
-            "error_detail.secret.command_spawn_failed",
-            "program" => cmd.program.as_str(),
-            "error" => err.to_string()
-        )
-    })?;
+    let child = spawn_command_with_retry(&mut command)
+        .await
+        .map_err(|err| {
+            secret_command_error!(
+                "error_detail.secret.command_spawn_failed",
+                "program" => cmd.program.as_str(),
+                "error" => err.to_string()
+            )
+        })?;
     let mut child = SecretCommandChild::new(child, cmd.program.as_str())?;
     let stdout = child.take_stdout(cmd.program.as_str())?;
     let stderr = child.take_stderr(cmd.program.as_str())?;
@@ -300,22 +302,36 @@ fn spawn_secret_command(
     Ok((child, stdout_task, stderr_task))
 }
 
-fn spawn_command_with_retry(
+async fn spawn_command_with_retry(
     command: &mut tokio::process::Command,
 ) -> std::io::Result<tokio::process::Child> {
-    for attempt in 0..=TEXT_FILE_BUSY_RETRY_ATTEMPTS {
-        match command.spawn() {
-            Ok(child) => return Ok(child),
-            Err(err)
-                if should_retry_text_file_busy(&err) && attempt < TEXT_FILE_BUSY_RETRY_ATTEMPTS =>
-            {
-                std::thread::sleep(TEXT_FILE_BUSY_RETRY_DELAY);
+    retry_text_file_busy(
+        TEXT_FILE_BUSY_RETRY_ATTEMPTS,
+        TEXT_FILE_BUSY_RETRY_DELAY,
+        || command.spawn(),
+    )
+    .await
+}
+
+async fn retry_text_file_busy<T, F>(
+    attempts: usize,
+    delay: Duration,
+    mut operation: F,
+) -> std::io::Result<T>
+where
+    F: FnMut() -> std::io::Result<T>,
+{
+    for attempt in 0..=attempts {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(err) if should_retry_text_file_busy(&err) && attempt < attempts => {
+                tokio::time::sleep(delay).await;
             }
             Err(err) => return Err(err),
         }
     }
 
-    unreachable!("spawn retry loop should always return or error");
+    unreachable!("retry loop should always return or error");
 }
 
 fn should_retry_text_file_busy(err: &std::io::Error) -> bool {
@@ -328,6 +344,47 @@ fn should_retry_text_file_busy(err: &std::io::Error) -> bool {
     {
         let _ = err;
         false
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn retry_text_file_busy_retries_until_success() {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+
+        let value = retry_text_file_busy(2, Duration::ZERO, || {
+            let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if attempt < 2 {
+                return Err(std::io::Error::from_raw_os_error(26));
+            }
+            Ok("ok")
+        })
+        .await
+        .expect("third attempt succeeds");
+
+        assert_eq!(value, "ok");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_text_file_busy_returns_non_retryable_error_immediately() {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+
+        let err = retry_text_file_busy(5, Duration::ZERO, || {
+            attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err::<(), _>(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            ))
+        })
+        .await
+        .expect_err("non-retryable error should be returned");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 }
 

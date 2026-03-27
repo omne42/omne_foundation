@@ -474,6 +474,9 @@ async fn wait_for_process_termination(identity: LinuxTestProcessIdentity, attemp
     false
 }
 
+#[cfg(all(unix, target_os = "linux"))]
+const PROCESS_TERMINATION_WAIT_ATTEMPTS: usize = 300;
+
 #[tokio::test]
 async fn resolves_env_secret() -> Result<()> {
     let env = TestEnv {
@@ -2954,7 +2957,7 @@ async fn secret_command_runner_returns_after_successful_leader_exit() -> Result<
     assert_eq!(value.expose_secret(), "ok");
 
     assert!(
-        wait_for_process_termination(pid, 500).await,
+        wait_for_process_termination(pid, PROCESS_TERMINATION_WAIT_ATTEMPTS).await,
         "successful secret command should clean up orphaned background processes"
     );
     Ok(())
@@ -2989,7 +2992,7 @@ async fn secret_command_runner_cancellation_kills_child_process_group() -> Resul
     let _ = handle.await;
 
     assert!(
-        wait_for_process_termination(pid, 500).await,
+        wait_for_process_termination(pid, PROCESS_TERMINATION_WAIT_ATTEMPTS).await,
         "secret command process group should be killed on cancellation"
     );
     Ok(())
@@ -3026,7 +3029,7 @@ async fn secret_command_runner_cancellation_kills_orphaned_process_group() -> Re
         .expect("background pid file should be written");
 
     assert!(
-        wait_for_process_termination(shell_pid, 500).await,
+        wait_for_process_termination(shell_pid, PROCESS_TERMINATION_WAIT_ATTEMPTS).await,
         "shell leader should exit before cancellation"
     );
 
@@ -3034,7 +3037,7 @@ async fn secret_command_runner_cancellation_kills_orphaned_process_group() -> Re
     let _ = handle.await;
 
     assert!(
-        wait_for_process_termination(bg_pid, 500).await,
+        wait_for_process_termination(bg_pid, PROCESS_TERMINATION_WAIT_ATTEMPTS).await,
         "secret command cancellation should still kill orphaned background processes"
     );
     Ok(())

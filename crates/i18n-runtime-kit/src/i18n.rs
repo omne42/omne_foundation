@@ -327,6 +327,16 @@ mod tests {
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
     use text_assets_kit::{MAX_TEXT_DIRECTORY_TOTAL_BYTES, MAX_TEXT_RESOURCE_BYTES, TextResource};
+
+    #[cfg(unix)]
+    fn short_tempdir_for_unix_socket() -> TempDir {
+        tempfile::Builder::new()
+            .prefix("of-sock-")
+            .rand_bytes(3)
+            .tempdir_in("/var/tmp")
+            .expect("short temp dir")
+    }
+
     #[test]
     fn resource_backed_catalog_rebuilds_snapshot_from_current_disk_state() {
         let temp = TempDir::new().expect("temp dir");
@@ -1024,7 +1034,7 @@ mod tests {
     fn directory_catalog_rejects_socket_entries() {
         use std::os::unix::net::UnixListener;
 
-        let temp = TempDir::new().expect("temp dir");
+        let temp = short_tempdir_for_unix_socket();
         fs::write(temp.path().join("en_US.json"), r#"{"greeting":"hello"}"#).expect("write locale");
         let socket_path = temp.path().join("catalog.sock");
         let _listener = match UnixListener::bind(&socket_path) {

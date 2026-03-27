@@ -363,6 +363,7 @@ impl Sink for FeishuWebhookSink {
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
@@ -372,6 +373,32 @@ mod tests {
 
     use super::*;
     use crate::sinks::feishu::media::LoadedImage;
+
+    fn local_image_test_root() -> PathBuf {
+        let base = std::env::temp_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| std::env::temp_dir())
+            .join("notify-kit-feishu-tests");
+        std::fs::create_dir_all(&base).expect("create local image test root");
+        base
+    }
+
+    fn unique_local_image_test_name(label: &str) -> String {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("unix epoch")
+            .as_nanos();
+        format!("{label}-{}-{unique:x}", std::process::id())
+    }
+
+    #[cfg(unix)]
+    fn unique_unix_socket_test_path() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("unix epoch")
+            .as_nanos();
+        PathBuf::from(format!("nk-{}-{unique:x}.sock", std::process::id()))
+    }
 
     #[test]
     fn builds_expected_text_payload() {
@@ -642,18 +669,10 @@ mod tests {
             .build()
             .expect("build runtime");
         rt.block_on(async {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("unix epoch")
-                .as_nanos();
-            let target = std::env::temp_dir().join(format!(
-                "notify-kit-feishu-local-image-target-{}-{unique}.png",
-                std::process::id()
-            ));
-            let link = std::env::temp_dir().join(format!(
-                "notify-kit-feishu-local-image-link-{}-{unique}.png",
-                std::process::id()
-            ));
+            let root = local_image_test_root();
+            let name = unique_local_image_test_name("notify-kit-feishu-local-image");
+            let target = root.join(format!("{name}-target.png"));
+            let link = root.join(format!("{name}-link.png"));
             std::fs::write(&target, b"png").expect("write symlink target");
             symlink(&target, &link).expect("create symlink");
 
@@ -683,13 +702,8 @@ mod tests {
             .build()
             .expect("build runtime");
         rt.block_on(async {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("unix epoch")
-                .as_nanos();
-            let base = std::env::temp_dir().join(format!(
-                "notify-kit-feishu-local-image-ancestor-{}-{unique}",
-                std::process::id()
+            let base = local_image_test_root().join(unique_local_image_test_name(
+                "notify-kit-feishu-local-image-ancestor",
             ));
             let target_dir = base.join("target");
             let link_dir = base.join("link");
@@ -710,7 +724,7 @@ mod tests {
                 .load_image(link_dir.join(image_name).to_str().expect("utf8 path"))
                 .await
                 .expect_err("symlink ancestors should be rejected");
-            assert!(err.to_string().contains("symlink"), "{err:#}");
+            assert!(err.to_string().contains("symlink ancestor"), "{err:#}");
 
             let _ = std::fs::remove_file(&target);
             let _ = std::fs::remove_file(&link_dir);
@@ -726,14 +740,7 @@ mod tests {
             .build()
             .expect("build runtime");
         rt.block_on(async {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("unix epoch")
-                .as_nanos();
-            let path = std::path::PathBuf::from(format!(
-                "/root/nk-feishu-{}-{unique:x}.sock",
-                std::process::id()
-            ));
+            let path = unique_unix_socket_test_path();
             let listener = UnixListener::bind(&path).expect("create unix socket");
 
             let sink = FeishuWebhookSink::new(
@@ -762,13 +769,9 @@ mod tests {
             .build()
             .expect("build runtime");
         rt.block_on(async {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("unix epoch")
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "notify-kit-feishu-local-image-unsupported-{}-{unique}.png",
-                std::process::id()
+            let path = local_image_test_root().join(format!(
+                "{}.png",
+                unique_local_image_test_name("notify-kit-feishu-local-image-unsupported")
             ));
             std::fs::write(&path, b"png").expect("write local image");
 
@@ -799,13 +802,9 @@ mod tests {
             .build()
             .expect("build runtime");
         rt.block_on(async {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("unix epoch")
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "notify-kit-feishu-local-image-large-{}-{unique}.png",
-                std::process::id()
+            let path = local_image_test_root().join(format!(
+                "{}.png",
+                unique_local_image_test_name("notify-kit-feishu-local-image-large")
             ));
             std::fs::write(&path, vec![b'x'; 5]).expect("write oversized image");
 

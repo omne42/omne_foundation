@@ -26,11 +26,30 @@ pub(crate) fn is_in_manager_handler_scope(manager_instance_id: u64) -> bool {
 
 async fn scope_manager_handler_call<T>(
     manager_instance_id: u64,
+    active_handler_scopes: Arc<AtomicU64>,
     fut: impl Future<Output = T>,
 ) -> T {
+    let _scope = ActiveHandlerScope::enter(active_handler_scopes);
     CURRENT_MANAGER_HANDLER_INSTANCE_ID
         .scope(manager_instance_id, fut)
         .await
+}
+
+struct ActiveHandlerScope {
+    counter: Arc<AtomicU64>,
+}
+
+impl ActiveHandlerScope {
+    fn enter(counter: Arc<AtomicU64>) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self { counter }
+    }
+}
+
+impl Drop for ActiveHandlerScope {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 enum HandlerOutcome<T> {
@@ -150,6 +169,7 @@ pub(crate) struct HandlerAttachSnapshot {
     pub(crate) handler_concurrency: usize,
     pub(crate) handler_timeout: Option<std::time::Duration>,
     pub(crate) timeout_counter: Arc<AtomicU64>,
+    pub(crate) active_handler_scopes: Arc<AtomicU64>,
     pub(crate) server_request_handler: ServerRequestHandler,
     pub(crate) server_notification_handler: ServerNotificationHandler,
     pub(crate) roots: Option<Arc<Vec<Root>>>,
@@ -177,6 +197,7 @@ impl Manager {
             handler_concurrency: self.server_handler_concurrency.max(1),
             handler_timeout,
             timeout_counter,
+            active_handler_scopes: Arc::clone(&self.active_handler_scopes),
             server_request_handler: self.server_request_handler.clone(),
             server_notification_handler: self.server_notification_handler.clone(),
             roots: self.roots.clone(),
@@ -194,6 +215,7 @@ impl Manager {
             handler_concurrency,
             handler_timeout,
             timeout_counter,
+            active_handler_scopes,
             server_request_handler,
             server_notification_handler,
             roots,
@@ -204,12 +226,14 @@ impl Manager {
             let handler = server_request_handler;
             let server_name = server_name.clone();
             let timeout_counter = timeout_counter.clone();
+            let request_handler_scopes = Arc::clone(&active_handler_scopes);
             tasks.push(tokio::spawn(async move {
                 drive_handler_tasks(requests_rx, handler_concurrency, move |req| {
                     let handler = handler.clone();
                     let roots = roots.clone();
                     let server_name = server_name.clone();
                     let timeout_counter = timeout_counter.clone();
+                    let active_handler_scopes = Arc::clone(&request_handler_scopes);
                     async move {
                         const JSONRPC_SERVER_ERROR: i64 = -32000;
 
@@ -224,7 +248,13 @@ impl Manager {
                         let mut outcome = match run_handler_with_timeout(
                             handler_timeout,
                             &timeout_counter,
-                            || scope_manager_handler_call(manager_instance_id, handler(ctx)),
+                            || {
+                                scope_manager_handler_call(
+                                    manager_instance_id,
+                                    active_handler_scopes,
+                                    handler(ctx),
+                                )
+                            },
                         )
                         .await
                         {
@@ -280,11 +310,13 @@ impl Manager {
 
         if let Some(notifications_rx) = client.take_notifications() {
             let handler = server_notification_handler;
+            let active_handler_scopes = Arc::clone(&active_handler_scopes);
             tasks.push(tokio::spawn(async move {
                 drive_handler_tasks(notifications_rx, handler_concurrency, move |note| {
                     let handler = handler.clone();
                     let server_name = server_name.clone();
                     let timeout_counter = timeout_counter.clone();
+                    let active_handler_scopes = Arc::clone(&active_handler_scopes);
                     async move {
                         let ctx = ServerNotificationContext {
                             server_name: server_name.clone(),
@@ -294,7 +326,11 @@ impl Manager {
 
                         let _ = /* pre-commit: allow-let-underscore */
                             run_handler_with_timeout(handler_timeout, &timeout_counter, || {
-                                scope_manager_handler_call(manager_instance_id, handler(ctx))
+                                scope_manager_handler_call(
+                                    manager_instance_id,
+                                    active_handler_scopes,
+                                    handler(ctx),
+                                )
                             })
                             .await;
                     }

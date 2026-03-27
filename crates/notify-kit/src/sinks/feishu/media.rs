@@ -402,26 +402,6 @@ impl FeishuWebhookSink {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    use super::tenant_access_token_refresh_waiter;
-
-    #[tokio::test]
-    async fn tenant_access_token_refresh_waiter_handles_notify_before_await() {
-        let notify = Arc::new(tokio::sync::Notify::new());
-        let wait = tenant_access_token_refresh_waiter(Arc::clone(&notify));
-
-        notify.notify_waiters();
-
-        tokio::time::timeout(Duration::from_millis(50), wait)
-            .await
-            .expect("enabled waiter should observe notify_waiters before await");
-    }
-}
-
 async fn read_local_image_file(path: String, max_bytes: usize) -> crate::Result<Vec<u8>> {
     #[cfg(not(unix))]
     {
@@ -550,5 +530,25 @@ fn normalize_optional_trimmed(value: Option<String>, field: &str) -> crate::Resu
             Ok(Some(value.to_string()))
         }
         None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::tenant_access_token_refresh_waiter;
+
+    #[tokio::test]
+    async fn tenant_access_token_refresh_waiter_handles_notify_before_await() {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let wait = tenant_access_token_refresh_waiter(Arc::clone(&notify));
+
+        notify.notify_waiters();
+
+        tokio::time::timeout(Duration::from_millis(50), wait)
+            .await
+            .expect("enabled waiter should observe notify_waiters before await");
     }
 }

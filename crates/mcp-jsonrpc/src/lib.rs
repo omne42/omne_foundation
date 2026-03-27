@@ -872,25 +872,15 @@ impl RequestResponder {
             RequestResponseTarget::Batch(batch) => batch.push_reserved_response(response).await,
         }
     }
-}
 
-impl Drop for RequestResponder {
-    fn drop(&mut self) {
+    fn begin_drop_without_response(&self) -> bool {
         if Arc::strong_count(&self.responded) != 1 {
-            return;
+            return false;
         }
 
-        if self
-            .responded
+        self.responded
             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err()
-        {
-            return;
-        }
-
-        if let RequestResponseTarget::Batch(batch) = &self.target {
-            batch.release_reserved_response();
-        }
+            .is_ok()
     }
 }
 
@@ -1660,6 +1650,48 @@ impl IncomingRequest {
         self.responder
             .respond_error(&self.id, code, message, data)
             .await
+    }
+}
+
+impl Drop for IncomingRequest {
+    fn drop(&mut self) {
+        const INTERNAL_ERROR: i64 = -32603;
+        const DROPPED_REQUEST_MESSAGE: &str = "request handler dropped request without responding";
+
+        if !self.responder.begin_drop_without_response() {
+            return;
+        }
+
+        let response = match outbound_error_response_value(
+            &self.id,
+            INTERNAL_ERROR,
+            DROPPED_REQUEST_MESSAGE,
+            None,
+        ) {
+            Ok(response) => response,
+            Err(_) => return,
+        };
+
+        match &self.responder.target {
+            RequestResponseTarget::Direct(handle) => {
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    let handle = handle.clone();
+                    drop(runtime.spawn(async move {
+                        drop(handle.write_json_line(&response).await);
+                    }));
+                }
+            }
+            RequestResponseTarget::Batch(batch) => {
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    let batch = batch.clone();
+                    drop(runtime.spawn(async move {
+                        drop(batch.push_reserved_response(response).await);
+                    }));
+                } else {
+                    batch.release_reserved_response();
+                }
+            }
+        }
     }
 }
 
@@ -2533,7 +2565,49 @@ mod incoming_value_tests {
     }
 
     #[tokio::test]
-    async fn dropped_batch_request_does_not_block_remaining_batch_response() {
+    async fn dropped_direct_request_returns_internal_error_response() {
+        let (client_stream, server_stream) = tokio::io::duplex(2048);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let mut client = Client::connect_io(client_read, client_write)
+            .await
+            .expect("connect client");
+        let mut requests = client.take_requests().expect("request receiver");
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        server_write
+            .write_all(br#"{"jsonrpc":"2.0","id":1,"method":"first"}"#)
+            .await
+            .expect("write request");
+        server_write.write_all(b"\n").await.expect("write newline");
+        server_write.flush().await.expect("flush request");
+
+        let request = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .expect("request timeout")
+            .expect("request");
+        assert_eq!(request.method, "first");
+        drop(request);
+
+        let response_line = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+            .await
+            .expect("response timeout")
+            .expect("read response")
+            .expect("response line");
+        let response: Value = serde_json::from_str(&response_line).expect("parse response");
+        assert_eq!(response["id"], 1);
+        assert_eq!(response["error"]["code"], -32603);
+        assert_eq!(
+            response["error"]["message"],
+            "request handler dropped request without responding"
+        );
+
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn dropped_batch_request_emits_internal_error_and_preserves_remaining_batch_response() {
         let (client_stream, server_stream) = tokio::io::duplex(2048);
         let (client_read, client_write) = tokio::io::split(client_stream);
         let (server_read, mut server_write) = tokio::io::split(server_stream);
@@ -2578,9 +2652,22 @@ mod incoming_value_tests {
             .expect("response line");
         let response: Value = serde_json::from_str(&response_line).expect("parse batch response");
         let items = response.as_array().expect("batch response array");
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0]["id"], 2);
-        assert_eq!(items[0]["result"]["handled"], "second");
+        assert_eq!(items.len(), 2);
+        assert!(
+            items.iter().any(|item| {
+                item["id"] == 1
+                    && item["error"]["code"] == -32603
+                    && item["error"]["message"]
+                        == "request handler dropped request without responding"
+            }),
+            "{items:?}"
+        );
+        assert!(
+            items
+                .iter()
+                .any(|item| item["id"] == 2 && item["result"]["handled"] == "second"),
+            "{items:?}"
+        );
 
         drop(client);
     }

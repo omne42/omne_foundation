@@ -61,7 +61,7 @@ fn normalize_server_name_lookup(server_name: &str) -> &str {
 
 pub(crate) fn resolve_connection_cwd(cwd: &Path) -> anyhow::Result<PathBuf> {
     if cwd.is_absolute() {
-        return Ok(cwd.to_path_buf());
+        Ok(cwd.to_path_buf())
     } else {
         let current_dir = std::env::current_dir()
             .context("determine current working directory for relative MCP cwd")?;

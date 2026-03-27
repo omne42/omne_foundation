@@ -14,6 +14,20 @@ use crate::sinks::Sink;
 const DEFAULT_MAX_INFLIGHT_EVENTS: usize = 128;
 const DEFAULT_MAX_SINK_SENDS_IN_PARALLEL: usize = 16;
 
+fn ensure_tokio_time_driver(operation: &'static str) -> crate::Result<()> {
+    std::panic::catch_unwind(|| {
+        drop(tokio::time::sleep(Duration::ZERO));
+    })
+    .map_err(|_| anyhow::anyhow!("tokio runtime time driver is required for {operation}").into())
+}
+
+fn has_tokio_time_driver() -> bool {
+    std::panic::catch_unwind(|| {
+        drop(tokio::time::sleep(Duration::ZERO));
+    })
+    .is_ok()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TryNotifyError {
     NoTokioRuntime,
@@ -23,7 +37,7 @@ pub enum TryNotifyError {
 impl std::fmt::Display for TryNotifyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NoTokioRuntime => write!(f, "no tokio runtime"),
+            Self::NoTokioRuntime => write!(f, "no tokio runtime or time driver"),
             Self::Overloaded => write!(f, "hub is overloaded"),
         }
     }
@@ -43,7 +57,8 @@ pub struct HubConfig {
     /// This is a **hard upper bound** enforced by `Hub` (via `tokio::time::timeout`) around each
     /// `Sink::send`. If a sink has its own internal timeout (e.g. an HTTP request timeout), keep
     /// `per_sink_timeout` >= that value (and ideally leave some slack for preflight work like DNS
-    /// checks), otherwise `Hub` may time out first.
+    /// checks), otherwise `Hub` may time out first. Calling `Hub::send` or `Hub::notify` with
+    /// sinks configured therefore requires a Tokio runtime with the time driver enabled.
     pub per_sink_timeout: Duration,
 }
 
@@ -157,8 +172,8 @@ impl Hub {
 
     /// Fire-and-forget notification.
     ///
-    /// - Requires a Tokio runtime; if none is present, the notification is dropped and a warning is
-    ///   logged.
+    /// - Requires a Tokio runtime with the time driver enabled; otherwise the notification is
+    ///   dropped and a warning is logged.
     /// - Concurrency is bounded; if overloaded, notifications are dropped (with a warning).
     pub fn notify(&self, event: Event) {
         if self.inner.sinks.is_empty() {
@@ -172,6 +187,10 @@ impl Hub {
             warn_hub_notify_dropped(event.kind.as_str(), "no_tokio_runtime");
             return;
         };
+        if !has_tokio_time_driver() {
+            warn_hub_notify_dropped(event.kind.as_str(), "no_tokio_time_driver");
+            return;
+        }
 
         if let Err(event) = self.try_notify_spawn(handle, event) {
             warn_hub_notify_dropped(event.kind.as_str(), "overloaded");
@@ -181,7 +200,8 @@ impl Hub {
     /// Attempt to enqueue a fire-and-forget notification.
     ///
     /// Returns:
-    /// - `Err(TryNotifyError::NoTokioRuntime)` if called outside a Tokio runtime.
+    /// - `Err(TryNotifyError::NoTokioRuntime)` if called outside a Tokio runtime or without the
+    ///   Tokio time driver enabled.
     /// - `Err(TryNotifyError::Overloaded)` when Hub inflight capacity is full.
     pub fn try_notify(&self, event: Event) -> Result<(), TryNotifyError> {
         if self.inner.sinks.is_empty() {
@@ -194,6 +214,9 @@ impl Hub {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return Err(TryNotifyError::NoTokioRuntime);
         };
+        if !has_tokio_time_driver() {
+            return Err(TryNotifyError::NoTokioRuntime);
+        }
 
         match self.try_notify_spawn(handle, event) {
             Ok(()) => Ok(()),
@@ -210,7 +233,12 @@ impl Hub {
         }
 
         tokio::runtime::Handle::try_current()
-            .map_err(|_| anyhow::Error::from(TryNotifyError::NoTokioRuntime))?;
+            .map_err(|_| crate::Error::from(anyhow::Error::from(TryNotifyError::NoTokioRuntime)))?;
+        if !has_tokio_time_driver() {
+            return Err(crate::Error::from(anyhow::Error::from(
+                TryNotifyError::NoTokioRuntime,
+            )));
+        }
         let _permit = self
             .inner
             .inflight
@@ -280,6 +308,7 @@ impl HubInner {
         if self.sinks.is_empty() {
             return Ok(());
         }
+        ensure_tokio_time_driver("Hub::send")?;
 
         let timeout = self.per_sink_timeout;
         if self.sinks.len() == 1 {
@@ -738,6 +767,48 @@ mod tests {
                 .await
                 .expect("send ok");
             assert_eq!(max_seen.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn send_returns_error_without_tokio_time_driver() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
+                name: "ok",
+                behavior: TestSinkBehavior::Ok,
+            })];
+            let hub = Hub::new(HubConfig::default(), sinks);
+
+            let err = hub
+                .send(Event::new("kind", Severity::Info, "title"))
+                .await
+                .expect_err("missing time driver should fail");
+            let msg = err.to_string();
+            assert!(msg.contains("time driver"), "{msg}");
+        });
+    }
+
+    #[test]
+    fn try_notify_errors_without_tokio_time_driver() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
+                name: "ok",
+                behavior: TestSinkBehavior::Ok,
+            })];
+            let hub = Hub::new(HubConfig::default(), sinks);
+
+            assert_eq!(
+                hub.try_notify(Event::new("kind", Severity::Info, "title")),
+                Err(TryNotifyError::NoTokioRuntime)
+            );
         });
     }
 }

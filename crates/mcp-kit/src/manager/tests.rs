@@ -1,5 +1,6 @@
 use super::*;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 fn seed_manager_side_state(manager: &mut Manager, server_name: &str) {
@@ -77,6 +78,69 @@ fn stdout_log_path_within_root_accepts_absolute_path_after_root_absolutize() {
     let root = absolutize_with_base(Path::new("workspace"), &base);
     let log_path = root.join("logs/server.stdout.log");
     assert!(stdout_log_path_within_root(&log_path, &root));
+}
+
+#[test]
+fn connection_wait_with_timeout_returns_error_without_tokio_time_driver() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
+        let (client_stream, _server_stream) = tokio::io::duplex(64);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+            .await
+            .expect("client connect");
+        let connection = Connection {
+            id: next_connection_id(),
+            child: None,
+            client,
+            handler_tasks: Vec::new(),
+        };
+
+        let err = connection
+            .wait_with_timeout(
+                Duration::from_secs(1),
+                mcp_jsonrpc::WaitOnTimeout::ReturnError,
+            )
+            .await
+            .expect_err("missing time driver should fail");
+        assert!(err.to_string().contains("time driver"));
+    });
+}
+
+#[test]
+fn session_notify_returns_error_without_tokio_time_driver() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
+        let (client_stream, _server_stream) = tokio::io::duplex(64);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+            .await
+            .expect("client connect");
+        let connection = Connection {
+            id: next_connection_id(),
+            child: None,
+            client,
+            handler_tasks: Vec::new(),
+        };
+        let session = Session::new(
+            ServerName::parse("demo").expect("server name"),
+            connection,
+            serde_json::json!({}),
+            Duration::from_secs(1),
+        );
+
+        let err = session
+            .notify("demo/notify", None)
+            .await
+            .expect_err("missing time driver should fail");
+        assert!(err.to_string().contains("time driver"));
+    });
 }
 
 #[test]

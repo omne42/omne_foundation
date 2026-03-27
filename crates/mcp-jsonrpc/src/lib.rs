@@ -44,6 +44,20 @@ pub type StdoutLogRedactor = Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
 const DEFAULT_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 const REUSABLE_LINE_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 const READ_LINE_INITIAL_CAP_BYTES: usize = 4 * 1024;
+const TOKIO_TIME_DRIVER_ERROR: &str =
+    "tokio runtime time driver is not enabled; build the runtime with enable_time()";
+
+pub(crate) fn ensure_tokio_time_driver(operation: &'static str) -> Result<(), Error> {
+    std::panic::catch_unwind(|| {
+        drop(tokio::time::sleep(Duration::ZERO));
+    })
+    .map_err(|_| {
+        Error::protocol(
+            ProtocolErrorKind::Other,
+            format!("{TOKIO_TIME_DRIVER_ERROR} ({operation})"),
+        )
+    })
+}
 
 #[derive(Clone)]
 pub struct SpawnOptions {
@@ -1001,6 +1015,10 @@ impl ClientHandle {
         self.request_optional_inner(method, params, None).await
     }
 
+    /// Send a JSON-RPC request and fail with `ProtocolErrorKind::WaitTimeout` if the response
+    /// does not arrive before `timeout`.
+    ///
+    /// This requires a Tokio runtime with the time driver enabled.
     pub async fn request_optional_with_timeout(
         &self,
         method: &str,
@@ -1017,6 +1035,9 @@ impl ClientHandle {
         params: Option<Value>,
         timeout: Option<Duration>,
     ) -> Result<Value, Error> {
+        if timeout.is_some() {
+            ensure_tokio_time_driver("ClientHandle::request_optional_with_timeout")?;
+        }
         self.check_closed()?;
         let id = Id::Integer(self.next_id.fetch_add(1, Ordering::Relaxed));
 
@@ -1409,6 +1430,10 @@ impl Client {
         self.handle.request_optional(method, params).await
     }
 
+    /// Send a JSON-RPC request and fail with `ProtocolErrorKind::WaitTimeout` if the response
+    /// does not arrive before `timeout`.
+    ///
+    /// This requires a Tokio runtime with the time driver enabled.
     pub async fn request_optional_with_timeout(
         &self,
         method: &str,
@@ -1450,11 +1475,14 @@ impl Client {
     ///   `ProtocolErrorKind::WaitTimeout` and leaves the child running.
     /// - `WaitOnTimeout::Kill { kill_timeout }` sends a kill signal, then waits up to
     ///   `kill_timeout` for the child to exit.
+    ///
+    /// This requires a Tokio runtime with the time driver enabled.
     pub async fn wait_with_timeout(
         &mut self,
         timeout: Duration,
         on_timeout: WaitOnTimeout,
     ) -> Result<Option<std::process::ExitStatus>, Error> {
+        ensure_tokio_time_driver("Client::wait_with_timeout")?;
         let deadline = tokio::time::Instant::now() + timeout;
         self.task.abort();
         for task in self.transport_tasks.drain(..) {
@@ -2790,6 +2818,60 @@ mod wait_timeout_tests {
 
         assert!(entered.load(Ordering::Relaxed));
         assert!(!status.success());
+    }
+
+    #[test]
+    fn request_optional_with_timeout_returns_error_without_tokio_time_driver() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let (client_stream, _server_stream) = tokio::io::duplex(1024);
+            let (client_read, client_write) = tokio::io::split(client_stream);
+            let client = Client::connect_io(client_read, client_write)
+                .await
+                .expect("connect client");
+
+            let err = client
+                .request_optional_with_timeout("demo/request", None, Duration::from_secs(1))
+                .await
+                .expect_err("missing time driver should fail");
+            match err {
+                Error::Protocol(protocol_err) => {
+                    assert_eq!(protocol_err.kind, ProtocolErrorKind::Other);
+                    assert!(protocol_err.message.contains("time driver"));
+                }
+                other => panic!("expected protocol error, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn wait_with_timeout_returns_error_without_tokio_time_driver() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let (client_stream, _server_stream) = tokio::io::duplex(1024);
+            let (client_read, client_write) = tokio::io::split(client_stream);
+            let mut client = Client::connect_io(client_read, client_write)
+                .await
+                .expect("connect client");
+
+            let err = client
+                .wait_with_timeout(Duration::from_secs(1), WaitOnTimeout::ReturnError)
+                .await
+                .expect_err("missing time driver should fail");
+            match err {
+                Error::Protocol(protocol_err) => {
+                    assert_eq!(protocol_err.kind, ProtocolErrorKind::Other);
+                    assert!(protocol_err.message.contains("time driver"));
+                }
+                other => panic!("expected protocol error, got {other:?}"),
+            }
+        });
     }
 }
 

@@ -82,6 +82,8 @@ impl Session {
     }
 
     /// Closes this session and waits for the underlying child process to exit, up to `timeout`.
+    ///
+    /// This requires a Tokio runtime with the time driver enabled.
     pub async fn wait_with_timeout(
         self,
         timeout: Duration,
@@ -98,6 +100,9 @@ impl Session {
             .with_context(|| format!("close session (server={server_name})"))
     }
 
+    /// Override the per-request timeout used by `Session::{request,notify}`.
+    ///
+    /// Timeouts require a Tokio runtime with the time driver enabled.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
         self
@@ -123,6 +128,7 @@ impl Session {
     }
 
     pub async fn notify(&self, method: &str, params: Option<Value>) -> anyhow::Result<()> {
+        crate::manager::ensure_tokio_time_driver("Session::notify")?;
         let timeout = self.request_timeout;
         let outcome = tokio::time::timeout(
             self.request_timeout,

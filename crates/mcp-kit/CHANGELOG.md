@@ -11,6 +11,7 @@
 
 ### Changed
 - release: bump workspace package version to `0.1.0`.
+- `mcp-kit`：`streamable_http` 文档现在明确说明 `mcp-jsonrpc` 会先把合法的 multiline JSON `data:` event 压平成单行 JSON，再写回内部按换行分帧的 JSON-RPC 流，避免文档继续描述旧的“原样写回”语义。
 - `mcp-kit`：`SharedManager` 的重入保护只对当前调用确实位于对应 manager 的 handler scope 时 fail-fast，避免外部正常并发调用在其他 handler 活跃时被误报成 `REENTRANT_HANDLER_ERROR`；同时冻结相对 `cwd` 的解析基准，并在 failed install / drop 路径对 stdio child 做 best-effort reap。
 - `mcp-kit`：`SharedManager` 的 handler 重入保护改为只依赖当前调用是否处在对应 manager 的 handler scope，不再把“其他 handler 仍活跃”的全局状态误判成当前调用重入。
 - `mcp-kit`：补充 `SharedManager` 的 `cwd` 复用保护回归测试，显式覆盖 cold-start 首次连接后再次以不同 `cwd` 复用的路径，锁住“同名 server 不同 cwd 复用必须显式报错”的约束。

@@ -745,6 +745,18 @@ impl BatchResponseWriter {
         self.flush_if_ready().await
     }
 
+    fn release_reserved_response(&self) {
+        self.state
+            .pending_async_responses
+            .fetch_sub(1, Ordering::Relaxed);
+        let batch = self.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            drop(handle.spawn(async move {
+                let _ = batch.flush_if_ready().await;
+            }));
+        }
+    }
+
     async fn finish(&self) -> Result<(), Error> {
         self.state.finished.store(true, Ordering::Relaxed);
         self.flush_if_ready().await
@@ -844,6 +856,26 @@ impl RequestResponder {
         match &self.target {
             RequestResponseTarget::Direct(handle) => handle.write_json_line(&response).await,
             RequestResponseTarget::Batch(batch) => batch.push_reserved_response(response).await,
+        }
+    }
+}
+
+impl Drop for RequestResponder {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.responded) != 1 {
+            return;
+        }
+
+        if self
+            .responded
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+
+        if let RequestResponseTarget::Batch(batch) = &self.target {
+            batch.release_reserved_response();
         }
     }
 }
@@ -2468,6 +2500,112 @@ mod incoming_value_tests {
             }),
             "{items:?}"
         );
+
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn dropped_batch_request_does_not_block_remaining_batch_response() {
+        let (client_stream, server_stream) = tokio::io::duplex(2048);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let mut client = Client::connect_io(client_read, client_write)
+            .await
+            .expect("connect client");
+        let mut requests = client.take_requests().expect("request receiver");
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        server_write
+            .write_all(
+                br#"[{"jsonrpc":"2.0","id":1,"method":"first"},{"jsonrpc":"2.0","id":2,"method":"second"}]"#,
+            )
+            .await
+            .expect("write batch");
+        server_write.write_all(b"\n").await.expect("write newline");
+        server_write.flush().await.expect("flush batch");
+
+        let first = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .expect("first request timeout")
+            .expect("first request");
+        assert_eq!(first.method, "first");
+
+        let second = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .expect("second request timeout")
+            .expect("second request");
+        assert_eq!(second.method, "second");
+
+        second
+            .respond_ok(serde_json::json!({"handled":"second"}))
+            .await
+            .expect("respond second");
+        drop(first);
+
+        let response_line = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+            .await
+            .expect("response timeout")
+            .expect("read response")
+            .expect("response line");
+        let response: Value = serde_json::from_str(&response_line).expect("parse batch response");
+        let items = response.as_array().expect("batch response array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], 2);
+        assert_eq!(items[0]["result"]["handled"], "second");
+
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn dropping_request_clone_does_not_release_batch_slot_early() {
+        let (client_stream, server_stream) = tokio::io::duplex(2048);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let mut client = Client::connect_io(client_read, client_write)
+            .await
+            .expect("connect client");
+        let mut requests = client.take_requests().expect("request receiver");
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        server_write
+            .write_all(
+                br#"[{"jsonrpc":"2.0","id":1,"method":"first"},{"jsonrpc":"2.0","id":2,"method":"second"}]"#,
+            )
+            .await
+            .expect("write batch");
+        server_write.write_all(b"\n").await.expect("write newline");
+        server_write.flush().await.expect("flush batch");
+
+        let first = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .expect("first request timeout")
+            .expect("first request");
+        let first_clone = first.clone();
+        let second = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .expect("second request timeout")
+            .expect("second request");
+
+        drop(first_clone);
+        second
+            .respond_ok(serde_json::json!({"handled":"second"}))
+            .await
+            .expect("respond second");
+        first
+            .respond_ok(serde_json::json!({"handled":"first"}))
+            .await
+            .expect("respond first");
+
+        let response_line = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+            .await
+            .expect("response timeout")
+            .expect("read response")
+            .expect("response line");
+        let response: Value = serde_json::from_str(&response_line).expect("parse batch response");
+        let items = response.as_array().expect("batch response array");
+        assert_eq!(items.len(), 2);
 
         drop(client);
     }

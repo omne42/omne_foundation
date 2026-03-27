@@ -12,7 +12,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `secret-kit`：CLI-backed secret resolution 现在会先验证 Tokio time driver，再进入命令超时控制；错误配置不再 panic，而是返回带稳定 catalog code 的命令错误，并把运行时前提写进 `SecretCommandRuntime` 文档。
 - `CachingSecretResolver` 现在只把 cache hint 用于命中 fast-path；当 hint 与 prepared cache scope 不匹配时，不再错误地在坏 hint 上串行化不同 secret 的并发解析，而是按文档契约退化成普通 cache miss。
 - `secret-kit` 的 crate-level 文档示例现在提供最小可编译上下文，`cargo test -p secret-kit --doc -- --ignored` 不再因为裸 `let` / `.await?` 片段而失败。
-- Stabilize Linux process-group cleanup tests by detaching background-command stdio, tracking PID identity to avoid `/proc` reuse false negatives, and extending the cleanup polling budget so slower CI runners do not spuriously fail `secret-kit` quality gates while preserving the same cleanup assertions.
+- Stabilize Linux process-group cleanup tests by detaching background-command stdio, tracking PID identity to avoid `/proc` reuse false negatives, extending the cleanup polling budget, and briefly keeping the shell leader alive after it records the background pid so slower CI runners can reliably capture process-tree cleanup state without changing library semantics.
 - Established crate-local changelog ownership now that `omne_foundation` tracks release notes per crate instead of at the repository root.
 - Kept `secret-kit` focused on secret-specific semantics while moving shared process-tree primitives out to the systems layer and preserving structured error texts.
 - Retry Unix `ETXTBSY` (`Text file busy`) command spawns briefly so freshly materialized builtin CLI shims do not introduce flaky secret resolution failures.

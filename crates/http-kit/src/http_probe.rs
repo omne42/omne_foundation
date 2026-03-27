@@ -1,3 +1,5 @@
+use crate::url::redact_reqwest_error;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpProbeMethod {
     Head,
@@ -46,7 +48,7 @@ pub async fn probe_http_endpoint_detailed(client: &reqwest::Client, url: &str) -
         }
         Ok(_) => {}
         Err(err) => {
-            head_error = Some(err.to_string());
+            head_error = Some(redact_reqwest_error(&err));
         }
     }
 
@@ -68,8 +70,11 @@ pub async fn probe_http_endpoint_detailed(client: &reqwest::Client, url: &str) -
             kind: HttpProbeKind::TransportError,
             status_code: None,
             detail: Some(match head_error {
-                Some(head) => format!("HEAD failed: {head}; GET failed: {err}"),
-                None => err.to_string(),
+                Some(head) => format!(
+                    "HEAD failed: {head}; GET failed: {}",
+                    redact_reqwest_error(&err)
+                ),
+                None => redact_reqwest_error(&err),
             }),
         },
     }
@@ -79,4 +84,38 @@ pub async fn probe_http_endpoint(client: &reqwest::Client, url: &str) -> bool {
     probe_http_endpoint_detailed(client, url)
         .await
         .is_reachable()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HttpProbeKind, HttpProbeMethod, probe_http_endpoint_detailed};
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn transport_errors_redact_url_details() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        drop(listener);
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(100))
+            .build()
+            .expect("build client");
+        let url = format!(
+            "http://user:pass@127.0.0.1:{}/secret/path?token=top-secret",
+            addr.port()
+        );
+
+        let result = probe_http_endpoint_detailed(&client, &url).await;
+        assert_eq!(result.method, HttpProbeMethod::Get);
+        assert_eq!(result.kind, HttpProbeKind::TransportError);
+
+        let detail = result.detail.expect("transport error detail");
+        assert!(detail.contains("127.0.0.1"), "{detail}");
+        assert!(!detail.contains("user"), "{detail}");
+        assert!(!detail.contains("pass"), "{detail}");
+        assert!(!detail.contains("secret/path"), "{detail}");
+        assert!(!detail.contains("token=top-secret"), "{detail}");
+    }
 }

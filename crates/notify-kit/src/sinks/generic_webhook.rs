@@ -4,8 +4,9 @@ use crate::Event;
 use crate::sinks::text::{TextLimits, format_event_text_limited};
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
-    build_http_client, ensure_http_success, parse_and_validate_https_url_basic, redact_url,
-    redact_url_str, select_http_client, send_reqwest, validate_url_path_prefix,
+    HttpClientOptions, HttpClientProfile, build_http_client_profile, ensure_http_success,
+    parse_and_validate_https_url_basic, redact_url, redact_url_str, send_reqwest,
+    validate_url_path_prefix,
 };
 
 #[non_exhaustive]
@@ -103,8 +104,7 @@ impl GenericWebhookConfig {
 pub struct GenericWebhookSink {
     url: reqwest::Url,
     payload_field: String,
-    client: reqwest::Client,
-    timeout: Duration,
+    http: HttpClientProfile,
     max_chars: usize,
     enforce_public_ip: bool,
 }
@@ -148,12 +148,14 @@ impl GenericWebhookSink {
         mode: GenericWebhookValidationMode,
     ) -> crate::Result<Self> {
         let normalized = normalize_config(config, mode)?;
-        let client = build_http_client(normalized.timeout)?;
+        let http = build_http_client_profile(&HttpClientOptions {
+            timeout: Some(normalized.timeout),
+            ..Default::default()
+        })?;
         Ok(Self {
             url: normalized.url,
             payload_field: normalized.payload_field,
-            client,
-            timeout: normalized.timeout,
+            http,
             max_chars: normalized.max_chars,
             enforce_public_ip: normalized.enforce_public_ip,
         })
@@ -322,13 +324,10 @@ impl Sink for GenericWebhookSink {
 
     fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
-            let client = select_http_client(
-                &self.client,
-                self.timeout,
-                &self.url,
-                self.enforce_public_ip,
-            )
-            .await?;
+            let client = self
+                .http
+                .select_for_url(&self.url, self.enforce_public_ip)
+                .await?;
 
             let payload = Self::build_payload(event, &self.payload_field, self.max_chars);
 

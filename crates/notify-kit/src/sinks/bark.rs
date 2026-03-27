@@ -4,9 +4,10 @@ use crate::Event;
 use crate::sinks::text::{TextLimits, format_event_body_and_tags_limited, truncate_chars};
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
-    DEFAULT_MAX_RESPONSE_BODY_BYTES, build_http_client, http_status_text_error,
-    parse_and_validate_https_url, read_text_body_limited, redact_url, response_body_read_error,
-    select_http_client, send_reqwest, validate_url_path_prefix,
+    DEFAULT_MAX_RESPONSE_BODY_BYTES, HttpClientOptions, HttpClientProfile,
+    build_http_client_profile, http_status_text_error, parse_and_validate_https_url,
+    read_text_body_limited, redact_url, response_body_read_error, send_reqwest,
+    validate_url_path_prefix,
 };
 
 const BARK_ALLOWED_HOSTS: [&str; 1] = ["api.day.app"];
@@ -73,8 +74,7 @@ pub struct BarkSink {
     api_url: reqwest::Url,
     device_key: String,
     group: Option<String>,
-    client: reqwest::Client,
-    timeout: Duration,
+    http: HttpClientProfile,
     max_chars: usize,
     enforce_public_ip: bool,
 }
@@ -103,13 +103,15 @@ impl BarkSink {
             parse_and_validate_https_url("https://api.day.app/push", &BARK_ALLOWED_HOSTS)?;
         validate_url_path_prefix(&api_url, "/push")?;
 
-        let client = build_http_client(config.timeout)?;
+        let http = build_http_client_profile(&HttpClientOptions {
+            timeout: Some(config.timeout),
+            ..Default::default()
+        })?;
         Ok(Self {
             api_url,
             device_key: device_key.to_string(),
             group,
-            client,
-            timeout: config.timeout,
+            http,
             max_chars: config.max_chars,
             enforce_public_ip: config.enforce_public_ip,
         })
@@ -158,13 +160,10 @@ impl Sink for BarkSink {
 
     fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
-            let client = select_http_client(
-                &self.client,
-                self.timeout,
-                &self.api_url,
-                self.enforce_public_ip,
-            )
-            .await?;
+            let client = self
+                .http
+                .select_for_url(&self.api_url, self.enforce_public_ip)
+                .await?;
 
             let payload = Self::build_payload(
                 event,

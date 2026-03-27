@@ -11,8 +11,9 @@ use crate::Event;
 use crate::sinks::crypto::hmac_sha256_base64;
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
-    build_http_client, parse_and_validate_https_url, read_json_body_after_http_success, redact_url,
-    redact_url_str, select_http_client, send_reqwest, validate_url_path_prefix,
+    HttpClientOptions, HttpClientProfile, build_http_client_profile, parse_and_validate_https_url,
+    read_json_body_after_http_success, redact_url, redact_url_str, send_reqwest,
+    validate_url_path_prefix,
 };
 
 const FEISHU_MAX_CHARS: usize = 4000;
@@ -125,8 +126,7 @@ impl FeishuWebhookConfig {
 
 pub struct FeishuWebhookSink {
     webhook_url: reqwest::Url,
-    client: reqwest::Client,
-    timeout: Duration,
+    http: HttpClientProfile,
     secret: Option<String>,
     max_chars: usize,
     enforce_public_ip: bool,
@@ -217,7 +217,10 @@ impl FeishuWebhookSink {
             &["open.feishu.cn", "open.larksuite.com"],
         )?;
         validate_url_path_prefix(&webhook_url, "/open-apis/bot/v2/hook/")?;
-        let client = build_http_client(config.timeout)?;
+        let http = build_http_client_profile(&HttpClientOptions {
+            timeout: Some(config.timeout),
+            ..Default::default()
+        })?;
         if validate_public_ip_at_construction {
             if tokio::runtime::Handle::try_current().is_ok() {
                 return Err(anyhow::anyhow!(
@@ -225,13 +228,12 @@ impl FeishuWebhookSink {
                 )
                 .into());
             }
-            Self::validate_public_ip_at_construction_sync(&client, config.timeout, &webhook_url)?;
+            Self::validate_public_ip_at_construction_sync(&http, &webhook_url)?;
         }
 
         Ok(Self {
             webhook_url,
-            client,
-            timeout: config.timeout,
+            http,
             secret,
             max_chars: config.max_chars,
             enforce_public_ip,
@@ -260,17 +262,17 @@ impl FeishuWebhookSink {
             &["open.feishu.cn", "open.larksuite.com"],
         )?;
         validate_url_path_prefix(&webhook_url, "/open-apis/bot/v2/hook/")?;
-        let client = build_http_client(config.timeout)?;
+        let http = build_http_client_profile(&HttpClientOptions {
+            timeout: Some(config.timeout),
+            ..Default::default()
+        })?;
         if validate_public_ip_at_construction {
-            select_http_client(&client, config.timeout, &webhook_url, true)
-                .await
-                .map(|_| ())?;
+            http.select_for_url(&webhook_url, true).await.map(|_| ())?;
         }
 
         Ok(Self {
             webhook_url,
-            client,
-            timeout: config.timeout,
+            http,
             secret,
             max_chars: config.max_chars,
             enforce_public_ip,
@@ -302,21 +304,16 @@ impl FeishuWebhookSink {
     }
 
     fn validate_public_ip_at_construction_sync(
-        client: &reqwest::Client,
-        timeout: Duration,
+        http: &HttpClientProfile,
         webhook_url: &reqwest::Url,
     ) -> crate::Result<()> {
-        let client = client.clone();
+        let http = http.clone();
         let webhook_url = webhook_url.clone();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|err| anyhow::anyhow!("build tokio runtime: {err}"))?;
-        Ok(rt.block_on(async move {
-            select_http_client(&client, timeout, &webhook_url, true)
-                .await
-                .map(|_| ())
-        })?)
+        Ok(rt.block_on(async move { http.select_for_url(&webhook_url, true).await.map(|_| ()) })?)
     }
 }
 
@@ -327,13 +324,10 @@ impl Sink for FeishuWebhookSink {
 
     fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
-            let client = select_http_client(
-                &self.client,
-                self.timeout,
-                &self.webhook_url,
-                self.enforce_public_ip,
-            )
-            .await?;
+            let client = self
+                .http
+                .select_for_url(&self.webhook_url, self.enforce_public_ip)
+                .await?;
             let (timestamp, sign) = if let Some(secret) = self.secret.as_deref() {
                 let timestamp = SystemTime::now()
                     .duration_since(UNIX_EPOCH)

@@ -454,6 +454,23 @@ fn tenant_access_token_cache_ttl(expires_in: i64) -> Duration {
 }
 
 #[cfg(unix)]
+fn open_local_image_file(path: &Path) -> crate::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|err| {
+            if err.raw_os_error() == Some(libc::ELOOP) {
+                crate::Error::from(anyhow::anyhow!("image path must not be a symlink"))
+            } else {
+                crate::Error::from(anyhow::anyhow!("read image file: {err}"))
+            }
+        })
+}
+
+#[cfg(unix)]
 fn ensure_local_image_path_has_no_symlink_ancestor(path: &Path) -> crate::Result<()> {
     let mut components = path.components().peekable();
     let mut current = PathBuf::new();
@@ -492,23 +509,6 @@ fn ensure_local_image_path_has_no_symlink_ancestor(path: &Path) -> crate::Result
     }
 
     Ok(())
-}
-
-#[cfg(unix)]
-fn open_local_image_file(path: &Path) -> crate::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-
-    std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(|err| {
-            if err.raw_os_error() == Some(libc::ELOOP) {
-                crate::Error::from(anyhow::anyhow!("image path must not be a symlink"))
-            } else {
-                crate::Error::from(anyhow::anyhow!("read image file: {err}"))
-            }
-        })
 }
 
 pub(super) fn read_bytes_body_limited(

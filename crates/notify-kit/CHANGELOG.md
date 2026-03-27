@@ -55,7 +55,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `FeishuWebhookSink`：本地图片读取在非 Unix 平台改为 fail closed；如果平台分支无法提供 no-follow 打开语义，即使显式开启本地图片也会拒绝读取，避免退化成跟随 symlink/reparse point。
 - release: bump workspace package version to `0.1.0`.
 - `FeishuWebhookSink`：本地图片读取改为先做 `symlink_metadata` 常规文件校验，再打开文件；Unix 下额外使用 `O_NOFOLLOW`，拒绝 symlink 与其他特殊路径，避免本地图片 opt-in 语义被绕过。
-- `FeishuWebhookSink`：本地图片路径现在会拒绝穿过祖先 symlink 目录；租户 token 缓存不再把服务端更短 TTL 延长成本地更长有效期；图片上传被上游拒绝后会丢弃匹配的缓存 token，避免持续复用坏凭证。
+- `FeishuWebhookSink`：Unix 本地图片路径改为逐层 `openat(..., O_NOFOLLOW)` 遍历并打开最终文件，拒绝祖先目录 symlink 与最终文件 symlink 的同一路径穿透；租户 token 缓存不再把服务端更短 TTL 延长成本地更长有效期；图片上传被上游拒绝后会丢弃匹配的缓存 token，避免持续复用坏凭证。
 - `FeishuWebhookSink`：租户 token 刷新状态机现在具备取消安全，刷新 future 被取消时会回退到 `Empty` 并唤醒 waiters，避免一次超时后永久卡在 `Refreshing`；并补充重试恢复回归测试。
 - env helper: 公开路径统一为 `notify_kit::env::build_hub_from_standard_env(...)` / `notify_kit::env::StandardEnvHubOptions`，不再保留 crate root 兼容 re-export。
 - docs: 明确 env helper 是 convenience helper，而不是库级强制 env 协议。

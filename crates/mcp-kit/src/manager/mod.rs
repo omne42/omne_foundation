@@ -77,6 +77,17 @@ pub(crate) fn contains_wait_timeout(err: &anyhow::Error) -> bool {
     })
 }
 
+pub(crate) fn ensure_tokio_time_driver(operation: &'static str) -> anyhow::Result<()> {
+    std::panic::catch_unwind(|| {
+        drop(tokio::time::sleep(Duration::ZERO));
+    })
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "tokio runtime time driver is not enabled; build the runtime with enable_time() ({operation})"
+        )
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProtocolVersionCheck {
     /// Fail closed (default): reject servers whose `initialize` result includes a different
@@ -269,11 +280,14 @@ impl Connection {
 
     /// Closes the JSON-RPC client and waits for the underlying child process to exit, up to
     /// `timeout`.
+    ///
+    /// This requires a Tokio runtime with the time driver enabled.
     pub async fn wait_with_timeout(
         mut self,
         timeout: Duration,
         on_timeout: mcp_jsonrpc::WaitOnTimeout,
     ) -> anyhow::Result<Option<std::process::ExitStatus>> {
+        ensure_tokio_time_driver("Connection::wait_with_timeout")?;
         let deadline = tokio::time::Instant::now() + timeout;
         let remaining_budget = || deadline.saturating_duration_since(tokio::time::Instant::now());
         let status = match self
@@ -1705,6 +1719,7 @@ impl Manager {
         method: &str,
         params: Option<Value>,
     ) -> anyhow::Result<()> {
+        ensure_tokio_time_driver("Manager::notify_raw_handle")?;
         let outcome = tokio::time::timeout(timeout, client.notify(method, params)).await;
         match outcome {
             Ok(result) => result.with_context(|| {

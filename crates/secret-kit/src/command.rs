@@ -82,6 +82,18 @@ type CommandReadTask = tokio::task::JoinHandle<std::io::Result<(SecretBytes, boo
 const TEXT_FILE_BUSY_RETRY_ATTEMPTS: usize = 5;
 const TEXT_FILE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(20);
 
+fn ensure_tokio_time_driver(program: &str) -> Result<()> {
+    std::panic::catch_unwind(|| {
+        drop(tokio::time::sleep(Duration::ZERO));
+    })
+    .map_err(|_| {
+        secret_command_error!(
+            "error_detail.secret.command_runtime_missing_time_driver",
+            "program" => program
+        )
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 struct CommandStderrSummary {
     bytes: usize,
@@ -144,6 +156,7 @@ pub(crate) async fn run_secret_command<E>(cmd: &SecretCommand, env: &E) -> Resul
 where
     E: SecretCommandRuntime + ?Sized,
 {
+    ensure_tokio_time_driver(cmd.program.as_str())?;
     let snapshot = CommandEnvSnapshot::capture(cmd.program.as_str(), env);
     let resolved_program = resolve_command_program(cmd, env, &snapshot)?;
     let timeout = snapshot.timeout();

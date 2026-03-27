@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：`Session::notify` 与 `Connection/Session::wait_with_timeout` 现在会在使用 Tokio timeout 前先验证 time driver；缺少 timer 时返回清晰错误并在 rustdoc 中显式声明运行时前提。
 - release: bump workspace package version to `0.1.0`.
 - `mcp-kit`：`streamable_http` 文档现在明确说明 `mcp-jsonrpc` 会先把合法的 multiline JSON `data:` event 压平成单行 JSON，再写回内部按换行分帧的 JSON-RPC 流，避免文档继续描述旧的“原样写回”语义。
 - `mcp-kit`：`SharedManager` 的重入保护只对当前调用确实位于对应 manager 的 handler scope 时 fail-fast，避免外部正常并发调用在其他 handler 活跃时被误报成 `REENTRANT_HANDLER_ERROR`；同时冻结相对 `cwd` 的解析基准，并在 failed install / drop 路径对 stdio child 做 best-effort reap。

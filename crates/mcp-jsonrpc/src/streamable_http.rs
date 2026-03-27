@@ -238,6 +238,9 @@ impl Client {
         let follow_redirects = http_options.follow_redirects;
         let error_body_preview_bytes = http_options.error_body_preview_bytes;
         let enforce_public_ip = http_options.enforce_public_ip;
+        if connect_timeout.is_some() || request_timeout.is_some() {
+            crate::ensure_tokio_time_driver("Client::connect_streamable_http*_with_options")?;
+        }
 
         let mut headers = reqwest::header::HeaderMap::new();
         for (key, value) in http_options.headers {

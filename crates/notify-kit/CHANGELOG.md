@@ -48,6 +48,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `FeishuWebhookSink::new_strict` / `new_with_secret_strict`：在构造阶段额外做一次 DNS 公网 IP 校验。
 
 ### Changed
+- `notify-kit`：`Hub::send`/`notify` 现在会在真正进入 `tokio::time` 超时路径前先验证 time driver；如果 runtime 缺少 timer，不再 panic，而是返回可解释错误并把契约写进 rustdoc。
 - Webhook/API sinks: 内部统一迁移到 `HttpClientProfile`，不再依赖已删除的 `http-kit::select_http_client(...)` timeout-only 入口，从而避免 public-IP pinning 路径静默丢失 `reqwest::Client` 隐式配置。
 - `FeishuWebhookSink`：`media.rs` 的回归测试模块移动到文件末尾，以满足 workspace 级 clippy 门禁并保持新增加的丢唤醒回归测试生效。
 - `FeishuWebhookSink`：Markdown 远程图片 URL 现在默认关闭，只有显式 `with_remote_image_urls(true)` 后才会主动下载并上传；避免正文里的任意公网 URL 触发隐藏出站副作用。

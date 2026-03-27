@@ -1865,6 +1865,42 @@ async fn run_secret_command_uses_single_command_env_snapshot_for_timeout() -> Re
 }
 
 #[test]
+fn run_secret_command_returns_error_without_tokio_time_driver() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
+        let cmd = SecretCommand {
+            program: if cfg!(windows) {
+                "cmd".to_string()
+            } else {
+                "sh".to_string()
+            },
+            args: if cfg!(windows) {
+                vec!["/C".to_string(), "echo hi".to_string()]
+            } else {
+                vec!["-c".to_string(), "printf hi".to_string()]
+            },
+            env: BTreeMap::new(),
+            json_key: None,
+        };
+
+        let env = TestEnv::default();
+        let err = run_secret_command(&cmd, &env)
+            .await
+            .expect_err("missing time driver should fail");
+        let SecretError::Command(text) = err else {
+            panic!("expected secret command error");
+        };
+        assert_catalog_code(
+            &text,
+            "error_detail.secret.command_runtime_missing_time_driver",
+        );
+    });
+}
+
+#[test]
 fn default_get_command_env_os_reads_explicit_command_env_pairs() {
     use std::ffi::OsStr;
 

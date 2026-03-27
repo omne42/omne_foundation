@@ -549,6 +549,9 @@ pub trait SecretEnvironment: Send + Sync {
 ///
 /// This is intentionally separate from [`SecretEnvironment`]. Secret lookup is domain state;
 /// child-process environment shaping and binary resolution are runtime policy.
+///
+/// Async secret resolution for CLI-backed providers enforces command timeouts via `tokio::time`,
+/// so callers need a Tokio runtime with the time driver enabled.
 pub trait SecretCommandRuntime: Send + Sync {
     /// Targeted command-environment lookup for control-plane settings and runtime overrides.
     ///

@@ -2842,7 +2842,10 @@ async fn missing_env_secret_reports_lookup_error() {
 async fn secret_command_runner_returns_after_successful_leader_exit() -> Result<()> {
     let dir = tempfile::tempdir().expect("tempdir");
     let pid_file = dir.path().join("secret-command-background.pid");
-    let script = format!("sleep 30 & echo $! > '{}'; printf ok", pid_file.display());
+    let script = format!(
+        "sleep 30 </dev/null >/dev/null 2>&1 & echo $! > '{}'; printf ok",
+        pid_file.display()
+    );
     let cmd = SecretCommand {
         program: "sh".to_string(),
         args: vec!["-c".to_string(), script],
@@ -2872,7 +2875,10 @@ async fn secret_command_runner_returns_after_successful_leader_exit() -> Result<
 async fn secret_command_runner_cancellation_kills_child_process_group() -> Result<()> {
     let dir = tempfile::tempdir().expect("tempdir");
     let pid_file = dir.path().join("secret-command-background.pid");
-    let script = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
+    let script = format!(
+        "sleep 30 </dev/null >/dev/null 2>&1 & echo $! > '{}'; wait",
+        pid_file.display()
+    );
     let cmd = SecretCommand {
         program: "sh".to_string(),
         args: vec!["-c".to_string(), script],
@@ -2906,7 +2912,7 @@ async fn secret_command_runner_cancellation_kills_orphaned_process_group() -> Re
     let shell_pid_file = dir.path().join("secret-command-shell.pid");
     let bg_pid_file = dir.path().join("secret-command-background.pid");
     let script = format!(
-        "echo $$ > '{shell}'; sleep 30 & echo $! > '{background}'; exit 0",
+        "echo $$ > '{shell}'; sleep 30 </dev/null >/dev/null 2>&1 & echo $! > '{background}'; exit 0",
         shell = shell_pid_file.display(),
         background = bg_pid_file.display()
     );

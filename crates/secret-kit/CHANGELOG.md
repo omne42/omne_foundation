@@ -7,7 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
-- Loosen Linux process-group cleanup test time windows so slower CI runners do not spuriously fail `secret-kit` quality gates while preserving the same cleanup assertions.
+- Stabilize Linux process-group cleanup tests by detaching background-command stdio and relaxing cleanup polling windows so slower CI runners do not spuriously fail `secret-kit` quality gates while preserving the same cleanup assertions.
 - Established crate-local changelog ownership now that `omne_foundation` tracks release notes per crate instead of at the repository root.
 - Kept `secret-kit` focused on secret-specific semantics while moving shared process-tree primitives out to the systems layer and preserving structured error texts.
 - Retry Unix `ETXTBSY` (`Text file busy`) command spawns briefly so freshly materialized builtin CLI shims do not introduce flaky secret resolution failures.

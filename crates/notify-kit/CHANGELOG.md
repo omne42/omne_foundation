@@ -48,6 +48,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `FeishuWebhookSink::new_strict` / `new_with_secret_strict`：在构造阶段额外做一次 DNS 公网 IP 校验。
 
 ### Changed
+- `FeishuWebhookSink`：Markdown 远程图片 URL 现在默认关闭，只有显式 `with_remote_image_urls(true)` 后才会主动下载并上传；避免正文里的任意公网 URL 触发隐藏出站副作用。
+- `FeishuWebhookSink`：本地图片读取在非 Unix 平台改为 fail closed；如果平台分支无法提供 no-follow 打开语义，即使显式开启本地图片也会拒绝读取，避免退化成跟随 symlink/reparse point。
 - release: bump workspace package version to `0.1.0`.
 - `FeishuWebhookSink`：本地图片读取改为先做 `symlink_metadata` 常规文件校验，再打开文件；Unix 下额外使用 `O_NOFOLLOW`，拒绝 symlink 与其他特殊路径，避免本地图片 opt-in 语义被绕过。
 - `FeishuWebhookSink`：租户 token 刷新状态机现在具备取消安全，刷新 future 被取消时会回退到 `Empty` 并唤醒 waiters，避免一次超时后永久卡在 `Refreshing`；并补充重试恢复回归测试。

@@ -18,6 +18,12 @@ use tokio_util::io::StreamReader;
 
 use crate::{Client, ClientHandle, Error, ProtocolErrorKind, SpawnOptions, StreamableHttpOptions};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SseWakeReason {
+    Connect,
+    SessionChanged,
+}
+
 fn ends_with_ignore_ascii_case(haystack: &str, suffix: &str) -> bool {
     if suffix.len() > haystack.len() {
         return false;
@@ -298,7 +304,7 @@ impl Client {
         let session_id: Arc<tokio::sync::Mutex<Option<String>>> =
             Arc::new(tokio::sync::Mutex::new(None));
 
-        let (sse_wake_tx, sse_wake_rx) = mpsc::channel::<()>(1);
+        let (sse_wake_tx, sse_wake_rx) = mpsc::channel::<SseWakeReason>(4);
         let sse_client = http_client_profile
             .select_for_url(&sse_url, enforce_public_ip)
             .await
@@ -343,59 +349,148 @@ impl Client {
         let http_client_profile_sse = http_client_profile.clone();
         let handle_sse = transport_handle;
         let sse_task = tokio::spawn(async move {
-            let Some(resp) = sse_resp else {
-                let mut wake_rx = sse_wake_rx;
-                while wake_rx.recv().await.is_some() {
-                    let sse_client = match http_client_profile_sse
-                        .select_for_url(&sse_url, enforce_public_ip)
+            let mut wake_rx = sse_wake_rx;
+            let mut current_resp = sse_resp;
+
+            loop {
+                let resp = match current_resp.take() {
+                    Some(resp) => resp,
+                    None => {
+                        let Some(_) = wake_rx.recv().await else {
+                            return;
+                        };
+                        let sse_client = match http_client_profile_sse
+                            .select_for_url(&sse_url, enforce_public_ip)
+                            .await
+                        {
+                            Ok(client) => client,
+                            Err(err) => {
+                                close_post_bridge(
+                                    &writer_sse,
+                                    &handle_sse,
+                                    format!("streamable http SSE client selection failed: {err}"),
+                                )
+                                .await;
+                                return;
+                            }
+                        };
+                        match try_connect_sse(
+                            &sse_client,
+                            sse_url.as_str(),
+                            connect_timeout,
+                            &session_id_sse,
+                        )
                         .await
-                    {
-                        Ok(client) => client,
-                        Err(err) => {
-                            close_post_bridge(
-                                &writer_sse,
-                                &handle_sse,
-                                format!("streamable http SSE client selection failed: {err}"),
-                            )
-                            .await;
+                        {
+                            Ok(Some(resp)) => resp,
+                            Ok(None) => continue,
+                            Err(err) => {
+                                close_post_bridge(
+                                    &writer_sse,
+                                    &handle_sse,
+                                    format!("streamable http SSE connection failed: {err}"),
+                                )
+                                .await;
+                                return;
+                            }
+                        }
+                    }
+                };
+
+                let writer = writer_sse.clone();
+                let mut pump_fut =
+                    std::pin::pin!(pump_sse_response(resp, writer, max_message_bytes));
+
+                loop {
+                    tokio::select! {
+                        result = &mut pump_fut => {
+                            match result {
+                                Ok(()) => {
+                                    close_post_bridge(
+                                        &writer_sse,
+                                        &handle_sse,
+                                        "streamable http SSE connection closed".to_string(),
+                                    )
+                                    .await;
+                                }
+                                Err(err) => {
+                                    close_post_bridge(
+                                        &writer_sse,
+                                        &handle_sse,
+                                        format!("streamable http SSE connection failed: {err}"),
+                                    )
+                                    .await;
+                                }
+                            }
                             return;
                         }
-                    };
-                    match try_connect_sse(
-                        &sse_client,
-                        sse_url.as_str(),
-                        connect_timeout,
-                        &session_id_sse,
-                    )
-                    .await
-                    {
-                        Ok(Some(resp)) => {
-                            pump_sse(
-                                resp,
-                                writer_sse.clone(),
-                                max_message_bytes,
-                                handle_sse.clone(),
-                            )
-                            .await;
-                            return;
-                        }
-                        Ok(None) => {}
-                        Err(err) => {
-                            close_post_bridge(
-                                &writer_sse,
-                                &handle_sse,
-                                format!("streamable http SSE connection failed: {err}"),
-                            )
-                            .await;
-                            return;
+                        wake = wake_rx.recv() => {
+                            match wake {
+                                Some(SseWakeReason::SessionChanged) => {
+                                    let sse_client = match http_client_profile_sse
+                                        .select_for_url(&sse_url, enforce_public_ip)
+                                        .await
+                                    {
+                                        Ok(client) => client,
+                                        Err(err) => {
+                                            close_post_bridge(
+                                                &writer_sse,
+                                                &handle_sse,
+                                                format!("streamable http SSE client selection failed: {err}"),
+                                            )
+                                            .await;
+                                            return;
+                                        }
+                                    };
+                                    current_resp = match try_connect_sse(
+                                        &sse_client,
+                                        sse_url.as_str(),
+                                        connect_timeout,
+                                        &session_id_sse,
+                                    )
+                                    .await
+                                    {
+                                        Ok(Some(resp)) => Some(resp),
+                                        Ok(None) => None,
+                                        Err(err) => {
+                                            close_post_bridge(
+                                                &writer_sse,
+                                                &handle_sse,
+                                                format!("streamable http SSE connection failed: {err}"),
+                                            )
+                                            .await;
+                                            return;
+                                        }
+                                    };
+                                    break;
+                                }
+                                Some(SseWakeReason::Connect) => {}
+                                None => {
+                                    match pump_fut.await {
+                                        Ok(()) => {
+                                            close_post_bridge(
+                                                &writer_sse,
+                                                &handle_sse,
+                                                "streamable http SSE connection closed".to_string(),
+                                            )
+                                            .await;
+                                        }
+                                        Err(err) => {
+                                            close_post_bridge(
+                                                &writer_sse,
+                                                &handle_sse,
+                                                format!("streamable http SSE connection failed: {err}"),
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                    return;
+                                }
+                            }
                         }
                     }
                 }
-                return;
-            };
-
-            let _ = sse_wake_rx;
-            pump_sse(resp, writer_sse.clone(), max_message_bytes, handle_sse).await;
+            }
         });
 
         client.transport_tasks.push(post_task);
@@ -411,7 +506,7 @@ struct HttpPostBridge {
     http_client_profile: HttpClientProfile,
     post_url: reqwest::Url,
     session_id: Arc<tokio::sync::Mutex<Option<String>>>,
-    sse_wake: mpsc::Sender<()>,
+    sse_wake: mpsc::Sender<SseWakeReason>,
     max_message_bytes: usize,
     request_timeout: Option<Duration>,
     error_body_preview_bytes: usize,
@@ -533,7 +628,11 @@ impl HttpPostBridge {
                 }
             };
 
-            let mut should_wake_sse = resp.status() == reqwest::StatusCode::ACCEPTED;
+            let mut wake_reason = if resp.status() == reqwest::StatusCode::ACCEPTED {
+                Some(SseWakeReason::Connect)
+            } else {
+                None
+            };
             if let Some(value) = resp.headers().get("mcp-session-id") {
                 if let Ok(value) = value.to_str() {
                     let mut guard = session_id.lock().await;
@@ -543,12 +642,12 @@ impl HttpPostBridge {
                     }
                     drop(guard);
                     if changed {
-                        should_wake_sse = true;
+                        wake_reason = Some(SseWakeReason::SessionChanged);
                     }
                 }
             }
-            if should_wake_sse {
-                let _ = sse_wake.try_send(());
+            if let Some(reason) = wake_reason {
+                let _ = sse_wake.try_send(reason);
             }
 
             let status = resp.status();
@@ -951,33 +1050,17 @@ async fn read_response_body_limited(
     Ok(out)
 }
 
-async fn pump_sse(
+async fn pump_sse_response(
     resp: reqwest::Response,
     writer: Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::io::DuplexStream>>>,
     max_message_bytes: usize,
-    handle: ClientHandle,
-) {
+) -> io::Result<()> {
     let stream = resp
         .bytes_stream()
         .map(|chunk| chunk.map_err(io::Error::other));
     let reader = StreamReader::new(stream);
     let mut reader = tokio::io::BufReader::new(reader);
-    let result = sse_pump_to_writer(&mut reader, &writer, max_message_bytes, false).await;
-    match result {
-        Ok(()) => {
-            handle
-                .close_with_reason("streamable http SSE connection closed".to_string())
-                .await;
-        }
-        Err(err) => {
-            handle
-                .close_with_reason(format!("streamable http SSE connection failed: {err}"))
-                .await;
-        }
-    }
-    let mut writer = writer.lock().await;
-    let _ = writer.shutdown().await;
-    drop(writer);
+    sse_pump_to_writer(&mut reader, &writer, max_message_bytes, false).await
 }
 
 async fn sse_pump_to_writer<R: tokio::io::AsyncBufRead + Unpin>(

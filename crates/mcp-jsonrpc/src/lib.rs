@@ -658,6 +658,196 @@ fn serialize_json_line(value: &impl Serialize) -> Result<Vec<u8>, Error> {
     Ok(line)
 }
 
+fn serialize_json_value(value: &impl Serialize) -> Result<Value, Error> {
+    Ok(serde_json::to_value(value)?)
+}
+
+fn outbound_ok_response_value(id: &Id, result: &Value) -> Result<Value, Error> {
+    serialize_json_value(&OutboundOkResponse {
+        jsonrpc: "2.0",
+        id,
+        result,
+    })
+}
+
+fn outbound_error_response_value<I>(
+    id: &I,
+    code: i64,
+    message: &str,
+    data: Option<&Value>,
+) -> Result<Value, Error>
+where
+    I: Serialize,
+{
+    serialize_json_value(&OutboundErrorResponse {
+        jsonrpc: "2.0",
+        id,
+        error: OutboundErrorBody {
+            code,
+            message,
+            data,
+        },
+    })
+}
+
+struct BatchResponseState {
+    handle: ClientHandle,
+    responses: tokio::sync::Mutex<Vec<Value>>,
+    pending_async_responses: AtomicU64,
+    finished: AtomicBool,
+    flushed: AtomicBool,
+}
+
+#[derive(Clone)]
+struct BatchResponseWriter {
+    state: Arc<BatchResponseState>,
+}
+
+impl std::fmt::Debug for BatchResponseWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BatchResponseWriter")
+            .finish_non_exhaustive()
+    }
+}
+
+impl BatchResponseWriter {
+    fn new(handle: ClientHandle) -> Self {
+        Self {
+            state: Arc::new(BatchResponseState {
+                handle,
+                responses: tokio::sync::Mutex::new(Vec::new()),
+                pending_async_responses: AtomicU64::new(0),
+                finished: AtomicBool::new(false),
+                flushed: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    fn reserve_request_slot(&self) -> Self {
+        self.state
+            .pending_async_responses
+            .fetch_add(1, Ordering::Relaxed);
+        self.clone()
+    }
+
+    async fn push_immediate_response(&self, response: Value) -> Result<(), Error> {
+        self.state.handle.check_closed()?;
+        self.state.responses.lock().await.push(response);
+        Ok(())
+    }
+
+    async fn push_reserved_response(&self, response: Value) -> Result<(), Error> {
+        self.state.handle.check_closed()?;
+        self.state.responses.lock().await.push(response);
+        self.state
+            .pending_async_responses
+            .fetch_sub(1, Ordering::Relaxed);
+        self.flush_if_ready().await
+    }
+
+    async fn finish(&self) -> Result<(), Error> {
+        self.state.finished.store(true, Ordering::Relaxed);
+        self.flush_if_ready().await
+    }
+
+    async fn flush_if_ready(&self) -> Result<(), Error> {
+        if !self.state.finished.load(Ordering::Relaxed)
+            || self.state.pending_async_responses.load(Ordering::Relaxed) != 0
+        {
+            return Ok(());
+        }
+
+        if self
+            .state
+            .flushed
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return Ok(());
+        }
+
+        let mut responses = self.state.responses.lock().await;
+        if responses.is_empty() {
+            return Ok(());
+        }
+        let batch = std::mem::take(&mut *responses);
+        drop(responses);
+        self.state.handle.write_json_line(&batch).await
+    }
+}
+
+#[derive(Clone)]
+enum RequestResponseTarget {
+    Direct(ClientHandle),
+    Batch(BatchResponseWriter),
+}
+
+impl std::fmt::Debug for RequestResponseTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Direct(_) => f.debug_tuple("Direct").finish(),
+            Self::Batch(_) => f.debug_tuple("Batch").finish(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RequestResponder {
+    target: RequestResponseTarget,
+    responded: Arc<AtomicBool>,
+}
+
+impl RequestResponder {
+    fn direct(handle: ClientHandle) -> Self {
+        Self {
+            target: RequestResponseTarget::Direct(handle),
+            responded: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn batch(batch: BatchResponseWriter) -> Self {
+        Self {
+            target: RequestResponseTarget::Batch(batch.reserve_request_slot()),
+            responded: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    async fn respond_ok(&self, id: &Id, result: Value) -> Result<(), Error> {
+        let response = outbound_ok_response_value(id, &result)?;
+        self.send_response(response).await
+    }
+
+    async fn respond_error(
+        &self,
+        id: &Id,
+        code: i64,
+        message: impl Into<String>,
+        data: Option<Value>,
+    ) -> Result<(), Error> {
+        let message = message.into();
+        let response = outbound_error_response_value(id, code, &message, data.as_ref())?;
+        self.send_response(response).await
+    }
+
+    async fn send_response(&self, response: Value) -> Result<(), Error> {
+        if self
+            .responded
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return Err(Error::protocol(
+                ProtocolErrorKind::Other,
+                "request already responded",
+            ));
+        }
+
+        match &self.target {
+            RequestResponseTarget::Direct(handle) => handle.write_json_line(&response).await,
+            RequestResponseTarget::Batch(batch) => batch.push_reserved_response(response).await,
+        }
+    }
+}
+
 impl ClientHandle {
     pub fn stats(&self) -> ClientStats {
         self.stats.snapshot()
@@ -880,13 +1070,12 @@ impl ClientHandle {
 
     pub async fn respond_ok(&self, id: Id, result: Value) -> Result<(), Error> {
         self.check_closed()?;
-        let response = OutboundOkResponse {
+        self.write_json_line(&OutboundOkResponse {
             jsonrpc: "2.0",
             id: &id,
             result: &result,
-        };
-        let line = serialize_json_line(&response)?;
-        self.write_line(&line).await
+        })
+        .await
     }
 
     pub async fn respond_error(
@@ -898,7 +1087,7 @@ impl ClientHandle {
     ) -> Result<(), Error> {
         self.check_closed()?;
         let message = message.into();
-        let response = OutboundErrorResponse {
+        self.write_json_line(&OutboundErrorResponse {
             jsonrpc: "2.0",
             id: &id,
             error: OutboundErrorBody {
@@ -906,9 +1095,8 @@ impl ClientHandle {
                 message: &message,
                 data: data.as_ref(),
             },
-        };
-        let line = serialize_json_line(&response)?;
-        self.write_line(&line).await
+        })
+        .await
     }
 
     pub(crate) async fn respond_error_raw_id(
@@ -920,7 +1108,7 @@ impl ClientHandle {
     ) -> Result<(), Error> {
         self.check_closed()?;
         let message = message.into();
-        let response = OutboundErrorResponse {
+        self.write_json_line(&OutboundErrorResponse {
             jsonrpc: "2.0",
             id: &id,
             error: OutboundErrorBody {
@@ -928,8 +1116,12 @@ impl ClientHandle {
                 message: &message,
                 data: data.as_ref(),
             },
-        };
-        let line = serialize_json_line(&response)?;
+        })
+        .await
+    }
+
+    async fn write_json_line(&self, value: &impl Serialize) -> Result<(), Error> {
+        let line = serialize_json_line(value)?;
         self.write_line(&line).await
     }
 
@@ -1391,12 +1583,12 @@ pub struct IncomingRequest {
     pub id: Id,
     pub method: String,
     pub params: Option<Value>,
-    responder: ClientHandle,
+    responder: RequestResponder,
 }
 
 impl IncomingRequest {
     pub async fn respond_ok(&self, result: Value) -> Result<(), Error> {
-        self.responder.respond_ok(self.id.clone(), result).await
+        self.responder.respond_ok(&self.id, result).await
     }
 
     pub async fn respond_error(
@@ -1406,7 +1598,7 @@ impl IncomingRequest {
         data: Option<Value>,
     ) -> Result<(), Error> {
         self.responder
-            .respond_error(self.id.clone(), code, message, data)
+            .respond_error(&self.id, code, message, data)
             .await
     }
 }
@@ -1511,160 +1703,249 @@ async fn handle_incoming_value(
     responder: &ClientHandle,
 ) {
     const INVALID_REQUEST: i64 = -32600;
-    const METHOD_NOT_FOUND: i64 = -32601;
-    const CLIENT_OVERLOADED: i64 = -32000;
+    let ctx = IncomingValueContext {
+        pending,
+        cancelled_request_ids,
+        stats,
+        notify_tx,
+        request_tx,
+        responder,
+    };
 
-    // Most traffic is a single JSON-RPC object (non-batch). Keep the common path allocation-free
-    // by only allocating stack storage when we actually need to expand batch arrays.
-    let mut stack = Vec::new();
-    let mut next = Some((value, true));
-    while let Some((value, allow_batch_expansion)) = next.take().or_else(|| stack.pop()) {
-        match value {
-            Value::Array(items) => {
-                if !allow_batch_expansion {
-                    let _ = responder
-                        .respond_error_raw_id(
-                            Value::Null,
+    match value {
+        Value::Array(items) => {
+            if items.is_empty() {
+                let _ = ctx
+                    .responder
+                    .respond_error_raw_id(Value::Null, INVALID_REQUEST, "empty batch", None)
+                    .await;
+                return;
+            }
+
+            let batch = BatchResponseWriter::new(ctx.responder.clone());
+            let mut stack = Vec::with_capacity(items.len());
+            stack.extend(items.into_iter().rev().map(|item| (item, false)));
+            while let Some((item, allow_batch_expansion)) = stack.pop() {
+                handle_incoming_item(item, allow_batch_expansion, &ctx, Some(&batch), &mut stack)
+                    .await;
+                if ctx.responder.is_closed() {
+                    return;
+                }
+            }
+            let _ = batch.finish().await;
+        }
+        other => {
+            let mut stack = Vec::new();
+            handle_incoming_item(other, true, &ctx, None, &mut stack).await;
+        }
+    }
+}
+
+struct IncomingValueContext<'a> {
+    pending: &'a PendingRequests,
+    cancelled_request_ids: &'a CancelledRequestIds,
+    stats: &'a Arc<ClientStatsInner>,
+    notify_tx: &'a mpsc::Sender<Notification>,
+    request_tx: &'a mpsc::Sender<IncomingRequest>,
+    responder: &'a ClientHandle,
+}
+
+async fn handle_incoming_item(
+    value: Value,
+    allow_batch_expansion: bool,
+    ctx: &IncomingValueContext<'_>,
+    batch: Option<&BatchResponseWriter>,
+    stack: &mut Vec<(Value, bool)>,
+) {
+    const INVALID_REQUEST: i64 = -32600;
+
+    match value {
+        Value::Array(items) => {
+            if !allow_batch_expansion {
+                let _ = send_batch_or_direct_error_raw_id(
+                    ctx.responder,
+                    batch,
+                    Value::Null,
+                    INVALID_REQUEST,
+                    "nested batch is not allowed",
+                    None,
+                )
+                .await;
+                return;
+            }
+
+            if items.is_empty() {
+                let _ = send_batch_or_direct_error_raw_id(
+                    ctx.responder,
+                    batch,
+                    Value::Null,
+                    INVALID_REQUEST,
+                    "empty batch",
+                    None,
+                )
+                .await;
+                return;
+            }
+
+            stack.reserve(items.len());
+            stack.extend(items.into_iter().rev().map(|item| (item, false)));
+        }
+        Value::Object(mut map) => {
+            let jsonrpc_valid = map.get("jsonrpc").and_then(Value::as_str) == Some("2.0");
+
+            match map.remove("method") {
+                Some(Value::String(method)) => {
+                    let id_value = map.remove("id");
+                    if !jsonrpc_valid {
+                        if let Some(id_value) = id_value {
+                            let id_value = error_response_id_or_null(id_value);
+                            let _ = send_batch_or_direct_error_raw_id(
+                                ctx.responder,
+                                batch,
+                                id_value,
+                                INVALID_REQUEST,
+                                "invalid jsonrpc version",
+                                None,
+                            )
+                            .await;
+                        }
+                        return;
+                    }
+
+                    let params = map.remove("params");
+                    if let Some(id_value) = id_value {
+                        let Some(id) = parse_id_owned(id_value) else {
+                            let _ = send_batch_or_direct_error_raw_id(
+                                ctx.responder,
+                                batch,
+                                Value::Null,
+                                INVALID_REQUEST,
+                                "invalid request id",
+                                None,
+                            )
+                            .await;
+                            return;
+                        };
+
+                        let request = IncomingRequest {
+                            id,
+                            method,
+                            params,
+                            responder: match batch {
+                                Some(batch) => RequestResponder::batch(batch.clone()),
+                                None => RequestResponder::direct(ctx.responder.clone()),
+                            },
+                        };
+
+                        match ctx.request_tx.try_send(request) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(request)) => {
+                                drop(
+                                    request
+                                        .responder
+                                        .respond_error(
+                                            &request.id,
+                                            -32000,
+                                            "client overloaded",
+                                            None,
+                                        )
+                                        .await,
+                                );
+                            }
+                            Err(mpsc::error::TrySendError::Closed(request)) => {
+                                drop(
+                                    request
+                                        .responder
+                                        .respond_error(
+                                            &request.id,
+                                            -32601,
+                                            "no request handler installed",
+                                            None,
+                                        )
+                                        .await,
+                                );
+                            }
+                        }
+                        return;
+                    }
+
+                    match ctx.notify_tx.try_send(Notification { method, params }) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            ctx.stats
+                                .dropped_notifications_full
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            ctx.stats
+                                .dropped_notifications_closed
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    return;
+                }
+                Some(_) => {
+                    if let Some(id_value) = map.remove("id") {
+                        let id_value = error_response_id_or_null(id_value);
+                        let _ = send_batch_or_direct_error_raw_id(
+                            ctx.responder,
+                            batch,
+                            id_value,
                             INVALID_REQUEST,
-                            "nested batch is not allowed",
+                            "invalid request method",
                             None,
                         )
                         .await;
-                    continue;
-                }
-                if items.is_empty() {
-                    let _ = responder
-                        .respond_error_raw_id(Value::Null, INVALID_REQUEST, "empty batch", None)
-                        .await;
-                    continue;
-                }
-                stack.reserve(items.len());
-                stack.extend(items.into_iter().rev().map(|item| (item, false)));
-                continue;
-            }
-            Value::Object(mut map) => {
-                let jsonrpc_valid = map.get("jsonrpc").and_then(Value::as_str) == Some("2.0");
-
-                match map.remove("method") {
-                    Some(Value::String(method)) => {
-                        let id_value = map.remove("id");
-                        if !jsonrpc_valid {
-                            if let Some(id_value) = id_value {
-                                let id_value = error_response_id_or_null(id_value);
-                                drop(
-                                    responder
-                                        .respond_error_raw_id(
-                                            id_value,
-                                            INVALID_REQUEST,
-                                            "invalid jsonrpc version",
-                                            None,
-                                        )
-                                        .await,
-                                );
-                            }
-                            continue;
-                        }
-
-                        let params = map.remove("params");
-                        if let Some(id_value) = id_value {
-                            let Some(id) = parse_id_owned(id_value) else {
-                                drop(
-                                    responder
-                                        .respond_error_raw_id(
-                                            Value::Null,
-                                            INVALID_REQUEST,
-                                            "invalid request id",
-                                            None,
-                                        )
-                                        .await,
-                                );
-                                continue;
-                            };
-
-                            let request = IncomingRequest {
-                                id,
-                                method,
-                                params,
-                                responder: responder.clone(),
-                            };
-
-                            match request_tx.try_send(request) {
-                                Ok(()) => {}
-                                Err(mpsc::error::TrySendError::Full(request)) => {
-                                    drop(
-                                        responder
-                                            .respond_error(
-                                                request.id,
-                                                CLIENT_OVERLOADED,
-                                                "client overloaded",
-                                                None,
-                                            )
-                                            .await,
-                                    );
-                                }
-                                Err(mpsc::error::TrySendError::Closed(request)) => {
-                                    drop(
-                                        responder
-                                            .respond_error(
-                                                request.id,
-                                                METHOD_NOT_FOUND,
-                                                "no request handler installed",
-                                                None,
-                                            )
-                                            .await,
-                                    );
-                                }
-                            }
-                            continue;
-                        }
-
-                        match notify_tx.try_send(Notification { method, params }) {
-                            Ok(()) => {}
-                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                stats
-                                    .dropped_notifications_full
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-                            Err(mpsc::error::TrySendError::Closed(_)) => {
-                                stats
-                                    .dropped_notifications_closed
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                        continue;
                     }
-                    Some(_) => {
-                        if let Some(id_value) = map.remove("id") {
-                            let id_value = error_response_id_or_null(id_value);
-                            let _ = responder
-                                .respond_error_raw_id(
-                                    id_value,
-                                    INVALID_REQUEST,
-                                    "invalid request method",
-                                    None,
-                                )
-                                .await;
-                        }
-                        continue;
-                    }
-                    None => {}
-                }
-
-                if let Err(err) =
-                    handle_response(pending, cancelled_request_ids, Value::Object(map))
-                {
-                    responder.close_with_error(err.to_string(), err).await;
                     return;
                 }
-                continue;
+                None => {}
             }
-            _ => {
-                // JSON-RPC messages must be objects or arrays.
-                let _ = responder
-                    .respond_error_raw_id(Value::Null, INVALID_REQUEST, "invalid message", None)
-                    .await;
-                continue;
+
+            if let Err(err) =
+                handle_response(ctx.pending, ctx.cancelled_request_ids, Value::Object(map))
+            {
+                ctx.responder.close_with_error(err.to_string(), err).await;
             }
+        }
+        _ => {
+            let _ = send_batch_or_direct_error_raw_id(
+                ctx.responder,
+                batch,
+                Value::Null,
+                INVALID_REQUEST,
+                "invalid message",
+                None,
+            )
+            .await;
+        }
+    }
+}
+
+async fn send_batch_or_direct_error_raw_id(
+    responder: &ClientHandle,
+    batch: Option<&BatchResponseWriter>,
+    id: Value,
+    code: i64,
+    message: impl Into<String>,
+    data: Option<Value>,
+) -> Result<(), Error> {
+    let message = message.into();
+    match batch {
+        Some(batch) => {
+            batch
+                .push_immediate_response(outbound_error_response_value(
+                    &id,
+                    code,
+                    &message,
+                    data.as_ref(),
+                )?)
+                .await
+        }
+        None => {
+            responder
+                .respond_error_raw_id(id, code, message, data)
+                .await
         }
     }
 }
@@ -2089,7 +2370,7 @@ mod incoming_value_tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     #[tokio::test]
-    async fn nested_batch_item_returns_invalid_request_error() {
+    async fn nested_batch_item_returns_invalid_request_error_in_batch_array() {
         let (client_stream, server_stream) = tokio::io::duplex(1024);
         let (client_read, client_write) = tokio::io::split(client_stream);
         let (server_read, mut server_write) = tokio::io::split(server_stream);
@@ -2111,11 +2392,82 @@ mod incoming_value_tests {
             .expect("response timeout")
             .expect("read response")
             .expect("response line");
-        let response: Value =
-            serde_json::from_str(&response_line).expect("parse invalid-request response");
-        assert_eq!(response["error"]["code"], -32600);
-        assert_eq!(response["error"]["message"], "nested batch is not allowed");
-        assert_eq!(response["id"], Value::Null);
+        let response: Value = serde_json::from_str(&response_line).expect("parse batch response");
+        let items = response.as_array().expect("batch response array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["error"]["code"], -32600);
+        assert_eq!(items[0]["error"]["message"], "nested batch is not allowed");
+        assert_eq!(items[0]["id"], Value::Null);
+
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn top_level_batch_request_returns_single_array_response() {
+        let (client_stream, server_stream) = tokio::io::duplex(2048);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let mut client = Client::connect_io(client_read, client_write)
+            .await
+            .expect("connect client");
+        let mut requests = client.take_requests().expect("request receiver");
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        server_write
+            .write_all(
+                br#"[{"jsonrpc":"2.0","id":1,"method":"first"},{"jsonrpc":"2.0","method":"note"},{"jsonrpc":"2.0","id":2,"method":"second"}]"#,
+            )
+            .await
+            .expect("write batch");
+        server_write.write_all(b"\n").await.expect("write newline");
+        server_write.flush().await.expect("flush batch");
+
+        let first = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .expect("first request timeout")
+            .expect("first request");
+        assert_eq!(first.method, "first");
+
+        let second = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .expect("second request timeout")
+            .expect("second request");
+        assert_eq!(second.method, "second");
+
+        first
+            .respond_ok(serde_json::json!({"handled":"first"}))
+            .await
+            .expect("respond first");
+        second
+            .respond_error(-32001, "second failed", None)
+            .await
+            .expect("respond second");
+
+        let response_line = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+            .await
+            .expect("response timeout")
+            .expect("read response")
+            .expect("response line");
+        let response: Value = serde_json::from_str(&response_line).expect("parse batch response");
+        let items = response.as_array().expect("batch response array");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items.iter().filter(|item| item["id"] == 1).count(), 1);
+        assert_eq!(items.iter().filter(|item| item["id"] == 2).count(), 1);
+        assert!(
+            items
+                .iter()
+                .any(|item| item["id"] == 1 && item["result"]["handled"] == "first"),
+            "{items:?}"
+        );
+        assert!(
+            items.iter().any(|item| {
+                item["id"] == 2
+                    && item["error"]["code"] == -32001
+                    && item["error"]["message"] == "second failed"
+            }),
+            "{items:?}"
+        );
 
         drop(client);
     }

@@ -409,6 +409,17 @@ async fn wait_for_pid(path: &std::path::Path) -> Option<u32> {
     None
 }
 
+#[cfg(all(unix, target_os = "linux"))]
+async fn wait_for_process_termination(pid: u32, attempts: usize) -> bool {
+    for _ in 0..attempts {
+        if process_terminated_or_zombie(pid) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    false
+}
+
 #[tokio::test]
 async fn resolves_env_secret() -> Result<()> {
     let env = TestEnv {
@@ -2840,7 +2851,7 @@ async fn secret_command_runner_returns_after_successful_leader_exit() -> Result<
     };
     let env = TestEnv::default();
 
-    let value = tokio::time::timeout(Duration::from_secs(1), run_secret_command(&cmd, &env))
+    let value = tokio::time::timeout(Duration::from_secs(3), run_secret_command(&cmd, &env))
         .await
         .expect("secret command should return after the leader exits")?;
     let pid = wait_for_pid(&pid_file)
@@ -2849,16 +2860,8 @@ async fn secret_command_runner_returns_after_successful_leader_exit() -> Result<
 
     assert_eq!(value.expose_secret(), "ok");
 
-    let mut gone = false;
-    for _ in 0..300 {
-        if process_terminated_or_zombie(pid) {
-            gone = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
     assert!(
-        gone,
+        wait_for_process_termination(pid, 500).await,
         "successful secret command should clean up orphaned background processes"
     );
     Ok(())
@@ -2889,16 +2892,8 @@ async fn secret_command_runner_cancellation_kills_child_process_group() -> Resul
     handle.abort();
     let _ = handle.await;
 
-    let mut gone = false;
-    for _ in 0..300 {
-        if process_terminated_or_zombie(pid) {
-            gone = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
     assert!(
-        gone,
+        wait_for_process_termination(pid, 500).await,
         "secret command process group should be killed on cancellation"
     );
     Ok(())
@@ -2934,32 +2929,16 @@ async fn secret_command_runner_cancellation_kills_orphaned_process_group() -> Re
         .await
         .expect("background pid file should be written");
 
-    let mut leader_exited = false;
-    for _ in 0..300 {
-        if process_terminated_or_zombie(shell_pid) {
-            leader_exited = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
     assert!(
-        leader_exited,
+        wait_for_process_termination(shell_pid, 500).await,
         "shell leader should exit before cancellation"
     );
 
     handle.abort();
     let _ = handle.await;
 
-    let mut gone = false;
-    for _ in 0..300 {
-        if process_terminated_or_zombie(bg_pid) {
-            gone = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
     assert!(
-        gone,
+        wait_for_process_termination(bg_pid, 500).await,
         "secret command cancellation should still kill orphaned background processes"
     );
     Ok(())

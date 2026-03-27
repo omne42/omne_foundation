@@ -448,8 +448,18 @@ fn process_terminated_or_reused_or_zombie(identity: LinuxTestProcessIdentity) ->
 }
 
 #[cfg(all(unix, target_os = "linux"))]
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+#[cfg(all(unix, target_os = "linux"))]
+const PID_FILE_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[cfg(all(unix, target_os = "linux"))]
+const PROCESS_TERMINATION_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[cfg(all(unix, target_os = "linux"))]
 async fn wait_for_pid(path: &std::path::Path) -> Option<LinuxTestProcessIdentity> {
-    for _ in 0..100 {
+    let deadline = tokio::time::Instant::now() + PID_FILE_WAIT_TIMEOUT;
+    while tokio::time::Instant::now() < deadline {
         if let Ok(raw) = tokio::fs::read_to_string(path).await
             && let Ok(pid) = raw.trim().parse::<u32>()
         {
@@ -458,24 +468,25 @@ async fn wait_for_pid(path: &std::path::Path) -> Option<LinuxTestProcessIdentity
                 start_ticks: linux_process_start_ticks(pid).ok(),
             });
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(PROCESS_POLL_INTERVAL).await;
     }
     None
 }
 
 #[cfg(all(unix, target_os = "linux"))]
-async fn wait_for_process_termination(identity: LinuxTestProcessIdentity, attempts: usize) -> bool {
-    for _ in 0..attempts {
+async fn wait_for_process_termination(
+    identity: LinuxTestProcessIdentity,
+    timeout: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
         if process_terminated_or_reused_or_zombie(identity) {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(PROCESS_POLL_INTERVAL).await;
     }
-    false
+    process_terminated_or_reused_or_zombie(identity)
 }
-
-#[cfg(all(unix, target_os = "linux"))]
-const PROCESS_TERMINATION_WAIT_ATTEMPTS: usize = 300;
 
 #[tokio::test]
 async fn resolves_env_secret() -> Result<()> {
@@ -2957,7 +2968,7 @@ async fn secret_command_runner_returns_after_successful_leader_exit() -> Result<
     assert_eq!(value.expose_secret(), "ok");
 
     assert!(
-        wait_for_process_termination(pid, PROCESS_TERMINATION_WAIT_ATTEMPTS).await,
+        wait_for_process_termination(pid, PROCESS_TERMINATION_WAIT_TIMEOUT).await,
         "successful secret command should clean up orphaned background processes"
     );
     Ok(())
@@ -2992,7 +3003,7 @@ async fn secret_command_runner_cancellation_kills_child_process_group() -> Resul
     let _ = handle.await;
 
     assert!(
-        wait_for_process_termination(pid, PROCESS_TERMINATION_WAIT_ATTEMPTS).await,
+        wait_for_process_termination(pid, PROCESS_TERMINATION_WAIT_TIMEOUT).await,
         "secret command process group should be killed on cancellation"
     );
     Ok(())
@@ -3029,7 +3040,7 @@ async fn secret_command_runner_cancellation_kills_orphaned_process_group() -> Re
         .expect("background pid file should be written");
 
     assert!(
-        wait_for_process_termination(shell_pid, PROCESS_TERMINATION_WAIT_ATTEMPTS).await,
+        wait_for_process_termination(shell_pid, PROCESS_TERMINATION_WAIT_TIMEOUT).await,
         "shell leader should exit before cancellation"
     );
 
@@ -3037,7 +3048,7 @@ async fn secret_command_runner_cancellation_kills_orphaned_process_group() -> Re
     let _ = handle.await;
 
     assert!(
-        wait_for_process_termination(bg_pid, PROCESS_TERMINATION_WAIT_ATTEMPTS).await,
+        wait_for_process_termination(bg_pid, PROCESS_TERMINATION_WAIT_TIMEOUT).await,
         "secret command cancellation should still kill orphaned background processes"
     );
     Ok(())

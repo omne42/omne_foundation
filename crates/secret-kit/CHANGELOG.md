@@ -7,8 +7,9 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- Stabilize the Linux process-group cleanup gate further by switching the helper waits from fixed iteration counts to explicit time budgets, so slower GitHub Actions runners have more room to observe pid-file writes and tree termination without weakening the assertions.
 - `secret-kit`：CLI-backed secret resolution 现在会先验证 Tokio time driver，再进入命令超时控制；错误配置不再 panic，而是返回带稳定 catalog code 的命令错误，并把运行时前提写进 `SecretCommandRuntime` 文档。
-- Stabilize Linux process-group cleanup tests by detaching background-command stdio, tracking PID identity to avoid `/proc` reuse false negatives, and aligning the cleanup polling budget with `omne-process-primitives` so slower CI runners do not spuriously fail `secret-kit` quality gates while preserving the same cleanup assertions.
+- Stabilize Linux process-group cleanup tests by detaching background-command stdio, tracking PID identity to avoid `/proc` reuse false negatives, and extending the cleanup polling budget so slower CI runners do not spuriously fail `secret-kit` quality gates while preserving the same cleanup assertions.
 - Established crate-local changelog ownership now that `omne_foundation` tracks release notes per crate instead of at the repository root.
 - Kept `secret-kit` focused on secret-specific semantics while moving shared process-tree primitives out to the systems layer and preserving structured error texts.
 - Retry Unix `ETXTBSY` (`Text file busy`) command spawns briefly so freshly materialized builtin CLI shims do not introduce flaky secret resolution failures.

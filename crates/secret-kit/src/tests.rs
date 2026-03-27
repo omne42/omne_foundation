@@ -2947,7 +2947,7 @@ async fn secret_command_runner_returns_after_successful_leader_exit() -> Result<
     let dir = tempfile::tempdir().expect("tempdir");
     let pid_file = dir.path().join("secret-command-background.pid");
     let script = format!(
-        "sleep 30 </dev/null >/dev/null 2>&1 & echo $! > '{}'; printf ok",
+        "sleep 30 </dev/null >/dev/null 2>&1 & echo $! > '{}'; sleep 0.2; printf ok",
         pid_file.display()
     );
     let cmd = SecretCommand {
@@ -3016,7 +3016,7 @@ async fn secret_command_runner_cancellation_kills_orphaned_process_group() -> Re
     let shell_pid_file = dir.path().join("secret-command-shell.pid");
     let bg_pid_file = dir.path().join("secret-command-background.pid");
     let script = format!(
-        "echo $$ > '{shell}'; sleep 30 </dev/null >/dev/null 2>&1 & echo $! > '{background}'; exit 0",
+        "echo $$ > '{shell}'; sleep 30 </dev/null >/dev/null 2>&1 & echo $! > '{background}'; sleep 0.2; exit 0",
         shell = shell_pid_file.display(),
         background = bg_pid_file.display()
     );

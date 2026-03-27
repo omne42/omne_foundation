@@ -11,3 +11,5 @@
 - Add `HttpClientProfile` so callers can reuse a single explicit `HttpClientOptions` configuration across pinned and unpinned requests without relying on opaque `reqwest::Client` state.
 - Add regression coverage for pinned-client redirect policy and proxy bypass so same-host redirects still succeed with preserved default headers, cross-host/scheme/port redirects fail under public-IP pinning, and proxy environment variables cannot intercept pinned requests.
 - Add `read_json_body_after_http_success_limited(...)` so callers with known large success payloads can raise the body cap without weakening the crate-wide default.
+- Fix public-IP classification for IPv4/IPv6 special-use ranges so `192.0.0.9/32` and `192.0.0.10/32` remain allowed, stale IPv4 anycast blocks are no longer rejected, and `2001::/23` special-use space is treated as non-global except for its documented globally reachable carve-outs.
+- Redact URL credentials, paths, and queries from `probe_http_endpoint_detailed(...)` transport error details instead of surfacing raw `reqwest` error strings.

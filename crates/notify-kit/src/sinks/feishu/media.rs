@@ -1,5 +1,5 @@
 use std::io::Read as _;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
@@ -229,7 +229,7 @@ impl FeishuWebhookSink {
         let resp = send_reqwest(
             client
                 .post(upload_url)
-                .bearer_auth(access_token)
+                .bearer_auth(&access_token)
                 .multipart(form),
             "feishu image upload",
         )
@@ -237,6 +237,7 @@ impl FeishuWebhookSink {
 
         let status = resp.status();
         if !status.is_success() {
+            self.invalidate_tenant_access_token(&access_token).await;
             let body = read_text_body_limited(resp, DEFAULT_MAX_RESPONSE_BODY_BYTES)
                 .await
                 .map_err(|err| {
@@ -248,6 +249,7 @@ impl FeishuWebhookSink {
         let body = read_json_body_limited(resp, DEFAULT_MAX_RESPONSE_BODY_BYTES).await?;
         let code = body["code"].as_i64().unwrap_or(-1);
         if code != 0 {
+            self.invalidate_tenant_access_token(&access_token).await;
             return Err(anyhow::anyhow!("feishu image upload api error: code={code}").into());
         }
 
@@ -258,6 +260,16 @@ impl FeishuWebhookSink {
             .ok_or_else(|| anyhow::anyhow!("feishu image upload api error: missing image_key"))?;
 
         Ok(image_key.to_string())
+    }
+
+    async fn invalidate_tenant_access_token(&self, token: &str) {
+        let mut guard = self.tenant_access_token.lock().await;
+        if matches!(
+            &*guard,
+            super::TenantAccessTokenState::Ready(cached) if cached.token == token
+        ) {
+            *guard = super::TenantAccessTokenState::Empty;
+        }
     }
 
     pub(super) async fn ensure_tenant_access_token(&self) -> crate::Result<String> {
@@ -388,11 +400,10 @@ impl FeishuWebhookSink {
         let expires_in = body["expire"]
             .as_i64()
             .or_else(|| body["expires_in"].as_i64())
-            .unwrap_or(7200)
-            .max(120) as u64;
+            .unwrap_or(7200);
         Ok(AccessTokenCache {
             token,
-            expires_at: Instant::now() + Duration::from_secs(expires_in.saturating_sub(60)),
+            expires_at: Instant::now() + tenant_access_token_cache_ttl(expires_in),
         })
     }
 }
@@ -408,6 +419,7 @@ async fn read_local_image_file(path: String, max_bytes: usize) -> crate::Result<
     #[cfg(unix)]
     tokio::task::spawn_blocking(move || {
         let path = Path::new(&path);
+        ensure_local_image_path_has_no_symlink_ancestor(path)?;
         let metadata = std::fs::symlink_metadata(path).map_err(|err| {
             crate::Error::from(anyhow::anyhow!("read image file metadata: {err}"))
         })?;
@@ -434,6 +446,52 @@ async fn read_local_image_file(path: String, max_bytes: usize) -> crate::Result<
     })
     .await
     .map_err(|err| crate::Error::from(anyhow::anyhow!("join image file read task: {err}")))?
+}
+
+fn tenant_access_token_cache_ttl(expires_in: i64) -> Duration {
+    let expires_in = u64::try_from(expires_in.max(0)).unwrap_or_default();
+    Duration::from_secs(expires_in.saturating_sub(60))
+}
+
+#[cfg(unix)]
+fn ensure_local_image_path_has_no_symlink_ancestor(path: &Path) -> crate::Result<()> {
+    let mut components = path.components().peekable();
+    let mut current = PathBuf::new();
+
+    while let Some(component) = components.next() {
+        let is_last = components.peek().is_none();
+        match component {
+            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::RootDir => current.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                current.pop();
+            }
+            Component::Normal(part) => {
+                current.push(part);
+                if is_last {
+                    // The final file component is protected by `O_NOFOLLOW` during open.
+                    continue;
+                }
+
+                let metadata = std::fs::symlink_metadata(&current).map_err(|err| {
+                    crate::Error::from(anyhow::anyhow!(
+                        "read image path metadata for {}: {err}",
+                        current.display()
+                    ))
+                })?;
+                if metadata.file_type().is_symlink() {
+                    return Err(anyhow::anyhow!(
+                        "image path must not traverse symlink ancestor: {}",
+                        current.display()
+                    )
+                    .into());
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -533,7 +591,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::tenant_access_token_refresh_waiter;
+    use super::{tenant_access_token_cache_ttl, tenant_access_token_refresh_waiter};
 
     #[tokio::test]
     async fn tenant_access_token_refresh_waiter_handles_notify_before_await() {
@@ -545,5 +603,12 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(50), wait)
             .await
             .expect("enabled waiter should observe notify_waiters before await");
+    }
+
+    #[test]
+    fn tenant_access_token_cache_ttl_does_not_extend_short_server_ttls() {
+        assert_eq!(tenant_access_token_cache_ttl(30), Duration::ZERO);
+        assert_eq!(tenant_access_token_cache_ttl(120), Duration::from_secs(60));
+        assert_eq!(tenant_access_token_cache_ttl(-1), Duration::ZERO);
     }
 }

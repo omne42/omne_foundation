@@ -371,6 +371,7 @@ mod tests {
     use std::{os::unix::fs::symlink, os::unix::net::UnixListener};
 
     use super::*;
+    use crate::sinks::feishu::media::LoadedImage;
 
     #[test]
     fn builds_expected_text_payload() {
@@ -676,6 +677,49 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn local_image_files_reject_symlink_ancestors() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("unix epoch")
+                .as_nanos();
+            let base = std::env::temp_dir().join(format!(
+                "notify-kit-feishu-local-image-ancestor-{}-{unique}",
+                std::process::id()
+            ));
+            let target_dir = base.join("target");
+            let link_dir = base.join("link");
+            let image_name = "image.png";
+            let target = target_dir.join(image_name);
+            std::fs::create_dir_all(&target_dir).expect("create target dir");
+            std::fs::write(&target, b"png").expect("write image");
+            symlink(&target_dir, &link_dir).expect("create dir symlink");
+
+            let sink = FeishuWebhookSink::new(
+                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+                    .with_app_credentials("app_id", "app_secret")
+                    .with_local_image_files(true),
+            )
+            .expect("build sink");
+
+            let err = sink
+                .load_image(link_dir.join(image_name).to_str().expect("utf8 path"))
+                .await
+                .expect_err("symlink ancestors should be rejected");
+            assert!(err.to_string().contains("symlink ancestor"), "{err:#}");
+
+            let _ = std::fs::remove_file(&target);
+            let _ = std::fs::remove_file(&link_dir);
+            let _ = std::fs::remove_dir_all(base);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn local_image_files_reject_unix_socket_paths() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -687,7 +731,7 @@ mod tests {
                 .expect("unix epoch")
                 .as_nanos();
             let path = std::path::PathBuf::from(format!(
-                "/tmp/nk-feishu-{unique:x}-{}.sock",
+                "/root/nk-feishu-{}-{unique:x}.sock",
                 std::process::id()
             ));
             let listener = UnixListener::bind(&path).expect("create unix socket");
@@ -915,6 +959,143 @@ mod tests {
                 .await
                 .expect("retry should fetch a fresh token");
             assert_eq!(token, "token-after-retry");
+        });
+
+        server.join().expect("join server");
+    }
+
+    #[test]
+    fn upload_image_invalidates_cached_token_after_upstream_rejection() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let mut buf = [0_u8; 4096];
+
+            let (mut first_token_stream, _) = listener.accept().expect("accept first token");
+            let first_token_read = first_token_stream
+                .read(&mut buf)
+                .expect("read first token request");
+            let first_token_req = String::from_utf8_lossy(&buf[..first_token_read]);
+            assert!(
+                first_token_req.starts_with("POST /open-apis/auth/v3/tenant_access_token/internal"),
+                "{first_token_req}"
+            );
+            let first_token_body =
+                r#"{"code":0,"tenant_access_token":"stale-token","expires_in":7200}"#;
+            let first_token_resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                first_token_body.len(),
+                first_token_body
+            );
+            first_token_stream
+                .write_all(first_token_resp.as_bytes())
+                .expect("write first token response");
+
+            let (mut first_upload_stream, _) = listener.accept().expect("accept first upload");
+            let first_upload_read = first_upload_stream
+                .read(&mut buf)
+                .expect("read first upload request");
+            let first_upload_req = String::from_utf8_lossy(&buf[..first_upload_read]);
+            let first_upload_req_lower = first_upload_req.to_ascii_lowercase();
+            assert!(
+                first_upload_req.starts_with("POST /open-apis/im/v1/images"),
+                "{first_upload_req}"
+            );
+            assert!(
+                first_upload_req_lower.contains("authorization: bearer stale-token"),
+                "{first_upload_req}"
+            );
+            let unauthorized = "token rejected";
+            let unauthorized_resp = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                unauthorized.len(),
+                unauthorized
+            );
+            first_upload_stream
+                .write_all(unauthorized_resp.as_bytes())
+                .expect("write first upload response");
+
+            let (mut second_token_stream, _) = listener.accept().expect("accept second token");
+            let second_token_read = second_token_stream
+                .read(&mut buf)
+                .expect("read second token request");
+            let second_token_req = String::from_utf8_lossy(&buf[..second_token_read]);
+            assert!(
+                second_token_req
+                    .starts_with("POST /open-apis/auth/v3/tenant_access_token/internal"),
+                "{second_token_req}"
+            );
+            let second_token_body =
+                r#"{"code":0,"tenant_access_token":"fresh-token","expires_in":7200}"#;
+            let second_token_resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                second_token_body.len(),
+                second_token_body
+            );
+            second_token_stream
+                .write_all(second_token_resp.as_bytes())
+                .expect("write second token response");
+
+            let (mut second_upload_stream, _) = listener.accept().expect("accept second upload");
+            let second_upload_read = second_upload_stream
+                .read(&mut buf)
+                .expect("read second upload request");
+            let second_upload_req = String::from_utf8_lossy(&buf[..second_upload_read]);
+            let second_upload_req_lower = second_upload_req.to_ascii_lowercase();
+            assert!(
+                second_upload_req_lower.contains("authorization: bearer fresh-token"),
+                "{second_upload_req}"
+            );
+            let upload_body = r#"{"code":0,"data":{"image_key":"img-key"}}"#;
+            let upload_resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                upload_body.len(),
+                upload_body
+            );
+            second_upload_stream
+                .write_all(upload_resp.as_bytes())
+                .expect("write second upload response");
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            let mut sink = FeishuWebhookSink::new(
+                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+                    .with_app_credentials("app_id", "app_secret"),
+            )
+            .expect("build sink");
+            sink.webhook_url =
+                reqwest::Url::parse(&format!("http://{addr}/open-apis/bot/v2/hook/x"))
+                    .expect("parse local webhook url");
+            sink.enforce_public_ip = false;
+
+            let image = LoadedImage {
+                bytes: b"png".to_vec(),
+                file_name: "image.png".to_string(),
+                content_type: "image/png".to_string(),
+            };
+            let err = sink
+                .upload_image(LoadedImage {
+                    bytes: image.bytes.clone(),
+                    file_name: image.file_name.clone(),
+                    content_type: image.content_type.clone(),
+                })
+                .await
+                .expect_err("first upload should fail");
+            assert!(err.to_string().contains("401"), "{err:#}");
+
+            let token_state = sink.tenant_access_token.lock().await;
+            assert!(
+                matches!(&*token_state, TenantAccessTokenState::Empty),
+                "rejected token should be dropped"
+            );
+            drop(token_state);
+
+            let image_key = sink.upload_image(image).await.expect("retry upload");
+            assert_eq!(image_key, "img-key");
         });
 
         server.join().expect("join server");

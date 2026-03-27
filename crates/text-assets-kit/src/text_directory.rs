@@ -141,6 +141,15 @@ mod tests {
     use crate::secure_fs::{MAX_TEXT_DIRECTORY_TOTAL_BYTES, MAX_TEXT_RESOURCE_BYTES};
     use tempfile::TempDir;
 
+    #[cfg(unix)]
+    fn short_tempdir_for_unix_socket() -> TempDir {
+        tempfile::Builder::new()
+            .prefix("of-sock-")
+            .rand_bytes(3)
+            .tempdir_in("/var/tmp")
+            .expect("short temp dir")
+    }
+
     #[test]
     fn text_directory_loads_nested_files() {
         let temp = TempDir::new().expect("temp dir");
@@ -372,7 +381,7 @@ mod tests {
     fn text_directory_rejects_socket_entries() {
         use std::os::unix::net::UnixListener;
 
-        let temp = TempDir::new().expect("temp dir");
+        let temp = short_tempdir_for_unix_socket();
         let socket_path = temp.path().join("resource.sock");
         let _listener = match UnixListener::bind(&socket_path) {
             Ok(listener) => listener,

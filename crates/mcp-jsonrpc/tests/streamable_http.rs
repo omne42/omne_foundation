@@ -591,6 +591,190 @@ async fn streamable_http_retries_sse_when_session_id_changes_without_202() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streamable_http_reconnects_active_sse_when_session_id_changes() {
+    #[derive(Default)]
+    struct State {
+        get_count: AtomicUsize,
+        post_count: AtomicUsize,
+        response_json: Mutex<Option<Vec<u8>>>,
+        response_ready: Notify,
+        sse_sessions: Mutex<Vec<Option<String>>>,
+        post_sessions: Mutex<Vec<Option<String>>>,
+    }
+
+    let state = Arc::new(State::default());
+    let Some(listener) = bind_loopback_listener_or_skip().await else {
+        return;
+    };
+    let addr = listener.local_addr().unwrap();
+
+    let server_state = state.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => return,
+            };
+            let server_state = server_state.clone();
+            tokio::spawn(async move {
+                let Some((req, body)) = read_http_request(&mut socket).await else {
+                    return;
+                };
+
+                match (req.method.as_str(), req.path.as_str()) {
+                    ("GET", "/mcp") => {
+                        let session = req.headers.get("mcp-session-id").cloned();
+                        server_state.sse_sessions.lock().await.push(session.clone());
+                        server_state.get_count.fetch_add(1, Ordering::SeqCst);
+
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n",
+                            )
+                            .await;
+
+                        if session.as_deref() == Some("next") {
+                            let response = loop {
+                                let response = server_state.response_json.lock().await.clone();
+                                if let Some(response) = response {
+                                    break response;
+                                }
+                                server_state.response_ready.notified().await;
+                            };
+
+                            let mut sse = Vec::new();
+                            sse.extend_from_slice(b"data: ");
+                            sse.extend_from_slice(&response);
+                            sse.extend_from_slice(b"\n\n");
+                            let _ = socket.write_all(&sse).await;
+                            let _ = socket.flush().await;
+                        }
+
+                        let mut drain = [0u8; 1024];
+                        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                            loop {
+                                match socket.read(&mut drain).await {
+                                    Ok(0) => break,
+                                    Ok(_) => continue,
+                                    Err(_) => break,
+                                }
+                            }
+                        })
+                        .await;
+                    }
+                    ("POST", "/mcp") => {
+                        let session = req.headers.get("mcp-session-id").cloned();
+                        server_state
+                            .post_sessions
+                            .lock()
+                            .await
+                            .push(session.clone());
+                        let post_idx = server_state.post_count.fetch_add(1, Ordering::SeqCst);
+
+                        let parsed: serde_json::Value = match serde_json::from_slice(&body) {
+                            Ok(v) => v,
+                            Err(_) => return,
+                        };
+                        let id = parsed.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                        let response = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": { "ok": true },
+                        });
+                        let body = serde_json::to_vec(&response).unwrap();
+
+                        match post_idx {
+                            0 => {
+                                let _ = write_http_response(
+                                    &mut socket,
+                                    "200 OK",
+                                    &[
+                                        ("Content-Type", "application/json".to_string()),
+                                        ("mcp-session-id", "next".to_string()),
+                                        ("Connection", "close".to_string()),
+                                    ],
+                                    &body,
+                                )
+                                .await;
+                            }
+                            1 => {
+                                *server_state.response_json.lock().await = Some(body);
+                                server_state.response_ready.notify_waiters();
+                                let _ = write_http_response(
+                                    &mut socket,
+                                    "202 Accepted",
+                                    &[("Connection", "close".to_string())],
+                                    b"",
+                                )
+                                .await;
+                            }
+                            _ => {
+                                let _ = socket
+                                    .write_all(
+                                        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                    _ => {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                    }
+                }
+            });
+        }
+    });
+
+    let url = format!("http://{addr}/mcp");
+    let client = mcp_jsonrpc::Client::connect_streamable_http(&url)
+        .await
+        .expect("connect streamable http");
+
+    let first = client
+        .request("ping1", serde_json::json!({}))
+        .await
+        .expect("first request should succeed");
+    assert_eq!(first, serde_json::json!({ "ok": true }));
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let sessions = state.sse_sessions.lock().await.clone();
+            if sessions.len() >= 2 && sessions[1].as_deref() == Some("next") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("session rollover should reconnect active SSE");
+
+    let second = tokio::time::timeout(
+        Duration::from_secs(1),
+        client.request("ping2", serde_json::json!({})),
+    )
+    .await
+    .expect("second request should not hang")
+    .expect("second request should succeed");
+    assert_eq!(second, serde_json::json!({ "ok": true }));
+
+    assert_eq!(
+        state.post_sessions.lock().await.clone(),
+        vec![None, Some("next".to_string())]
+    );
+    assert_eq!(
+        state.sse_sessions.lock().await.clone(),
+        vec![None, Some("next".to_string())]
+    );
+
+    drop(client);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn streamable_http_clamps_zero_max_message_bytes_to_minimum() {
     let Some(listener) = bind_loopback_listener_or_skip().await else {
         return;

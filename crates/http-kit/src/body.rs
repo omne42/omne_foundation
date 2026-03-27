@@ -94,6 +94,14 @@ pub async fn read_json_body_after_http_success(
     resp: reqwest::Response,
     context: &str,
 ) -> crate::Result<serde_json::Value> {
+    read_json_body_after_http_success_limited(resp, context, DEFAULT_MAX_RESPONSE_BODY_BYTES).await
+}
+
+pub async fn read_json_body_after_http_success_limited(
+    resp: reqwest::Response,
+    context: &str,
+    max_bytes: usize,
+) -> crate::Result<serde_json::Value> {
     let status = resp.status();
     if !status.is_success() {
         let body = read_text_body_limited(resp, DEFAULT_MAX_RESPONSE_BODY_BYTES)
@@ -104,7 +112,7 @@ pub async fn read_json_body_after_http_success(
         return Err(http_status_text_error(context, status, &body));
     }
 
-    read_json_body_limited(resp, DEFAULT_MAX_RESPONSE_BODY_BYTES).await
+    read_json_body_limited(resp, max_bytes).await
 }
 
 pub async fn drain_response_body(mut resp: reqwest::Response) {

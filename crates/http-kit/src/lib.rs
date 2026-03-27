@@ -12,8 +12,9 @@ mod url;
 pub use body::{
     DEFAULT_MAX_RESPONSE_BODY_BYTES, body_preview_json, body_preview_text, drain_response_body,
     ensure_http_success, http_status_text_error, read_json_body_after_http_success,
-    read_json_body_limited, read_response_body_preview_text, read_text_body_limited,
-    response_body_read_error, write_response_body_limited,
+    read_json_body_after_http_success_limited, read_json_body_limited,
+    read_response_body_preview_text, read_text_body_limited, response_body_read_error,
+    write_response_body_limited,
 };
 pub use client::{
     HttpClientOptions, HttpClientProfile, build_http_client, build_http_client_profile,

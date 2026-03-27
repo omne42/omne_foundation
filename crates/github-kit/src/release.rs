@@ -1,10 +1,12 @@
 use http_kit::{
-    read_json_body_after_http_success, redact_url_for_error, redact_url_str, send_reqwest,
+    read_json_body_after_http_success_limited, redact_url_for_error, redact_url_str, send_reqwest,
 };
 use serde::Deserialize;
 
 use crate::client::{GitHubApiRequestOptions, apply_github_api_headers};
 use crate::error::{GitHubApiError, Result};
+
+const GITHUB_LATEST_RELEASE_MAX_JSON_BYTES: usize = 512 * 1024;
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct GitHubRelease {
@@ -59,7 +61,12 @@ pub async fn fetch_latest_release<S: AsRef<str>>(
             }
         };
 
-        let json = match read_json_body_after_http_success(response, "github latest release").await
+        let json = match read_json_body_after_http_success_limited(
+            response,
+            "github latest release",
+            GITHUB_LATEST_RELEASE_MAX_JSON_BYTES,
+        )
+        .await
         {
             Ok(json) => json,
             Err(err) => {
@@ -191,6 +198,51 @@ mod tests {
 
         assert_eq!(release.tag_name, "v2.0.0");
         assert_eq!(release.assets[0].name, "asset.tar.gz");
+        handle.join().expect("mock server thread");
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_release_accepts_large_but_bounded_json_payloads() {
+        let long_asset_name = "asset".repeat(4_300);
+        let body = format!(
+            "{{\"tag_name\":\"v2.0.0\",\"assets\":[{{\"name\":\"{long_asset_name}\",\"browser_download_url\":\"https://example.invalid/asset.tar.gz\",\"digest\":null}}]}}"
+        );
+        assert!(
+            body.len() > 16 * 1024,
+            "test body should exceed old 16 KiB cap"
+        );
+        assert!(
+            body.len() < GITHUB_LATEST_RELEASE_MAX_JSON_BYTES,
+            "test body should remain within github release cap"
+        );
+
+        let responses = vec![MockHttpResponse {
+            expected_path: "/api-ok/repos/cli/cli/releases/latest".to_string(),
+            expected_headers: vec![
+                (
+                    "accept".to_string(),
+                    "application/vnd.github+json".to_string(),
+                ),
+                ("user-agent".to_string(), "toolchain-installer".to_string()),
+                ("x-github-api-version".to_string(), "2022-11-28".to_string()),
+            ],
+            status_line: "HTTP/1.1 200 OK",
+            body,
+        }];
+        let (base, handle) = spawn_mock_server(responses);
+        let client = reqwest::Client::new();
+
+        let release = fetch_latest_release(
+            &client,
+            &[format!("{base}/api-ok")],
+            "cli/cli",
+            GitHubApiRequestOptions::new().with_user_agent("toolchain-installer"),
+        )
+        .await
+        .expect("release");
+
+        assert_eq!(release.tag_name, "v2.0.0");
+        assert_eq!(release.assets[0].name, long_asset_name);
         handle.join().expect("mock server thread");
     }
 

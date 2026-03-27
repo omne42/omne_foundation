@@ -156,12 +156,40 @@ impl PreparedConnectionInstall {
             }
         }
 
+        struct ChildGuard {
+            child: Option<Child>,
+            armed: bool,
+        }
+
+        impl ChildGuard {
+            fn new(child: Option<Child>) -> Self {
+                Self { child, armed: true }
+            }
+
+            fn disarm(mut self) -> Option<Child> {
+                self.armed = false;
+                self.child.take()
+            }
+        }
+
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                if !self.armed {
+                    return;
+                }
+                if let Some(child) = self.child.take() {
+                    reap_stale_child_best_effort(child);
+                }
+            }
+        }
+
         let PreparedConnectionInstall {
             server_name,
             handler_snapshot,
             initialize_snapshot,
         } = self;
 
+        let child_guard = ChildGuard::new(child);
         let handler_tasks = Manager::attach_client_handlers_from_snapshot(
             handler_snapshot,
             server_name.clone(),
@@ -170,6 +198,7 @@ impl PreparedConnectionInstall {
         let handler_tasks_guard = HandlerTasksGuard::new(handler_tasks);
         let (init_result, mismatch_update) = initialize_snapshot.run(&server_name, &client).await?;
         let handler_tasks = handler_tasks_guard.disarm();
+        let child = child_guard.disarm();
 
         Ok(CompletedConnectionInstall {
             server_name,

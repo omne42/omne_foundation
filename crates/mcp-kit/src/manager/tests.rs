@@ -337,6 +337,78 @@ async fn disconnect_reaps_child_best_effort() {
     .expect("disconnect should reap child process in best-effort mode");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn install_failure_reaps_child_best_effort() {
+    async fn pid_is_alive(pid: u32) -> bool {
+        tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("kill -0 {pid} 2>/dev/null"))
+            .status()
+            .await
+            .is_ok_and(|status| status.success())
+    }
+
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": "1900-01-01" },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+    });
+
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .unwrap();
+
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c").arg("exec sleep 10");
+    let child = cmd.spawn().unwrap();
+    let child_id = child.id().expect("child id should exist");
+    assert!(pid_is_alive(child_id).await);
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    let err = manager
+        .install_connection_parsed(ServerName::parse("srv").unwrap(), client, Some(child))
+        .await
+        .expect_err("protocol mismatch should fail install");
+    assert!(
+        err.to_string().contains("protocolVersion mismatch"),
+        "{err:#}"
+    );
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if !pid_is_alive(child_id).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("failed install should reap child process in best-effort mode");
+
+    server_task.await.unwrap();
+}
+
 #[tokio::test]
 async fn disconnect_and_wait_clears_stale_timeout_counter_without_connection() {
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
@@ -3372,6 +3444,50 @@ async fn connection_drop_aborts_handler_tasks() {
     .unwrap();
 
     server_task.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn connection_drop_reaps_child_best_effort() {
+    async fn pid_is_alive(pid: u32) -> bool {
+        tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("kill -0 {pid} 2>/dev/null"))
+            .status()
+            .await
+            .is_ok_and(|status| status.success())
+    }
+
+    let (client_stream, _server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .unwrap();
+
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c").arg("exec sleep 10");
+    let child = cmd.spawn().unwrap();
+    let child_id = child.id().expect("child id should exist");
+    assert!(pid_is_alive(child_id).await);
+
+    let conn = Connection {
+        id: next_connection_id(),
+        child: Some(child),
+        client,
+        handler_tasks: Vec::new(),
+    };
+    drop(conn);
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if !pid_is_alive(child_id).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("dropping a connection should reap child process in best-effort mode");
 }
 
 #[tokio::test]

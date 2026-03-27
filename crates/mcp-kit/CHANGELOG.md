@@ -14,7 +14,7 @@
 - `mcpctl` 和 `mcp-kit` 的相对 `cwd/root` 解析不再在 `current_dir()` 失败时静默回退到 `.`；相关路径现在显式报错，避免把工作目录边界问题伪装成后续配置/连接异常。
 - `mcp-kit` 文档与 untrusted 出站说明现在明确区分 `allow_localhost` 的真实边界：它只放开 `localhost` / `localhost.localdomain` / `*.localhost`，不会顺带放开 `*.local`、`*.localdomain` 或单标签 host。
 - `mcp-kit`：`Session::notify` 与 `Connection/Session::wait_with_timeout` 现在会在使用 Tokio timeout 前先验证 time driver；缺少 timer 时返回清晰错误并在 rustdoc 中显式声明运行时前提。
-- `mcp-kit`：`current_dir()` 不可用回归测试现在会通过测试内 restore guard 无条件恢复原始工作目录，避免 Windows runner 在断言失败或提前返回时把进程留在已删除目录上，从而把测试清理问题误报成产品回归；不改变产品行为。
+- `mcp-kit`：`current_dir()` 不可用回归测试现在会通过测试内 restore guard 无条件恢复原始工作目录，并仅在支持“删除当前工作目录”语义的平台上执行该用例，避免 Windows runner 把测试清理差异误报成产品回归；不改变产品行为。
 - release: bump workspace package version to `0.1.0`.
 - `mcp-kit`：`streamable_http` 文档现在明确说明 `mcp-jsonrpc` 会先把合法的 multiline JSON `data:` event 压平成单行 JSON，再写回内部按换行分帧的 JSON-RPC 流，避免文档继续描述旧的“原样写回”语义。
 - `mcp-kit`：`SharedManager` 的重入保护只在当前调用确实位于对应 manager 的 handler scope 且实际撞上共享锁/同 server connect gate 时才 fail-fast，避免外部正常并发调用被“其他 handler 仍活跃”的全局状态误报成 `REENTRANT_HANDLER_ERROR`；并补充同 server connect gate 的回归测试，锁住这条语义。

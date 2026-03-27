@@ -187,6 +187,7 @@ fn stdout_log_path_within_root_accepts_equivalent_root_with_parent_segments() {
     assert!(stdout_log_path_within_root(&log_path, &root_with_parent));
 }
 
+#[cfg(not(windows))]
 #[test]
 fn resolve_connection_cwd_errors_when_current_dir_is_unavailable() {
     let _guard = cwd_test_guard();

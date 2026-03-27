@@ -159,6 +159,7 @@ impl ServerHandlerTimeoutCounts {
 
 pub struct Manager {
     instance_id: u64,
+    active_handler_scopes: Arc<AtomicU64>,
     conns: HashMap<ServerName, Connection>,
     connection_cwds: HashMap<ServerName, PathBuf>,
     init_results: HashMap<ServerName, Value>,
@@ -438,6 +439,10 @@ impl Default for Manager {
 }
 
 impl Manager {
+    pub(crate) fn active_handler_scopes(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.active_handler_scopes)
+    }
+
     pub fn try_from_config(
         config: &Config,
         client_name: impl Into<String>,
@@ -495,6 +500,7 @@ impl Manager {
 
         Self {
             instance_id: NEXT_MANAGER_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
+            active_handler_scopes: Arc::new(AtomicU64::new(0)),
             conns: HashMap::new(),
             connection_cwds: HashMap::new(),
             init_results: HashMap::new(),

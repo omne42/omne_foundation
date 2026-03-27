@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
@@ -30,6 +31,7 @@ pub struct SharedManager {
     inner: Arc<Mutex<Manager>>,
     connect_gates: Arc<StdMutex<HashMap<String, Weak<Mutex<()>>>>>,
     manager_id: u64,
+    active_handler_scopes: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Manager {
@@ -42,10 +44,12 @@ impl Manager {
 impl SharedManager {
     pub fn new(manager: Manager) -> Self {
         let manager_id = manager.instance_id();
+        let active_handler_scopes = manager.active_handler_scopes();
         Self {
             inner: Arc::new(Mutex::new(manager)),
             connect_gates: Arc::new(StdMutex::new(HashMap::new())),
             manager_id,
+            active_handler_scopes,
         }
     }
 
@@ -56,12 +60,17 @@ impl SharedManager {
                 inner,
                 connect_gates: self.connect_gates,
                 manager_id: self.manager_id,
+                active_handler_scopes: self.active_handler_scopes,
             }),
         }
     }
 
     fn is_reentrant_handler_call(&self) -> bool {
         crate::manager::is_in_manager_handler_scope(self.manager_id)
+    }
+
+    fn has_active_handler_scope(&self) -> bool {
+        self.active_handler_scopes.load(Ordering::Relaxed) > 0
     }
 
     fn connect_gate_for(&self, server_name: &str) -> Arc<Mutex<()>> {
@@ -84,7 +93,7 @@ impl SharedManager {
         &self,
         operation: &'static str,
     ) -> anyhow::Result<MutexGuard<'_, Manager>> {
-        if self.is_reentrant_handler_call() {
+        if self.is_reentrant_handler_call() || self.has_active_handler_scope() {
             return self
                 .inner
                 .try_lock()
@@ -108,7 +117,7 @@ impl SharedManager {
         server_name: &str,
     ) -> anyhow::Result<OwnedMutexGuard<()>> {
         let gate = self.connect_gate_for(server_name);
-        if self.is_reentrant_handler_call() {
+        if self.is_reentrant_handler_call() || self.has_active_handler_scope() {
             return gate
                 .try_lock_owned()
                 .map_err(|_| anyhow::anyhow!("{REENTRANT_HANDLER_ERROR}: {operation}"));
@@ -509,6 +518,8 @@ impl SharedManager {
 
 #[cfg(test)]
 mod tests {
+    use super::REENTRANT_HANDLER_ERROR;
+
     #[cfg(unix)]
     use std::collections::BTreeMap;
     use std::path::Path;
@@ -518,6 +529,7 @@ mod tests {
     use serde::{Deserialize, Serialize};
     use serde_json::Value;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use tokio::sync::oneshot;
 
     #[cfg(unix)]
     use crate::{ClientConfig, Config, ServerConfig, ServerName};
@@ -709,6 +721,125 @@ mod tests {
         assert!(!clone.is_connected("srv").await.unwrap());
 
         server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn shared_manager_spawned_handler_task_rejects_lock_contention() {
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+        let (send_notification_tx, send_notification_rx) = oneshot::channel();
+        let (handler_result_tx, handler_result_rx) = oneshot::channel();
+        let shared_slot = Arc::new(StdMutex::new(None::<SharedManager>));
+        let shared_slot_for_handler = Arc::clone(&shared_slot);
+        let handler_result_tx = Arc::new(StdMutex::new(Some(handler_result_tx)));
+        let handler_result_tx_for_handler = Arc::clone(&handler_result_tx);
+
+        let server_task = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            let init_id = init_value["id"].clone();
+
+            let init_response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": init_id,
+                "result": { "serverInfo": { "name": "demo" } },
+            });
+            let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+            init_response_line.push('\n');
+            server_write
+                .write_all(init_response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let initialized_line = lines.next_line().await.unwrap().unwrap();
+            let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+            assert_eq!(initialized_value["method"], "notifications/initialized");
+
+            send_notification_rx.await.unwrap();
+
+            let notification = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "demo/notify",
+                "params": {},
+            });
+            let mut notification_line = serde_json::to_string(&notification).unwrap();
+            notification_line.push('\n');
+            server_write
+                .write_all(notification_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let eof = lines.next_line().await.unwrap();
+            assert!(eof.is_none(), "expected EOF after test completes");
+        });
+
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted)
+            .with_server_notification_handler(Arc::new(move |_ctx| {
+                let shared_slot_for_handler = Arc::clone(&shared_slot_for_handler);
+                let handler_result_tx_for_handler = Arc::clone(&handler_result_tx_for_handler);
+                Box::pin(async move {
+                    let shared = shared_slot_for_handler
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                        .expect("shared manager should be installed before notification")
+                        .clone();
+                    let child = tokio::spawn(async move { shared.inspect(|_| ()).await });
+                    let message =
+                        match tokio::time::timeout(Duration::from_millis(200), child).await {
+                            Ok(Ok(Ok(()))) => {
+                                "spawned shared-manager call unexpectedly succeeded".to_string()
+                            }
+                            Ok(Ok(Err(err))) => format!("{err:#}"),
+                            Ok(Err(err)) => panic!("spawned task should join: {err}"),
+                            Err(_) => "spawned shared-manager call timed out".to_string(),
+                        };
+                    if let Some(tx) = handler_result_tx_for_handler
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                    {
+                        let _ = tx.send(message);
+                    }
+                })
+            }));
+        manager
+            .connect_io("srv", client_read, client_write)
+            .await
+            .unwrap();
+
+        let shared = manager.into_shared();
+        shared_slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(shared.clone());
+
+        let held_lock = shared.lock_for_async_op("held_lock").await.unwrap();
+        send_notification_tx.send(()).unwrap();
+
+        let err = tokio::time::timeout(Duration::from_secs(1), handler_result_rx)
+            .await
+            .expect("spawned handler task should fail fast")
+            .unwrap();
+        assert!(
+            err.contains(REENTRANT_HANDLER_ERROR),
+            "unexpected error: {err}"
+        );
+        assert!(err.contains("inspect"), "unexpected error: {err}");
+
+        drop(held_lock);
+        shared_slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        drop(shared);
+        server_task.await.unwrap();
     }
 
     #[tokio::test]

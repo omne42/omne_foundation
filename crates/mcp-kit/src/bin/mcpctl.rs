@@ -395,12 +395,14 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(windows))]
     use std::sync::{Mutex, OnceLock};
 
     use anyhow::Result;
 
     use super::resolve_cli_root;
 
+    #[cfg(not(windows))]
     fn cwd_test_guard() -> std::sync::MutexGuard<'static, ()> {
         static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
         GUARD
@@ -410,6 +412,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn resolve_cli_root_errors_when_current_dir_is_unavailable() -> Result<()> {
         let _guard = cwd_test_guard();
         let original_cwd = std::env::current_dir()?;

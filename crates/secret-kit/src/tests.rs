@@ -474,6 +474,54 @@ fn secret_bytes_debug_is_redacted() {
     assert_eq!(format!("{bytes:?}"), "SecretBytes(<redacted>, len=4)");
 }
 
+#[test]
+fn deterministic_secret_io_errors_are_not_retryable() {
+    let err = SecretError::io(
+        structured_text!("error_detail.secret.file_not_regular"),
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"),
+    );
+
+    assert_eq!(err.retry_advice(), ErrorRetryAdvice::DoNotRetry);
+    assert_eq!(
+        err.error_record().retry_advice(),
+        ErrorRetryAdvice::DoNotRetry
+    );
+}
+
+#[test]
+fn transient_secret_io_errors_remain_retryable() {
+    let err = SecretError::io(
+        structured_text!("error_detail.secret.file_read_failed"),
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "temporary timeout"),
+    );
+
+    assert_eq!(err.retry_advice(), ErrorRetryAdvice::Retryable);
+    assert_eq!(
+        err.error_record().retry_advice(),
+        ErrorRetryAdvice::Retryable
+    );
+}
+
+#[test]
+fn secret_command_timeout_and_spawn_failures_are_retryable() {
+    let timeout = SecretError::Command(structured_text!("error_detail.secret.command_timeout"));
+    let spawn = SecretError::Command(structured_text!("error_detail.secret.command_spawn_failed"));
+
+    assert_eq!(timeout.retry_advice(), ErrorRetryAdvice::Retryable);
+    assert_eq!(spawn.retry_advice(), ErrorRetryAdvice::Retryable);
+}
+
+#[test]
+fn secret_command_exit_failures_are_not_retryable() {
+    let err = SecretError::Command(structured_text!("error_detail.secret.command_failed"));
+
+    assert_eq!(err.retry_advice(), ErrorRetryAdvice::DoNotRetry);
+    assert_eq!(
+        err.error_record().retry_advice(),
+        ErrorRetryAdvice::DoNotRetry
+    );
+}
+
 #[tokio::test]
 async fn resolves_env_secret_preserves_whitespace() -> Result<()> {
     let env = TestEnv {
@@ -483,6 +531,31 @@ async fn resolves_env_secret_preserves_whitespace() -> Result<()> {
     let value = resolve_secret_text("secret://env/TEST_SECRET", &env).await?;
     assert_eq!(value, "  ok \n");
     Ok(())
+}
+
+#[tokio::test]
+async fn invalid_utf8_file_secret_is_not_retryable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("secret.bin");
+    tokio::fs::write(&path, [0xff, 0xfe])
+        .await
+        .expect("write invalid utf8 bytes");
+    let env = TestEnv::default();
+    let err = resolve_secret_text(
+        &format!("secret://file?path={}", path.to_string_lossy()),
+        &env,
+    )
+    .await
+    .expect_err("invalid utf8 should fail");
+
+    let SecretError::Io { .. } = &err else {
+        panic!("expected io error");
+    };
+    assert_eq!(err.retry_advice(), ErrorRetryAdvice::DoNotRetry);
+    assert_eq!(
+        err.error_record().retry_advice(),
+        ErrorRetryAdvice::DoNotRetry
+    );
 }
 
 #[tokio::test]

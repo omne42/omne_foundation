@@ -1035,13 +1035,29 @@ async fn flush_sse_event_data(
         return Ok(true);
     }
 
-    write_json_line(writer, data).await?;
+    let normalized = normalize_sse_event_data_for_json_line(data)?;
+    write_json_line(writer, &normalized).await?;
     data.clear();
     if data.capacity() > SSE_EVENT_BUFFER_RETAIN_BYTES {
         let retain = SSE_EVENT_BUFFER_RETAIN_BYTES.min(max_message_bytes);
         data.shrink_to(retain);
     }
     Ok(false)
+}
+
+fn normalize_sse_event_data_for_json_line(data: &[u8]) -> Result<Vec<u8>, io::Error> {
+    if data.iter().any(|byte| matches!(byte, b'\n' | b'\r')) {
+        if let Ok(value) = serde_json::from_slice::<Value>(data) {
+            return serde_json::to_vec(&value).map_err(|err| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("serialize sse event payload failed: {err}"),
+                )
+            });
+        }
+    }
+
+    Ok(data.to_vec())
 }
 
 async fn write_json_line(

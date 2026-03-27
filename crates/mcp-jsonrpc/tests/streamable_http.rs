@@ -1789,6 +1789,89 @@ async fn streamable_http_bridges_pretty_json_body() {
     server.abort();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streamable_http_bridges_multiline_sse_event_body() {
+    let Some(listener) = bind_loopback_listener_or_skip().await else {
+        return;
+    };
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => return,
+            };
+            tokio::spawn(async move {
+                let Some((req, body)) = read_http_request(&mut socket).await else {
+                    return;
+                };
+
+                match (req.method.as_str(), req.path.as_str()) {
+                    ("GET", "/mcp") => {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                    }
+                    ("POST", "/mcp") => {
+                        let parsed: serde_json::Value = match serde_json::from_slice(&body) {
+                            Ok(v) => v,
+                            Err(_) => return,
+                        };
+                        let id = parsed.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                        let event_body = format!(
+                            concat!(
+                                "data: {{\n",
+                                "data:   \"jsonrpc\": \"2.0\",\n",
+                                "data:   \"id\": {},\n",
+                                "data:   \"result\": {{\n",
+                                "data:     \"ok\": true\n",
+                                "data:   }}\n",
+                                "data: }}\n",
+                                "\n"
+                            ),
+                            id,
+                        );
+                        let _ = write_http_response(
+                            &mut socket,
+                            "200 OK",
+                            &[
+                                ("Content-Type", "text/event-stream".to_string()),
+                                ("Connection", "close".to_string()),
+                            ],
+                            event_body.as_bytes(),
+                        )
+                        .await;
+                    }
+                    _ => {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                    }
+                }
+            });
+        }
+    });
+
+    let url = format!("http://{addr}/mcp");
+    let client = mcp_jsonrpc::Client::connect_streamable_http(&url)
+        .await
+        .expect("connect streamable http");
+
+    let result = client
+        .request("ping", serde_json::json!({}))
+        .await
+        .expect("multiline SSE response should succeed");
+    assert_eq!(result, serde_json::json!({ "ok": true }));
+
+    drop(client);
+    server.abort();
+}
+
 #[derive(Debug)]
 struct ParsedRequest {
     method: String,

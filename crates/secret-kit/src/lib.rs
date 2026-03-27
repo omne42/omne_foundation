@@ -125,7 +125,7 @@ use error_kit::{ErrorCategory, ErrorCode, ErrorRecord, ErrorRetryAdvice};
 use tokio::sync::broadcast;
 use zeroize::Zeroize;
 
-use structured_text_kit::{StructuredText, structured_text};
+use structured_text_kit::{CatalogTextRef, StructuredText, structured_text};
 
 #[derive(Debug)]
 pub enum SecretError {
@@ -290,6 +290,26 @@ impl<const N: usize> Drop for ZeroizingByteBuffer<N> {
 }
 
 impl SecretError {
+    fn io_retry_advice(source: &std::io::Error) -> ErrorRetryAdvice {
+        match source.kind() {
+            std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::PermissionDenied
+            | std::io::ErrorKind::InvalidInput
+            | std::io::ErrorKind::InvalidData
+            | std::io::ErrorKind::Unsupported => ErrorRetryAdvice::DoNotRetry,
+            _ => ErrorRetryAdvice::Retryable,
+        }
+    }
+
+    fn command_retry_advice(text: &StructuredText) -> ErrorRetryAdvice {
+        match text.as_catalog().map(CatalogTextRef::code) {
+            Some("error_detail.secret.command_timeout")
+            | Some("error_detail.secret.command_spawn_failed")
+            | Some("error_detail.secret.command_output_read_failed") => ErrorRetryAdvice::Retryable,
+            _ => ErrorRetryAdvice::DoNotRetry,
+        }
+    }
+
     #[must_use]
     pub fn structured_text(&self) -> &StructuredText {
         match self {
@@ -335,11 +355,11 @@ impl SecretError {
     #[must_use]
     pub fn retry_advice(&self) -> ErrorRetryAdvice {
         match self {
-            Self::Io { .. } => ErrorRetryAdvice::Retryable,
+            Self::Io { source, .. } => Self::io_retry_advice(source),
             Self::Json { .. } => ErrorRetryAdvice::DoNotRetry,
             Self::Lookup(_) => ErrorRetryAdvice::DoNotRetry,
             Self::InvalidSpec(_) => ErrorRetryAdvice::DoNotRetry,
-            Self::Command(_) => ErrorRetryAdvice::DoNotRetry,
+            Self::Command(text) => Self::command_retry_advice(text),
         }
     }
 
@@ -352,40 +372,42 @@ impl SecretError {
 
     #[must_use]
     pub fn into_error_record(self) -> ErrorRecord {
+        let category = self.error_category();
+        let retry_advice = self.retry_advice();
         match self {
             Self::Io { text, source } => ErrorRecord::new(
                 ErrorCode::try_new("secret.io").expect("literal error code should validate"),
                 text,
             )
-            .with_category(ErrorCategory::ExternalDependency)
-            .with_retry_advice(ErrorRetryAdvice::Retryable)
+            .with_category(category)
+            .with_retry_advice(retry_advice)
             .with_source(source),
             Self::Json { text, source } => ErrorRecord::new(
                 ErrorCode::try_new("secret.json").expect("literal error code should validate"),
                 text,
             )
-            .with_category(ErrorCategory::InvalidInput)
-            .with_retry_advice(ErrorRetryAdvice::DoNotRetry)
+            .with_category(category)
+            .with_retry_advice(retry_advice)
             .with_source(source),
             Self::Lookup(text) => ErrorRecord::new(
                 ErrorCode::try_new("secret.lookup").expect("literal error code should validate"),
                 text,
             )
-            .with_category(ErrorCategory::NotFound)
-            .with_retry_advice(ErrorRetryAdvice::DoNotRetry),
+            .with_category(category)
+            .with_retry_advice(retry_advice),
             Self::InvalidSpec(text) => ErrorRecord::new(
                 ErrorCode::try_new("secret.invalid_spec")
                     .expect("literal error code should validate"),
                 text,
             )
-            .with_category(ErrorCategory::InvalidInput)
-            .with_retry_advice(ErrorRetryAdvice::DoNotRetry),
+            .with_category(category)
+            .with_retry_advice(retry_advice),
             Self::Command(text) => ErrorRecord::new(
                 ErrorCode::try_new("secret.command").expect("literal error code should validate"),
                 text,
             )
-            .with_category(ErrorCategory::ExternalDependency)
-            .with_retry_advice(ErrorRetryAdvice::DoNotRetry),
+            .with_category(category)
+            .with_retry_advice(retry_advice),
         }
     }
 

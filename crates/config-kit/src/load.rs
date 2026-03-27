@@ -133,8 +133,6 @@ pub fn try_load_config_document(
 ) -> Result<Option<ConfigDocument>> {
     let path = path.as_ref();
     validate_load_options(options)?;
-
-    let format = resolve_format(path, options)?;
     let (mut file, metadata) = match open_regular_readonly_nofollow(path) {
         Ok(pair) => pair,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -151,6 +149,7 @@ pub fn try_load_config_document(
             });
         }
     };
+    let format = resolve_format(path, options)?;
     let contents = read_document_contents(path, &mut file, metadata.len(), options.max_bytes)?;
 
     Ok(Some(ConfigDocument::new(
@@ -308,7 +307,6 @@ fn try_load_rooted_candidate_document(
     options: ConfigLoadOptions,
 ) -> Result<Option<ConfigDocument>> {
     let (path, parent_components, leaf) = resolve_candidate_path(root_path, candidate)?;
-    let format = resolve_format(&path, options)?;
     let mut directory = root_dir.try_clone().map_err(|err| Error::Io {
         action: "open",
         path: root_path.to_path_buf(),
@@ -346,6 +344,7 @@ fn try_load_rooted_candidate_document(
         path: path.clone(),
         source: err,
     })?;
+    let format = resolve_format(&path, options)?;
     let contents = read_document_contents(&path, &mut file, metadata.len(), options.max_bytes)?;
 
     Ok(Some(ConfigDocument::new(path, format, contents)))
@@ -566,6 +565,27 @@ mod tests {
     }
 
     #[test]
+    fn try_load_missing_extensionless_path_returns_none() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("missing-config");
+
+        let document = try_load_config_document(&path, ConfigLoadOptions::new())
+            .expect("missing should not fail");
+        assert!(document.is_none());
+    }
+
+    #[test]
+    fn try_load_rejects_existing_extensionless_path_without_format() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("config");
+        std::fs::write(&path, "enabled = true\n").expect("write");
+
+        let err = try_load_config_document(&path, ConfigLoadOptions::new())
+            .expect_err("existing extensionless file should fail");
+        assert!(err.to_string().contains("no extension"));
+    }
+
+    #[test]
     fn load_rejects_oversized_files() {
         let dir = tempfile::tempdir().expect("dir");
         let path = dir.path().join("config.json");
@@ -586,6 +606,36 @@ mod tests {
                 .expect("find")
                 .expect("document");
         assert_eq!(document.path(), dir.path().join("b.toml"));
+    }
+
+    #[test]
+    fn find_skips_missing_extensionless_candidates_before_existing_supported_file() {
+        let dir = tempfile::tempdir().expect("dir");
+        std::fs::write(dir.path().join("config.toml"), "enabled = true\n").expect("write");
+
+        let document = find_config_document(
+            dir.path(),
+            ["missing-config", "config.toml"],
+            ConfigLoadOptions::new(),
+        )
+        .expect("find")
+        .expect("document");
+        assert_eq!(document.path(), dir.path().join("config.toml"));
+    }
+
+    #[test]
+    fn find_rejects_existing_extensionless_candidate_without_format() {
+        let dir = tempfile::tempdir().expect("dir");
+        std::fs::write(dir.path().join("config"), "enabled = true\n").expect("write");
+        std::fs::write(dir.path().join("fallback.toml"), "enabled = false\n").expect("write");
+
+        let err = find_config_document(
+            dir.path(),
+            ["config", "fallback.toml"],
+            ConfigLoadOptions::new(),
+        )
+        .expect_err("existing extensionless candidate should fail");
+        assert!(err.to_string().contains("no extension"));
     }
 
     #[test]

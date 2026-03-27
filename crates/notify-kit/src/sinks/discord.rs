@@ -4,8 +4,9 @@ use crate::Event;
 use crate::sinks::text::{TextLimits, format_event_text_limited};
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
-    build_http_client, ensure_http_success, parse_and_validate_https_url, redact_url,
-    redact_url_str, select_http_client, send_reqwest, validate_url_path_prefix,
+    HttpClientOptions, HttpClientProfile, build_http_client_profile, ensure_http_success,
+    parse_and_validate_https_url, redact_url, redact_url_str, send_reqwest,
+    validate_url_path_prefix,
 };
 
 const DISCORD_ALLOWED_HOSTS: [&str; 2] = ["discord.com", "discordapp.com"];
@@ -61,8 +62,7 @@ impl DiscordWebhookConfig {
 
 pub struct DiscordWebhookSink {
     webhook_url: reqwest::Url,
-    client: reqwest::Client,
-    timeout: Duration,
+    http: HttpClientProfile,
     max_chars: usize,
     enforce_public_ip: bool,
 }
@@ -81,11 +81,13 @@ impl DiscordWebhookSink {
         let webhook_url =
             parse_and_validate_https_url(&config.webhook_url, &DISCORD_ALLOWED_HOSTS)?;
         validate_url_path_prefix(&webhook_url, "/api/webhooks/")?;
-        let client = build_http_client(config.timeout)?;
+        let http = build_http_client_profile(&HttpClientOptions {
+            timeout: Some(config.timeout),
+            ..Default::default()
+        })?;
         Ok(Self {
             webhook_url,
-            client,
-            timeout: config.timeout,
+            http,
             max_chars: config.max_chars,
             enforce_public_ip: config.enforce_public_ip,
         })
@@ -104,13 +106,10 @@ impl Sink for DiscordWebhookSink {
 
     fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
-            let client = select_http_client(
-                &self.client,
-                self.timeout,
-                &self.webhook_url,
-                self.enforce_public_ip,
-            )
-            .await?;
+            let client = self
+                .http
+                .select_for_url(&self.webhook_url, self.enforce_public_ip)
+                .await?;
             let payload = Self::build_payload(event, self.max_chars);
 
             let resp = send_reqwest(

@@ -4,9 +4,10 @@ use crate::Event;
 use crate::sinks::text::{TextLimits, format_event_text_limited, truncate_chars};
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
-    DEFAULT_MAX_RESPONSE_BODY_BYTES, build_http_client, http_status_text_error,
-    parse_and_validate_https_url, read_text_body_limited, redact_url, redact_url_str,
-    response_body_read_error, select_http_client, send_reqwest, validate_url_path_prefix,
+    DEFAULT_MAX_RESPONSE_BODY_BYTES, HttpClientOptions, HttpClientProfile,
+    build_http_client_profile, http_status_text_error, parse_and_validate_https_url,
+    read_text_body_limited, redact_url, redact_url_str, response_body_read_error, send_reqwest,
+    validate_url_path_prefix,
 };
 
 const SLACK_ALLOWED_HOSTS: [&str; 1] = ["hooks.slack.com"];
@@ -62,8 +63,7 @@ impl SlackWebhookConfig {
 
 pub struct SlackWebhookSink {
     webhook_url: reqwest::Url,
-    client: reqwest::Client,
-    timeout: Duration,
+    http: HttpClientProfile,
     max_chars: usize,
     enforce_public_ip: bool,
 }
@@ -81,11 +81,13 @@ impl SlackWebhookSink {
     pub fn new(config: SlackWebhookConfig) -> crate::Result<Self> {
         let webhook_url = parse_and_validate_https_url(&config.webhook_url, &SLACK_ALLOWED_HOSTS)?;
         validate_url_path_prefix(&webhook_url, "/services/")?;
-        let client = build_http_client(config.timeout)?;
+        let http = build_http_client_profile(&HttpClientOptions {
+            timeout: Some(config.timeout),
+            ..Default::default()
+        })?;
         Ok(Self {
             webhook_url,
-            client,
-            timeout: config.timeout,
+            http,
             max_chars: config.max_chars,
             enforce_public_ip: config.enforce_public_ip,
         })
@@ -104,13 +106,10 @@ impl Sink for SlackWebhookSink {
 
     fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
-            let client = select_http_client(
-                &self.client,
-                self.timeout,
-                &self.webhook_url,
-                self.enforce_public_ip,
-            )
-            .await?;
+            let client = self
+                .http
+                .select_for_url(&self.webhook_url, self.enforce_public_ip)
+                .await?;
             let payload = Self::build_payload(event, self.max_chars);
 
             let resp = send_reqwest(

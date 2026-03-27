@@ -559,27 +559,9 @@ pub async fn select_http_client_with_options(
     }
 
     // `reqwest::Client` does not expose a safe way to clone its opaque builder state while
-    // swapping in per-host DNS pinning. Callers that need settings to survive pinning should
-    // prefer `HttpClientProfile`, which makes the supported reusable options explicit.
+    // swapping in per-host DNS pinning. Callers that need the same configuration on both paths
+    // should prefer `HttpClientProfile`, which keeps the reusable options explicit.
     select_pinned_http_client_with_options(options, url).await
-}
-
-pub async fn select_http_client(
-    base_client: &reqwest::Client,
-    timeout: Duration,
-    url: &reqwest::Url,
-    enforce_public_ip: bool,
-) -> crate::Result<reqwest::Client> {
-    select_http_client_with_options(
-        base_client,
-        &HttpClientOptions {
-            timeout: Some(timeout),
-            ..Default::default()
-        },
-        url,
-        enforce_public_ip,
-    )
-    .await
 }
 
 #[cfg(test)]
@@ -1078,7 +1060,7 @@ mod tests {
     }
 
     #[test]
-    fn select_http_client_cleans_build_lock_on_error() {
+    fn select_http_client_from_profile_cleans_build_lock_on_error() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1098,8 +1080,10 @@ mod tests {
                 locks.remove(&key);
             }
 
-            let client = build_http_client(Duration::from_millis(10)).expect("build client");
-            let err = select_http_client(&client, Duration::ZERO, &url, true)
+            let profile = build_http_client_profile(&timeout_only_options(Duration::ZERO))
+                .expect("build client profile");
+            let err = profile
+                .select_for_url(&url, true)
                 .await
                 .expect_err("expected dns timeout error");
             assert!(err.to_string().contains("dns lookup timeout"), "{err:#}");
@@ -1113,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    fn select_http_client_cleans_build_lock_on_cancel() {
+    fn select_http_client_from_profile_cleans_build_lock_on_cancel() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1140,12 +1124,13 @@ mod tests {
                 .await
                 .expect("acquire dns semaphore permits");
 
-            let client = build_http_client(timeout).expect("build client");
+            let profile =
+                build_http_client_profile(&timeout_only_options(timeout)).expect("build profile");
             let task = tokio::spawn({
-                let client = client.clone();
+                let profile = profile.clone();
                 let url = url.clone();
                 async move {
-                    let _ = select_http_client(&client, timeout, &url, true).await;
+                    let _ = profile.select_for_url(&url, true).await;
                 }
             });
 
@@ -1176,7 +1161,7 @@ mod tests {
     }
 
     #[test]
-    fn select_http_client_cleans_expired_cache_entry_when_refresh_fails() {
+    fn select_http_client_from_profile_cleans_expired_cache_entry_when_refresh_fails() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1204,8 +1189,10 @@ mod tests {
                 locks.remove(&key);
             }
 
-            let client = build_http_client(Duration::from_millis(10)).expect("build client");
-            let err = select_http_client(&client, timeout, &url, true)
+            let profile =
+                build_http_client_profile(&timeout_only_options(timeout)).expect("build profile");
+            let err = profile
+                .select_for_url(&url, true)
                 .await
                 .expect_err("expected dns timeout error");
             assert!(err.to_string().contains("dns lookup timeout"), "{err:#}");

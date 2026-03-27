@@ -4,8 +4,8 @@ use crate::Event;
 use crate::sinks::text::{TextLimits, format_event_body_and_tags_limited, truncate_chars};
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
-    build_http_client, parse_and_validate_https_url, read_json_body_after_http_success, redact_url,
-    select_http_client, send_reqwest, validate_url_path_prefix,
+    HttpClientOptions, HttpClientProfile, build_http_client_profile, parse_and_validate_https_url,
+    read_json_body_after_http_success, redact_url, send_reqwest, validate_url_path_prefix,
 };
 
 const PUSHPLUS_ALLOWED_HOSTS: [&str; 1] = ["www.pushplus.plus"];
@@ -98,8 +98,7 @@ pub struct PushPlusSink {
     channel: Option<String>,
     template: Option<String>,
     topic: Option<String>,
-    client: reqwest::Client,
-    timeout: Duration,
+    http: HttpClientProfile,
     max_chars: usize,
     enforce_public_ip: bool,
 }
@@ -134,15 +133,17 @@ impl PushPlusSink {
         )?;
         validate_url_path_prefix(&api_url, "/send")?;
 
-        let client = build_http_client(config.timeout)?;
+        let http = build_http_client_profile(&HttpClientOptions {
+            timeout: Some(config.timeout),
+            ..Default::default()
+        })?;
         Ok(Self {
             api_url,
             token: token.to_string(),
             channel,
             template,
             topic,
-            client,
-            timeout: config.timeout,
+            http,
             max_chars: config.max_chars,
             enforce_public_ip: config.enforce_public_ip,
         })
@@ -201,13 +202,10 @@ impl Sink for PushPlusSink {
 
     fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
-            let client = select_http_client(
-                &self.client,
-                self.timeout,
-                &self.api_url,
-                self.enforce_public_ip,
-            )
-            .await?;
+            let client = self
+                .http
+                .select_for_url(&self.api_url, self.enforce_public_ip)
+                .await?;
 
             let payload = Self::build_payload(
                 event,

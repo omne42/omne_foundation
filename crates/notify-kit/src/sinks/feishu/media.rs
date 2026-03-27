@@ -8,8 +8,7 @@ use crate::log::{warn_feishu_image_load_failed, warn_feishu_image_upload_failed}
 use crate::sinks::BoxFuture;
 use http_kit::{
     DEFAULT_MAX_RESPONSE_BODY_BYTES, http_status_text_error, parse_and_validate_https_url_basic,
-    read_json_body_limited, read_text_body_limited, response_body_read_error, select_http_client,
-    send_reqwest,
+    read_json_body_limited, read_text_body_limited, response_body_read_error, send_reqwest,
 };
 
 use super::FeishuWebhookSink;
@@ -161,8 +160,10 @@ impl FeishuWebhookSink {
 
     pub(super) async fn load_remote_image(&self, src: &str) -> crate::Result<LoadedImage> {
         let url = parse_and_validate_https_url_basic(src)?;
-        let client =
-            select_http_client(&self.client, self.timeout, &url, self.enforce_public_ip).await?;
+        let client = self
+            .http
+            .select_for_url(&url, self.enforce_public_ip)
+            .await?;
 
         let resp = send_reqwest(client.get(url.clone()), "feishu image download").await?;
         let status = resp.status();
@@ -212,13 +213,10 @@ impl FeishuWebhookSink {
         upload_url.set_path("/open-apis/im/v1/images");
         upload_url.set_query(None);
 
-        let client = select_http_client(
-            &self.client,
-            self.timeout,
-            &upload_url,
-            self.enforce_public_ip,
-        )
-        .await?;
+        let client = self
+            .http
+            .select_for_url(&upload_url, self.enforce_public_ip)
+            .await?;
 
         let part = reqwest::multipart::Part::bytes(image.bytes)
             .file_name(image.file_name)
@@ -346,13 +344,10 @@ impl FeishuWebhookSink {
         token_url.set_path("/open-apis/auth/v3/tenant_access_token/internal");
         token_url.set_query(None);
 
-        let client = select_http_client(
-            &self.client,
-            self.timeout,
-            &token_url,
-            self.enforce_public_ip,
-        )
-        .await?;
+        let client = self
+            .http
+            .select_for_url(&token_url, self.enforce_public_ip)
+            .await?;
 
         let payload = serde_json::json!({
             "app_id": credentials.app_id,

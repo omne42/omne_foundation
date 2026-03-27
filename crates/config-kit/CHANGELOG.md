@@ -14,3 +14,4 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ### Changed
 - Rooted candidate config discovery is now capability-style fail-closed: candidate paths must stay relative to the declared root, may not use absolute paths or `..`, and may not cross intermediate directory symlinks; callers that need an explicit external file must use an explicit file layer.
 - `SchemaConfigLoader` now reports missing required explicit and candidate file layers through the same `required config layer ... not found` error family instead of mixing `Io` and `InvalidOptions`.
+- `try_load_config_document(...)` and rooted candidate discovery now check file existence before rejecting extensionless paths, so missing `try_*` targets and missing fallback candidates correctly return `None` instead of surfacing premature `UnsupportedFormat` errors, while existing extensionless files still require an explicit or default format.

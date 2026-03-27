@@ -384,25 +384,79 @@ async fn temp_file_spec(name: &str, contents: &[u8]) -> Result<(tempfile::TempDi
 }
 
 #[cfg(all(unix, target_os = "linux"))]
-fn process_terminated_or_zombie(pid: u32) -> bool {
-    let status_path = format!("/proc/{pid}/status");
-    match std::fs::read_to_string(status_path) {
-        Ok(status) => status
-            .lines()
-            .find(|line| line.starts_with("State:"))
-            .map(|line| line.contains("\tZ") || line.contains(" zombie"))
-            .unwrap_or(false),
-        Err(err) => err.kind() == std::io::ErrorKind::NotFound,
-    }
+#[derive(Clone, Copy, Debug)]
+struct LinuxTestProcessIdentity {
+    pid: u32,
+    start_ticks: Option<u64>,
 }
 
 #[cfg(all(unix, target_os = "linux"))]
-async fn wait_for_pid(path: &std::path::Path) -> Option<u32> {
+fn linux_process_start_ticks(pid: u32) -> std::io::Result<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let tail = stat
+        .rsplit_once(") ")
+        .map(|(_, tail)| tail)
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid /proc stat")
+        })?;
+    let mut fields = tail.split_whitespace();
+    let _state = fields.next().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "missing proc state")
+    })?;
+    let _parent_pid = fields.next().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "missing proc parent pid")
+    })?;
+    let _process_group_id = fields.next().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "missing proc group id")
+    })?;
+    for _ in 0..16 {
+        let _ = fields.next().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "missing proc stat field")
+        })?;
+    }
+    fields
+        .next()
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "missing proc start time")
+        })?
+        .parse::<u64>()
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn process_terminated_or_reused_or_zombie(identity: LinuxTestProcessIdentity) -> bool {
+    let pid = identity.pid;
+    let Some(expected_start_ticks) = identity.start_ticks else {
+        return true;
+    };
+    let status_path = format!("/proc/{pid}/status");
+    let status = match std::fs::read_to_string(status_path) {
+        Ok(status) => status,
+        Err(err) => return err.kind() == std::io::ErrorKind::NotFound,
+    };
+    let Ok(start_ticks) = linux_process_start_ticks(pid) else {
+        return true;
+    };
+    if start_ticks != expected_start_ticks {
+        return true;
+    }
+    status
+        .lines()
+        .find(|line| line.starts_with("State:"))
+        .map(|line| line.contains("\tZ") || line.contains(" zombie"))
+        .unwrap_or(false)
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+async fn wait_for_pid(path: &std::path::Path) -> Option<LinuxTestProcessIdentity> {
     for _ in 0..100 {
         if let Ok(raw) = tokio::fs::read_to_string(path).await
             && let Ok(pid) = raw.trim().parse::<u32>()
         {
-            return Some(pid);
+            return Some(LinuxTestProcessIdentity {
+                pid,
+                start_ticks: linux_process_start_ticks(pid).ok(),
+            });
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -410,9 +464,9 @@ async fn wait_for_pid(path: &std::path::Path) -> Option<u32> {
 }
 
 #[cfg(all(unix, target_os = "linux"))]
-async fn wait_for_process_termination(pid: u32, attempts: usize) -> bool {
+async fn wait_for_process_termination(identity: LinuxTestProcessIdentity, attempts: usize) -> bool {
     for _ in 0..attempts {
-        if process_terminated_or_zombie(pid) {
+        if process_terminated_or_reused_or_zombie(identity) {
             return true;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;

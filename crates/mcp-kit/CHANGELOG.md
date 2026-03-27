@@ -11,7 +11,8 @@
 
 ### Changed
 - release: bump workspace package version to `0.1.0`.
-- `mcp-kit`：`SharedManager` 的 handler 重入保护现在会跟踪活跃 handler 作用域；即使 handler 内把回调转交给 `tokio::spawn` 出来的子任务，只要再次争用共享 manager 锁或 connect gate，也会继续 fail-fast，避免绕过保护后卡死。
+- `mcp-kit`：`SharedManager` 的重入保护只对当前调用确实位于对应 manager 的 handler scope 时 fail-fast，避免外部正常并发调用在其他 handler 活跃时被误报成 `REENTRANT_HANDLER_ERROR`；同时冻结相对 `cwd` 的解析基准，并在 failed install / drop 路径对 stdio child 做 best-effort reap。
+- `mcp-kit`：`SharedManager` 的 handler 重入保护改为只依赖当前调用是否处在对应 manager 的 handler scope，不再把“其他 handler 仍活跃”的全局状态误判成当前调用重入。
 - `mcp-kit`：补充 `SharedManager` 的 `cwd` 复用保护回归测试，显式覆盖 cold-start 首次连接后再次以不同 `cwd` 复用的路径，锁住“同名 server 不同 cwd 复用必须显式报错”的约束。
 - `mcp-kit`：稳定 `cwd` 连接缓存回归测试在 Windows 上的路径语义，改为使用进程当前目录下的绝对路径构造用例，避免把 Windows 的驱动器根相对路径误当作可复用的同一路径。
 - `mcp-kit`：untrusted `streamable_http` 连接现在会把已校验的公网 DNS 结果绑定到实际 HTTP 连接，避免 DNS rebinding / TOCTOU 绕过。

@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
@@ -31,7 +30,6 @@ pub struct SharedManager {
     inner: Arc<Mutex<Manager>>,
     connect_gates: Arc<StdMutex<HashMap<String, Weak<Mutex<()>>>>>,
     manager_id: u64,
-    active_handler_scopes: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Manager {
@@ -44,12 +42,10 @@ impl Manager {
 impl SharedManager {
     pub fn new(manager: Manager) -> Self {
         let manager_id = manager.instance_id();
-        let active_handler_scopes = manager.active_handler_scopes();
         Self {
             inner: Arc::new(Mutex::new(manager)),
             connect_gates: Arc::new(StdMutex::new(HashMap::new())),
             manager_id,
-            active_handler_scopes,
         }
     }
 
@@ -60,17 +56,12 @@ impl SharedManager {
                 inner,
                 connect_gates: self.connect_gates,
                 manager_id: self.manager_id,
-                active_handler_scopes: self.active_handler_scopes,
             }),
         }
     }
 
     fn is_reentrant_handler_call(&self) -> bool {
         crate::manager::is_in_manager_handler_scope(self.manager_id)
-    }
-
-    fn has_active_handler_scope(&self) -> bool {
-        self.active_handler_scopes.load(Ordering::Relaxed) > 0
     }
 
     fn connect_gate_for(&self, server_name: &str) -> Arc<Mutex<()>> {
@@ -93,7 +84,7 @@ impl SharedManager {
         &self,
         operation: &'static str,
     ) -> anyhow::Result<MutexGuard<'_, Manager>> {
-        if self.is_reentrant_handler_call() || self.has_active_handler_scope() {
+        if self.is_reentrant_handler_call() {
             return self
                 .inner
                 .try_lock()
@@ -117,7 +108,7 @@ impl SharedManager {
         server_name: &str,
     ) -> anyhow::Result<OwnedMutexGuard<()>> {
         let gate = self.connect_gate_for(server_name);
-        if self.is_reentrant_handler_call() || self.has_active_handler_scope() {
+        if self.is_reentrant_handler_call() {
             return gate
                 .try_lock_owned()
                 .map_err(|_| anyhow::anyhow!("{REENTRANT_HANDLER_ERROR}: {operation}"));
@@ -149,10 +140,11 @@ impl SharedManager {
         server_name: &str,
         cwd: &Path,
     ) -> anyhow::Result<()> {
+        let cwd = crate::manager::resolve_connection_cwd(cwd);
         let _gate = self.lock_connect_gate(operation, server_name).await?;
 
         if self
-            .try_prepare_connected_client(operation, server_name, Some(cwd))
+            .try_prepare_connected_client(operation, server_name, Some(&cwd))
             .await?
             .is_some()
         {
@@ -162,7 +154,7 @@ impl SharedManager {
         let prepared = {
             self.lock_for_async_op(operation)
                 .await?
-                .prepare_transport_connect(config, server_name, cwd)?
+                .prepare_transport_connect(config, server_name, &cwd)?
         };
         let Some(prepared) = prepared else {
             return Ok(());
@@ -241,8 +233,9 @@ impl SharedManager {
         params: Option<Value>,
         cwd: &Path,
     ) -> anyhow::Result<Value> {
+        let cwd = crate::manager::resolve_connection_cwd(cwd);
         if let Some(prepared) = self
-            .try_prepare_connected_client("request", server_name, Some(cwd))
+            .try_prepare_connected_client("request", server_name, Some(&cwd))
             .await?
         {
             let result = Manager::request_raw_handle(
@@ -268,7 +261,7 @@ impl SharedManager {
             return result;
         }
 
-        self.ensure_connected("request_connect", config, server_name, cwd)
+        self.ensure_connected("request_connect", config, server_name, &cwd)
             .await?;
         self.request_connected(server_name, method, params).await
     }
@@ -365,8 +358,9 @@ impl SharedManager {
         params: Option<Value>,
         cwd: &Path,
     ) -> anyhow::Result<()> {
+        let cwd = crate::manager::resolve_connection_cwd(cwd);
         if let Some(prepared) = self
-            .try_prepare_connected_client("notify", server_name, Some(cwd))
+            .try_prepare_connected_client("notify", server_name, Some(&cwd))
             .await?
         {
             let result = Manager::notify_raw_handle(
@@ -394,7 +388,7 @@ impl SharedManager {
             return result;
         }
 
-        self.ensure_connected("notify_connect", config, server_name, cwd)
+        self.ensure_connected("notify_connect", config, server_name, &cwd)
             .await?;
         self.notify_connected(server_name, method, params).await
     }
@@ -518,11 +512,10 @@ impl SharedManager {
 
 #[cfg(test)]
 mod tests {
-    use super::REENTRANT_HANDLER_ERROR;
-
     #[cfg(unix)]
     use std::collections::BTreeMap;
     use std::path::Path;
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
 
@@ -724,7 +717,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_manager_spawned_handler_task_rejects_lock_contention() {
+    async fn shared_manager_spawned_handler_task_waits_like_external_call() {
         let (client_stream, server_stream) = tokio::io::duplex(1024);
         let (client_read, client_write) = tokio::io::split(client_stream);
         let (server_read, mut server_write) = tokio::io::split(server_stream);
@@ -791,15 +784,11 @@ mod tests {
                         .expect("shared manager should be installed before notification")
                         .clone();
                     let child = tokio::spawn(async move { shared.inspect(|_| ()).await });
-                    let message =
-                        match tokio::time::timeout(Duration::from_millis(200), child).await {
-                            Ok(Ok(Ok(()))) => {
-                                "spawned shared-manager call unexpectedly succeeded".to_string()
-                            }
-                            Ok(Ok(Err(err))) => format!("{err:#}"),
-                            Ok(Err(err)) => panic!("spawned task should join: {err}"),
-                            Err(_) => "spawned shared-manager call timed out".to_string(),
-                        };
+                    let message = match child.await {
+                        Ok(Ok(())) => "spawned shared-manager call succeeded".to_string(),
+                        Ok(Err(err)) => format!("{err:#}"),
+                        Err(err) => panic!("spawned task should join: {err}"),
+                    };
                     if let Some(tx) = handler_result_tx_for_handler
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -823,23 +812,64 @@ mod tests {
         let held_lock = shared.lock_for_async_op("held_lock").await.unwrap();
         send_notification_tx.send(()).unwrap();
 
-        let err = tokio::time::timeout(Duration::from_secs(1), handler_result_rx)
-            .await
-            .expect("spawned handler task should fail fast")
-            .unwrap();
+        let mut handler_result_rx = handler_result_rx;
         assert!(
-            err.contains(REENTRANT_HANDLER_ERROR),
-            "unexpected error: {err}"
+            tokio::time::timeout(Duration::from_millis(50), &mut handler_result_rx)
+                .await
+                .is_err(),
+            "spawned task should still be waiting on the shared lock"
         );
-        assert!(err.contains("inspect"), "unexpected error: {err}");
 
         drop(held_lock);
+
+        let result = tokio::time::timeout(Duration::from_secs(1), handler_result_rx)
+            .await
+            .expect("spawned handler task should finish after lock release")
+            .unwrap();
+        assert!(result.contains("succeeded"), "unexpected result: {result}");
         shared_slot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         drop(shared);
         server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shared_manager_external_call_waits_even_if_other_handler_scope_is_active() {
+        let manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted);
+        let active_handler_scopes = manager.active_handler_scopes();
+        active_handler_scopes.fetch_add(1, Ordering::Relaxed);
+
+        let shared = manager.into_shared();
+        let (release_tx, release_rx) = oneshot::channel();
+        let held_lock = tokio::spawn({
+            let shared = shared.clone();
+            async move {
+                let guard = shared.lock_for_async_op("held_lock").await.unwrap();
+                let _ = release_rx.await;
+                drop(guard);
+            }
+        });
+
+        tokio::task::yield_now().await;
+
+        let inspect = tokio::spawn({
+            let shared = shared.clone();
+            async move { shared.inspect(|_| ()).await }
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !inspect.is_finished(),
+            "external call should wait instead of failing fast"
+        );
+
+        release_tx.send(()).unwrap();
+        held_lock.await.unwrap();
+        inspect.await.unwrap().unwrap();
+        active_handler_scopes.fetch_sub(1, Ordering::Relaxed);
     }
 
     #[tokio::test]

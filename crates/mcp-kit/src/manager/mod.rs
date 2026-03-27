@@ -59,7 +59,7 @@ fn normalize_server_name_lookup(server_name: &str) -> &str {
     server_name.trim()
 }
 
-fn normalize_connection_cwd(cwd: &Path) -> PathBuf {
+pub(crate) fn resolve_connection_cwd(cwd: &Path) -> PathBuf {
     if cwd.is_absolute() {
         cwd.to_path_buf()
     } else {
@@ -425,6 +425,7 @@ impl Drop for Connection {
         for task in self.handler_tasks.drain(..) {
             task.abort();
         }
+        Manager::reap_connection_child_best_effort(self);
     }
 }
 
@@ -439,6 +440,7 @@ impl Default for Manager {
 }
 
 impl Manager {
+    #[cfg(test)]
     pub(crate) fn active_handler_scopes(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.active_handler_scopes)
     }
@@ -683,7 +685,7 @@ impl Manager {
     pub(crate) fn record_connection_cwd(&mut self, server_name: &str, cwd: &Path) {
         self.connection_cwds.insert(
             parse_server_name_anyhow(server_name).expect("validated server name"),
-            normalize_connection_cwd(cwd),
+            resolve_connection_cwd(cwd),
         );
     }
 
@@ -695,7 +697,7 @@ impl Manager {
         let Some(connected_cwd) = self.connection_cwds.get(server_name) else {
             return Ok(());
         };
-        let requested_cwd = normalize_connection_cwd(cwd);
+        let requested_cwd = resolve_connection_cwd(cwd);
         if *connected_cwd == requested_cwd {
             return Ok(());
         }
@@ -752,12 +754,13 @@ impl Manager {
         server_cfg
             .validate()
             .with_context(|| format!("invalid mcp server config (server={server_name_key})"))?;
+        let cwd = resolve_connection_cwd(cwd);
 
         Ok(Some(PreparedTransportConnect {
             server_name: server_name.to_string(),
             server_name_key,
             server_cfg: server_cfg.clone(),
-            cwd: cwd.to_path_buf(),
+            cwd,
             ctx: ConnectContext {
                 trust_mode: self.trust_mode,
                 untrusted_streamable_http_policy: self.untrusted_streamable_http_policy.clone(),
@@ -820,9 +823,10 @@ impl Manager {
     where
         F: FnOnce() -> anyhow::Result<ServerName>,
     {
+        let cwd = resolve_connection_cwd(cwd);
         let server_name_key = build_server_name()?;
         if self.is_connected_and_alive(server_name_key.as_str()) {
-            self.ensure_connection_cwd_matches(server_name_key.as_str(), cwd)?;
+            self.ensure_connection_cwd_matches(server_name_key.as_str(), &cwd)?;
             return Ok(());
         }
         self.clear_connection_cwd(server_name_key.as_str());
@@ -838,11 +842,11 @@ impl Manager {
             protocol_version: self.protocol_version.clone(),
             request_timeout: self.request_timeout,
         };
-        let (client, child) = connect_transport(&ctx, server_name, server_cfg, cwd).await?;
+        let (client, child) = connect_transport(&ctx, server_name, server_cfg, &cwd).await?;
 
         self.install_connection_parsed(server_name_key, client, child)
             .await?;
-        self.record_connection_cwd(server_name, cwd);
+        self.record_connection_cwd(server_name, &cwd);
         Ok(())
     }
 

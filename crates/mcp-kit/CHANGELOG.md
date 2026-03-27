@@ -10,6 +10,9 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：`SharedManager` 的重入 fail-fast 语义现在在代码与变更记录里显式收口为“只针对当前 manager 的当前 handler 调用栈”；其他活跃 handler 不会再把外部正常调用误伤成 `REENTRANT_HANDLER_ERROR`。
+- `mcpctl` 和 `mcp-kit` 的相对 `cwd/root` 解析不再在 `current_dir()` 失败时静默回退到 `.`；相关路径现在显式报错，避免把工作目录边界问题伪装成后续配置/连接异常。
+- `mcp-kit` 文档与 untrusted 出站说明现在明确区分 `allow_localhost` 的真实边界：它只放开 `localhost` / `localhost.localdomain` / `*.localhost`，不会顺带放开 `*.local`、`*.localdomain` 或单标签 host。
 - `mcp-kit`：`Session::notify` 与 `Connection/Session::wait_with_timeout` 现在会在使用 Tokio timeout 前先验证 time driver；缺少 timer 时返回清晰错误并在 rustdoc 中显式声明运行时前提。
 - release: bump workspace package version to `0.1.0`.
 - `mcp-kit`：`streamable_http` 文档现在明确说明 `mcp-jsonrpc` 会先把合法的 multiline JSON `data:` event 压平成单行 JSON，再写回内部按换行分帧的 JSON-RPC 流，避免文档继续描述旧的“原样写回”语义。

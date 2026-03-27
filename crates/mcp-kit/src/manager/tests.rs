@@ -1,5 +1,6 @@
 use super::*;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
@@ -15,6 +16,14 @@ fn seed_manager_side_state(manager: &mut Manager, server_name: &str) {
         .server_handler_timeout_counts
         .counter_for(&ServerName::parse(server_name).unwrap())
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn cwd_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    GUARD
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[test]
@@ -159,6 +168,24 @@ fn stdout_log_path_within_root_accepts_equivalent_root_with_parent_segments() {
 }
 
 #[test]
+fn resolve_connection_cwd_errors_when_current_dir_is_unavailable() {
+    let _guard = cwd_test_guard();
+    let original_cwd = std::env::current_dir().expect("original cwd");
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    std::env::set_current_dir(tempdir.path()).expect("enter tempdir");
+    std::fs::remove_dir(tempdir.path()).expect("remove tempdir");
+
+    let err = resolve_connection_cwd(Path::new("relative"))
+        .expect_err("relative cwd should fail without current dir");
+    assert!(
+        err.to_string()
+            .contains("determine current working directory for relative MCP cwd")
+    );
+
+    std::env::set_current_dir(&original_cwd).expect("restore cwd");
+}
+
+#[test]
 fn try_from_config_rejects_invalid_client_config() {
     let config = Config::new(
         crate::ClientConfig {
@@ -289,7 +316,9 @@ async fn try_prepare_connected_client_rejects_different_cwd_context() {
             handler_tasks: Vec::new(),
         },
     );
-    manager.record_connection_cwd("srv", &connected_cwd);
+    manager
+        .record_connection_cwd("srv", &connected_cwd)
+        .unwrap();
 
     let err = match manager.try_prepare_connected_client("srv", Some(&other_cwd)) {
         Ok(_) => panic!("different cwd should be rejected"),
@@ -328,7 +357,9 @@ async fn prepare_transport_connect_rejects_different_cwd_context() {
             handler_tasks: Vec::new(),
         },
     );
-    manager.record_connection_cwd("srv", Path::new("/workspace/a"));
+    manager
+        .record_connection_cwd("srv", Path::new("/workspace/a"))
+        .unwrap();
 
     let mut servers = std::collections::BTreeMap::new();
     servers.insert(
@@ -3002,6 +3033,39 @@ fn untrusted_policy_enforces_allowlist_when_set() {
     let err = validate_streamable_http_url_untrusted(&policy, "srv", "url", "https://evil.com/mcp")
         .unwrap_err();
     assert!(err.to_string().contains("allowlist"));
+}
+
+#[test]
+fn untrusted_policy_allow_localhost_does_not_allow_local_domains_or_single_label_hosts() {
+    let policy = UntrustedStreamableHttpPolicy {
+        outbound: http_kit::UntrustedOutboundPolicy {
+            allow_localhost: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    validate_streamable_http_url_untrusted(&policy, "srv", "url", "https://localhost/mcp").unwrap();
+    validate_streamable_http_url_untrusted(&policy, "srv", "url", "https://demo.localhost/mcp")
+        .unwrap();
+
+    let err =
+        validate_streamable_http_url_untrusted(&policy, "srv", "url", "https://service.local/mcp")
+            .unwrap_err();
+    assert!(err.to_string().contains("localhost/local/single-label"));
+
+    let err = validate_streamable_http_url_untrusted(
+        &policy,
+        "srv",
+        "url",
+        "https://service.localdomain/mcp",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("localhost/local/single-label"));
+
+    let err = validate_streamable_http_url_untrusted(&policy, "srv", "url", "https://internal/mcp")
+        .unwrap_err();
+    assert!(err.to_string().contains("localhost/local/single-label"));
 }
 
 #[tokio::test]

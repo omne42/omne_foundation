@@ -36,7 +36,7 @@ CLI 对应：
 默认 `UntrustedStreamableHttpPolicy`：
 
 - `require_https = true`：只允许 `https://`
-- `allow_localhost = false`：拒绝 `localhost` / `*.localhost` / `*.local` / `*.localdomain`，以及**单标签 host**（不含 `.` 的 host，如 `https://example/...`；常见于本地/企业网搜索域解析）
+- `allow_localhost = false`：拒绝 `localhost` / `localhost.localdomain` / `*.localhost`，以及 `*.local` / `*.localdomain` 和**单标签 host**（不含 `.` 的 host，如 `https://example/...`；常见于本地/企业网搜索域解析）
 - `allow_private_ips = false`：拒绝 loopback/link-local/private 等非公网 IP 字面量（包括 IPv4-mapped IPv6，以及 NAT64 well-known prefix / 6to4 中嵌入的 IPv4）
 - `dns_check = true`：默认做 DNS 解析检查（若解析到非公网 IP 则拒绝）
 - `dns_timeout = 2s`：DNS lookup 超时（仅在 `dns_check=true` 时生效）
@@ -45,7 +45,7 @@ CLI 对应：
 
 补充说明：
 
-- allowlist（`allowed_hosts` / `--allow-host`）不会覆盖 `allow_localhost=false` 下的 `localhost/localdomain/单标签 host` 拒绝逻辑；如需允许这些 host，请显式开启 `allow_localhost` / `--allow-localhost` 或直接使用 `Trusted`。
+- allowlist（`allowed_hosts` / `--allow-host`）不会覆盖 `allow_localhost=false` 下的 `localhost/localdomain/单标签 host` 拒绝逻辑；其中 `allow_localhost` / `--allow-localhost` 只会放开 `localhost` / `localhost.localdomain` / `*.localhost`。如需允许 `*.local`、`*.localdomain` 或单标签 host，只能直接使用 `Trusted`。
 
 另外，Untrusted 下还会拒绝：
 

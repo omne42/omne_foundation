@@ -56,36 +56,55 @@
 //! ### 场景 1：从环境变量读取
 //!
 //! ```ignore
-//! let env = /* 同时实现 SecretEnvironment 和 SecretCommandRuntime */;
-//! let api_key = resolve_secret("secret://env/OPENAI_API_KEY", &env).await?;
+//! # use secret_kit::{resolve_secret, Result, SecretCommandRuntime, SecretEnvironment};
+//! # async fn example(env: &(impl SecretEnvironment + SecretCommandRuntime)) -> Result<()> {
+//! let api_key = resolve_secret("secret://env/OPENAI_API_KEY", env).await?;
+//! # let _ = api_key;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### 场景 2：从文件读取
 //!
 //! ```ignore
+//! # use secret_kit::{resolve_secret, Result, SecretCommandRuntime, SecretEnvironment};
+//! # async fn example(env: &(impl SecretEnvironment + SecretCommandRuntime)) -> Result<()> {
 //! let api_key = resolve_secret(
 //!     "secret://file?path=/etc/secrets/openai_key",
-//!     &env
+//!     env
 //! ).await?;
+//! # let _ = api_key;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### 场景 3：从 AWS Secrets Manager 读取
 //!
 //! ```ignore
+//! # use secret_kit::{resolve_secret, Result, SecretCommandRuntime, SecretEnvironment};
+//! # async fn example(env: &(impl SecretEnvironment + SecretCommandRuntime)) -> Result<()> {
 //! let api_key = resolve_secret(
 //!     "secret://aws-sm/openai-api-key?region=us-east-1",
-//!     &env
+//!     env
 //! ).await?;
+//! # let _ = api_key;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### 场景 4：从 JSON 秘密中提取字段
 //!
 //! ```ignore
+//! # use secret_kit::{resolve_secret, Result, SecretCommandRuntime, SecretEnvironment};
+//! # async fn example(env: &(impl SecretEnvironment + SecretCommandRuntime)) -> Result<()> {
 //! // AWS Secrets Manager 中存储的 JSON：{"api_key": "sk-...", "org_id": "org-..."}
 //! let api_key = resolve_secret(
 //!     "secret://aws-sm/openai-credentials?json_key=api_key",
-//!     &env
+//!     env
 //! ).await?;
+//! # let _ = api_key;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## 设计注意事项
@@ -866,6 +885,14 @@ impl<R> CachingSecretResolver<R> {
         SecretCacheLookup::Leader(waiter_done)
     }
 
+    fn cached_value(&self, key: &SecretCacheKey) -> Option<SecretString> {
+        let mut state = lock_cache_state(&self.state);
+        state.prune_expired(self.ttl);
+        let value = state.entries.get(key).map(|entry| entry.value.clone())?;
+        state.touch_key(key);
+        Some(value)
+    }
+
     async fn resolve_with_fill(
         &self,
         prepared: R::Prepared,
@@ -893,35 +920,18 @@ where
         context: SecretResolutionContext<'_>,
     ) -> Result<SecretString> {
         loop {
-            let hinted_fill = if let Some(key) = self
+            if let Some(key) = self
                 .inner
                 .lookup_secret_cache_scope(spec, context)?
                 .and_then(|scope| SecretCacheKey::for_env(scope, context.environment()))
             {
-                match self.lookup_cache(&key) {
-                    SecretCacheLookup::Hit(value) => return Ok(value),
-                    SecretCacheLookup::Wait(mut waiter_done) => {
-                        let _ = waiter_done.recv().await;
-                        continue;
-                    }
-                    SecretCacheLookup::Leader(waiter_done) => {
-                        Some(SecretCacheFillGuard::new(self, key, waiter_done))
-                    }
+                if let Some(value) = self.cached_value(&key) {
+                    return Ok(value);
                 }
-            } else {
-                None
-            };
+            }
 
             let prepared = self.inner.prepare_secret_resolution(spec, context).await?;
             let prepared_key = prepared.cache_key(context);
-
-            if let Some(fill) = hinted_fill
-                && fill.key.as_ref() == prepared_key.as_ref()
-            {
-                return self
-                    .resolve_with_fill(prepared.into_prepared(), context, fill)
-                    .await;
-            }
 
             let Some(key) = prepared_key else {
                 return self

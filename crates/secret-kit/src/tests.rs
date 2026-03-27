@@ -292,6 +292,59 @@ impl SecretResolver for MismatchedHintResolver {
     }
 }
 
+#[derive(Default)]
+struct SlowMismatchedHintResolver {
+    calls: AtomicUsize,
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+}
+
+impl SecretResolver for SlowMismatchedHintResolver {
+    async fn resolve_secret(
+        &self,
+        spec: &str,
+        _context: SecretResolutionContext<'_>,
+    ) -> Result<SecretString> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Ok(SecretString::from(spec.to_string()))
+    }
+}
+
+impl CacheAwareSecretResolver for SlowMismatchedHintResolver {
+    type Prepared = String;
+
+    fn lookup_secret_cache_scope(
+        &self,
+        _spec: &str,
+        _context: SecretResolutionContext<'_>,
+    ) -> Result<Option<String>> {
+        Ok(Some("shared-hint".to_string()))
+    }
+
+    async fn prepare_secret_resolution(
+        &self,
+        spec: &str,
+        _context: SecretResolutionContext<'_>,
+    ) -> Result<PreparedSecretResolution<Self::Prepared>> {
+        Ok(PreparedSecretResolution::cached(
+            spec.to_string(),
+            format!("prepared:{spec}"),
+        ))
+    }
+
+    async fn resolve_prepared_secret(
+        &self,
+        prepared: Self::Prepared,
+        context: SecretResolutionContext<'_>,
+    ) -> Result<SecretString> {
+        self.resolve_secret(prepared.as_str(), context).await
+    }
+}
+
 impl CacheAwareSecretResolver for MismatchedHintResolver {
     type Prepared = String;
 
@@ -2282,6 +2335,28 @@ async fn caching_resolver_ignores_mismatched_hint_scopes() -> Result<()> {
     assert_eq!(second, "spec-a-1");
     assert_eq!(third, "spec-b-2");
     assert_eq!(resolver.inner().calls.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn caching_resolver_does_not_serialize_distinct_specs_on_mismatched_hint() -> Result<()> {
+    let resolver = CachingSecretResolver::new(
+        SlowMismatchedHintResolver::default(),
+        Duration::from_secs(60),
+    );
+    let env = TestEnv::default();
+
+    let first = resolver.resolve_secret_text("spec-a", &env);
+    let second = resolver.resolve_secret_text("spec-b", &env);
+    let (first, second) = tokio::join!(first, second);
+
+    assert_eq!(first?, "spec-a");
+    assert_eq!(second?, "spec-b");
+    assert_eq!(resolver.inner().calls.load(Ordering::SeqCst), 2);
+    assert!(
+        resolver.inner().max_active.load(Ordering::SeqCst) >= 2,
+        "distinct specs should not block each other behind a mismatched hint gate"
+    );
     Ok(())
 }
 

@@ -120,6 +120,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Dev: `githooks/pre-commit` 新增严格门禁（`scripts/pre-commit-check.sh`），提交前执行 clippy（`-D warnings`）与生产目标关键 lint（`unwrap/expect`、`let _ =` 忽略 must_use、冗余 clone）。
 
 ### Fixed
+- `FeishuWebhookSink`：等待 tenant access token 刷新完成时改为在释放状态锁前预注册 `Notify` waiter，修复并发图片上传场景下可能丢唤醒并永久卡住的问题，并补回归测试覆盖“notify 先于 await”窗口。
 - Webhook/API sinks: 修复 `pinned client` 过期后若刷新失败（如 DNS 超时）时，过期缓存条目可能长期残留的问题，并新增回归测试覆盖该路径。
 - `ServerChanSink`：修复 SC3 `send_key` 边界校验缺口；`sctp{uid}t`（缺少后缀 code）现在会在构造阶段被拒绝，避免生成无效目标 URL 后在发送期失败。
 - Webhook/API sinks: IPv6 公网 IP 判定补齐 `100::/64`（discard-only）与 `2001:2::/48`（benchmarking）保留网段，避免 SSRF 防护误放行。

@@ -81,6 +81,19 @@ impl Drop for TenantAccessTokenRefreshGuard {
     }
 }
 
+fn tenant_access_token_refresh_waiter(
+    notify: std::sync::Arc<tokio::sync::Notify>,
+) -> impl std::future::Future<Output = ()> {
+    let mut notified = Box::pin(notify.notified_owned());
+
+    // Register before releasing the state lock so a completing refresh cannot notify between the
+    // state check and waiter installation.
+    notified.as_mut().enable();
+    async move {
+        notified.await;
+    }
+}
+
 impl FeishuWebhookSink {
     pub(super) async fn resolve_single_image_key(&self, src: &str) -> Option<String> {
         self.app_credentials.as_ref()?;
@@ -267,8 +280,9 @@ impl FeishuWebhookSink {
                 }
                 super::TenantAccessTokenState::Refreshing(notify) => {
                     let notify = std::sync::Arc::clone(notify);
+                    let wait = tenant_access_token_refresh_waiter(notify);
                     drop(guard);
-                    notify.notified().await;
+                    wait.await;
                     continue;
                 }
                 super::TenantAccessTokenState::Empty | super::TenantAccessTokenState::Ready(_) => {
@@ -285,8 +299,9 @@ impl FeishuWebhookSink {
                             }
                             super::TenantAccessTokenState::Refreshing(existing) => {
                                 let notify = std::sync::Arc::clone(existing);
+                                let wait = tenant_access_token_refresh_waiter(notify);
                                 drop(guard);
-                                notify.notified().await;
+                                wait.await;
                                 continue;
                             }
                             super::TenantAccessTokenState::Empty
@@ -384,6 +399,26 @@ impl FeishuWebhookSink {
             token,
             expires_at: Instant::now() + Duration::from_secs(expires_in.saturating_sub(60)),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::tenant_access_token_refresh_waiter;
+
+    #[tokio::test]
+    async fn tenant_access_token_refresh_waiter_handles_notify_before_await() {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let wait = tenant_access_token_refresh_waiter(Arc::clone(&notify));
+
+        notify.notify_waiters();
+
+        tokio::time::timeout(Duration::from_millis(50), wait)
+            .await
+            .expect("enabled waiter should observe notify_waiters before await");
     }
 }
 

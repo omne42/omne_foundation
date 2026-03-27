@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `secret-kit`：Linux cleanup 回归测试现在按真实超时窗口轮询 pid 文件和进程退出，并在写出后台 pid 后短暂保留 shell leader，减少慢速 GitHub Actions runner 上的误报失败而不放宽断言语义。
 - Stabilize the Linux process-group cleanup gate further by switching the helper waits from fixed iteration counts to explicit time budgets, so slower GitHub Actions runners have more room to observe pid-file writes and tree termination without weakening the assertions.
 - `secret-kit`：CLI-backed secret resolution 现在会先验证 Tokio time driver，再进入命令超时控制；错误配置不再 panic，而是返回带稳定 catalog code 的命令错误，并把运行时前提写进 `SecretCommandRuntime` 文档。
 - Stabilize Linux process-group cleanup tests by detaching background-command stdio, tracking PID identity to avoid `/proc` reuse false negatives, and extending the cleanup polling budget so slower CI runners do not spuriously fail `secret-kit` quality gates while preserving the same cleanup assertions.

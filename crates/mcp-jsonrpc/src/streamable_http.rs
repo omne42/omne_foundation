@@ -427,6 +427,10 @@ impl Client {
                         wake = wake_rx.recv() => {
                             match wake {
                                 Some(SseWakeReason::SessionChanged) => {
+                                    // Tear down the stale SSE stream before reconnecting with
+                                    // the rotated session id so server->client traffic resumes on
+                                    // the new session immediately.
+                                    drop(pump_fut);
                                     let sse_client = match http_client_profile_sse
                                         .select_for_url(&sse_url, enforce_public_ip)
                                         .await
@@ -1193,8 +1197,12 @@ async fn write_error_response(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::mpsc;
 
     #[test]
     fn jsonrpc_response_id_from_line_accepts_object_and_ignores_non_object() {
@@ -1401,5 +1409,266 @@ mod tests {
         capture_side.read_to_end(&mut out).await?;
         assert_eq!(out, b" {\"jsonrpc\":\"2.0\",\"method\":\"demo/notify\"}\n");
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn streamable_http_reconnects_sse_after_session_rollover() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let base_url = format!("http://{addr}");
+        let (stage_tx, mut stage_rx) = mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let (mut initial_sse, _) = listener.accept().await.expect("accept initial SSE");
+            let initial_request = read_http_request(&mut initial_sse).await.expect("read GET");
+            assert_eq!(initial_request.method, "GET");
+            assert_eq!(initial_request.path, "/sse");
+            assert_eq!(header(&initial_request, "mcp-session-id"), None);
+            write_chunked_response_headers(
+                &mut initial_sse,
+                "200 OK",
+                &[
+                    ("content-type", "text/event-stream"),
+                    ("mcp-session-id", "session-1"),
+                ],
+            )
+            .await
+            .expect("write initial SSE headers");
+            stage_tx.send("initial-sse-open").expect("send stage");
+
+            let (mut post_stream, _) = listener.accept().await.expect("accept POST");
+            let post_request = read_http_request(&mut post_stream)
+                .await
+                .expect("read POST");
+            assert_eq!(post_request.method, "POST");
+            assert_eq!(post_request.path, "/post");
+            assert_eq!(
+                header(&post_request, "mcp-session-id"),
+                Some("session-1".to_string())
+            );
+            assert!(
+                String::from_utf8(post_request.body)
+                    .expect("utf8 POST body")
+                    .contains("\"method\":\"demo/trigger\""),
+                "unexpected POST body"
+            );
+            write_fixed_response(
+                &mut post_stream,
+                "202 Accepted",
+                &[("mcp-session-id", "session-2"), ("connection", "close")],
+                b"",
+            )
+            .await
+            .expect("write POST response");
+            stage_tx.send("session-rolled").expect("send stage");
+            drop(post_stream);
+
+            let (mut rollover_sse, _) = listener.accept().await.expect("accept rollover SSE");
+            let rollover_request = read_http_request(&mut rollover_sse)
+                .await
+                .expect("read rollover GET");
+            assert_eq!(rollover_request.method, "GET");
+            assert_eq!(rollover_request.path, "/sse");
+            assert_eq!(
+                header(&rollover_request, "mcp-session-id"),
+                Some("session-2".to_string())
+            );
+            write_chunked_response_headers(
+                &mut rollover_sse,
+                "200 OK",
+                &[
+                    ("content-type", "text/event-stream"),
+                    ("mcp-session-id", "session-2"),
+                ],
+            )
+            .await
+            .expect("write rollover SSE headers");
+            stage_tx.send("rollover-sse-open").expect("send stage");
+            write_chunk(
+                &mut rollover_sse,
+                b"data: {\"jsonrpc\":\"2.0\",\"method\":\"demo/notify\",\"params\":{\"session\":\"session-2\"}}\n\n",
+            )
+            .await
+            .expect("write SSE notification");
+            finish_chunked_response(&mut rollover_sse)
+                .await
+                .expect("finish SSE response");
+            stage_tx.send("rollover-sse-finished").expect("send stage");
+        });
+
+        let mut client = Client::connect_streamable_http_split_with_options(
+            &format!("{base_url}/sse"),
+            &format!("{base_url}/post"),
+            StreamableHttpOptions::default(),
+            SpawnOptions::default(),
+        )
+        .await
+        .expect("connect streamable http");
+        let mut notifications = client
+            .take_notifications()
+            .expect("take notifications receiver");
+
+        client
+            .notify("demo/trigger", None)
+            .await
+            .expect("send trigger notification");
+
+        let rollover_stage = tokio::time::timeout(Duration::from_secs(2), stage_rx.recv())
+            .await
+            .expect("stage should arrive before timeout")
+            .expect("stage channel open");
+        assert_eq!(rollover_stage, "initial-sse-open");
+        let rollover_stage = tokio::time::timeout(Duration::from_secs(2), stage_rx.recv())
+            .await
+            .expect("stage should arrive before timeout")
+            .expect("stage channel open");
+        assert_eq!(rollover_stage, "session-rolled");
+        let rollover_stage = tokio::time::timeout(Duration::from_secs(2), stage_rx.recv())
+            .await
+            .expect("second SSE connect should happen before timeout")
+            .expect("stage channel open");
+        assert_eq!(rollover_stage, "rollover-sse-open");
+
+        let notification = tokio::time::timeout(Duration::from_secs(2), notifications.recv())
+            .await
+            .expect("notification should arrive before timeout")
+            .expect("notification stream open");
+        assert_eq!(notification.method, "demo/notify");
+        assert_eq!(
+            notification.params,
+            Some(serde_json::json!({ "session": "session-2" }))
+        );
+        let rollover_stage = tokio::time::timeout(Duration::from_secs(2), stage_rx.recv())
+            .await
+            .expect("rollover SSE should finish before timeout")
+            .expect("stage channel open");
+        assert_eq!(rollover_stage, "rollover-sse-finished");
+
+        client.close("test complete").await;
+        server.await.expect("server task should join");
+    }
+
+    #[derive(Debug)]
+    struct HttpRequest {
+        method: String,
+        path: String,
+        headers: BTreeMap<String, String>,
+        body: Vec<u8>,
+    }
+
+    async fn read_http_request(stream: &mut tokio::net::TcpStream) -> io::Result<HttpRequest> {
+        let mut buf = Vec::new();
+        let header_end = loop {
+            let mut byte = [0_u8; 1];
+            stream.read_exact(&mut byte).await?;
+            buf.push(byte[0]);
+            if buf.len() >= 4 && buf[buf.len() - 4..] == *b"\r\n\r\n" {
+                break buf.len() - 4;
+            }
+        };
+
+        let header_text = std::str::from_utf8(&buf[..header_end]).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("http request header was not valid utf-8: {err}"),
+            )
+        })?;
+        let mut lines = header_text.split("\r\n");
+        let request_line = lines.next().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "missing http request line")
+        })?;
+        let mut request_line_parts = request_line.split_whitespace();
+        let method = request_line_parts
+            .next()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing http method"))?
+            .to_string();
+        let path = request_line_parts
+            .next()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing http path"))?
+            .to_string();
+
+        let mut headers = BTreeMap::new();
+        for line in lines {
+            let Some((name, value)) = line.split_once(':') else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid http header line: {line}"),
+                ));
+            };
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+
+        let content_length = headers
+            .get("content-length")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let mut body = vec![0_u8; content_length];
+        if content_length > 0 {
+            stream.read_exact(&mut body).await?;
+        }
+
+        Ok(HttpRequest {
+            method,
+            path,
+            headers,
+            body,
+        })
+    }
+
+    fn header(request: &HttpRequest, name: &str) -> Option<String> {
+        request.headers.get(&name.to_ascii_lowercase()).cloned()
+    }
+
+    async fn write_fixed_response(
+        stream: &mut tokio::net::TcpStream,
+        status: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> io::Result<()> {
+        let mut response = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\n", body.len());
+        for (name, value) in headers {
+            response.push_str(name);
+            response.push_str(": ");
+            response.push_str(value);
+            response.push_str("\r\n");
+        }
+        response.push_str("\r\n");
+        stream.write_all(response.as_bytes()).await?;
+        if !body.is_empty() {
+            stream.write_all(body).await?;
+        }
+        stream.flush().await
+    }
+
+    async fn write_chunked_response_headers(
+        stream: &mut tokio::net::TcpStream,
+        status: &str,
+        headers: &[(&str, &str)],
+    ) -> io::Result<()> {
+        let mut response = format!("HTTP/1.1 {status}\r\nTransfer-Encoding: chunked\r\n");
+        for (name, value) in headers {
+            response.push_str(name);
+            response.push_str(": ");
+            response.push_str(value);
+            response.push_str("\r\n");
+        }
+        response.push_str("\r\n");
+        stream.write_all(response.as_bytes()).await?;
+        stream.flush().await
+    }
+
+    async fn write_chunk(stream: &mut tokio::net::TcpStream, body: &[u8]) -> io::Result<()> {
+        stream
+            .write_all(format!("{:X}\r\n", body.len()).as_bytes())
+            .await?;
+        stream.write_all(body).await?;
+        stream.write_all(b"\r\n").await?;
+        stream.flush().await
+    }
+
+    async fn finish_chunked_response(stream: &mut tokio::net::TcpStream) -> io::Result<()> {
+        stream.write_all(b"0\r\n\r\n").await?;
+        stream.flush().await
     }
 }

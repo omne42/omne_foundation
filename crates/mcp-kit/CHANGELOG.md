@@ -13,6 +13,7 @@
 - `mcp-kit`：`SharedManager` 的重入 fail-fast 语义现在在代码与变更记录里显式收口为“只针对当前 manager 的当前 handler 调用栈”；其他活跃 handler 不会再把外部正常调用误伤成 `REENTRANT_HANDLER_ERROR`。
 - `mcp-kit`：测试侧 `current_dir()` 不可用回归 helper 的条件导入现在与平台编译条件一致，避免 Windows runner 在 helper 被裁掉后把残留 import 视为编译错误；不改变产品行为。
 - `mcp-kit`：`mcpctl` 内用于模拟“当前工作目录不可用”的回归测试现在只在支持“删除当前目录”语义的平台上运行，避免 Windows runner 因平台文件锁语义差异把测试夹具失败误报成产品回归；不改变 CLI 行为。
+- `mcp-kit`：`mcpctl` 上述平台限定测试的专用 import 现在也随平台条件一起裁剪，避免 Windows 在测试被禁用后把残留导入视为 `-D warnings` 编译错误；不改变 CLI 行为。
 - `mcpctl` 和 `mcp-kit` 的相对 `cwd/root` 解析不再在 `current_dir()` 失败时静默回退到 `.`；相关路径现在显式报错，避免把工作目录边界问题伪装成后续配置/连接异常。
 - `mcp-kit` 文档与 untrusted 出站说明现在明确区分 `allow_localhost` 的真实边界：它只放开 `localhost` / `localhost.localdomain` / `*.localhost`，不会顺带放开 `*.local`、`*.localdomain` 或单标签 host。
 - `mcp-kit`：`Session::notify` 与 `Connection/Session::wait_with_timeout` 现在会在使用 Tokio timeout 前先验证 time driver；缺少 timer 时返回清晰错误并在 rustdoc 中显式声明运行时前提。

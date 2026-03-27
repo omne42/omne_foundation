@@ -398,9 +398,10 @@ mod tests {
     #[cfg(not(windows))]
     use std::sync::{Mutex, OnceLock};
 
-    use anyhow::Result;
-
+    #[cfg(not(windows))]
     use super::resolve_cli_root;
+    #[cfg(not(windows))]
+    use anyhow::Result;
 
     #[cfg(not(windows))]
     fn cwd_test_guard() -> std::sync::MutexGuard<'static, ()> {

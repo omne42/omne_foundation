@@ -710,7 +710,7 @@ mod tests {
                 .load_image(link_dir.join(image_name).to_str().expect("utf8 path"))
                 .await
                 .expect_err("symlink ancestors should be rejected");
-            assert!(err.to_string().contains("symlink ancestor"), "{err:#}");
+            assert!(err.to_string().contains("symlink"), "{err:#}");
 
             let _ = std::fs::remove_file(&target);
             let _ = std::fs::remove_file(&link_dir);

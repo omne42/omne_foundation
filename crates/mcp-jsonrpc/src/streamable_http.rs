@@ -401,7 +401,7 @@ impl Client {
                 let mut pump_fut =
                     std::pin::pin!(pump_sse_response(resp, writer, max_message_bytes));
 
-                loop {
+                let reconnect = loop {
                     tokio::select! {
                         result = &mut pump_fut => {
                             match result {
@@ -427,46 +427,7 @@ impl Client {
                         wake = wake_rx.recv() => {
                             match wake {
                                 Some(SseWakeReason::SessionChanged) => {
-                                    // Tear down the stale SSE stream before reconnecting with
-                                    // the rotated session id so server->client traffic resumes on
-                                    // the new session immediately.
-                                    drop(pump_fut);
-                                    let sse_client = match http_client_profile_sse
-                                        .select_for_url(&sse_url, enforce_public_ip)
-                                        .await
-                                    {
-                                        Ok(client) => client,
-                                        Err(err) => {
-                                            close_post_bridge(
-                                                &writer_sse,
-                                                &handle_sse,
-                                                format!("streamable http SSE client selection failed: {err}"),
-                                            )
-                                            .await;
-                                            return;
-                                        }
-                                    };
-                                    current_resp = match try_connect_sse(
-                                        &sse_client,
-                                        sse_url.as_str(),
-                                        connect_timeout,
-                                        &session_id_sse,
-                                    )
-                                    .await
-                                    {
-                                        Ok(Some(resp)) => Some(resp),
-                                        Ok(None) => None,
-                                        Err(err) => {
-                                            close_post_bridge(
-                                                &writer_sse,
-                                                &handle_sse,
-                                                format!("streamable http SSE connection failed: {err}"),
-                                            )
-                                            .await;
-                                            return;
-                                        }
-                                    };
-                                    break;
+                                    break true;
                                 }
                                 Some(SseWakeReason::Connect) => {}
                                 None => {
@@ -493,7 +454,47 @@ impl Client {
                             }
                         }
                     }
+                };
+
+                if !reconnect {
+                    continue;
                 }
+
+                let sse_client = match http_client_profile_sse
+                    .select_for_url(&sse_url, enforce_public_ip)
+                    .await
+                {
+                    Ok(client) => client,
+                    Err(err) => {
+                        close_post_bridge(
+                            &writer_sse,
+                            &handle_sse,
+                            format!("streamable http SSE client selection failed: {err}"),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                current_resp = match try_connect_sse(
+                    &sse_client,
+                    sse_url.as_str(),
+                    connect_timeout,
+                    &session_id_sse,
+                )
+                .await
+                {
+                    Ok(Some(resp)) => Some(resp),
+                    Ok(None) => None,
+                    Err(err) => {
+                        close_post_bridge(
+                            &writer_sse,
+                            &handle_sse,
+                            format!("streamable http SSE connection failed: {err}"),
+                        )
+                        .await;
+                        return;
+                    }
+                };
             }
         });
 

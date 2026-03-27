@@ -26,6 +26,26 @@ fn cwd_test_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+struct CurrentDirRestoreGuard {
+    original_cwd: Option<PathBuf>,
+}
+
+impl CurrentDirRestoreGuard {
+    fn capture() -> Self {
+        Self {
+            original_cwd: Some(std::env::current_dir().expect("original cwd")),
+        }
+    }
+}
+
+impl Drop for CurrentDirRestoreGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.original_cwd.take() {
+            let _ = std::env::set_current_dir(path);
+        }
+    }
+}
+
 #[test]
 fn roots_capability_is_inserted() {
     let mut capabilities = serde_json::json!({});
@@ -170,7 +190,7 @@ fn stdout_log_path_within_root_accepts_equivalent_root_with_parent_segments() {
 #[test]
 fn resolve_connection_cwd_errors_when_current_dir_is_unavailable() {
     let _guard = cwd_test_guard();
-    let original_cwd = std::env::current_dir().expect("original cwd");
+    let _cwd_restore = CurrentDirRestoreGuard::capture();
     let tempdir = tempfile::tempdir().expect("tempdir");
     std::env::set_current_dir(tempdir.path()).expect("enter tempdir");
     std::fs::remove_dir(tempdir.path()).expect("remove tempdir");
@@ -181,8 +201,6 @@ fn resolve_connection_cwd_errors_when_current_dir_is_unavailable() {
         err.to_string()
             .contains("determine current working directory for relative MCP cwd")
     );
-
-    std::env::set_current_dir(&original_cwd).expect("restore cwd");
 }
 
 #[test]

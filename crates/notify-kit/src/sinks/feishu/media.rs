@@ -84,6 +84,9 @@ impl Drop for TenantAccessTokenRefreshGuard {
 impl FeishuWebhookSink {
     pub(super) async fn resolve_single_image_key(&self, src: &str) -> Option<String> {
         self.app_credentials.as_ref()?;
+        if src.starts_with("https://") && !self.allow_remote_image_urls {
+            return None;
+        }
 
         let loaded = match self.load_image(src).await {
             Ok(loaded) => loaded,
@@ -104,6 +107,9 @@ impl FeishuWebhookSink {
 
     pub(super) async fn load_image(&self, src: &str) -> crate::Result<LoadedImage> {
         if src.starts_with("https://") {
+            if !self.allow_remote_image_urls {
+                return Err(anyhow::anyhow!("remote image urls are disabled").into());
+            }
             return self.load_remote_image(src).await;
         }
 
@@ -382,6 +388,14 @@ impl FeishuWebhookSink {
 }
 
 async fn read_local_image_file(path: String, max_bytes: usize) -> crate::Result<Vec<u8>> {
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        let _ = max_bytes;
+        return Err(anyhow::anyhow!("local image files are not supported on this platform").into());
+    }
+
+    #[cfg(unix)]
     tokio::task::spawn_blocking(move || {
         let path = Path::new(&path);
         let metadata = std::fs::symlink_metadata(path).map_err(|err| {
@@ -427,12 +441,6 @@ fn open_local_image_file(path: &Path) -> crate::Result<std::fs::File> {
                 crate::Error::from(anyhow::anyhow!("read image file: {err}"))
             }
         })
-}
-
-#[cfg(not(unix))]
-fn open_local_image_file(path: &Path) -> crate::Result<std::fs::File> {
-    std::fs::File::open(path)
-        .map_err(|err| crate::Error::from(anyhow::anyhow!("read image file: {err}")))
 }
 
 pub(super) fn read_bytes_body_limited(

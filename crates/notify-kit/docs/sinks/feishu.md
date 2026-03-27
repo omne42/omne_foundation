@@ -130,7 +130,8 @@ let sink = FeishuWebhookSink::new(cfg)?;
 - 链接会映射为可点击富文本链接
 - 图片：
   - 未配置应用凭据时：降级为可读文本 + 原链接
-  - 配置了应用凭据时：自动上传并以内嵌图片显示
+  - 配置了应用凭据，但没有显式开启图片来源时：仍然降级为可读文本 + 原链接
+  - 只有在显式开启远程 URL 或本地文件来源后，才会尝试上传并以内嵌图片显示
 
 ## Markdown 图片上传（可选）
 
@@ -151,8 +152,10 @@ let sink = FeishuWebhookSink::new(cfg)?;
 
 说明：
 
+- 远程图片 URL 默认禁用；如确实需要，可显式调用 `.with_remote_image_urls(true)` 后再允许下载并上传
 - 图片 URL 仅支持 `https`
 - 本地文件路径默认禁用；如确实需要，可显式调用 `.with_local_image_files(true)` 后再读取并上传
+- 非 Unix 平台如果无法提供安全的 no-follow 打开语义，会直接拒绝本地图片读取，而不是退化成跟随 symlink/reparse point
 - 上传失败时不会中断整条消息，自动回退为文本链接表示
 
 ## 错误信息（刻意保持“低敏感”）

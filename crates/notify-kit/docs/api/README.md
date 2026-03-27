@@ -8,4 +8,4 @@
 - `Event` / `Severity`：事件数据结构与严重级别
 - `Sink`：通知渠道抽象
 - `SoundSink` / `SoundConfig`：本地提示音/终端 bell
-- `FeishuWebhookSink` / `FeishuWebhookConfig`：飞书 webhook（text / post 富文本，支持 Markdown 图片上传）
+- `FeishuWebhookSink` / `FeishuWebhookConfig`：飞书 webhook（text / post 富文本，支持显式 opt-in 的 Markdown 图片上传）

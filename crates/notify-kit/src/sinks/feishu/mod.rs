@@ -26,6 +26,7 @@ pub struct FeishuWebhookConfig {
     pub max_chars: usize,
     pub enforce_public_ip: bool,
     pub enable_markdown_rich_text: bool,
+    pub allow_remote_image_urls: bool,
     pub allow_local_image_files: bool,
     pub image_upload_max_bytes: usize,
     pub app_id: Option<String>,
@@ -40,6 +41,7 @@ impl std::fmt::Debug for FeishuWebhookConfig {
             .field("max_chars", &self.max_chars)
             .field("enforce_public_ip", &self.enforce_public_ip)
             .field("enable_markdown_rich_text", &self.enable_markdown_rich_text)
+            .field("allow_remote_image_urls", &self.allow_remote_image_urls)
             .field("allow_local_image_files", &self.allow_local_image_files)
             .field("image_upload_max_bytes", &self.image_upload_max_bytes)
             .field("app_id", &self.app_id.as_ref().map(|_| "<redacted>"))
@@ -59,6 +61,7 @@ impl FeishuWebhookConfig {
             max_chars: FEISHU_MAX_CHARS,
             enforce_public_ip: true,
             enable_markdown_rich_text: true,
+            allow_remote_image_urls: false,
             allow_local_image_files: false,
             image_upload_max_bytes: FEISHU_DEFAULT_IMAGE_UPLOAD_MAX_BYTES,
             app_id: None,
@@ -87,6 +90,12 @@ impl FeishuWebhookConfig {
     #[must_use]
     pub fn with_markdown_rich_text(mut self, enable: bool) -> Self {
         self.enable_markdown_rich_text = enable;
+        self
+    }
+
+    #[must_use]
+    pub fn with_remote_image_urls(mut self, allow: bool) -> Self {
+        self.allow_remote_image_urls = allow;
         self
     }
 
@@ -122,6 +131,7 @@ pub struct FeishuWebhookSink {
     max_chars: usize,
     enforce_public_ip: bool,
     enable_markdown_rich_text: bool,
+    allow_remote_image_urls: bool,
     allow_local_image_files: bool,
     image_upload_max_bytes: usize,
     app_credentials: Option<FeishuAppCredentials>,
@@ -143,6 +153,7 @@ impl std::fmt::Debug for FeishuWebhookSink {
             .field("max_chars", &self.max_chars)
             .field("enforce_public_ip", &self.enforce_public_ip)
             .field("enable_markdown_rich_text", &self.enable_markdown_rich_text)
+            .field("allow_remote_image_urls", &self.allow_remote_image_urls)
             .field("allow_local_image_files", &self.allow_local_image_files)
             .field("image_upload_max_bytes", &self.image_upload_max_bytes)
             .field(
@@ -225,6 +236,7 @@ impl FeishuWebhookSink {
             max_chars: config.max_chars,
             enforce_public_ip,
             enable_markdown_rich_text: config.enable_markdown_rich_text,
+            allow_remote_image_urls: config.allow_remote_image_urls,
             allow_local_image_files: config.allow_local_image_files,
             image_upload_max_bytes: config.image_upload_max_bytes,
             app_credentials,
@@ -263,6 +275,7 @@ impl FeishuWebhookSink {
             max_chars: config.max_chars,
             enforce_public_ip,
             enable_markdown_rich_text: config.enable_markdown_rich_text,
+            allow_remote_image_urls: config.allow_remote_image_urls,
             allow_local_image_files: config.allow_local_image_files,
             image_upload_max_bytes: config.image_upload_max_bytes,
             app_credentials,
@@ -534,6 +547,30 @@ mod tests {
     }
 
     #[test]
+    fn remote_image_urls_are_disabled_by_default() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            let sink = FeishuWebhookSink::new(
+                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+                    .with_app_credentials("app_id", "app_secret"),
+            )
+            .expect("build sink");
+
+            let err = sink
+                .load_image("https://example.com/image.png")
+                .await
+                .expect_err("remote image urls should be disabled");
+            assert!(
+                err.to_string().contains("remote image urls are disabled"),
+                "{err:#}"
+            );
+        });
+    }
+
+    #[test]
     fn local_image_files_require_explicit_opt_in() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -675,6 +712,44 @@ mod tests {
             assert!(err.to_string().contains("regular file"), "{err:#}");
 
             drop(listener);
+            let _ = std::fs::remove_file(path);
+        });
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn local_image_files_fail_closed_on_platforms_without_safe_open() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("unix epoch")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "notify-kit-feishu-local-image-unsupported-{}-{unique}.png",
+                std::process::id()
+            ));
+            std::fs::write(&path, b"png").expect("write local image");
+
+            let sink = FeishuWebhookSink::new(
+                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+                    .with_app_credentials("app_id", "app_secret")
+                    .with_local_image_files(true),
+            )
+            .expect("build sink");
+
+            let err = sink
+                .load_image(path.to_str().expect("utf8 path"))
+                .await
+                .expect_err("platform should fail closed");
+            assert!(
+                err.to_string().contains("not supported on this platform"),
+                "{err:#}"
+            );
+
             let _ = std::fs::remove_file(path);
         });
     }

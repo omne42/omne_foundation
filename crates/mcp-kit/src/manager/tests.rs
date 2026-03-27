@@ -18,6 +18,7 @@ fn seed_manager_side_state(manager: &mut Manager, server_name: &str) {
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
+#[cfg(not(windows))]
 fn cwd_test_guard() -> std::sync::MutexGuard<'static, ()> {
     static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
     GUARD
@@ -26,10 +27,12 @@ fn cwd_test_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+#[cfg(not(windows))]
 struct CurrentDirRestoreGuard {
     original_cwd: Option<PathBuf>,
 }
 
+#[cfg(not(windows))]
 impl CurrentDirRestoreGuard {
     fn capture() -> Self {
         Self {
@@ -38,6 +41,7 @@ impl CurrentDirRestoreGuard {
     }
 }
 
+#[cfg(not(windows))]
 impl Drop for CurrentDirRestoreGuard {
     fn drop(&mut self) {
         if let Some(path) = self.original_cwd.take() {

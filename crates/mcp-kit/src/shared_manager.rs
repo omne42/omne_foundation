@@ -64,6 +64,20 @@ impl SharedManager {
         crate::manager::is_in_manager_handler_scope(self.manager_id)
     }
 
+    fn fail_fast_if_reentrant<T>(
+        &self,
+        operation: &'static str,
+        try_acquire: impl FnOnce() -> Result<T, tokio::sync::TryLockError>,
+    ) -> anyhow::Result<Option<T>> {
+        if !self.is_reentrant_handler_call() {
+            return Ok(None);
+        }
+
+        try_acquire()
+            .map(Some)
+            .map_err(|_| anyhow::anyhow!("{REENTRANT_HANDLER_ERROR}: {operation}"))
+    }
+
     fn connect_gate_for(&self, server_name: &str) -> Arc<Mutex<()>> {
         let key = server_name.trim().to_string();
         let mut gates = self
@@ -84,11 +98,8 @@ impl SharedManager {
         &self,
         operation: &'static str,
     ) -> anyhow::Result<MutexGuard<'_, Manager>> {
-        if self.is_reentrant_handler_call() {
-            return self
-                .inner
-                .try_lock()
-                .map_err(|_| anyhow::anyhow!("{REENTRANT_HANDLER_ERROR}: {operation}"));
+        if let Some(manager) = self.fail_fast_if_reentrant(operation, || self.inner.try_lock())? {
+            return Ok(manager);
         }
         Ok(self.inner.lock().await)
     }
@@ -108,10 +119,10 @@ impl SharedManager {
         server_name: &str,
     ) -> anyhow::Result<OwnedMutexGuard<()>> {
         let gate = self.connect_gate_for(server_name);
-        if self.is_reentrant_handler_call() {
-            return gate
-                .try_lock_owned()
-                .map_err(|_| anyhow::anyhow!("{REENTRANT_HANDLER_ERROR}: {operation}"));
+        if let Some(guard) =
+            self.fail_fast_if_reentrant(operation, || gate.clone().try_lock_owned())?
+        {
+            return Ok(guard);
         }
         Ok(gate.lock_owned().await)
     }
@@ -869,6 +880,43 @@ mod tests {
         release_tx.send(()).unwrap();
         held_lock.await.unwrap();
         inspect.await.unwrap().unwrap();
+        active_handler_scopes.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    #[tokio::test]
+    async fn shared_manager_external_connect_gate_waits_even_if_other_handler_scope_is_active() {
+        let manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted);
+        let active_handler_scopes = manager.active_handler_scopes();
+        active_handler_scopes.fetch_add(1, Ordering::Relaxed);
+
+        let shared = manager.into_shared();
+        let (release_tx, release_rx) = oneshot::channel();
+        let held_gate = tokio::spawn({
+            let shared = shared.clone();
+            async move {
+                let guard = shared.lock_connect_gate("held_gate", "srv").await.unwrap();
+                let _ = release_rx.await;
+                drop(guard);
+            }
+        });
+
+        tokio::task::yield_now().await;
+
+        let wait_for_gate = tokio::spawn({
+            let shared = shared.clone();
+            async move { shared.lock_connect_gate("second_gate", "srv").await }
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !wait_for_gate.is_finished(),
+            "external call should wait on the server gate instead of failing fast"
+        );
+
+        release_tx.send(()).unwrap();
+        held_gate.await.unwrap();
+        drop(wait_for_gate.await.unwrap().unwrap());
         active_handler_scopes.fetch_sub(1, Ordering::Relaxed);
     }
 

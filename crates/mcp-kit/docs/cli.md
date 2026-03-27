@@ -34,7 +34,7 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- --help
 - `--allow-stdout-log-outside-root`：允许 `stdout_log.path` 写到 `--root` 之外（默认拒绝；仅建议在可信配置下使用）
 - `--show-argv`：`list-servers` 时输出 stdio `argv` 明文（默认不输出；避免把 token/key 打进终端/CI）
 - `--allow-http`：Untrusted 下允许连接 `http://`（默认只允许 https）
-- `--allow-localhost`：Untrusted 下允许连接 `localhost/*.localhost/*.local/*.localdomain`，以及**单标签 host**（不含 `.` 的 host，如 `https://example/...`；常见于本地/企业网搜索域解析）
+- `--allow-localhost`：Untrusted 下只允许连接 `localhost` / `localhost.localdomain` / `*.localhost`
 - `--allow-private-ip`：Untrusted 下允许连接非公网 IP 字面量
 - `--no-dns-check`：显式关闭默认启用的 DNS 校验（更不安全）
 - `--dns-timeout-ms <ms>`：DNS lookup 超时（仅在 DNS 校验开启时生效；默认 2000）
@@ -43,7 +43,7 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- --help
 
 > `--allow-*` / `--no-dns-check` 只影响 `transport=streamable_http`，不会放开 stdio/unix（它们需要 `--trust --yes-trust`）。
 >
-> 注意：`--allow-host` allowlist **不会**覆盖上述 `localhost/localdomain/单标签 host` 的拦截；如需允许这些 host，请显式 `--allow-localhost` 或直接 `--trust --yes-trust`。
+> 注意：`--allow-host` allowlist **不会**覆盖 `localhost/localdomain/单标签 host` 的拦截；`--allow-localhost` 只会放开 `localhost` / `localhost.localdomain` / `*.localhost`。如果你确实要连接 `*.local`、`*.localdomain` 或单标签 host，只能显式使用 `--trust --yes-trust`。
 
 ## 子命令（subcommands）
 

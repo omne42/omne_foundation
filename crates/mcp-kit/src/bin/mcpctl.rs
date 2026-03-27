@@ -60,8 +60,10 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     allow_http: bool,
 
-    /// Allow connecting to `localhost` / `*.localhost` / `*.local` / `*.localdomain`, and
-    /// single-label hosts (no dots) in untrusted mode.
+    /// Allow connecting to `localhost`, `localhost.localdomain`, and `*.localhost`
+    /// in untrusted mode.
+    ///
+    /// This does not allow `*.local`, `*.localdomain`, or single-label hosts.
     ///
     /// WARNING: This weakens the default SSRF/safety protections.
     #[arg(long, default_value_t = false)]
@@ -95,8 +97,9 @@ struct Cli {
     ///
     /// When set, only these hosts (or their subdomains) are allowed unless `--trust` is used.
     ///
-    /// Note: this does not override the localhost/localdomain/single-label host restriction;
-    /// use `--allow-localhost` or `--trust` for that.
+    /// Note: this does not override the localhost/local-domain/single-label restriction.
+    /// `--allow-localhost` only lifts the localhost / `*.localhost` subset; `.local`,
+    /// `.localdomain`, and single-label hosts still require `--trust`.
     #[arg(long)]
     allow_host: Vec<String>,
 
@@ -148,12 +151,17 @@ async fn canonicalize_existing_ancestor(path: &Path) -> Option<PathBuf> {
     None
 }
 
+fn resolve_cli_root(root: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    root.map_or_else(
+        || std::env::current_dir().context("determine current working directory for --root"),
+        Ok,
+    )
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let root = cli
-        .root
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let root = resolve_cli_root(cli.root)?;
 
     if let Some(path) = cli.config.as_ref() {
         let resolved = if path.is_absolute() {
@@ -383,4 +391,39 @@ async fn main() -> anyhow::Result<()> {
     };
     println!("{text}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Mutex, OnceLock};
+
+    use anyhow::Result;
+
+    use super::resolve_cli_root;
+
+    fn cwd_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        GUARD
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn resolve_cli_root_errors_when_current_dir_is_unavailable() -> Result<()> {
+        let _guard = cwd_test_guard();
+        let original_cwd = std::env::current_dir()?;
+        let tempdir = tempfile::tempdir()?;
+        std::env::set_current_dir(tempdir.path())?;
+        std::fs::remove_dir(tempdir.path())?;
+
+        let err = resolve_cli_root(None).expect_err("missing cwd should fail");
+        assert!(
+            err.to_string()
+                .contains("determine current working directory for --root")
+        );
+
+        std::env::set_current_dir(&original_cwd)?;
+        Ok(())
+    }
 }

@@ -138,13 +138,13 @@ stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)
 
 安全（默认 Untrusted）：
 
-- 允许连接远程 `https` 且 host 看起来是公网域名的 `url`（默认拒绝 `localhost/*.localhost/*.local/*.localdomain`、**单标签 host**、私网/loopback IP 字面量，以及 DNS 解析到非公网 IP 的 hostname）
+- 允许连接远程 `https` 且 host 看起来是公网域名的 `url`（默认拒绝 `localhost` / `localhost.localdomain` / `*.localhost`、`*.local` / `*.localdomain`、**单标签 host**、私网/loopback IP 字面量，以及 DNS 解析到非公网 IP 的 hostname）
 - 拒绝发送敏感 header：`Authorization/Cookie/Proxy-Authorization`
 - 拒绝读取 `bearer_token_env_var` / `env_http_headers`（env secrets）
 
 详见 [`安全模型`](security.md)。
 
-> 注意：即使你配置了 `allowed_hosts` / CLI `--allow-host`，它也不会覆盖 `localhost/localdomain/单标签 host` 的默认拦截；如需允许这些 host，请显式开启 `allow_localhost` / CLI `--allow-localhost`，或直接使用 `Trusted`。
+> 注意：即使你配置了 `allowed_hosts` / CLI `--allow-host`，它也不会覆盖 `localhost/localdomain/单标签 host` 的默认拦截；其中 `allow_localhost` / `--allow-localhost` 只会放开 `localhost` / `localhost.localdomain` / `*.localhost`。如果要连接 `*.local`、`*.localdomain` 或单标签 host，只能直接使用 `Trusted`。
 
 streamable_http 的具体 HTTP 形态（SSE + POST、`mcp-session-id`、回包为 SSE 的场景）见 [`streamable_http 传输详解`](streamable_http.md)。
 

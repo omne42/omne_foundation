@@ -59,13 +59,13 @@ fn normalize_server_name_lookup(server_name: &str) -> &str {
     server_name.trim()
 }
 
-pub(crate) fn resolve_connection_cwd(cwd: &Path) -> PathBuf {
+pub(crate) fn resolve_connection_cwd(cwd: &Path) -> anyhow::Result<PathBuf> {
     if cwd.is_absolute() {
-        cwd.to_path_buf()
+        return Ok(cwd.to_path_buf());
     } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(cwd)
+        let current_dir = std::env::current_dir()
+            .context("determine current working directory for relative MCP cwd")?;
+        Ok(current_dir.join(cwd))
     }
 }
 
@@ -696,11 +696,16 @@ impl Manager {
         self.initialize_result(server_name.as_str())
     }
 
-    pub(crate) fn record_connection_cwd(&mut self, server_name: &str, cwd: &Path) {
+    pub(crate) fn record_connection_cwd(
+        &mut self,
+        server_name: &str,
+        cwd: &Path,
+    ) -> anyhow::Result<()> {
         self.connection_cwds.insert(
             parse_server_name_anyhow(server_name).expect("validated server name"),
-            resolve_connection_cwd(cwd),
+            resolve_connection_cwd(cwd)?,
         );
+        Ok(())
     }
 
     pub(crate) fn clear_connection_cwd(&mut self, server_name: &str) {
@@ -711,7 +716,7 @@ impl Manager {
         let Some(connected_cwd) = self.connection_cwds.get(server_name) else {
             return Ok(());
         };
-        let requested_cwd = resolve_connection_cwd(cwd);
+        let requested_cwd = resolve_connection_cwd(cwd)?;
         if *connected_cwd == requested_cwd {
             return Ok(());
         }
@@ -768,7 +773,7 @@ impl Manager {
         server_cfg
             .validate()
             .with_context(|| format!("invalid mcp server config (server={server_name_key})"))?;
-        let cwd = resolve_connection_cwd(cwd);
+        let cwd = resolve_connection_cwd(cwd)?;
 
         Ok(Some(PreparedTransportConnect {
             server_name: server_name.to_string(),
@@ -837,7 +842,7 @@ impl Manager {
     where
         F: FnOnce() -> anyhow::Result<ServerName>,
     {
-        let cwd = resolve_connection_cwd(cwd);
+        let cwd = resolve_connection_cwd(cwd)?;
         let server_name_key = build_server_name()?;
         if self.is_connected_and_alive(server_name_key.as_str()) {
             self.ensure_connection_cwd_matches(server_name_key.as_str(), &cwd)?;
@@ -860,7 +865,7 @@ impl Manager {
 
         self.install_connection_parsed(server_name_key, client, child)
             .await?;
-        self.record_connection_cwd(server_name, &cwd);
+        self.record_connection_cwd(server_name, &cwd)?;
         Ok(())
     }
 

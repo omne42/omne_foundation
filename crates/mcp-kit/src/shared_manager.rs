@@ -18,6 +18,10 @@ const REENTRANT_HANDLER_ERROR: &str = "SharedManager async operations cannot be 
 /// inspection operations still execute under the shared lock. It is intended for callers that want
 /// shared ownership ergonomics without introducing a second runtime or actor layer.
 ///
+/// Reentrant fail-fast is scoped to the current manager handler task, not to global handler
+/// activity. If some other handler for the same `Manager` is active elsewhere, external callers
+/// still wait normally for the shared lock or connect gate.
+///
 /// This is not an actor or fully concurrent manager:
 /// - lifecycle-changing operations still serialize on the shared manager lock
 /// - connected request/notify operations can overlap once they have borrowed a client handle
@@ -69,6 +73,8 @@ impl SharedManager {
         operation: &'static str,
         try_acquire: impl FnOnce() -> Result<T, tokio::sync::TryLockError>,
     ) -> anyhow::Result<Option<T>> {
+        // Only the current task-local manager handler scope gets fail-fast behavior. Other
+        // unrelated handler activity must not cause external callers to spuriously error.
         if !self.is_reentrant_handler_call() {
             return Ok(None);
         }
@@ -151,7 +157,7 @@ impl SharedManager {
         server_name: &str,
         cwd: &Path,
     ) -> anyhow::Result<()> {
-        let cwd = crate::manager::resolve_connection_cwd(cwd);
+        let cwd = crate::manager::resolve_connection_cwd(cwd)?;
         let _gate = self.lock_connect_gate(operation, server_name).await?;
 
         if self
@@ -189,7 +195,7 @@ impl SharedManager {
             Ok(completed) => {
                 let mut manager = self.lock_for_async_op(operation).await?;
                 manager.commit_connection_install(completed);
-                manager.record_connection_cwd(prepared.server_name_key.as_str(), &prepared.cwd);
+                manager.record_connection_cwd(prepared.server_name_key.as_str(), &prepared.cwd)?;
                 Ok(())
             }
             Err(err) => {
@@ -244,7 +250,7 @@ impl SharedManager {
         params: Option<Value>,
         cwd: &Path,
     ) -> anyhow::Result<Value> {
-        let cwd = crate::manager::resolve_connection_cwd(cwd);
+        let cwd = crate::manager::resolve_connection_cwd(cwd)?;
         if let Some(prepared) = self
             .try_prepare_connected_client("request", server_name, Some(&cwd))
             .await?
@@ -369,7 +375,7 @@ impl SharedManager {
         params: Option<Value>,
         cwd: &Path,
     ) -> anyhow::Result<()> {
-        let cwd = crate::manager::resolve_connection_cwd(cwd);
+        let cwd = crate::manager::resolve_connection_cwd(cwd)?;
         if let Some(prepared) = self
             .try_prepare_connected_client("notify", server_name, Some(&cwd))
             .await?
@@ -960,7 +966,9 @@ mod tests {
             .connect_io("srv", client_read, client_write)
             .await
             .unwrap();
-        manager.record_connection_cwd("srv", Path::new("/workspace/a"));
+        manager
+            .record_connection_cwd("srv", Path::new("/workspace/a"))
+            .unwrap();
 
         let shared = manager.into_shared();
         let config = crate::Config::new(crate::ClientConfig::default(), Default::default());

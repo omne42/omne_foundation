@@ -86,12 +86,14 @@
 
 ### refusing to connect localhost/local/single-label domain in untrusted mode
 
-原因：默认拒绝 `localhost / *.localhost / *.local / *.localdomain`，以及**单标签 host**（不含 `.` 的 host）。
+原因：默认拒绝 `localhost` / `localhost.localdomain` / `*.localhost`，以及 `*.local` / `*.localdomain` 和**单标签 host**（不含 `.` 的 host）。
 
 解决：
 
-- CLI：加 `--allow-localhost`
-- 代码：`UntrustedStreamableHttpPolicy { allow_localhost: true, .. }`
+- 如果目标是 `localhost` / `localhost.localdomain` / `*.localhost`：
+  CLI：加 `--allow-localhost`
+  代码：`UntrustedStreamableHttpPolicy { allow_localhost: true, .. }`
+- 如果目标是 `*.local` / `*.localdomain` 或单标签 host：只能改用 `Trusted`
 
 ### refusing to connect non-global ip in untrusted mode
 

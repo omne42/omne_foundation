@@ -55,20 +55,12 @@ pub fn validate_untrusted_outbound_url(
     let host = normalized_host(url)?;
     let host_for_ip = host_for_ip_literal(host);
 
-    if !policy.allow_localhost {
-        let is_ip_literal = host_for_ip.parse::<IpAddr>().is_ok();
-        let is_single_label = !is_ip_literal && !host.contains('.');
-        if host.eq_ignore_ascii_case("localhost")
-            || host.eq_ignore_ascii_case("localhost.localdomain")
-            || ends_with_ignore_ascii_case(host, ".localhost")
-            || ends_with_ignore_ascii_case(host, ".local")
-            || ends_with_ignore_ascii_case(host, ".localdomain")
-            || is_single_label
-        {
-            return Err(UntrustedOutboundError::LocalhostHostNotAllowed {
-                host: host.to_string(),
-            });
-        }
+    if is_local_or_single_label_host(host, host_for_ip)
+        && !(policy.allow_localhost && is_loopback_hostname(host))
+    {
+        return Err(UntrustedOutboundError::LocalhostHostNotAllowed {
+            host: host.to_string(),
+        });
     }
 
     if !policy.allowed_hosts.is_empty()
@@ -161,6 +153,21 @@ fn host_for_ip_literal(host: &str) -> &str {
     host.trim_start_matches('[').trim_end_matches(']')
 }
 
+fn is_loopback_hostname(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host.eq_ignore_ascii_case("localhost.localdomain")
+        || ends_with_ignore_ascii_case(host, ".localhost")
+}
+
+fn is_local_or_single_label_host(host: &str, host_for_ip: &str) -> bool {
+    let is_ip_literal = host_for_ip.parse::<IpAddr>().is_ok();
+    let is_single_label = !is_ip_literal && !host.contains('.');
+    is_loopback_hostname(host)
+        || ends_with_ignore_ascii_case(host, ".local")
+        || ends_with_ignore_ascii_case(host, ".localdomain")
+        || is_single_label
+}
+
 fn ends_with_ignore_ascii_case(haystack: &str, suffix: &str) -> bool {
     if suffix.len() > haystack.len() {
         return false;
@@ -198,6 +205,47 @@ mod tests {
         let policy = UntrustedOutboundPolicy::default();
         let url = reqwest::Url::parse("https://internal/mcp").expect("parse url");
         let err = validate_untrusted_outbound_url(&policy, &url).expect_err("expected rejection");
+        assert!(matches!(
+            err,
+            UntrustedOutboundError::LocalhostHostNotAllowed { .. }
+        ));
+    }
+
+    #[test]
+    fn allow_localhost_only_allows_loopback_hostnames() {
+        let policy = UntrustedOutboundPolicy {
+            allow_localhost: true,
+            ..Default::default()
+        };
+
+        let localhost = reqwest::Url::parse("https://localhost/mcp").expect("parse url");
+        validate_untrusted_outbound_url(&policy, &localhost).expect("localhost should be allowed");
+
+        let localhost_subdomain =
+            reqwest::Url::parse("https://demo.localhost/mcp").expect("parse url");
+        validate_untrusted_outbound_url(&policy, &localhost_subdomain)
+            .expect("*.localhost should be allowed");
+
+        let local_domain = reqwest::Url::parse("https://service.local/mcp").expect("parse url");
+        let err =
+            validate_untrusted_outbound_url(&policy, &local_domain).expect_err("*.local blocks");
+        assert!(matches!(
+            err,
+            UntrustedOutboundError::LocalhostHostNotAllowed { .. }
+        ));
+
+        let localdomain =
+            reqwest::Url::parse("https://service.localdomain/mcp").expect("parse url");
+        let err = validate_untrusted_outbound_url(&policy, &localdomain)
+            .expect_err("*.localdomain blocks");
+        assert!(matches!(
+            err,
+            UntrustedOutboundError::LocalhostHostNotAllowed { .. }
+        ));
+
+        let single_label = reqwest::Url::parse("https://internal/mcp").expect("parse url");
+        let err = validate_untrusted_outbound_url(&policy, &single_label)
+            .expect_err("single-label blocks");
         assert!(matches!(
             err,
             UntrustedOutboundError::LocalhostHostNotAllowed { .. }

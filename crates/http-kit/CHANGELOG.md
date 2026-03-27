@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Narrow `allow_localhost` so it only exempts loopback-style hostnames (`localhost`, `localhost.localdomain`, `*.localhost`) instead of also allowing `*.local`, `*.localdomain`, or single-label hosts.
 - Add the standalone `http-kit` crate with reusable HTTP client, body, URL, and outbound policy helpers.
 - Add bounded response streaming support for consumers such as `toolchain-installer`.
 - Fix `select_http_client` public-IP pinning so `http://` URLs without an explicit port keep the scheme default instead of being forced to `:443`.

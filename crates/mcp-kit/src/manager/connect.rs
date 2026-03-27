@@ -51,6 +51,8 @@ async fn connect_stdio_transport(
     server_cfg: &ServerConfig,
     cwd: &Path,
 ) -> anyhow::Result<(mcp_jsonrpc::Client, Option<Child>)> {
+    let cwd = super::resolve_connection_cwd(cwd)?;
+
     if ctx.trust_mode == TrustMode::Untrusted {
         anyhow::bail!(
             "refusing to spawn mcp server in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
@@ -62,7 +64,7 @@ async fn connect_stdio_transport(
         .iter()
         .enumerate()
         .map(|(idx, arg)| {
-            let expanded = expand_placeholders_trusted(arg, cwd).with_context(|| {
+            let expanded = expand_placeholders_trusted(arg, &cwd).with_context(|| {
                 format!("expand argv placeholder (server={server_name} argv[{idx}] redacted)")
             })?;
             Ok::<_, anyhow::Error>(std::ffi::OsString::from(expanded))
@@ -71,7 +73,7 @@ async fn connect_stdio_transport(
 
     let mut cmd = Command::new(&expanded_argv[0]);
     cmd.args(expanded_argv.iter().skip(1));
-    cmd.current_dir(cwd);
+    cmd.current_dir(&cwd);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::inherit());
@@ -80,18 +82,16 @@ async fn connect_stdio_transport(
         apply_stdio_baseline_env(&mut cmd);
     }
     for (key, value) in server_cfg.env().iter() {
-        let value = expand_placeholders_trusted(value, cwd)
+        let value = expand_placeholders_trusted(value, &cwd)
             .with_context(|| format!("expand env placeholder: {key}"))?;
         cmd.env(key, value);
     }
     cmd.kill_on_drop(true);
 
     let stdout_log = server_cfg.stdout_log().map(|log| {
-        let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let cwd_abs = absolutize_with_base(cwd, &current_dir);
-        let resolved_log_path = absolutize_with_base(&log.path, &cwd_abs);
+        let resolved_log_path = absolutize_with_base(&log.path, &cwd);
         if !ctx.allow_stdout_log_outside_root
-            && !stdout_log_path_within_root(&resolved_log_path, &cwd_abs)
+            && !stdout_log_path_within_root(&resolved_log_path, &cwd)
         {
             anyhow::bail!(
                 "mcp server {server_name}: stdout_log.path must be within root (set Manager::with_allow_stdout_log_outside_root(true) to override): {}",

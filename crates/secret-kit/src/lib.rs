@@ -924,9 +924,10 @@ where
                 .inner
                 .lookup_secret_cache_scope(spec, context)?
                 .and_then(|scope| SecretCacheKey::for_env(scope, context.environment()))
-                && let Some(value) = self.cached_value(&key)
             {
-                return Ok(value);
+                if let Some(value) = self.cached_value(&key) {
+                    return Ok(value);
+                }
             }
 
             let prepared = self.inner.prepare_secret_resolution(spec, context).await?;

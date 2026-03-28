@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `secret-kit` 现在会在 Linux 上对 secret command 的 process-tree cleanup 做短时重试，避免 leader 刚退出时 `/proc` 尚未稳定暴露 orphaned helper 导致的一次性漏杀。
 - `secret-kit`：Linux cleanup 回归测试现在按真实超时窗口轮询 pid 文件和进程退出，并在写出后台 pid 后短暂保留 shell leader，减少慢速 GitHub Actions runner 上的误报失败而不放宽断言语义。
 - `secret-kit`：Linux cleanup 回归测试现在会先记录 shell 当时真实的 process group，并确认后台进程已经加入该组，再让 leader 退出，进一步减少 GitHub Actions runner 上的误报失败而不削弱清理断言。
 - `secret-kit` 现在在 secret command leader 已退出时立刻触发 process-tree cleanup，而不再把 orphaned background process 的清理延后到尾部 `Drop` 路径；这样 stdout/stderr 已经读完的成功/取消路径也能稳定回收残留子进程。

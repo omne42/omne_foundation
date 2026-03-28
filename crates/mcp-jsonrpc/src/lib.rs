@@ -759,16 +759,34 @@ impl BatchResponseWriter {
         self.flush_if_ready().await
     }
 
-    fn release_reserved_response(&self) {
+    fn push_reserved_response_without_runtime(&self, response: Value) {
+        if self.state.handle.check_closed().is_err() {
+            self.state
+                .pending_async_responses
+                .fetch_sub(1, Ordering::Relaxed);
+            return;
+        }
+
+        self.state.responses.blocking_lock().push(response);
         self.state
             .pending_async_responses
             .fetch_sub(1, Ordering::Relaxed);
+        self.flush_if_ready_without_runtime();
+    }
+
+    fn flush_if_ready_without_runtime(&self) {
         let batch = self.clone();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            drop(handle.spawn(async move {
-                let _ = batch.flush_if_ready().await;
-            }));
-        }
+        let _ = std::thread::Builder::new()
+            .name("mcp-jsonrpc-batch-flush".to_string())
+            .spawn(move || {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_io()
+                    .build()
+                else {
+                    return;
+                };
+                let _ = runtime.block_on(async move { batch.flush_if_ready().await });
+            });
     }
 
     async fn finish(&self) -> Result<(), Error> {
@@ -1688,7 +1706,7 @@ impl Drop for IncomingRequest {
                         drop(batch.push_reserved_response(response).await);
                     }));
                 } else {
-                    batch.release_reserved_response();
+                    batch.push_reserved_response_without_runtime(response);
                 }
             }
         }
@@ -2670,6 +2688,87 @@ mod incoming_value_tests {
         );
 
         drop(client);
+    }
+
+    #[test]
+    fn dropped_batch_request_without_runtime_still_flushes_remaining_batch_response() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build setup runtime");
+
+        let (request, server_read, client) = runtime.block_on(async {
+            let (client_stream, server_stream) = tokio::io::duplex(2048);
+            let (client_read, client_write) = tokio::io::split(client_stream);
+            let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+            let mut client = Client::connect_io(client_read, client_write)
+                .await
+                .expect("connect client");
+            let mut requests = client.take_requests().expect("request receiver");
+
+            server_write
+                .write_all(
+                    br#"[{"jsonrpc":"2.0","id":1,"method":"first"},{"jsonrpc":"2.0","id":2,"method":"second"}]"#,
+                )
+                .await
+                .expect("write batch");
+            server_write.write_all(b"\n").await.expect("write newline");
+            server_write.flush().await.expect("flush batch");
+
+            let first = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+                .await
+                .expect("first request timeout")
+                .expect("first request");
+            let second = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+                .await
+                .expect("second request timeout")
+                .expect("second request");
+
+            second
+                .respond_ok(serde_json::json!({"handled":"second"}))
+                .await
+                .expect("respond second");
+
+            (first, server_read, client)
+        });
+        drop(runtime);
+
+        drop(request);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build read runtime");
+
+        runtime.block_on(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+            let response_line = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+                .await
+                .expect("response timeout")
+                .expect("read response")
+                .expect("response line");
+            let response: Value = serde_json::from_str(&response_line).expect("parse batch");
+            let items = response.as_array().expect("batch response array");
+            assert_eq!(items.len(), 2);
+            assert!(
+                items.iter().any(|item| {
+                    item["id"] == 1
+                        && item["error"]["code"] == -32603
+                        && item["error"]["message"]
+                            == "request handler dropped request without responding"
+                }),
+                "{items:?}"
+            );
+            assert!(
+                items
+                    .iter()
+                    .any(|item| item["id"] == 2 && item["result"]["handled"] == "second"),
+                "{items:?}"
+            );
+
+            drop(client);
+        });
     }
 
     #[tokio::test]

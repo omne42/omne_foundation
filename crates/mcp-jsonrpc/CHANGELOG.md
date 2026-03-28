@@ -25,3 +25,4 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Aggregate top-level JSON-RPC batch responses into a single array so server->client requests received in a batch no longer emit protocol-invalid standalone response objects.
 - Dropping an unresponded `IncomingRequest` now emits a JSON-RPC internal error for both direct and batch requests, so the peer never hangs waiting for a missing response and batch flushes still complete.
 - Added regression coverage for the `streamable_http` path where an already-open SSE stream must reconnect after a POST response rolls the session id and continue delivering server notifications on the new session.
+- `mcp-jsonrpc` now finishes batch-response flushes even when the last dropped request is released from a sync/no-runtime context, so sibling responses do not hang behind a leaked final flush.

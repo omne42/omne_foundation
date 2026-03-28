@@ -733,6 +733,60 @@ async fn load_denies_streamable_http_with_invalid_env_http_header_name() {
 }
 
 #[tokio::test]
+async fn load_denies_streamable_http_with_reserved_http_header_name() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{
+  "version": 1,
+  "servers": {
+    "litellm": {
+      "transport": "streamable_http",
+      "url": "https://example.com/mcp",
+      "http_headers": { "MCP-Protocol-Version": "override" }
+    }
+  }
+}"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("http_headers key is reserved by transport"),
+        "err={err:#}"
+    );
+}
+
+#[tokio::test]
+async fn load_denies_streamable_http_with_reserved_env_http_header_name() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{
+  "version": 1,
+  "servers": {
+    "litellm": {
+      "transport": "streamable_http",
+      "url": "https://example.com/mcp",
+      "env_http_headers": { "MCP-Protocol-Version": "TOKEN" }
+    }
+  }
+}"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("env_http_headers key is reserved by transport"),
+        "err={err:#}"
+    );
+}
+
+#[tokio::test]
 async fn load_denies_unix_transport_with_stdout_log_in_v1_format() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(

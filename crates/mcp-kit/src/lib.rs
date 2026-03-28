@@ -32,6 +32,10 @@
 //! operation is already in flight. Prefer plain `Manager` when you need fine-grained lifecycle
 //! control or handler callbacks that may need to call back into connection setup/teardown paths.
 //!
+//! When you use config-driven connection helpers (`Manager::request`, `get_or_connect`, etc.),
+//! relative `cwd` values are resolved against the loaded `mcp.json` thread root when available,
+//! not against the ambient process directory.
+//!
 //! ## Non-goals
 //!
 //! - Implementing an MCP server

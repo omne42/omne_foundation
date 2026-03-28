@@ -1,4 +1,8 @@
 use super::*;
+#[cfg(unix)]
+use std::ffi::OsString;
+#[cfg(unix)]
+use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::Path;
 #[cfg(not(windows))]
 use std::path::PathBuf;
@@ -619,6 +623,25 @@ fn expand_placeholders_rejects_invalid_name() {
     let cwd = Path::new("/tmp/plugin");
     let err = expand_placeholders_trusted("${BAD-NAME}", cwd).unwrap_err();
     assert!(err.to_string().contains("invalid placeholder name"));
+}
+
+#[cfg(unix)]
+#[test]
+fn expand_placeholders_trusted_os_preserves_non_utf8_cwd() {
+    let cwd = PathBuf::from(OsString::from_vec(b"/tmp/plugin-\xff".to_vec()));
+    let expanded =
+        super::placeholders::expand_placeholders_trusted_os("${MCP_ROOT}/server", &cwd).unwrap();
+
+    assert_eq!(expanded.as_os_str().as_bytes(), b"/tmp/plugin-\xff/server");
+}
+
+#[cfg(unix)]
+#[test]
+fn expand_placeholders_trusted_text_rejects_non_utf8_cwd() {
+    let cwd = PathBuf::from(OsString::from_vec(b"/tmp/plugin-\xff".to_vec()));
+    let err = expand_placeholders_trusted("${CLAUDE_PLUGIN_ROOT}/server", &cwd).unwrap_err();
+
+    assert!(err.to_string().contains("requires a UTF-8 cwd"), "{err:#}");
 }
 
 #[tokio::test]

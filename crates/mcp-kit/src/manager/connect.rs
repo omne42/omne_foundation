@@ -8,7 +8,9 @@ use tokio::process::{Child, Command};
 
 use crate::{ServerConfig, Transport, TrustMode, UntrustedStreamableHttpPolicy};
 
-use super::placeholders::{apply_stdio_baseline_env, expand_placeholders_trusted};
+use super::placeholders::{
+    apply_stdio_baseline_env, expand_placeholders_trusted, expand_placeholders_trusted_os,
+};
 use super::streamable_http_validation::{
     validate_streamable_http_config, validate_streamable_http_url_untrusted_dns,
 };
@@ -64,10 +66,9 @@ async fn connect_stdio_transport(
         .iter()
         .enumerate()
         .map(|(idx, arg)| {
-            let expanded = expand_placeholders_trusted(arg, &cwd).with_context(|| {
+            expand_placeholders_trusted_os(arg, &cwd).with_context(|| {
                 format!("expand argv placeholder (server={server_name} argv[{idx}] redacted)")
-            })?;
-            Ok::<_, anyhow::Error>(std::ffi::OsString::from(expanded))
+            })
         })
         .collect::<anyhow::Result<Vec<std::ffi::OsString>>>()?;
 
@@ -82,7 +83,7 @@ async fn connect_stdio_transport(
         apply_stdio_baseline_env(&mut cmd);
     }
     for (key, value) in server_cfg.env().iter() {
-        let value = expand_placeholders_trusted(value, &cwd)
+        let value = expand_placeholders_trusted_os(value, &cwd)
             .with_context(|| format!("expand env placeholder: {key}"))?;
         cmd.env(key, value);
     }

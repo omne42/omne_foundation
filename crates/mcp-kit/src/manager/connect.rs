@@ -79,7 +79,9 @@ async fn connect_stdio_transport(
     cmd.current_dir(&cwd);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::inherit());
+    // Library callers own stderr routing. Default to /dev/null instead of leaking server logs or
+    // secrets into the host process boundary.
+    cmd.stderr(Stdio::null());
     if !server_cfg.inherit_env() {
         cmd.env_clear();
         apply_stdio_baseline_env(&mut cmd);

@@ -260,6 +260,59 @@ fn try_from_config_rejects_invalid_client_config() {
 }
 
 #[test]
+fn try_from_config_rejects_invalid_server_config() {
+    let mut server = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+    server
+        .env_http_headers_mut()
+        .unwrap()
+        .insert("MCP-Protocol-Version".to_string(), "MCP_TOKEN".to_string());
+
+    let mut servers = std::collections::BTreeMap::new();
+    servers.insert(ServerName::parse("srv").unwrap(), server);
+    let config = Config::new(crate::ClientConfig::default(), servers);
+
+    let err =
+        match Manager::try_from_config(&config, "test-client", "0.0.0", Duration::from_secs(1)) {
+            Ok(_) => panic!("expected error"),
+            Err(err) => err,
+        };
+    let msg = err.to_string();
+    assert!(msg.contains("invalid mcp server config"), "err={err:#}");
+    assert!(msg.contains("reserved by transport"), "err={err:#}");
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+#[tokio::test]
+async fn connect_transport_stdio_null_routes_stderr_to_devnull() {
+    let server_cfg = ServerConfig::stdio(vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        "exec cat".to_string(),
+    ])
+    .unwrap();
+    let ctx = ConnectContext {
+        trust_mode: TrustMode::Trusted,
+        untrusted_streamable_http_policy: UntrustedStreamableHttpPolicy::default(),
+        allow_stdout_log_outside_root: false,
+        protocol_version: MCP_PROTOCOL_VERSION.to_string(),
+        request_timeout: Duration::from_secs(1),
+    };
+
+    let (client, child) = connect_transport(&ctx, "srv", &server_cfg, Path::new("/"))
+        .await
+        .expect("stdio transport should spawn");
+    let mut child = child.expect("stdio transport should expose child");
+    let pid = child.id().expect("child pid");
+
+    let stderr_path = std::fs::read_link(format!("/proc/{pid}/fd/2")).expect("read stderr fd");
+    assert_eq!(stderr_path, PathBuf::from("/dev/null"));
+
+    drop(client);
+    child.kill().await.expect("kill child");
+    let _ = child.wait().await;
+}
+
+#[test]
 fn server_handler_timeout_counts_take_resets_counters() {
     let counts = ServerHandlerTimeoutCounts::default();
     let a = ServerName::parse("a").unwrap();

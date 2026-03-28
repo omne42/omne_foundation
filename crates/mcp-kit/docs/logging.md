@@ -14,6 +14,11 @@
 
 因此建议 MCP server 把日志写到 stderr，避免污染 stdout 的 JSON 流。
 
+但要注意 `mcp-kit` 自己的 `transport=stdio` 默认不会继承或落盘 child 的 stderr：
+
+- 库层会把 stderr 收口到空设备，避免把日志/secret 直接泄露到宿主进程边界
+- 如果你需要直接观测 stderr，请在外层自己 spawn 子进程并接管 stderr，再用 `Manager::connect_io(...)` 接入
+
 ## stdout_log：抓取 server stdout（并旋转落盘）
 
 `mcp-kit` 的配置字段：`servers.<name>.stdout_log`

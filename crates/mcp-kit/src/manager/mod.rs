@@ -518,10 +518,7 @@ impl Manager {
         client_version: impl Into<String>,
         timeout: Duration,
     ) -> anyhow::Result<Self> {
-        config.client().validate().map_err(|err| {
-            let msg = format!("invalid mcp client config: {err}");
-            err.context(msg)
-        })?;
+        config.validate()?;
         Ok(Self::from_config(
             config,
             client_name,

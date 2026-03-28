@@ -1006,8 +1006,13 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 行为要点：
 
 - `cwd`：child 的工作目录是 `--root`（CLI）或你传入 `Manager::connect(..., cwd)` 的目录
-- `stderr`：默认继承到父进程（便于直接看到报错）
+- `stderr`：默认收口到空设备；`mcp-kit` 不会把 child 的 stderr 直接继承到宿主进程
 - `kill_on_drop = true`：连接被 drop 时，child 会被结束
+
+如果你需要直接观察 server 的 stderr：
+
+- 让外层 supervisor/调用方自己 spawn 子进程并接管 stderr
+- 然后改用 `Manager::connect_io(...)` 把已经建立好的 stdio 管道接进来
 
 安全：
 
@@ -1219,6 +1224,11 @@ data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}
 - **stderr**：通常承载日志（人类可读的调试输出）
 
 因此建议 MCP server 把日志写到 stderr，避免污染 stdout 的 JSON 流。
+
+但要注意 `mcp-kit` 自己的 `transport=stdio` 默认不会继承或落盘 child 的 stderr：
+
+- 库层会把 stderr 收口到空设备，避免把日志/secret 直接泄露到宿主进程边界
+- 如果你需要直接观测 stderr，请在外层自己 spawn 子进程并接管 stderr，再用 `Manager::connect_io(...)` 接入
 
 ## stdout_log：抓取 server stdout（并旋转落盘）
 

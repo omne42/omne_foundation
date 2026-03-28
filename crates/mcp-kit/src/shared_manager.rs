@@ -159,7 +159,7 @@ impl SharedManager {
         server_name: &str,
         cwd: &Path,
     ) -> anyhow::Result<()> {
-        let cwd = crate::manager::resolve_connection_cwd(cwd)?;
+        let cwd = crate::manager::resolve_connection_cwd_with_base(config.thread_root(), cwd)?;
         let _gate = self.lock_connect_gate(operation, server_name).await?;
 
         if self
@@ -251,7 +251,7 @@ impl SharedManager {
         params: Option<Value>,
         cwd: &Path,
     ) -> anyhow::Result<Value> {
-        let cwd = crate::manager::resolve_connection_cwd(cwd)?;
+        let cwd = crate::manager::resolve_connection_cwd_with_base(config.thread_root(), cwd)?;
         if let Some(prepared) = self
             .try_prepare_connected_client("request", server_name, Some(&cwd))
             .await?
@@ -376,7 +376,7 @@ impl SharedManager {
         params: Option<Value>,
         cwd: &Path,
     ) -> anyhow::Result<()> {
-        let cwd = crate::manager::resolve_connection_cwd(cwd)?;
+        let cwd = crate::manager::resolve_connection_cwd_with_base(config.thread_root(), cwd)?;
         if let Some(prepared) = self
             .try_prepare_connected_client("notify", server_name, Some(&cwd))
             .await?
@@ -533,6 +533,10 @@ mod tests {
     #[cfg(unix)]
     use std::collections::BTreeMap;
     use std::path::Path;
+    #[cfg(not(windows))]
+    use std::path::PathBuf;
+    #[cfg(not(windows))]
+    use std::sync::OnceLock;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
@@ -565,6 +569,36 @@ mod tests {
         const METHOD: &'static str = "nested";
         type Params = NestedParams;
         type Result = NestedResult;
+    }
+
+    #[cfg(not(windows))]
+    async fn cwd_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        static GUARD: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        GUARD
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
+
+    #[cfg(not(windows))]
+    struct CurrentDirRestoreGuard {
+        original_cwd: PathBuf,
+    }
+
+    #[cfg(not(windows))]
+    impl CurrentDirRestoreGuard {
+        fn capture() -> Self {
+            Self {
+                original_cwd: std::env::current_dir().expect("original cwd"),
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    impl Drop for CurrentDirRestoreGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original_cwd);
+        }
     }
 
     #[tokio::test]
@@ -2427,6 +2461,99 @@ mod tests {
         server_task.await.unwrap();
 
         let _ = std::fs::remove_file(socket_path);
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn shared_manager_request_resolves_relative_cwd_from_config_thread_root() {
+        let _guard = cwd_test_guard().await;
+        let _cwd_restore = CurrentDirRestoreGuard::capture();
+        let tempdir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(outside.path()).expect("enter outside dir");
+
+        let config_path = tempdir.path().join("mcp.json");
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let server_task = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            assert_eq!(init_value["method"], "initialize");
+            let init_id = init_value["id"].clone();
+
+            let init_response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": init_id,
+                "result": { "serverInfo": { "name": "demo" } },
+            });
+            let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+            init_response_line.push('\n');
+            server_write
+                .write_all(init_response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let initialized_line = lines.next_line().await.unwrap().unwrap();
+            let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+            assert_eq!(initialized_value["method"], "notifications/initialized");
+
+            let request_line = lines.next_line().await.unwrap().unwrap();
+            let request_value: Value = serde_json::from_str(&request_line).unwrap();
+            assert_eq!(request_value["method"], "ping");
+            let request_id = request_value["id"].clone();
+
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": { "ok": true },
+            });
+            let mut response_line = serde_json::to_string(&response).unwrap();
+            response_line.push('\n');
+            server_write
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+        });
+
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            ServerName::parse("srv").unwrap(),
+            ServerConfig::unix(PathBuf::from("/tmp/mock.sock")).unwrap(),
+        );
+        let config = Config::new(ClientConfig::default(), servers).with_path(config_path);
+
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted);
+        manager
+            .connect_io("srv", client_read, client_write)
+            .await
+            .expect("connect in-memory client");
+        manager
+            .record_connection_cwd_with_base(
+                "srv",
+                Path::new("workspace/demo"),
+                config.thread_root(),
+            )
+            .expect("record cwd identity");
+
+        let shared = manager.into_shared();
+        let result = shared
+            .request(
+                &config,
+                "srv",
+                "ping",
+                None::<Value>,
+                Path::new("workspace/./demo"),
+            )
+            .await
+            .expect("same thread-root-relative cwd should reuse connection");
+        assert_eq!(result, serde_json::json!({ "ok": true }));
+        server_task.await.unwrap();
     }
 
     #[cfg(unix)]

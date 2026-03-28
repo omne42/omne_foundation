@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：`SharedManager` 的 config 驱动 `request` / `notify` / `ensure_connected` 现在和 `Manager` 一样，会把相对 `cwd` 锚定到 `config.thread_root()`；避免同一条基于 `mcp.json` 的连接在 shared 入口下退回 ambient `current_dir()` 语义，并补充 thread-root 相对 `cwd` 复用回归测试。
 - `mcp-kit`：config 驱动的连接路径现在会把相对 `cwd` 锚定到 `mcp.json` 所在的 thread root，并把 `cwd` 复用判断收口到稳定目录身份；同一物理目录的 `.`/`..` 等不同词法写法不再误判成不同连接上下文。
 - `mcp-kit`：`streamable_http` 现在会在配置校验阶段拒绝 `http_headers` / `env_http_headers` 里试图声明 transport 保留头（例如 `MCP-Protocol-Version`），避免用户配置重新覆盖握手边界。
 - `mcp-kit`：`SharedManager::disconnect_and_wait` 现在会把同 server 的 lifecycle gate 一直持有到 wait 结束，避免旧连接 teardown 仍在进行时，同名 server 的冷启动重连先一步穿透进来。

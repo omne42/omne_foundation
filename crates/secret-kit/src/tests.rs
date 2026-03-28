@@ -3020,19 +3020,23 @@ async fn missing_env_secret_reports_lookup_error() {
 async fn secret_command_runner_returns_after_successful_leader_exit() -> Result<()> {
     let dir = tempfile::tempdir().expect("tempdir");
     let shell_pid_file = dir.path().join("secret-command-shell.pid");
+    let shell_pgid_file = dir.path().join("secret-command-shell.pgid");
     let pid_file = dir.path().join("secret-command-background.pid");
     let script = format!(
         "echo $$ > '{shell}'; \
+         awk '{{print $5}}' /proc/$$/stat > '{shell_pgid}'; \
          sleep 30 </dev/null >/dev/null 2>&1 & \
          bg=$!; \
          echo $bg > '{background}'; \
          while [ -r /proc/$bg/stat ]; do \
            bg_pgid=$(awk '{{print $5}}' /proc/$bg/stat 2>/dev/null || true); \
-           [ \"$bg_pgid\" = \"$$\" ] && break; \
+           shell_pgid=$(cat '{shell_pgid}' 2>/dev/null || true); \
+           [ -n \"$shell_pgid\" ] && [ \"$bg_pgid\" = \"$shell_pgid\" ] && break; \
            sleep 0.01; \
          done; \
          printf ok",
         shell = shell_pid_file.display(),
+        shell_pgid = shell_pgid_file.display(),
         background = pid_file.display()
     );
     let cmd = SecretCommand {
@@ -3102,19 +3106,23 @@ async fn secret_command_runner_cancellation_kills_child_process_group() -> Resul
 async fn secret_command_runner_cancellation_kills_orphaned_process_group() -> Result<()> {
     let dir = tempfile::tempdir().expect("tempdir");
     let shell_pid_file = dir.path().join("secret-command-shell.pid");
+    let shell_pgid_file = dir.path().join("secret-command-shell.pgid");
     let bg_pid_file = dir.path().join("secret-command-background.pid");
     let script = format!(
         "echo $$ > '{shell}'; \
+         awk '{{print $5}}' /proc/$$/stat > '{shell_pgid}'; \
          sleep 30 </dev/null >/dev/null 2>&1 & \
          bg=$!; \
          echo $bg > '{background}'; \
          while [ -r /proc/$bg/stat ]; do \
            bg_pgid=$(awk '{{print $5}}' /proc/$bg/stat 2>/dev/null || true); \
-           [ \"$bg_pgid\" = \"$$\" ] && break; \
+           shell_pgid=$(cat '{shell_pgid}' 2>/dev/null || true); \
+           [ -n \"$shell_pgid\" ] && [ \"$bg_pgid\" = \"$shell_pgid\" ] && break; \
            sleep 0.01; \
          done; \
          exit 0",
         shell = shell_pid_file.display(),
+        shell_pgid = shell_pgid_file.display(),
         background = bg_pid_file.display()
     );
     let cmd = SecretCommand {

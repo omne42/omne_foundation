@@ -1865,6 +1865,7 @@ name = "text-assets-kit"
 version = "0.1.0"
 dependencies = [
  "omne-fs-primitives",
+ "rustix",
  "tempfile",
 ]
 

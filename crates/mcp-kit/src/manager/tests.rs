@@ -7,9 +7,17 @@ use std::path::Path;
 #[cfg(not(windows))]
 use std::path::PathBuf;
 #[cfg(not(windows))]
+use std::process::Command;
+#[cfg(not(windows))]
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+#[cfg(not(windows))]
+const CWD_UNAVAILABLE_HELPER_ENV: &str = "MCP_KIT_CWD_UNAVAILABLE_HELPER";
+#[cfg(not(windows))]
+const CWD_UNAVAILABLE_TEST_FILTER: &str =
+    "resolve_connection_cwd_errors_when_current_dir_is_unavailable";
 
 fn seed_manager_side_state(manager: &mut Manager, server_name: &str) {
     manager
@@ -23,6 +31,25 @@ fn seed_manager_side_state(manager: &mut Manager, server_name: &str) {
         .server_handler_timeout_counts
         .counter_for(&ServerName::parse(server_name).unwrap())
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(not(windows))]
+fn maybe_run_cwd_unavailable_helper() -> bool {
+    if std::env::var_os(CWD_UNAVAILABLE_HELPER_ENV).is_none() {
+        return false;
+    }
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    std::env::set_current_dir(tempdir.path()).expect("enter tempdir");
+    std::fs::remove_dir(tempdir.path()).expect("remove tempdir");
+
+    let err = resolve_connection_cwd(Path::new("relative"))
+        .expect_err("relative cwd should fail without current dir");
+    assert!(
+        err.to_string()
+            .contains("determine current working directory for relative MCP cwd")
+    );
+    true
 }
 
 #[cfg(not(windows))]
@@ -201,18 +228,18 @@ fn stdout_log_path_within_root_accepts_equivalent_root_with_parent_segments() {
 #[cfg(not(windows))]
 #[test]
 fn resolve_connection_cwd_errors_when_current_dir_is_unavailable() {
-    let _guard = cwd_test_guard();
-    let _cwd_restore = CurrentDirRestoreGuard::capture();
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    std::env::set_current_dir(tempdir.path()).expect("enter tempdir");
-    std::fs::remove_dir(tempdir.path()).expect("remove tempdir");
+    if maybe_run_cwd_unavailable_helper() {
+        return;
+    }
 
-    let err = resolve_connection_cwd(Path::new("relative"))
-        .expect_err("relative cwd should fail without current dir");
-    assert!(
-        err.to_string()
-            .contains("determine current working directory for relative MCP cwd")
-    );
+    let current_exe = std::env::current_exe().expect("current test binary");
+    let status = Command::new(current_exe)
+        .arg(CWD_UNAVAILABLE_TEST_FILTER)
+        .env(CWD_UNAVAILABLE_HELPER_ENV, "1")
+        .env("RUST_TEST_THREADS", "1")
+        .status()
+        .expect("spawn current_dir helper process");
+    assert!(status.success(), "helper process should exit cleanly");
 }
 
 #[test]

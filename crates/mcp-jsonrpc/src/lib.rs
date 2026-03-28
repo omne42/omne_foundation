@@ -1697,6 +1697,21 @@ impl Drop for IncomingRequest {
                     drop(runtime.spawn(async move {
                         drop(handle.write_json_line(&response).await);
                     }));
+                } else {
+                    let handle = handle.clone();
+                    let _ = std::thread::Builder::new()
+                        .name("mcp-jsonrpc-direct-drop".to_string())
+                        .spawn(move || {
+                            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                                .enable_io()
+                                .build()
+                            else {
+                                return;
+                            };
+                            runtime.block_on(async move {
+                                drop(handle.write_json_line(&response).await);
+                            });
+                        });
                 }
             }
             RequestResponseTarget::Batch(batch) => {
@@ -2765,6 +2780,65 @@ mod incoming_value_tests {
                     .iter()
                     .any(|item| item["id"] == 2 && item["result"]["handled"] == "second"),
                 "{items:?}"
+            );
+
+            drop(client);
+        });
+    }
+
+    #[test]
+    fn dropped_direct_request_without_runtime_still_emits_internal_error() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build setup runtime");
+
+        let (request, server_read, client) = runtime.block_on(async {
+            let (client_stream, server_stream) = tokio::io::duplex(2048);
+            let (client_read, client_write) = tokio::io::split(client_stream);
+            let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+            let mut client = Client::connect_io(client_read, client_write)
+                .await
+                .expect("connect client");
+            let mut requests = client.take_requests().expect("request receiver");
+
+            server_write
+                .write_all(br#"{"jsonrpc":"2.0","id":1,"method":"first"}"#)
+                .await
+                .expect("write request");
+            server_write.write_all(b"\n").await.expect("write newline");
+            server_write.flush().await.expect("flush request");
+
+            let request = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+                .await
+                .expect("request timeout")
+                .expect("request");
+
+            (request, server_read, client)
+        });
+        drop(runtime);
+
+        drop(request);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build read runtime");
+
+        runtime.block_on(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+            let response_line = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+                .await
+                .expect("response timeout")
+                .expect("read response")
+                .expect("response line");
+            let response: Value = serde_json::from_str(&response_line).expect("parse response");
+            assert_eq!(response["id"], 1);
+            assert_eq!(response["error"]["code"], -32603);
+            assert_eq!(
+                response["error"]["message"],
+                "request handler dropped request without responding"
             );
 
             drop(client);

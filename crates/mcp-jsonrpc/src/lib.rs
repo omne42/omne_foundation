@@ -20,10 +20,12 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{OsStr, OsString};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, mpsc as std_mpsc};
 use std::time::Duration;
 
 use error_kit::{ErrorCategory, ErrorCode, ErrorRecord, ErrorRetryAdvice};
@@ -46,6 +48,7 @@ const REUSABLE_LINE_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 const READ_LINE_INITIAL_CAP_BYTES: usize = 4 * 1024;
 const TOKIO_TIME_DRIVER_ERROR: &str =
     "tokio runtime time driver is not enabled; build the runtime with enable_time()";
+type DetachedTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 pub(crate) fn ensure_tokio_time_driver(operation: &'static str) -> Result<(), Error> {
     std::panic::catch_unwind(|| {
@@ -717,6 +720,50 @@ struct BatchResponseWriter {
     state: Arc<BatchResponseState>,
 }
 
+struct DetachedRuntime {
+    tx: std_mpsc::Sender<DetachedTask>,
+}
+
+impl DetachedRuntime {
+    fn spawn(&self, task: DetachedTask) {
+        let _ = self.tx.send(task);
+    }
+}
+
+fn spawn_detached(task_name: &str, task: impl Future<Output = ()> + Send + 'static) {
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        drop(runtime.spawn(task));
+        return;
+    }
+
+    detached_runtime(task_name).spawn(Box::pin(task));
+}
+
+fn detached_runtime(task_name: &str) -> &'static DetachedRuntime {
+    static DETACHED_RUNTIME: OnceLock<DetachedRuntime> = OnceLock::new();
+    DETACHED_RUNTIME.get_or_init(|| {
+        let (tx, rx) = std_mpsc::channel::<DetachedTask>();
+        std::thread::Builder::new()
+            .name("mcp-jsonrpc-detached".to_string())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(_) => return,
+                };
+                while let Ok(task) = rx.recv() {
+                    runtime.block_on(task);
+                }
+            })
+            .unwrap_or_else(|err| {
+                panic!("spawn detached mcp-jsonrpc runtime ({task_name}): {err}")
+            });
+        DetachedRuntime { tx }
+    })
+}
+
 impl std::fmt::Debug for BatchResponseWriter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BatchResponseWriter")
@@ -776,17 +823,9 @@ impl BatchResponseWriter {
 
     fn flush_if_ready_without_runtime(&self) {
         let batch = self.clone();
-        let _ = std::thread::Builder::new()
-            .name("mcp-jsonrpc-batch-flush".to_string())
-            .spawn(move || {
-                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                    .enable_io()
-                    .build()
-                else {
-                    return;
-                };
-                let _ = runtime.block_on(async move { batch.flush_if_ready().await });
-            });
+        spawn_detached("batch flush without runtime", async move {
+            let _ = batch.flush_if_ready().await;
+        });
     }
 
     async fn finish(&self) -> Result<(), Error> {
@@ -1692,34 +1731,17 @@ impl Drop for IncomingRequest {
 
         match &self.responder.target {
             RequestResponseTarget::Direct(handle) => {
-                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                    let handle = handle.clone();
-                    drop(runtime.spawn(async move {
-                        drop(handle.write_json_line(&response).await);
-                    }));
-                } else {
-                    let handle = handle.clone();
-                    let _ = std::thread::Builder::new()
-                        .name("mcp-jsonrpc-direct-drop".to_string())
-                        .spawn(move || {
-                            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                                .enable_io()
-                                .build()
-                            else {
-                                return;
-                            };
-                            runtime.block_on(async move {
-                                drop(handle.write_json_line(&response).await);
-                            });
-                        });
-                }
+                let handle = handle.clone();
+                spawn_detached("direct dropped request response", async move {
+                    drop(handle.write_json_line(&response).await);
+                });
             }
             RequestResponseTarget::Batch(batch) => {
-                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                if tokio::runtime::Handle::try_current().is_ok() {
                     let batch = batch.clone();
-                    drop(runtime.spawn(async move {
+                    spawn_detached("batch dropped request response", async move {
                         drop(batch.push_reserved_response(response).await);
-                    }));
+                    });
                 } else {
                     batch.push_reserved_response_without_runtime(response);
                 }
@@ -1788,10 +1810,15 @@ where
                             if let Some(diagnostics) = &diagnostics_state {
                                 diagnostics.record_invalid_json_line(&line);
                             }
-                            continue;
+                            close_invalid_message(
+                                &responder,
+                                "peer sent invalid JSON line".to_string(),
+                            )
+                            .await;
+                            return;
                         }
                     };
-                    handle_incoming_value(
+                    if let Err(reason) = handle_incoming_value(
                         value,
                         &pending,
                         &cancelled_request_ids,
@@ -1800,7 +1827,11 @@ where
                         &request_tx,
                         &responder,
                     )
-                    .await;
+                    .await
+                    {
+                        close_invalid_message(&responder, reason).await;
+                        return;
+                    }
                 }
                 Ok(false) => {
                     responder
@@ -1818,6 +1849,15 @@ where
     })
 }
 
+async fn close_invalid_message(responder: &ClientHandle, reason: String) {
+    responder
+        .close_with_error(
+            reason.clone(),
+            Error::protocol(ProtocolErrorKind::InvalidMessage, reason),
+        )
+        .await;
+}
+
 async fn handle_incoming_value(
     value: Value,
     pending: &PendingRequests,
@@ -1826,7 +1866,7 @@ async fn handle_incoming_value(
     notify_tx: &mpsc::Sender<Notification>,
     request_tx: &mpsc::Sender<IncomingRequest>,
     responder: &ClientHandle,
-) {
+) -> Result<(), String> {
     const INVALID_REQUEST: i64 = -32600;
     let ctx = IncomingValueContext {
         pending,
@@ -1844,24 +1884,35 @@ async fn handle_incoming_value(
                     .responder
                     .respond_error_raw_id(Value::Null, INVALID_REQUEST, "empty batch", None)
                     .await;
-                return;
+                return Err("peer sent empty JSON-RPC batch".to_string());
             }
 
             let batch = BatchResponseWriter::new(ctx.responder.clone());
             let mut stack = Vec::with_capacity(items.len());
             stack.extend(items.into_iter().rev().map(|item| (item, false)));
             while let Some((item, allow_batch_expansion)) = stack.pop() {
-                handle_incoming_item(item, allow_batch_expansion, &ctx, Some(&batch), &mut stack)
-                    .await;
+                if let Err(reason) = handle_incoming_item(
+                    item,
+                    allow_batch_expansion,
+                    &ctx,
+                    Some(&batch),
+                    &mut stack,
+                )
+                .await
+                {
+                    let _ = batch.finish().await;
+                    return Err(reason);
+                }
                 if ctx.responder.is_closed() {
-                    return;
+                    return Ok(());
                 }
             }
             let _ = batch.finish().await;
+            Ok(())
         }
         other => {
             let mut stack = Vec::new();
-            handle_incoming_item(other, true, &ctx, None, &mut stack).await;
+            handle_incoming_item(other, true, &ctx, None, &mut stack).await
         }
     }
 }
@@ -1881,7 +1932,7 @@ async fn handle_incoming_item(
     ctx: &IncomingValueContext<'_>,
     batch: Option<&BatchResponseWriter>,
     stack: &mut Vec<(Value, bool)>,
-) {
+) -> Result<(), String> {
     const INVALID_REQUEST: i64 = -32600;
 
     match value {
@@ -1896,7 +1947,7 @@ async fn handle_incoming_item(
                     None,
                 )
                 .await;
-                return;
+                return Err("peer sent nested JSON-RPC batch".to_string());
             }
 
             if items.is_empty() {
@@ -1909,11 +1960,12 @@ async fn handle_incoming_item(
                     None,
                 )
                 .await;
-                return;
+                return Err("peer sent empty nested JSON-RPC batch".to_string());
             }
 
             stack.reserve(items.len());
             stack.extend(items.into_iter().rev().map(|item| (item, false)));
+            Ok(())
         }
         Value::Object(mut map) => {
             let jsonrpc_valid = map.get("jsonrpc").and_then(Value::as_str) == Some("2.0");
@@ -1934,7 +1986,10 @@ async fn handle_incoming_item(
                             )
                             .await;
                         }
-                        return;
+                        return Err(
+                            "peer sent request/notification with invalid jsonrpc version"
+                                .to_string(),
+                        );
                     }
 
                     let params = map.remove("params");
@@ -1949,7 +2004,7 @@ async fn handle_incoming_item(
                                 None,
                             )
                             .await;
-                            return;
+                            return Err("peer sent request with invalid id".to_string());
                         };
 
                         let request = IncomingRequest {
@@ -1991,7 +2046,7 @@ async fn handle_incoming_item(
                                 );
                             }
                         }
-                        return;
+                        return Ok(());
                     }
 
                     match ctx.notify_tx.try_send(Notification { method, params }) {
@@ -2007,7 +2062,7 @@ async fn handle_incoming_item(
                                 .fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    return;
+                    return Ok(());
                 }
                 Some(_) => {
                     if let Some(id_value) = map.remove("id") {
@@ -2022,16 +2077,13 @@ async fn handle_incoming_item(
                         )
                         .await;
                     }
-                    return;
+                    return Err("peer sent request with invalid method".to_string());
                 }
                 None => {}
             }
 
-            if let Err(err) =
-                handle_response(ctx.pending, ctx.cancelled_request_ids, Value::Object(map))
-            {
-                ctx.responder.close_with_error(err.to_string(), err).await;
-            }
+            handle_response(ctx.pending, ctx.cancelled_request_ids, Value::Object(map))
+                .map_err(|err| err.to_string())
         }
         _ => {
             let _ = send_batch_or_direct_error_raw_id(
@@ -2043,6 +2095,7 @@ async fn handle_incoming_item(
                 None,
             )
             .await;
+            Err("peer sent non-object JSON-RPC message".to_string())
         }
     }
 }
@@ -2902,6 +2955,8 @@ mod incoming_value_tests {
 #[cfg(test)]
 mod stats_tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
     use tokio::io::AsyncWriteExt;
 
     #[test]
@@ -2914,19 +2969,33 @@ mod stats_tests {
     }
 
     #[tokio::test]
-    async fn stats_tracks_invalid_json_lines() {
+    async fn invalid_json_line_closes_client_and_drains_pending_requests() {
         let (client_stream, server_stream) = tokio::io::duplex(1024);
         let (client_read, client_write) = tokio::io::split(client_stream);
-        let (_server_read, mut server_write) = tokio::io::split(server_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
 
         let client = Client::connect_io(client_read, client_write).await.unwrap();
+        let handle = client.handle();
+        let request_task = tokio::spawn({
+            let client = handle.clone();
+            async move { client.request("demo/ping", serde_json::json!({})).await }
+        });
+
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+        let request_line = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+            .await
+            .expect("request timeout")
+            .expect("read request")
+            .expect("request line");
+        let request: Value = serde_json::from_str(&request_line).expect("parse request");
+        assert_eq!(request["method"], "demo/ping");
 
         server_write.write_all(b"not-json\n").await.unwrap();
         server_write.flush().await.unwrap();
 
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                if client.stats().invalid_json_lines >= 1 {
+                if client.stats().invalid_json_lines >= 1 && client.is_closed() {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -2934,40 +3003,99 @@ mod stats_tests {
         })
         .await
         .unwrap();
+
+        let err = request_task
+            .await
+            .unwrap()
+            .expect_err("request should fail closed");
+        assert!(matches!(err, Error::Protocol(_)));
+        assert!(
+            handle
+                .close_reason()
+                .as_deref()
+                .is_some_and(|reason: &str| reason.contains("invalid JSON line"))
+        );
     }
 
     #[tokio::test]
-    async fn invalid_json_samples_keep_latest_lines_when_buffer_is_full() {
+    async fn invalid_jsonrpc_frame_closes_client_after_invalid_request_response() {
         let (client_stream, server_stream) = tokio::io::duplex(1024);
         let (client_read, client_write) = tokio::io::split(client_stream);
-        let (_server_read, mut server_write) = tokio::io::split(server_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
 
-        let mut options = SpawnOptions::default();
-        options.diagnostics.invalid_json_sample_lines = 2;
-        let client = Client::connect_io_with_options(client_read, client_write, options)
-            .await
-            .unwrap();
+        let client = Client::connect_io(client_read, client_write).await.unwrap();
         let handle = client.handle();
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
 
         server_write
-            .write_all(b"invalid-1\ninvalid-2\ninvalid-3\n")
+            .write_all(br#"{"jsonrpc":"1.0","id":7,"method":"demo/callback"}"#)
             .await
             .unwrap();
+        server_write.write_all(b"\n").await.unwrap();
         server_write.flush().await.unwrap();
 
+        let response_line = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+            .await
+            .expect("response timeout")
+            .expect("read response")
+            .expect("response line");
+        let response: Value = serde_json::from_str(&response_line).expect("parse response");
+        assert_eq!(response["id"], 7);
+        assert_eq!(response["error"]["code"], -32600);
+        assert_eq!(response["error"]["message"], "invalid jsonrpc version");
+
         tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if client.stats().invalid_json_lines >= 3 {
-                    break;
-                }
+            while !client.is_closed() {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .unwrap();
 
+        let err = client
+            .request("demo/ping", serde_json::json!({}))
+            .await
+            .expect_err("closed client should reject new requests");
+        assert!(matches!(err, Error::Protocol(_)));
+        assert!(
+            handle
+                .close_reason()
+                .as_deref()
+                .is_some_and(|reason: &str| reason.contains("invalid jsonrpc version"))
+        );
+    }
+
+    #[test]
+    fn spawn_detached_runs_tasks_without_tokio_runtime() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let counter_for_task = Arc::clone(&counter);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        spawn_detached("test detached runtime", async move {
+            counter_for_task.fetch_add(1, AtomicOrdering::Relaxed);
+            done_tx.send(()).unwrap();
+        });
+
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("detached runtime should execute queued task");
+        assert_eq!(counter.load(AtomicOrdering::Relaxed), 1);
+    }
+
+    #[test]
+    fn invalid_json_samples_keep_latest_lines_when_buffer_is_full() {
+        let diagnostics = DiagnosticsState::new(&DiagnosticsOptions {
+            invalid_json_sample_lines: 2,
+            invalid_json_sample_max_bytes: 64,
+        })
+        .expect("diagnostics enabled");
+
+        diagnostics.record_invalid_json_line(b"invalid-1");
+        diagnostics.record_invalid_json_line(b"invalid-2");
+        diagnostics.record_invalid_json_line(b"invalid-3");
+
         assert_eq!(
-            handle.invalid_json_samples(),
+            diagnostics.invalid_json_samples(),
             vec!["invalid-2".to_string(), "invalid-3".to_string()]
         );
     }

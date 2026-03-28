@@ -119,7 +119,7 @@
 //! - **明文导出责任**：`SecretString::expose_secret` 和 `SecretString::into_owned` 会把明文交给调用方；一旦调用方复制或长期持有这些值，zeroize 保障就只剩当前容器，不会替外部副本擦屁股
 //! - **内建 CLI 发现**：内建 provider 默认只信任 ambient allowlist 里的绝对 `PATH` 快照项来找 `vault`/`aws`/`gcloud`/`az`；显式 command env 不能重写这个搜索，生产环境优先提供绝对路径 override
 //! - **命令失败诊断**：CLI provider 失败时只返回退出状态、`stderr` 字节数和粗粒度 `stderr_hint`；不会回显原始 `stderr` 明文，且 `stderr_hint` 仅供排障，不是稳定协议
-//! - **缓存分区**：`CachingSecretResolver` 只会为显式提供非空 `secret_cache_partition()` 的环境复用缓存；相同分区必须表示相同的非秘密解析上下文，空分区会被当成未分区处理
+//! - **缓存分区**：`CachingSecretResolver` 只会为显式提供非空 `secret_cache_partition()` 的环境复用缓存；runtime-sensitive secret 还需要稳定的 `SecretCommandRuntime::secret_cache_partition()`。相同分区必须表示相同的非秘密解析上下文，空分区会被当成未分区处理
 //! - **文件路径**：`secret://file` 只接受绝对路径，避免把当前工作目录偷偷变成配置输入
 //! - **文件轮换**：允许目录内的符号链接轮换（如 Kubernetes projected volumes），拒绝越出父目录树的链接
 //! - **进程清理**：Unix 下会清理整个进程组；Linux 额外校验 leader 身份以降低 PID/PGID 复用误杀风险；Windows 下优先使用 Job Object，失败时退回 runtime 层的 best-effort 树清理
@@ -572,6 +572,16 @@ pub trait SecretEnvironment: Send + Sync {
 /// Async secret resolution for CLI-backed providers enforces command timeouts via `tokio::time`,
 /// so callers need a Tokio runtime with the time driver enabled.
 pub trait SecretCommandRuntime: Send + Sync {
+    /// Stable partition key used by [`CachingSecretResolver`] for runtime-sensitive secrets.
+    ///
+    /// Cacheable resolutions that depend on command discovery, explicit command environment, or
+    /// other runtime policy should include this partition in their cache key. Returning `None`
+    /// disables cache reuse for runtime-sensitive secrets, which is the safe default when no
+    /// stable, non-secret runtime identity exists.
+    fn secret_cache_partition(&self) -> Option<Cow<'_, str>> {
+        None
+    }
+
     /// Targeted command-environment lookup for control-plane settings and runtime overrides.
     ///
     /// This does not automatically populate spawned child processes. Use `command_env_pairs` or
@@ -674,7 +684,11 @@ impl<'a> SecretResolutionContext<'a> {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AmbientSecretCommandRuntime;
 
-impl SecretCommandRuntime for AmbientSecretCommandRuntime {}
+impl SecretCommandRuntime for AmbientSecretCommandRuntime {
+    fn secret_cache_partition(&self) -> Option<Cow<'_, str>> {
+        Some(Cow::Borrowed("ambient"))
+    }
+}
 
 static AMBIENT_SECRET_COMMAND_RUNTIME: AmbientSecretCommandRuntime = AmbientSecretCommandRuntime;
 
@@ -686,9 +700,16 @@ pub trait SecretResolver: Send + Sync {
     ) -> impl Future<Output = Result<SecretString>> + Send;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretCachePartitioning {
+    Environment,
+    EnvironmentAndCommandRuntime,
+}
+
 pub struct PreparedSecretResolution<P> {
     prepared: P,
     cache_scope: Option<String>,
+    cache_partitioning: SecretCachePartitioning,
 }
 
 impl<P> PreparedSecretResolution<P> {
@@ -697,14 +718,25 @@ impl<P> PreparedSecretResolution<P> {
         Self {
             prepared,
             cache_scope: None,
+            cache_partitioning: SecretCachePartitioning::Environment,
         }
     }
 
     #[must_use]
     pub fn cached(prepared: P, cache_scope: impl Into<String>) -> Self {
+        Self::cached_with_partitioning(prepared, cache_scope, SecretCachePartitioning::Environment)
+    }
+
+    #[must_use]
+    pub fn cached_with_partitioning(
+        prepared: P,
+        cache_scope: impl Into<String>,
+        cache_partitioning: SecretCachePartitioning,
+    ) -> Self {
         Self {
             prepared,
             cache_scope: normalize_secret_cache_component(cache_scope.into()),
+            cache_partitioning,
         }
     }
 
@@ -714,9 +746,9 @@ impl<P> PreparedSecretResolution<P> {
     }
 
     fn cache_key(&self, context: SecretResolutionContext<'_>) -> Option<SecretCacheKey> {
-        self.cache_scope
-            .as_ref()
-            .and_then(|scope| SecretCacheKey::for_env(scope.clone(), context.environment()))
+        self.cache_scope.as_ref().and_then(|scope| {
+            SecretCacheKey::for_context(scope.clone(), self.cache_partitioning, context)
+        })
     }
 
     /// Extract the prepared resolution payload.
@@ -743,6 +775,19 @@ pub trait CacheAwareSecretResolver: SecretResolver {
         _context: SecretResolutionContext<'_>,
     ) -> Result<Option<String>> {
         Ok(None)
+    }
+
+    /// Declare how a cache-scope hint should be partitioned.
+    ///
+    /// Returning `None` disables the hint-only fast path and falls back to the prepared-resolution
+    /// path, which is the fail-closed default for resolvers that have not audited whether their
+    /// cacheable secrets also depend on [`SecretCommandRuntime`].
+    fn lookup_secret_cache_partitioning(
+        &self,
+        _spec: &str,
+        _context: SecretResolutionContext<'_>,
+    ) -> Option<SecretCachePartitioning> {
+        None
     }
 
     fn prepare_secret_resolution(
@@ -799,9 +844,11 @@ impl CacheAwareSecretResolver for DefaultSecretResolver {
 ///
 /// The wrapped resolver decides which specs are cacheable by providing a cache scope. When that
 /// scope can be derived from the raw spec, cache hits avoid running the expensive resolution path
-/// entirely. Cache entries are partitioned by [`SecretEnvironment::secret_cache_partition`].
-/// Environments that do not expose a stable partition key are treated as uncached so secrets from
-/// disjoint environments cannot bleed into one another through a shared resolver.
+/// entirely. Cache entries are always partitioned by
+/// [`SecretEnvironment::secret_cache_partition`], and runtime-sensitive secrets can additionally
+/// opt into [`SecretCommandRuntime::secret_cache_partition`]. Missing required partitions disable
+/// cache reuse so secrets from disjoint environments or command runtimes cannot bleed into one
+/// another through a shared resolver.
 pub struct CachingSecretResolver<R> {
     inner: R,
     state: Mutex<SecretCacheState>,
@@ -819,6 +866,7 @@ struct SecretCacheState {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct SecretCacheKey {
     env_partition: String,
+    runtime_partition: Option<String>,
     scope: String,
 }
 
@@ -923,7 +971,13 @@ where
             if let Some(key) = self
                 .inner
                 .lookup_secret_cache_scope(spec, context)?
-                .and_then(|scope| SecretCacheKey::for_env(scope, context.environment()))
+                .and_then(|scope| {
+                    self.inner
+                        .lookup_secret_cache_partitioning(spec, context)
+                        .and_then(|partitioning| {
+                            SecretCacheKey::for_context(scope, partitioning, context)
+                        })
+                })
                 && let Some(value) = self.cached_value(&key)
             {
                 return Ok(value);
@@ -1069,12 +1123,29 @@ use spec::{
 pub use spec::{SecretSpec, resolve_secret, resolve_secret_with_runtime};
 
 impl SecretCacheKey {
-    fn for_env(scope: String, env: &dyn SecretEnvironment) -> Option<Self> {
-        let env_partition =
-            normalize_secret_cache_component(env.secret_cache_partition()?.into_owned())?;
+    fn for_context(
+        scope: String,
+        partitioning: SecretCachePartitioning,
+        context: SecretResolutionContext<'_>,
+    ) -> Option<Self> {
+        let env_partition = normalize_secret_cache_component(
+            context.environment().secret_cache_partition()?.into_owned(),
+        )?;
         let scope = normalize_secret_cache_component(scope)?;
+        let runtime_partition = match partitioning {
+            SecretCachePartitioning::Environment => None,
+            SecretCachePartitioning::EnvironmentAndCommandRuntime => {
+                Some(normalize_secret_cache_component(
+                    context
+                        .command_runtime()
+                        .secret_cache_partition()?
+                        .into_owned(),
+                )?)
+            }
+        };
         Some(Self {
             env_partition,
+            runtime_partition,
             scope,
         })
     }

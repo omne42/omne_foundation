@@ -21,6 +21,8 @@ mod macros;
 mod render;
 mod scalar;
 mod serialize;
+#[cfg(test)]
+mod tests;
 mod text;
 mod validation;
 

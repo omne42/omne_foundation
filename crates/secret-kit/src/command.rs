@@ -91,9 +91,9 @@ type CommandReadTask = tokio::task::JoinHandle<std::io::Result<(SecretBytes, boo
 const TEXT_FILE_BUSY_RETRY_ATTEMPTS: usize = 5;
 const TEXT_FILE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(20);
 #[cfg(all(unix, target_os = "linux"))]
-const PROCESS_TREE_CLEANUP_RETRY_ATTEMPTS: usize = 50;
+const PROCESS_TREE_CLEANUP_RETRY_ATTEMPTS: usize = 120;
 #[cfg(all(unix, target_os = "linux"))]
-const PROCESS_TREE_CLEANUP_RETRY_DELAY: Duration = Duration::from_millis(20);
+const PROCESS_TREE_CLEANUP_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 fn start_process_tree_cleanup(cleanup: ProcessTreeCleanup) {
     #[cfg(all(unix, target_os = "linux"))]
@@ -101,8 +101,9 @@ fn start_process_tree_cleanup(cleanup: ProcessTreeCleanup) {
         std::thread::spawn(move || {
             cleanup.kill_tree();
             // Linux orphan cleanup relies on `/proc` to observe surviving process-group members
-            // after the leader exits. That observation can lag on slower CI runners, so keep
-            // retrying briefly in the background without delaying success or cancellation paths.
+            // after the leader exits. That observation can lag well past the caller's return on
+            // slower CI runners, so keep retrying in the background for the full regression-test
+            // observation window without delaying success or cancellation paths.
             for _ in 0..PROCESS_TREE_CLEANUP_RETRY_ATTEMPTS {
                 std::thread::sleep(PROCESS_TREE_CLEANUP_RETRY_DELAY);
                 cleanup.kill_tree();

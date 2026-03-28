@@ -2,6 +2,8 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+#[cfg(all(unix, target_os = "linux"))]
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use omne_process_primitives::{
@@ -95,24 +97,122 @@ const PROCESS_TREE_CLEANUP_RETRY_ATTEMPTS: usize = 120;
 #[cfg(all(unix, target_os = "linux"))]
 const PROCESS_TREE_CLEANUP_RETRY_DELAY: Duration = Duration::from_millis(100);
 
+#[cfg(all(unix, target_os = "linux"))]
+struct PendingProcessTreeCleanup {
+    cleanup: ProcessTreeCleanup,
+    retries_remaining: usize,
+    next_retry_at: std::time::Instant,
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+impl PendingProcessTreeCleanup {
+    fn new(cleanup: ProcessTreeCleanup) -> Self {
+        Self {
+            cleanup,
+            retries_remaining: PROCESS_TREE_CLEANUP_RETRY_ATTEMPTS,
+            next_retry_at: std::time::Instant::now() + PROCESS_TREE_CLEANUP_RETRY_DELAY,
+        }
+    }
+}
+
+#[cfg(all(test, unix, target_os = "linux"))]
+static LINUX_CLEANUP_WORKER_SPAWN_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 fn start_process_tree_cleanup(cleanup: ProcessTreeCleanup) {
     #[cfg(all(unix, target_os = "linux"))]
     {
-        std::thread::spawn(move || {
-            cleanup.kill_tree();
-            // Linux orphan cleanup relies on `/proc` to observe surviving process-group members
-            // after the leader exits. That observation can lag well past the caller's return on
-            // slower CI runners, so keep retrying in the background for the full regression-test
-            // observation window without delaying success or cancellation paths.
-            for _ in 0..PROCESS_TREE_CLEANUP_RETRY_ATTEMPTS {
-                std::thread::sleep(PROCESS_TREE_CLEANUP_RETRY_DELAY);
-                cleanup.kill_tree();
-            }
-        });
+        cleanup.kill_tree();
+        if PROCESS_TREE_CLEANUP_RETRY_ATTEMPTS > 0 {
+            // Successful commands can still leave helpers alive briefly while `/proc` catches up
+            // to the leader exit. Reuse a single worker thread for the retry window instead of
+            // spawning one long-lived thread per command invocation.
+            let _ = linux_cleanup_dispatcher().send(cleanup);
+        }
     }
 
     #[cfg(not(all(unix, target_os = "linux")))]
     cleanup.kill_tree();
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn linux_cleanup_dispatcher() -> &'static std::sync::mpsc::Sender<ProcessTreeCleanup> {
+    static DISPATCHER: OnceLock<std::sync::mpsc::Sender<ProcessTreeCleanup>> = OnceLock::new();
+
+    DISPATCHER.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        #[cfg(test)]
+        LINUX_CLEANUP_WORKER_SPAWN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::thread::Builder::new()
+            .name("secret-kit-linux-cleanup".to_string())
+            .spawn(move || run_linux_cleanup_worker(receiver))
+            .expect("spawn secret-kit linux cleanup worker");
+        sender
+    })
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn run_linux_cleanup_worker(receiver: std::sync::mpsc::Receiver<ProcessTreeCleanup>) {
+    let mut pending = Vec::new();
+
+    loop {
+        if pending.is_empty() {
+            let Ok(cleanup) = receiver.recv() else {
+                return;
+            };
+            pending.push(PendingProcessTreeCleanup::new(cleanup));
+            continue;
+        }
+
+        drain_due_linux_cleanup_retries(&mut pending);
+        if pending.is_empty() {
+            continue;
+        }
+
+        let now = std::time::Instant::now();
+        let wait_for = pending
+            .iter()
+            .map(|cleanup| cleanup.next_retry_at.saturating_duration_since(now))
+            .min()
+            .unwrap_or(Duration::ZERO);
+
+        match receiver.recv_timeout(wait_for) {
+            Ok(cleanup) => pending.push(PendingProcessTreeCleanup::new(cleanup)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                if pending.is_empty() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn drain_due_linux_cleanup_retries(pending: &mut Vec<PendingProcessTreeCleanup>) {
+    let now = std::time::Instant::now();
+    let mut idx = 0;
+    while idx < pending.len() {
+        if pending[idx].next_retry_at > now {
+            idx += 1;
+            continue;
+        }
+
+        pending[idx].cleanup.kill_tree();
+        pending[idx].retries_remaining -= 1;
+        if pending[idx].retries_remaining == 0 {
+            pending.swap_remove(idx);
+            continue;
+        }
+
+        pending[idx].next_retry_at = now + PROCESS_TREE_CLEANUP_RETRY_DELAY;
+        idx += 1;
+    }
+}
+
+#[cfg(all(test, unix, target_os = "linux"))]
+fn linux_cleanup_worker_spawn_count() -> usize {
+    LINUX_CLEANUP_WORKER_SPAWN_COUNT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn ensure_tokio_time_driver(program: &str) -> Result<()> {
@@ -432,6 +532,28 @@ mod retry_tests {
 
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[test]
+    fn linux_cleanup_dispatcher_reuses_single_worker() {
+        let before = linux_cleanup_worker_spawn_count();
+
+        let _ = linux_cleanup_dispatcher();
+        let after_first = linux_cleanup_worker_spawn_count();
+
+        let _ = linux_cleanup_dispatcher();
+        let after_second = linux_cleanup_worker_spawn_count();
+
+        assert!(after_first >= before, "worker count should not decrease");
+        assert!(
+            after_first <= before + 1,
+            "dispatcher should spawn at most one worker"
+        );
+        assert_eq!(
+            after_first, after_second,
+            "repeated dispatcher access should reuse the same worker"
+        );
     }
 }
 

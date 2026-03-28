@@ -2579,6 +2579,84 @@ async fn caching_resolver_skips_runtime_sensitive_cache_without_runtime_partitio
 }
 
 #[tokio::test]
+async fn caching_resolver_skips_runtime_sensitive_cache_with_ambient_runtime() -> Result<()> {
+    #[derive(Default)]
+    struct AmbientRuntimeResolver {
+        calls: AtomicUsize,
+    }
+
+    impl SecretResolver for AmbientRuntimeResolver {
+        async fn resolve_secret(
+            &self,
+            spec: &str,
+            context: SecretResolutionContext<'_>,
+        ) -> Result<SecretString> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let value = context
+                .command_runtime()
+                .get_command_env(spec)
+                .expect("ambient runtime variable should exist");
+            Ok(SecretString::from(value))
+        }
+    }
+
+    impl CacheAwareSecretResolver for AmbientRuntimeResolver {
+        type Prepared = String;
+
+        fn lookup_secret_cache_scope(
+            &self,
+            spec: &str,
+            _context: SecretResolutionContext<'_>,
+        ) -> Result<Option<String>> {
+            Ok(Some(spec.to_string()))
+        }
+
+        fn lookup_secret_cache_partitioning(
+            &self,
+            _spec: &str,
+            _context: SecretResolutionContext<'_>,
+        ) -> Option<SecretCachePartitioning> {
+            Some(SecretCachePartitioning::EnvironmentAndCommandRuntime)
+        }
+
+        async fn prepare_secret_resolution(
+            &self,
+            spec: &str,
+            _context: SecretResolutionContext<'_>,
+        ) -> Result<PreparedSecretResolution<Self::Prepared>> {
+            Ok(PreparedSecretResolution::cached_with_partitioning(
+                spec.to_string(),
+                spec.to_string(),
+                SecretCachePartitioning::EnvironmentAndCommandRuntime,
+            ))
+        }
+
+        async fn resolve_prepared_secret(
+            &self,
+            prepared: Self::Prepared,
+            context: SecretResolutionContext<'_>,
+        ) -> Result<SecretString> {
+            self.resolve_secret(prepared.as_str(), context).await
+        }
+    }
+
+    let resolver =
+        CachingSecretResolver::new(AmbientRuntimeResolver::default(), Duration::from_secs(60));
+    let environment = TestEnv {
+        cache_partition: "shared-env".to_string(),
+        ..TestEnv::default()
+    };
+
+    let first = resolver.resolve_secret_text("PATH", &environment).await?;
+    let second = resolver.resolve_secret_text("PATH", &environment).await?;
+
+    assert!(!first.is_empty(), "ambient PATH should be non-empty");
+    assert_eq!(first, second);
+    assert_eq!(resolver.inner().calls.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+#[tokio::test]
 async fn caching_resolver_skips_cache_without_environment_partition() -> Result<()> {
     struct PartitionlessEnv;
 

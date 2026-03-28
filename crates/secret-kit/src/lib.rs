@@ -577,7 +577,9 @@ pub trait SecretCommandRuntime: Send + Sync {
     /// Cacheable resolutions that depend on command discovery, explicit command environment, or
     /// other runtime policy should include this partition in their cache key. Returning `None`
     /// disables cache reuse for runtime-sensitive secrets, which is the safe default when no
-    /// stable, non-secret runtime identity exists.
+    /// stable, non-secret runtime identity exists. The built-in ambient runtime intentionally
+    /// returns `None` here because the process environment and `PATH` are not a stable cache
+    /// boundary.
     fn secret_cache_partition(&self) -> Option<Cow<'_, str>> {
         None
     }
@@ -684,11 +686,7 @@ impl<'a> SecretResolutionContext<'a> {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AmbientSecretCommandRuntime;
 
-impl SecretCommandRuntime for AmbientSecretCommandRuntime {
-    fn secret_cache_partition(&self) -> Option<Cow<'_, str>> {
-        Some(Cow::Borrowed("ambient"))
-    }
-}
+impl SecretCommandRuntime for AmbientSecretCommandRuntime {}
 
 static AMBIENT_SECRET_COMMAND_RUNTIME: AmbientSecretCommandRuntime = AmbientSecretCommandRuntime;
 

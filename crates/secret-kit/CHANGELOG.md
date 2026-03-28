@@ -8,6 +8,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ### Changed
 - `CachingSecretResolver` 现在允许 cacheable resolver 显式声明 `SecretCommandRuntime` 是否属于缓存边界；runtime-sensitive secret 会把 command runtime partition 一并纳入 cache key，缺失稳定 runtime partition 时 fail-closed 禁止复用，避免同一 environment 分区下误复用不同 CLI/runtime 上下文的 secret。
+- `secret-kit` 现在把内建 ambient command runtime 也视为“不稳定 cache 边界”：ambient 路径默认不提供 runtime cache partition，因此 runtime-sensitive secret 不会在 ambient `PATH`/进程环境上下文上静默复用缓存，除非调用方显式提供稳定 runtime partition。
 - Collapse the cache-hint fast-path lookup in `CachingSecretResolver` so the crate stays clean under the workspace `clippy::all` local gate after the mismatched-hint fix.
 - `secret-kit` 现在会在 Linux 上于 secret command leader 退出时立刻触发 process-tree cleanup，并把 orphan cleanup 交给后台短时重试，避免慢速 `/proc` 观察窗口导致成功路径遗漏残留 helper 进程。
 - `secret-kit`：Linux orphan cleanup 的后台重试窗口现在覆盖完整回归测试观测区间，避免慢速 GitHub Actions runner 上 `/proc` 进程组可见性滞后导致清理线程过早停止。

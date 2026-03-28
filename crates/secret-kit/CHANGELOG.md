@@ -13,6 +13,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Collapse the cache-hint fast-path lookup in `CachingSecretResolver` so the crate stays clean under the workspace `clippy::all` local gate after the mismatched-hint fix.
 - `secret-kit` 现在会在 Linux 上于 secret command leader 退出时立刻触发 process-tree cleanup，并把 orphan cleanup 交给后台短时重试，避免慢速 `/proc` 观察窗口导致成功路径遗漏残留 helper 进程。
 - `secret-kit`：Linux orphan cleanup 的后台重试窗口现在覆盖完整回归测试观测区间，避免慢速 GitHub Actions runner 上 `/proc` 进程组可见性滞后导致清理线程过早停止。
+- `secret-kit`：Linux secret-command process-tree cleanup 现在把 orphan retry 收口到共享后台 worker，而不是每次成功/失败路径都 spawn 一个最长 12 秒的清理线程；保留现有 retry 语义，同时避免高吞吐下的线程放大。
 - `secret-kit`：Linux orphan cleanup 回归测试现在会先确认后台 helper 已经加入 shell 的 process group，再断言成功/取消路径的清理结果，避免 GitHub Actions runner 上因 shell 时序抖动产生误判。
 - `secret-kit`：Linux cleanup 回归测试现在按真实超时窗口轮询 pid 文件和进程退出，并在写出后台 pid 后短暂保留 shell leader，减少慢速 GitHub Actions runner 上的误报失败而不放宽断言语义。
 - Stabilize the Linux process-group cleanup gate further by switching the helper waits from fixed iteration counts to explicit time budgets, so slower GitHub Actions runners have more room to observe pid-file writes and tree termination without weakening the assertions.

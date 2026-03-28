@@ -15,6 +15,8 @@ use super::streamable_http_validation::{
     validate_streamable_http_config, validate_streamable_http_url_untrusted_dns,
 };
 
+const MCP_PROTOCOL_VERSION_HEADER: &str = "MCP-Protocol-Version";
+
 #[derive(Debug, Clone)]
 pub(crate) struct ConnectContext {
     pub(crate) trust_mode: TrustMode,
@@ -296,6 +298,9 @@ fn build_streamable_http_headers(
     let mut headers = HashMap::with_capacity(capacity);
 
     for (key, value) in server_cfg.http_headers() {
+        if is_reserved_streamable_http_header(key) {
+            anyhow::bail!("mcp server {server_name}: http header is reserved by transport: {key}");
+        }
         let value = if ctx.trust_mode == TrustMode::Trusted {
             expand_placeholders_trusted(value, cwd).with_context(|| {
                 format!("expand http_header placeholder: {server_name} header={key}")
@@ -306,7 +311,7 @@ fn build_streamable_http_headers(
         headers.insert(key.to_string(), value);
     }
     headers.insert(
-        "MCP-Protocol-Version".to_string(),
+        MCP_PROTOCOL_VERSION_HEADER.to_string(),
         ctx.protocol_version.clone(),
     );
 
@@ -320,6 +325,11 @@ fn build_streamable_http_headers(
     if !server_cfg.env_http_headers().is_empty() {
         debug_assert_eq!(ctx.trust_mode, TrustMode::Trusted);
         for (header, env_var) in server_cfg.env_http_headers().iter() {
+            if is_reserved_streamable_http_header(header) {
+                anyhow::bail!(
+                    "mcp server {server_name}: http header env var targets a reserved transport header: {header}"
+                );
+            }
             let value = std::env::var(env_var)
                 .with_context(|| format!("read http header env var: {env_var}"))?;
             headers.insert(header.to_string(), value);
@@ -327,6 +337,10 @@ fn build_streamable_http_headers(
     }
 
     Ok(headers)
+}
+
+fn is_reserved_streamable_http_header(header: &str) -> bool {
+    header.eq_ignore_ascii_case(MCP_PROTOCOL_VERSION_HEADER)
 }
 
 pub(super) fn absolutize_with_base(path: &Path, base: &Path) -> PathBuf {

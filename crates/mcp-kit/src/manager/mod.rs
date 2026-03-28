@@ -60,13 +60,66 @@ fn normalize_server_name_lookup(server_name: &str) -> &str {
 }
 
 pub(crate) fn resolve_connection_cwd(cwd: &Path) -> anyhow::Result<PathBuf> {
-    if cwd.is_absolute() {
-        Ok(cwd.to_path_buf())
+    resolve_connection_cwd_with_base(None, cwd)
+}
+
+pub(crate) fn resolve_connection_cwd_with_base(
+    base: Option<&Path>,
+    cwd: &Path,
+) -> anyhow::Result<PathBuf> {
+    let resolved = if cwd.is_absolute() {
+        cwd.to_path_buf()
     } else {
-        let current_dir = std::env::current_dir()
-            .context("determine current working directory for relative MCP cwd")?;
-        Ok(current_dir.join(cwd))
+        let base = match base {
+            Some(base) if base.is_absolute() => base.to_path_buf(),
+            Some(base) => std::env::current_dir()
+                .context("determine current working directory for relative MCP cwd base")?
+                .join(base),
+            None => std::env::current_dir()
+                .context("determine current working directory for relative MCP cwd")?,
+        };
+        base.join(cwd)
+    };
+    Ok(stable_connection_cwd_identity(&resolved))
+}
+
+fn stable_connection_cwd_identity(path: &Path) -> PathBuf {
+    let normalized = normalize_connection_path(path);
+    let mut existing = normalized.as_path();
+    let mut missing_components = Vec::new();
+
+    while std::fs::symlink_metadata(existing).is_err() {
+        let Some(component) = existing.file_name() else {
+            return normalized;
+        };
+        missing_components.push(component.to_os_string());
+        let Some(parent) = existing.parent() else {
+            return normalized;
+        };
+        existing = parent;
     }
+
+    let mut canonical = std::fs::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
+    for component in missing_components.iter().rev() {
+        canonical.push(component);
+    }
+    canonical
+}
+
+fn normalize_connection_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
 }
 
 pub(crate) fn contains_wait_timeout(err: &anyhow::Error) -> bool {
@@ -701,9 +754,18 @@ impl Manager {
         server_name: &str,
         cwd: &Path,
     ) -> anyhow::Result<()> {
+        self.record_connection_cwd_with_base(server_name, cwd, None)
+    }
+
+    pub(crate) fn record_connection_cwd_with_base(
+        &mut self,
+        server_name: &str,
+        cwd: &Path,
+        base: Option<&Path>,
+    ) -> anyhow::Result<()> {
         self.connection_cwds.insert(
             parse_server_name_anyhow(server_name).expect("validated server name"),
-            resolve_connection_cwd(cwd)?,
+            resolve_connection_cwd_with_base(base, cwd)?,
         );
         Ok(())
     }
@@ -712,11 +774,16 @@ impl Manager {
         self.connection_cwds.remove(server_name);
     }
 
-    fn ensure_connection_cwd_matches(&self, server_name: &str, cwd: &Path) -> anyhow::Result<()> {
+    fn ensure_connection_cwd_matches(
+        &self,
+        server_name: &str,
+        cwd: &Path,
+        base: Option<&Path>,
+    ) -> anyhow::Result<()> {
         let Some(connected_cwd) = self.connection_cwds.get(server_name) else {
             return Ok(());
         };
-        let requested_cwd = resolve_connection_cwd(cwd)?;
+        let requested_cwd = resolve_connection_cwd_with_base(base, cwd)?;
         if *connected_cwd == requested_cwd {
             return Ok(());
         }
@@ -739,7 +806,7 @@ impl Manager {
             return Ok(None);
         }
         if let Some(cwd) = cwd {
-            self.ensure_connection_cwd_matches(server_name, cwd)?;
+            self.ensure_connection_cwd_matches(server_name, cwd, None)?;
         }
 
         let conn = self
@@ -764,8 +831,9 @@ impl Manager {
             .server(server_name)
             .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
         let server_name_key = parse_server_name_anyhow(server_name)?;
+        let config_root = config.thread_root();
         if self.is_connected_and_alive(server_name_key.as_str()) {
-            self.ensure_connection_cwd_matches(server_name_key.as_str(), cwd)?;
+            self.ensure_connection_cwd_matches(server_name_key.as_str(), cwd, config_root)?;
             return Ok(None);
         }
         self.clear_connection_cwd(server_name_key.as_str());
@@ -773,7 +841,7 @@ impl Manager {
         server_cfg
             .validate()
             .with_context(|| format!("invalid mcp server config (server={server_name_key})"))?;
-        let cwd = resolve_connection_cwd(cwd)?;
+        let cwd = resolve_connection_cwd_with_base(config_root, cwd)?;
 
         Ok(Some(PreparedTransportConnect {
             server_name: server_name.to_string(),
@@ -826,7 +894,7 @@ impl Manager {
         server_cfg: &ServerConfig,
         cwd: &Path,
     ) -> anyhow::Result<()> {
-        self.connect_with_builder(server_name, server_cfg, cwd, || {
+        self.connect_with_builder(server_name, server_cfg, cwd, None, || {
             parse_server_name_anyhow(server_name)
         })
         .await
@@ -837,15 +905,16 @@ impl Manager {
         server_name: &str,
         server_cfg: &ServerConfig,
         cwd: &Path,
+        cwd_base: Option<&Path>,
         build_server_name: F,
     ) -> anyhow::Result<()>
     where
         F: FnOnce() -> anyhow::Result<ServerName>,
     {
-        let cwd = resolve_connection_cwd(cwd)?;
+        let cwd = resolve_connection_cwd_with_base(cwd_base, cwd)?;
         let server_name_key = build_server_name()?;
         if self.is_connected_and_alive(server_name_key.as_str()) {
-            self.ensure_connection_cwd_matches(server_name_key.as_str(), &cwd)?;
+            self.ensure_connection_cwd_matches(server_name_key.as_str(), &cwd, None)?;
             return Ok(());
         }
         self.clear_connection_cwd(server_name_key.as_str());
@@ -986,7 +1055,10 @@ impl Manager {
         let server_cfg = config
             .server(server_name)
             .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
-        self.connect(server_name, server_cfg, cwd).await
+        self.connect_with_builder(server_name, server_cfg, cwd, config.thread_root(), || {
+            parse_server_name_anyhow(server_name)
+        })
+        .await
     }
 
     pub async fn get_or_connect_named(
@@ -998,7 +1070,15 @@ impl Manager {
         let server_cfg = config
             .server_named(server_name)
             .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
-        self.connect_named(server_name, server_cfg, cwd).await
+        let server_name_key = server_name.clone();
+        self.connect_with_builder(
+            server_name.as_str(),
+            server_cfg,
+            cwd,
+            config.thread_root(),
+            || Ok(server_name_key),
+        )
+        .await
     }
 
     pub async fn get_or_connect_session(
@@ -1030,7 +1110,7 @@ impl Manager {
         cwd: &Path,
     ) -> anyhow::Result<()> {
         let server_name_key = server_name.clone();
-        self.connect_with_builder(server_name.as_str(), server_cfg, cwd, || {
+        self.connect_with_builder(server_name.as_str(), server_cfg, cwd, None, || {
             Ok(server_name_key)
         })
         .await

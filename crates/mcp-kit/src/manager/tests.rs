@@ -367,6 +367,48 @@ async fn try_prepare_connected_client_rejects_different_cwd_context() {
 }
 
 #[tokio::test]
+async fn try_prepare_connected_client_reuses_same_cwd_identity() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let _server_stream = server_stream;
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .unwrap();
+
+    let connected_cwd = std::env::current_dir()
+        .expect("current dir")
+        .join("workspace")
+        .join("demo");
+    let same_cwd_different_spelling = connected_cwd
+        .parent()
+        .expect("parent")
+        .join(".")
+        .join("demo");
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    let server_name = ServerName::parse("srv").unwrap();
+    manager.conns.insert(
+        server_name,
+        Connection {
+            id: 1,
+            child: None,
+            client,
+            handler_tasks: Vec::new(),
+        },
+    );
+    manager
+        .record_connection_cwd("srv", &connected_cwd)
+        .unwrap();
+
+    let prepared = manager
+        .try_prepare_connected_client("srv", Some(&same_cwd_different_spelling))
+        .unwrap()
+        .expect("stable cwd identity should allow reuse");
+    assert_eq!(prepared.server_name, "srv");
+}
+
+#[tokio::test]
 async fn prepare_transport_connect_rejects_different_cwd_context() {
     let (client_stream, server_stream) = tokio::io::duplex(1024);
     let (client_read, client_write) = tokio::io::split(client_stream);
@@ -406,6 +448,34 @@ async fn prepare_transport_connect_rejects_different_cwd_context() {
         err.to_string().contains("cannot be reused for cwd="),
         "{err:#}"
     );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn prepare_transport_connect_resolves_relative_cwd_from_config_thread_root() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let config_path = tempdir.path().join("mcp.json");
+    let expected_cwd = tempdir.path().join("workspace").join("demo");
+    let outside = tempfile::tempdir().unwrap();
+
+    let _guard = cwd_test_guard();
+    let _cwd_restore = CurrentDirRestoreGuard::capture();
+    std::env::set_current_dir(outside.path()).expect("enter outside dir");
+
+    let mut servers = std::collections::BTreeMap::new();
+    servers.insert(
+        ServerName::parse("srv").unwrap(),
+        ServerConfig::unix(PathBuf::from("/tmp/mock.sock")).unwrap(),
+    );
+    let config = Config::new(crate::ClientConfig::default(), servers).with_path(config_path);
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    let prepared = manager
+        .prepare_transport_connect(&config, "srv", Path::new("workspace/./demo"))
+        .unwrap()
+        .expect("transport should prepare");
+    assert_eq!(prepared.cwd, expected_cwd);
 }
 
 #[cfg(unix)]

@@ -140,6 +140,10 @@ fn empty_kv_map() -> &'static BTreeMap<String, String> {
     EMPTY.get_or_init(BTreeMap::new)
 }
 
+fn is_reserved_streamable_http_header(header: &HeaderName) -> bool {
+    header.as_str().eq_ignore_ascii_case("mcp-protocol-version")
+}
+
 impl ServerConfig {
     pub fn stdio(argv: Vec<String>) -> anyhow::Result<Self> {
         validate_argv(Transport::Stdio, &argv)?;
@@ -257,11 +261,16 @@ impl ServerConfig {
                             "mcp server transport=streamable_http: http_headers key must not be empty"
                         );
                     }
-                    HeaderName::from_bytes(header.as_bytes()).map_err(|_| {
+                    let header_name = HeaderName::from_bytes(header.as_bytes()).map_err(|_| {
                         anyhow::anyhow!(
                             "mcp server transport=streamable_http: invalid http_headers key: {header}"
                         )
                     })?;
+                    if is_reserved_streamable_http_header(&header_name) {
+                        anyhow::bail!(
+                            "mcp server transport=streamable_http: http_headers key is reserved by transport: {header}"
+                        );
+                    }
                     if value.trim().is_empty() {
                         anyhow::bail!(
                             "mcp server transport=streamable_http: http_headers[{header}] must not be empty"
@@ -279,11 +288,16 @@ impl ServerConfig {
                             "mcp server transport=streamable_http: env_http_headers key must not be empty"
                         );
                     }
-                    HeaderName::from_bytes(header.as_bytes()).map_err(|_| {
+                    let header_name = HeaderName::from_bytes(header.as_bytes()).map_err(|_| {
                         anyhow::anyhow!(
                             "mcp server transport=streamable_http: invalid env_http_headers key: {header}"
                         )
                     })?;
+                    if is_reserved_streamable_http_header(&header_name) {
+                        anyhow::bail!(
+                            "mcp server transport=streamable_http: env_http_headers key is reserved by transport: {header}"
+                        );
+                    }
                     if env_var.trim().is_empty() {
                         anyhow::bail!(
                             "mcp server transport=streamable_http: env_http_headers[{header}] must not be empty"
@@ -520,6 +534,10 @@ impl Config {
 
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
+    }
+
+    pub fn thread_root(&self) -> Option<&Path> {
+        self.path().and_then(Path::parent)
     }
 
     pub fn client(&self) -> &ClientConfig {

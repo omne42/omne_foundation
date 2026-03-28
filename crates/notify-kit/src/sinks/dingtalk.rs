@@ -1,6 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::Event;
+use crate::SecretString;
 use crate::sinks::crypto::hmac_sha256_base64;
 use crate::sinks::text::{TextLimits, format_event_text_limited};
 use crate::sinks::{BoxFuture, Sink};
@@ -16,7 +17,7 @@ const DINGTALK_ALLOWED_HOSTS: [&str; 1] = ["oapi.dingtalk.com"];
 #[derive(Clone)]
 pub struct DingTalkWebhookConfig {
     pub webhook_url: String,
-    pub secret: Option<String>,
+    pub secret: Option<SecretString>,
     pub timeout: Duration,
     pub max_chars: usize,
     pub enforce_public_ip: bool,
@@ -46,7 +47,7 @@ impl DingTalkWebhookConfig {
     }
 
     #[must_use]
-    pub fn with_secret(mut self, secret: impl Into<String>) -> Self {
+    pub fn with_secret(mut self, secret: impl Into<SecretString>) -> Self {
         self.secret = Some(secret.into());
         self
     }
@@ -72,7 +73,7 @@ impl DingTalkWebhookConfig {
 
 pub struct DingTalkWebhookSink {
     webhook_url: reqwest::Url,
-    secret: Option<String>,
+    secret: Option<SecretString>,
     http: HttpClientProfile,
     max_chars: usize,
     enforce_public_ip: bool,
@@ -129,7 +130,7 @@ impl DingTalkWebhookSink {
     }
 
     fn webhook_url_with_signature(&self) -> crate::Result<reqwest::Url> {
-        let Some(secret) = self.secret.as_deref() else {
+        let Some(secret) = self.secret.as_ref() else {
             return Ok(self.webhook_url.clone());
         };
 
@@ -139,6 +140,7 @@ impl DingTalkWebhookSink {
             .as_millis()
             .to_string();
 
+        let secret = secret.expose_secret();
         let string_to_sign = format!("{timestamp}\n{secret}");
         let sign = hmac_sha256_base64(secret, &string_to_sign)?;
 
@@ -152,14 +154,14 @@ impl DingTalkWebhookSink {
     }
 }
 
-fn normalize_optional_trimmed(value: Option<String>) -> crate::Result<Option<String>> {
+fn normalize_optional_trimmed(value: Option<SecretString>) -> crate::Result<Option<SecretString>> {
     match value {
         Some(value) => {
-            let value = value.trim();
+            let value = value.expose_secret().trim();
             if value.is_empty() {
                 return Err(anyhow::anyhow!("dingtalk secret must not be empty").into());
             }
-            Ok(Some(value.to_string()))
+            Ok(Some(SecretString::new(value)))
         }
         None => Ok(None),
     }
@@ -319,6 +321,11 @@ mod tests {
         let cfg = DingTalkWebhookConfig::new("https://oapi.dingtalk.com/robot/send?access_token=x")
             .with_secret("  s3cr3t  ");
         let sink = DingTalkWebhookSink::new(cfg).expect("build sink");
-        assert_eq!(sink.secret.as_deref(), Some("s3cr3t"));
+        assert_eq!(
+            sink.secret
+                .as_ref()
+                .map(secret_kit::SecretString::expose_secret),
+            Some("s3cr3t")
+        );
     }
 }

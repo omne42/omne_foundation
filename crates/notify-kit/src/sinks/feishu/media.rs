@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 
+use crate::SecretString;
 use crate::log::{warn_feishu_image_load_failed, warn_feishu_image_upload_failed};
 use crate::sinks::BoxFuture;
 use http_kit::{
@@ -16,12 +17,12 @@ use super::FeishuWebhookSink;
 #[derive(Debug, Clone)]
 pub(super) struct FeishuAppCredentials {
     pub(super) app_id: String,
-    pub(super) app_secret: String,
+    pub(super) app_secret: SecretString,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct AccessTokenCache {
-    pub(super) token: String,
+    pub(super) token: SecretString,
     pub(super) expires_at: Instant,
 }
 
@@ -229,7 +230,7 @@ impl FeishuWebhookSink {
         let resp = send_reqwest(
             client
                 .post(upload_url)
-                .bearer_auth(&access_token)
+                .bearer_auth(access_token.expose_secret())
                 .multipart(form),
             "feishu image upload",
         )
@@ -262,17 +263,18 @@ impl FeishuWebhookSink {
         Ok(image_key.to_string())
     }
 
-    async fn invalidate_tenant_access_token(&self, token: &str) {
+    async fn invalidate_tenant_access_token(&self, token: &SecretString) {
         let mut guard = self.tenant_access_token.lock().await;
         if matches!(
             &*guard,
-            super::TenantAccessTokenState::Ready(cached) if cached.token == token
+            super::TenantAccessTokenState::Ready(cached)
+                if cached.token.expose_secret() == token.expose_secret()
         ) {
             *guard = super::TenantAccessTokenState::Empty;
         }
     }
 
-    pub(super) async fn ensure_tenant_access_token(&self) -> crate::Result<String> {
+    pub(super) async fn ensure_tenant_access_token(&self) -> crate::Result<SecretString> {
         let Some(credentials) = self.app_credentials.as_ref().cloned() else {
             return Err(anyhow::anyhow!(
                 "feishu app credentials are required for markdown image upload"
@@ -362,8 +364,8 @@ impl FeishuWebhookSink {
             .await?;
 
         let payload = serde_json::json!({
-            "app_id": credentials.app_id,
-            "app_secret": credentials.app_secret,
+            "app_id": credentials.app_id.as_str(),
+            "app_secret": credentials.app_secret.expose_secret(),
         });
 
         let resp = send_reqwest(
@@ -394,15 +396,16 @@ impl FeishuWebhookSink {
             .as_str()
             .map(str::trim)
             .filter(|v| !v.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("feishu tenant access token api error: missing token"))?
-            .to_string();
+            .ok_or_else(|| {
+                anyhow::anyhow!("feishu tenant access token api error: missing token")
+            })?;
 
         let expires_in = body["expire"]
             .as_i64()
             .or_else(|| body["expires_in"].as_i64())
             .unwrap_or(7200);
         Ok(AccessTokenCache {
-            token,
+            token: SecretString::new(token),
             expires_at: Instant::now() + tenant_access_token_cache_ttl(expires_in),
         })
     }
@@ -547,21 +550,21 @@ pub(super) fn guess_image_mime(ext: Option<&str>) -> String {
     .to_string()
 }
 
-pub(super) fn normalize_secret(secret: impl Into<String>) -> crate::Result<String> {
+pub(super) fn normalize_secret(secret: impl Into<SecretString>) -> crate::Result<SecretString> {
     let secret = secret.into();
-    let secret = secret.trim();
+    let secret = secret.expose_secret().trim();
     if secret.is_empty() {
         return Err(anyhow::anyhow!("feishu secret must not be empty").into());
     }
-    Ok(secret.to_string())
+    Ok(SecretString::new(secret))
 }
 
 pub(super) fn normalize_app_credentials(
     app_id: Option<String>,
-    app_secret: Option<String>,
+    app_secret: Option<SecretString>,
 ) -> crate::Result<Option<FeishuAppCredentials>> {
     let app_id = normalize_optional_trimmed(app_id, "app_id")?;
-    let app_secret = normalize_optional_trimmed(app_secret, "app_secret")?;
+    let app_secret = normalize_optional_secret(app_secret, "app_secret")?;
 
     match (app_id, app_secret) {
         (None, None) => Ok(None),
@@ -581,6 +584,22 @@ fn normalize_optional_trimmed(value: Option<String>, field: &str) -> crate::Resu
                 return Err(anyhow::anyhow!("feishu {field} must not be empty").into());
             }
             Ok(Some(value.to_string()))
+        }
+        None => Ok(None),
+    }
+}
+
+fn normalize_optional_secret(
+    value: Option<SecretString>,
+    field: &str,
+) -> crate::Result<Option<SecretString>> {
+    match value {
+        Some(value) => {
+            let value = value.expose_secret().trim();
+            if value.is_empty() {
+                return Err(anyhow::anyhow!("feishu {field} must not be empty").into());
+            }
+            Ok(Some(SecretString::new(value)))
         }
         None => Ok(None),
     }

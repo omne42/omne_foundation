@@ -8,6 +8,7 @@ use self::media::{
     AccessTokenCache, FeishuAppCredentials, normalize_app_credentials, normalize_secret,
 };
 use crate::Event;
+use crate::SecretString;
 use crate::sinks::crypto::hmac_sha256_base64;
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
@@ -31,7 +32,7 @@ pub struct FeishuWebhookConfig {
     pub allow_local_image_files: bool,
     pub image_upload_max_bytes: usize,
     pub app_id: Option<String>,
-    pub app_secret: Option<String>,
+    pub app_secret: Option<SecretString>,
 }
 
 impl std::fmt::Debug for FeishuWebhookConfig {
@@ -116,7 +117,7 @@ impl FeishuWebhookConfig {
     pub fn with_app_credentials(
         mut self,
         app_id: impl Into<String>,
-        app_secret: impl Into<String>,
+        app_secret: impl Into<SecretString>,
     ) -> Self {
         self.app_id = Some(app_id.into());
         self.app_secret = Some(app_secret.into());
@@ -127,7 +128,7 @@ impl FeishuWebhookConfig {
 pub struct FeishuWebhookSink {
     webhook_url: reqwest::Url,
     http: HttpClientProfile,
-    secret: Option<String>,
+    secret: Option<SecretString>,
     max_chars: usize,
     enforce_public_ip: bool,
     enable_markdown_rich_text: bool,
@@ -179,7 +180,7 @@ impl FeishuWebhookSink {
 
     pub fn new_with_secret(
         config: FeishuWebhookConfig,
-        secret: impl Into<String>,
+        secret: impl Into<SecretString>,
     ) -> crate::Result<Self> {
         let secret = normalize_secret(secret)?;
         Self::new_internal(config, Some(secret), false)
@@ -187,7 +188,7 @@ impl FeishuWebhookSink {
 
     pub fn new_with_secret_strict(
         config: FeishuWebhookConfig,
-        secret: impl Into<String>,
+        secret: impl Into<SecretString>,
     ) -> crate::Result<Self> {
         let secret = normalize_secret(secret)?;
         Self::new_internal(config, Some(secret), true)
@@ -195,7 +196,7 @@ impl FeishuWebhookSink {
 
     pub async fn new_with_secret_strict_async(
         config: FeishuWebhookConfig,
-        secret: impl Into<String>,
+        secret: impl Into<SecretString>,
     ) -> crate::Result<Self> {
         let secret = normalize_secret(secret)?;
         Self::new_internal_async(config, Some(secret), true).await
@@ -203,7 +204,7 @@ impl FeishuWebhookSink {
 
     fn new_internal(
         config: FeishuWebhookConfig,
-        secret: Option<String>,
+        secret: Option<SecretString>,
         validate_public_ip_at_construction: bool,
     ) -> crate::Result<Self> {
         let enforce_public_ip = config.enforce_public_ip;
@@ -248,7 +249,7 @@ impl FeishuWebhookSink {
 
     async fn new_internal_async(
         config: FeishuWebhookConfig,
-        secret: Option<String>,
+        secret: Option<SecretString>,
         validate_public_ip_at_construction: bool,
     ) -> crate::Result<Self> {
         let enforce_public_ip = config.enforce_public_ip;
@@ -328,13 +329,14 @@ impl Sink for FeishuWebhookSink {
                 .http
                 .select_for_url(&self.webhook_url, self.enforce_public_ip)
                 .await?;
-            let (timestamp, sign) = if let Some(secret) = self.secret.as_deref() {
+            let (timestamp, sign) = if let Some(secret) = self.secret.as_ref() {
                 let timestamp = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_err(|err| anyhow::anyhow!("get unix timestamp: {err}"))?
                     .as_secs()
                     .to_string();
 
+                let secret = secret.expose_secret();
                 let string_to_sign = format!("{timestamp}\n{secret}");
                 let sign = hmac_sha256_base64(secret, &string_to_sign)?;
 
@@ -522,7 +524,10 @@ mod tests {
         let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x");
         let sink =
             FeishuWebhookSink::new_with_secret(cfg, "  my_secret  ").expect("build secret sink");
-        assert_eq!(sink.secret.as_deref(), Some("my_secret"));
+        assert_eq!(
+            sink.secret.as_ref().map(SecretString::expose_secret),
+            Some("my_secret")
+        );
     }
 
     #[test]
@@ -541,7 +546,7 @@ mod tests {
         let sink = FeishuWebhookSink::new(cfg).expect("build sink");
         let creds = sink.app_credentials.expect("credentials");
         assert_eq!(creds.app_id, "app_id");
-        assert_eq!(creds.app_secret, "app_secret");
+        assert_eq!(creds.app_secret.expose_secret(), "app_secret");
     }
 
     #[test]
@@ -879,7 +884,7 @@ mod tests {
                     .await
                     .expect("join token task")
                     .expect("resolve tenant token");
-                assert_eq!(token, "token");
+                assert_eq!(token.expose_secret(), "token");
             }
         });
 
@@ -957,7 +962,7 @@ mod tests {
                 .ensure_tenant_access_token()
                 .await
                 .expect("retry should fetch a fresh token");
-            assert_eq!(token, "token-after-retry");
+            assert_eq!(token.expose_secret(), "token-after-retry");
         });
 
         server.join().expect("join server");

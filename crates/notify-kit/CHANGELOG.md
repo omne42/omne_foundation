@@ -48,6 +48,9 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `FeishuWebhookSink::new_strict` / `new_with_secret_strict`：在构造阶段额外做一次 DNS 公网 IP 校验。
 
 ### Changed
+- `TelegramBotConfig` / `GitHubCommentConfig` / `FeishuWebhookConfig` 及对应 sinks 现在用 `secret-kit::SecretString` 持有长期凭证；`FeishuWebhookSink` 的 webhook secret、tenant access token 与 app secret 也切到同一安全容器，减少 foundation 层把敏感值长期留在普通 `String` 中的路径。
+- `notify-kit`：其余长期凭证持有也统一收口到 `secret-kit::SecretString`。`Bark.device_key`、`DingTalk.secret`、`PushPlus.token`、`ServerChan.send_key` 不再以裸 `String` 长期保存在 config/sink 里；`ServerChan` 还把 send key 从持久化 URL 中拆出，改为按发送请求临时拼装目标 URL。
+- `GenericWebhookSink::new` 现在默认按目标 URL 自动推导 host/path 边界并走 strict-by-default 校验；调用方不再需要额外记住 `new_strict(...)` 才能拿到安全默认值，而显式 `new_strict(...)` 仍保留给需要自定义 allow-list/path 前缀的场景。
 - `notify-kit`：`Hub::send`/`notify` 现在会在真正进入 `tokio::time` 超时路径前先验证 time driver；如果 runtime 缺少 timer，不再 panic，而是返回可解释错误并把契约写进 rustdoc。
 - Webhook/API sinks: 内部统一迁移到 `HttpClientProfile`，不再依赖已删除的 `http-kit::select_http_client(...)` timeout-only 入口，从而避免 public-IP pinning 路径静默丢失 `reqwest::Client` 隐式配置。
 - `FeishuWebhookSink`：`media.rs` 的回归测试模块移动到文件末尾，以满足 workspace 级 clippy 门禁并保持新增加的丢唤醒回归测试生效。

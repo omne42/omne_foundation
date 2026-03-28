@@ -1031,7 +1031,7 @@ async fn request_rejected_when_pending_limit_reached() {
 }
 
 #[tokio::test]
-async fn server_request_with_invalid_method_type_does_not_consume_pending_request() {
+async fn server_request_with_invalid_method_type_fails_closed_after_error_response() {
     let (client_stream, server_stream) = tokio::io::duplex(4096);
     let (client_read, client_write) = tokio::io::split(client_stream);
     let (server_read, mut server_write) = tokio::io::split(server_stream);
@@ -1074,18 +1074,20 @@ async fn server_request_with_invalid_method_type_does_not_consume_pending_reques
         });
         let mut out = serde_json::to_string(&response).unwrap();
         out.push('\n');
-        server_write.write_all(out.as_bytes()).await.unwrap();
-        server_write.flush().await.unwrap();
+        assert!(
+            server_write.write_all(out.as_bytes()).await.is_err(),
+            "client should close the connection after the invalid frame"
+        );
     });
 
     let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
         .await
         .expect("client connect");
-    let result = client
+    let err = client
         .request("demo/request", serde_json::json!({}))
         .await
-        .expect("request ok");
-    assert_eq!(result, serde_json::json!({ "ok": true }));
+        .expect_err("request should fail closed after invalid frame");
+    assert!(matches!(err, mcp_jsonrpc::Error::Protocol(_)), "{err:?}");
 
     tokio::time::timeout(Duration::from_secs(1), &mut server_task)
         .await

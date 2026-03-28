@@ -10,7 +10,15 @@ use std::os::unix::ffi::OsStrExt;
 use std::sync::{Condvar, LazyLock, Mutex, MutexGuard};
 
 #[cfg(unix)]
-const BOOTSTRAP_LOCK_DIR_UNIX: &str = "/tmp/.text-assets-kit-bootstrap-locks";
+const BOOTSTRAP_LOCK_DIR_NAME_UNIX: &str = ".text-assets-kit-bootstrap-locks";
+#[cfg(unix)]
+const BOOTSTRAP_LOCK_ENV_RUNTIME_DIR_UNIX: &str = "XDG_RUNTIME_DIR";
+#[cfg(unix)]
+const BOOTSTRAP_LOCK_RUNTIME_ROOT_UNIX: &str = "/run/user";
+#[cfg(unix)]
+const BOOTSTRAP_LOCK_TMP_ROOT_UNIX: &str = "/tmp";
+#[cfg(not(unix))]
+const BOOTSTRAP_LOCK_DIR_NAME_OTHER: &str = ".text-assets-kit-bootstrap-locks";
 
 struct BootstrapTransactionState {
     held_roots: Mutex<BTreeSet<BootstrapRootKey>>,
@@ -117,13 +125,40 @@ fn open_bootstrap_lock_file_at(
 fn bootstrap_lock_dir() -> PathBuf {
     #[cfg(unix)]
     {
-        PathBuf::from(BOOTSTRAP_LOCK_DIR_UNIX)
+        bootstrap_lock_dir_unix(
+            rustix::process::geteuid().as_raw(),
+            std::env::var_os(BOOTSTRAP_LOCK_ENV_RUNTIME_DIR_UNIX),
+            &|path| path.is_dir(),
+        )
     }
 
     #[cfg(not(unix))]
     {
-        std::env::temp_dir().join(".text-assets-kit-bootstrap-locks")
+        std::env::temp_dir().join(BOOTSTRAP_LOCK_DIR_NAME_OTHER)
     }
+}
+
+fn bootstrap_lock_dir_unix(
+    uid: u32,
+    xdg_runtime_dir: Option<std::ffi::OsString>,
+    runtime_dir_exists: &impl Fn(&Path) -> bool,
+) -> PathBuf {
+    if let Some(runtime_dir) = xdg_runtime_dir
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .filter(|path| runtime_dir_exists(path))
+    {
+        return runtime_dir.join("text-assets-kit/bootstrap-locks");
+    }
+
+    let runtime_dir = PathBuf::from(BOOTSTRAP_LOCK_RUNTIME_ROOT_UNIX).join(uid.to_string());
+    if runtime_dir_exists(&runtime_dir) {
+        return runtime_dir.join("text-assets-kit/bootstrap-locks");
+    }
+
+    PathBuf::from(BOOTSTRAP_LOCK_TMP_ROOT_UNIX)
+        .join(BOOTSTRAP_LOCK_DIR_NAME_UNIX)
+        .join(format!("uid-{uid}"))
 }
 
 fn stable_bootstrap_lock_hash(root: &BootstrapRootKey) -> u64 {
@@ -547,8 +582,37 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn bootstrap_lock_dir_uses_fixed_tmp_namespace_on_unix() {
-        assert_eq!(bootstrap_lock_dir(), PathBuf::from(BOOTSTRAP_LOCK_DIR_UNIX));
+    fn bootstrap_lock_dir_prefers_xdg_runtime_dir_on_unix() {
+        let lock_dir = bootstrap_lock_dir_unix(1000, Some("/xdg/runtime".into()), &|path| {
+            path == Path::new("/xdg/runtime")
+        });
+        assert_eq!(
+            lock_dir,
+            PathBuf::from("/xdg/runtime").join("text-assets-kit/bootstrap-locks")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_lock_dir_prefers_uid_runtime_dir_on_unix() {
+        let lock_dir =
+            bootstrap_lock_dir_unix(1000, None, &|path| path == Path::new("/run/user/1000"));
+        assert_eq!(
+            lock_dir,
+            PathBuf::from("/run/user/1000").join("text-assets-kit/bootstrap-locks")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_lock_dir_falls_back_to_uid_tmp_namespace_on_unix() {
+        let lock_dir = bootstrap_lock_dir_unix(1000, None, &|_| false);
+        assert_eq!(
+            lock_dir,
+            PathBuf::from("/tmp")
+                .join(BOOTSTRAP_LOCK_DIR_NAME_UNIX)
+                .join("uid-1000")
+        );
     }
 
     #[cfg(not(unix))]
@@ -556,7 +620,7 @@ mod tests {
     fn bootstrap_lock_dir_uses_process_temp_dir_off_unix() {
         assert_eq!(
             bootstrap_lock_dir(),
-            std::env::temp_dir().join(".text-assets-kit-bootstrap-locks")
+            std::env::temp_dir().join(BOOTSTRAP_LOCK_DIR_NAME_OTHER)
         );
     }
 

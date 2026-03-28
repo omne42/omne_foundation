@@ -402,7 +402,7 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     #[cfg(not(windows))]
-    use std::sync::{Mutex, OnceLock};
+    use std::process::Command;
 
     #[cfg(not(windows))]
     use super::resolve_cli_root;
@@ -410,30 +410,43 @@ mod tests {
     use anyhow::Result;
 
     #[cfg(not(windows))]
-    fn cwd_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-        GUARD
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    #[test]
+    const CWD_UNAVAILABLE_HELPER_ENV: &str = "MCPCTL_CWD_UNAVAILABLE_HELPER";
     #[cfg(not(windows))]
-    fn resolve_cli_root_errors_when_current_dir_is_unavailable() -> Result<()> {
-        let _guard = cwd_test_guard();
-        let original_cwd = std::env::current_dir()?;
-        let tempdir = tempfile::tempdir()?;
-        std::env::set_current_dir(tempdir.path())?;
-        std::fs::remove_dir(tempdir.path())?;
+    const CWD_UNAVAILABLE_TEST_FILTER: &str =
+        "resolve_cli_root_errors_when_current_dir_is_unavailable";
+
+    #[cfg(not(windows))]
+    fn maybe_run_cwd_unavailable_helper() -> bool {
+        if std::env::var_os(CWD_UNAVAILABLE_HELPER_ENV).is_none() {
+            return false;
+        }
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        std::env::set_current_dir(tempdir.path()).expect("enter tempdir");
+        std::fs::remove_dir(tempdir.path()).expect("remove tempdir");
 
         let err = resolve_cli_root(None).expect_err("missing cwd should fail");
         assert!(
             err.to_string()
                 .contains("determine current working directory for --root")
         );
+        true
+    }
 
-        std::env::set_current_dir(&original_cwd)?;
+    #[test]
+    #[cfg(not(windows))]
+    fn resolve_cli_root_errors_when_current_dir_is_unavailable() -> Result<()> {
+        if maybe_run_cwd_unavailable_helper() {
+            return Ok(());
+        }
+
+        let current_exe = std::env::current_exe()?;
+        let status = Command::new(current_exe)
+            .arg(CWD_UNAVAILABLE_TEST_FILTER)
+            .env(CWD_UNAVAILABLE_HELPER_ENV, "1")
+            .env("RUST_TEST_THREADS", "1")
+            .status()?;
+        assert!(status.success(), "helper process should exit cleanly");
         Ok(())
     }
 }

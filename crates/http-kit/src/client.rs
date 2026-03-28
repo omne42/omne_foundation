@@ -9,7 +9,10 @@ use crate::public_ip::validate_public_addrs;
 
 const DEFAULT_DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_MAX_DNS_LOOKUPS_INFLIGHT: usize = 32;
-const DEFAULT_PINNED_CLIENT_TTL: Duration = Duration::from_secs(60);
+// Re-resolve DNS on every pinned-client selection instead of reusing a cross-request pinned
+// client cache entry, so failover or rebinding cannot keep routing requests through a stale
+// address set for an arbitrary TTL window.
+const DEFAULT_PINNED_CLIENT_TTL: Duration = Duration::ZERO;
 const DEFAULT_MAX_PINNED_CLIENT_CACHE_ENTRIES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +145,10 @@ fn dns_lookup_timeout_message() -> &'static str {
 
 fn pinned_client_cache() -> &'static RwLock<HashMap<PinnedClientKey, CachedPinnedClient>> {
     PINNED_CLIENT_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn pinned_client_cache_reuse_enabled() -> bool {
+    DEFAULT_PINNED_CLIENT_TTL > Duration::ZERO
 }
 
 fn pinned_client_build_locks() -> &'static Mutex<HashMap<PinnedClientKey, Weak<TokioMutex<()>>>> {
@@ -453,26 +460,30 @@ async fn select_pinned_http_client_with_options(
     url: &reqwest::Url,
 ) -> crate::Result<reqwest::Client> {
     let key = pinned_client_key(options, url)?;
+    if pinned_client_cache_reuse_enabled() {
+        let lookup_now = Instant::now();
+        let should_cleanup_expired_cache_entry = {
+            let cache = pinned_client_cache().read().await;
+            match cache.get(&key) {
+                Some(cached) if cached.expires_at > lookup_now => return Ok(cached.client.clone()),
+                Some(_) => true,
+                None => false,
+            }
+        };
 
-    let lookup_now = Instant::now();
-    let should_cleanup_expired_cache_entry = {
-        let cache = pinned_client_cache().read().await;
-        match cache.get(&key) {
-            Some(cached) if cached.expires_at > lookup_now => return Ok(cached.client.clone()),
-            Some(_) => true,
-            None => false,
+        if should_cleanup_expired_cache_entry {
+            let mut cache = pinned_client_cache().write().await;
+            let now = Instant::now();
+            if cache
+                .get(&key)
+                .is_some_and(|cached| cached.expires_at <= now)
+            {
+                cache.remove(&key);
+            }
         }
-    };
-
-    if should_cleanup_expired_cache_entry {
+    } else {
         let mut cache = pinned_client_cache().write().await;
-        let now = Instant::now();
-        if cache
-            .get(&key)
-            .is_some_and(|cached| cached.expires_at <= now)
-        {
-            cache.remove(&key);
-        }
+        cache.remove(&key);
     }
 
     let mut build_lock_cleanup = PinnedClientBuildLockCleanupGuard::new(key.clone());
@@ -490,20 +501,22 @@ async fn select_pinned_http_client_with_options(
 
     let result: crate::Result<reqwest::Client> = async {
         let _build_guard = key_lock.lock().await;
-        let now = Instant::now();
-        let cached_client = {
-            let cache = pinned_client_cache().read().await;
-            cache.get(&key).and_then(|cached| {
-                if cached.expires_at > now {
-                    Some(cached.client.clone())
-                } else {
-                    None
-                }
-            })
-        };
-        if let Some(client) = cached_client {
-            Ok(client)
-        } else {
+        if pinned_client_cache_reuse_enabled() {
+            let now = Instant::now();
+            let cached_client = {
+                let cache = pinned_client_cache().read().await;
+                cache.get(&key).and_then(|cached| {
+                    if cached.expires_at > now {
+                        Some(cached.client.clone())
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some(client) = cached_client {
+                return Ok(client);
+            }
+
             let client = build_http_client_pinned_async(options, url).await?;
             let now = Instant::now();
             {
@@ -523,6 +536,8 @@ async fn select_pinned_http_client_with_options(
                 );
             }
             Ok(client)
+        } else {
+            build_http_client_pinned_async(options, url).await
         }
     }
     .await;
@@ -1201,6 +1216,51 @@ mod tests {
             assert!(
                 !cache.contains_key(&key),
                 "expired cache entry should be removed after failed refresh"
+            );
+        });
+    }
+
+    #[test]
+    fn select_http_client_from_profile_re_resolves_dns_instead_of_reusing_cross_request_cache() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let timeout = Duration::ZERO;
+            let url = reqwest::Url::parse("https://future-cache-bypass.invalid/webhook")
+                .expect("parse url");
+            let key = pinned_key_for_timeout(&url, timeout);
+
+            {
+                let mut cache = pinned_client_cache().write().await;
+                cache.remove(&key);
+                cache.insert(
+                    key.clone(),
+                    CachedPinnedClient {
+                        client: build_http_client(Duration::from_millis(10)).expect("build client"),
+                        expires_at: Instant::now() + Duration::from_secs(60),
+                    },
+                );
+            }
+            {
+                let mut locks = lock_pinned_client_build_locks();
+                locks.remove(&key);
+            }
+
+            let profile =
+                build_http_client_profile(&timeout_only_options(timeout)).expect("build profile");
+            let err = profile
+                .select_for_url(&url, true)
+                .await
+                .expect_err("selection should ignore seeded cross-request cache");
+            assert!(err.to_string().contains("dns lookup timeout"), "{err:#}");
+
+            let cache = pinned_client_cache().read().await;
+            assert!(
+                !cache.contains_key(&key),
+                "seeded cross-request cache entry should be cleared instead of being reused"
             );
         });
     }

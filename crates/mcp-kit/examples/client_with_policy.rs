@@ -68,7 +68,7 @@ fn print_help() {
     );
     eprintln!("  --allow-http         Allow http:// in Untrusted mode");
     eprintln!(
-        "  --allow-localhost    Allow localhost/*.localhost/*.local/*.localdomain and single-label hosts in Untrusted mode"
+        "  --allow-localhost    Allow localhost, localhost.localdomain, and *.localhost in Untrusted mode"
     );
     eprintln!("  --allow-private-ip   Allow private/loopback IP literals in Untrusted mode");
     eprintln!("  --allow-host <host>  Host allowlist (repeatable), e.g. --allow-host example.com");

@@ -12,6 +12,24 @@ use crate::ServerName;
 const MCP_CONFIG_VERSION: u32 = 1;
 const DEFAULT_CONFIG_CANDIDATES: [&str; 2] = [".mcp.json", "mcp.json"];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ConfigLoadPolicy {
+    allow_override_outside_root: bool,
+}
+
+impl ConfigLoadPolicy {
+    #[must_use]
+    pub fn allow_override_outside_root(mut self, allow: bool) -> Self {
+        self.allow_override_outside_root = allow;
+        self
+    }
+
+    #[must_use]
+    pub fn allows_override_outside_root(self) -> bool {
+        self.allow_override_outside_root
+    }
+}
+
 fn config_load_options() -> ConfigLoadOptions {
     ConfigLoadOptions::new()
         .with_format(ConfigFormat::Json)
@@ -31,17 +49,55 @@ fn load_json_value_from_file(path: &Path) -> anyhow::Result<Value> {
         .into_value())
 }
 
+fn canonicalize_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut cursor = Some(path);
+    while let Some(candidate) = cursor {
+        if let Ok(canonical) = std::fs::canonicalize(candidate) {
+            return Some(canonical);
+        }
+        cursor = candidate.parent();
+    }
+    None
+}
+
+fn resolve_override_path(
+    thread_root: &Path,
+    override_path: PathBuf,
+    policy: ConfigLoadPolicy,
+) -> anyhow::Result<PathBuf> {
+    let path = if override_path.is_absolute() {
+        override_path
+    } else {
+        thread_root.join(override_path)
+    };
+
+    if policy.allows_override_outside_root() {
+        return Ok(path);
+    }
+
+    let canonical_root =
+        std::fs::canonicalize(thread_root).unwrap_or_else(|_| thread_root.to_path_buf());
+    if let Some(canonical_override_or_parent) = canonicalize_existing_ancestor(&path)
+        && !canonical_override_or_parent.starts_with(&canonical_root)
+    {
+        anyhow::bail!(
+            "override config path must be within root {} (set ConfigLoadPolicy::allow_override_outside_root(true) to override): {}",
+            thread_root.display(),
+            path.display()
+        );
+    }
+
+    Ok(path)
+}
+
 async fn load_initial_path_and_value(
     thread_root: &Path,
     override_path: Option<PathBuf>,
+    policy: ConfigLoadPolicy,
 ) -> anyhow::Result<Option<(PathBuf, Value)>> {
     match override_path {
         Some(path) => {
-            let path = if path.is_absolute() {
-                path
-            } else {
-                thread_root.join(path)
-            };
+            let path = resolve_override_path(thread_root, path, policy)?;
             let value = load_json_value_from_file(&path)?;
             Ok(Some((path, value)))
         }
@@ -390,7 +446,17 @@ impl Config {
         thread_root: &Path,
         override_path: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
-        let cfg = Self::load(thread_root, override_path).await?;
+        Self::load_required_with_policy(thread_root, override_path, ConfigLoadPolicy::default())
+            .await
+    }
+
+    /// Load `mcp.json` (v1) with an explicit override-path policy, but fail if no config file is found.
+    pub async fn load_required_with_policy(
+        thread_root: &Path,
+        override_path: Option<PathBuf>,
+        policy: ConfigLoadPolicy,
+    ) -> anyhow::Result<Self> {
+        let cfg = Self::load_with_policy(thread_root, override_path, policy).await?;
         if cfg.path().is_none() {
             anyhow::bail!(
                 "mcp config not found under root {} (tried: {})",
@@ -402,7 +468,21 @@ impl Config {
     }
 
     pub async fn load(thread_root: &Path, override_path: Option<PathBuf>) -> anyhow::Result<Self> {
-        let Some((path, json)) = load_initial_path_and_value(thread_root, override_path).await?
+        Self::load_with_policy(thread_root, override_path, ConfigLoadPolicy::default()).await
+    }
+
+    /// Load `mcp.json` (v1) with an explicit override-path policy.
+    ///
+    /// By default `Config::load` and `Config::load_required` reject override paths that escape the
+    /// provided root. Callers that intentionally need an external config file must opt into that
+    /// behavior explicitly here.
+    pub async fn load_with_policy(
+        thread_root: &Path,
+        override_path: Option<PathBuf>,
+        policy: ConfigLoadPolicy,
+    ) -> anyhow::Result<Self> {
+        let Some((path, json)) =
+            load_initial_path_and_value(thread_root, override_path, policy).await?
         else {
             return Ok(Self {
                 path: None,

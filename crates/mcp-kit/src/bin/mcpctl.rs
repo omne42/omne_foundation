@@ -189,7 +189,13 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let config = mcp_kit::Config::load(&root, cli.config.clone()).await?;
+    let config = mcp_kit::Config::load_with_policy(
+        &root,
+        cli.config.clone(),
+        mcp_kit::ConfigLoadPolicy::default()
+            .allow_override_outside_root(cli.allow_config_outside_root),
+    )
+    .await?;
 
     if cli.trust {
         eprintln!("WARNING: --trust disables the default safety restrictions.");

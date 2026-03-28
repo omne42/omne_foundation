@@ -47,7 +47,9 @@ mod server_name;
 mod session;
 mod shared_manager;
 
-pub use config::{ClientConfig, Config, Root, ServerConfig, StdoutLogConfig, Transport};
+pub use config::{
+    ClientConfig, Config, ConfigLoadPolicy, Root, ServerConfig, StdoutLogConfig, Transport,
+};
 pub use manager::{
     Connection, Manager, ProtocolVersionCheck, ProtocolVersionMismatch, ServerNotificationContext,
     ServerNotificationHandler, ServerRequestContext, ServerRequestHandler, ServerRequestOutcome,

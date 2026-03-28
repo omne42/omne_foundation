@@ -7,6 +7,7 @@ mod model;
 #[cfg(test)]
 mod tests;
 
+pub use load::ConfigLoadPolicy;
 pub use model::{ClientConfig, Config, Root, ServerConfig, StdoutLogConfig, Transport};
 
 pub(crate) const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;

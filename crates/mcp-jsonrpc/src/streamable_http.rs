@@ -397,59 +397,63 @@ impl Client {
                     }
                 };
 
-                let writer = writer_sse.clone();
-                let mut pump_fut =
-                    std::pin::pin!(pump_sse_response(resp, writer, max_message_bytes));
+                let reconnect = {
+                    let writer = writer_sse.clone();
+                    let mut pump_fut =
+                        std::pin::pin!(pump_sse_response(resp, writer, max_message_bytes));
 
-                let reconnect = loop {
-                    tokio::select! {
-                        result = &mut pump_fut => {
-                            match result {
-                                Ok(()) => {
-                                    close_post_bridge(
-                                        &writer_sse,
-                                        &handle_sse,
-                                        "streamable http SSE connection closed".to_string(),
-                                    )
-                                    .await;
-                                }
-                                Err(err) => {
-                                    close_post_bridge(
-                                        &writer_sse,
-                                        &handle_sse,
-                                        format!("streamable http SSE connection failed: {err}"),
-                                    )
-                                    .await;
-                                }
-                            }
-                            return;
-                        }
-                        wake = wake_rx.recv() => {
-                            match wake {
-                                Some(SseWakeReason::SessionChanged) => {
-                                    break true;
-                                }
-                                Some(SseWakeReason::Connect) => {}
-                                None => {
-                                    match pump_fut.await {
-                                        Ok(()) => {
-                                            close_post_bridge(
-                                                &writer_sse,
-                                                &handle_sse,
-                                                "streamable http SSE connection closed".to_string(),
-                                            )
-                                            .await;
-                                        }
-                                        Err(err) => {
-                                            close_post_bridge(
-                                                &writer_sse,
-                                                &handle_sse,
-                                                format!("streamable http SSE connection failed: {err}"),
-                                            )
-                                            .await;
-                                        }
+                    loop {
+                        tokio::select! {
+                            result = &mut pump_fut => {
+                                match result {
+                                    Ok(()) => {
+                                        close_post_bridge(
+                                            &writer_sse,
+                                            &handle_sse,
+                                            "streamable http SSE connection closed".to_string(),
+                                        )
+                                        .await;
                                     }
-                                    return;
+                                    Err(err) => {
+                                        close_post_bridge(
+                                            &writer_sse,
+                                            &handle_sse,
+                                            format!("streamable http SSE connection failed: {err}"),
+                                        )
+                                        .await;
+                                    }
+                                }
+                                return;
+                            }
+                            wake = wake_rx.recv() => {
+                                match wake {
+                                    Some(SseWakeReason::SessionChanged) => {
+                                        // Exiting this scope drops the stale SSE pump before the
+                                        // reconnect path selects a new socket.
+                                        break true;
+                                    }
+                                    Some(SseWakeReason::Connect) => {}
+                                    None => {
+                                        match pump_fut.await {
+                                            Ok(()) => {
+                                                close_post_bridge(
+                                                    &writer_sse,
+                                                    &handle_sse,
+                                                    "streamable http SSE connection closed".to_string(),
+                                                )
+                                                .await;
+                                            }
+                                            Err(err) => {
+                                                close_post_bridge(
+                                                    &writer_sse,
+                                                    &handle_sse,
+                                                    format!("streamable http SSE connection failed: {err}"),
+                                                )
+                                                .await;
+                                            }
+                                        }
+                                        return;
+                                    }
                                 }
                             }
                         }

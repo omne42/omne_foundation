@@ -23,6 +23,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `mcp-jsonrpc` 现在接受并路由超出 `i64` 范围的合法 unsigned numeric JSON-RPC `id`，避免把大整数请求/响应误判为无效消息。
 - Rewrote the timeout child-kill branch without `let` chains so the crate remains compatible with the Rust 1.85 toolchain enforced by workspace gates.
 - Aggregate top-level JSON-RPC batch responses into a single array so server->client requests received in a batch no longer emit protocol-invalid standalone response objects.
-- Dropping an unresponded `IncomingRequest` now emits a JSON-RPC internal error for both direct and batch requests, so the peer never hangs waiting for a missing response and batch flushes still complete.
-- Added regression coverage for the `streamable_http` path where an already-open SSE stream must reconnect after a POST response rolls the session id and continue delivering server notifications on the new session.
+- Dropping an unresponded `IncomingRequest` now emits a JSON-RPC internal error for both direct and batch requests, including sync/no-runtime drop paths, so peers never hang waiting for a missing response and batch flushes still complete.
+- Added direct-request regression coverage for the sync/no-runtime drop path so dropping a handler-owned request outside a current Tokio runtime still returns the expected JSON-RPC internal error.
+- Added regression coverage for the `streamable_http` path where an already-open SSE stream must drop the stale connection, reconnect after a POST response rolls the session id, and continue delivering server notifications on the new session.
 - `mcp-jsonrpc` now finishes batch-response flushes even when the last dropped request is released from a sync/no-runtime context, so sibling responses do not hang behind a leaked final flush.

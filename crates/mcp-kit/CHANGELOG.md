@@ -17,6 +17,7 @@
 - `mcp-kit`：`mcpctl` 上述平台限定测试的专用 import 现在也随平台条件一起裁剪，避免 Windows 在测试被禁用后把残留导入视为 `-D warnings` 编译错误；不改变 CLI 行为。
 - `mcpctl` 和 `mcp-kit` 的相对 `cwd/root` 解析不再在 `current_dir()` 失败时静默回退到 `.`；相关路径现在显式报错，避免把工作目录边界问题伪装成后续配置/连接异常。
 - `mcp-kit` 文档与 untrusted 出站说明现在明确区分 `allow_localhost` 的真实边界：它只放开 `localhost` / `localhost.localdomain` / `*.localhost`，不会顺带放开 `*.local`、`*.localdomain` 或单标签 host。
+- `mcp-kit`：`client_with_policy` example 的 `--allow-localhost` 帮助文本现在与实际语义保持一致，只描述 `localhost` / `localhost.localdomain` / `*.localhost`，不再误写成会放开 `*.local`、`*.localdomain` 或单标签 host。
 - `mcp-kit`：`Session::notify` 与 `Connection/Session::wait_with_timeout` 现在会在使用 Tokio timeout 前先验证 time driver；缺少 timer 时返回清晰错误并在 rustdoc 中显式声明运行时前提。
 - `mcp-kit`：`current_dir()` 不可用回归测试现在会通过测试内 restore guard 无条件恢复原始工作目录，并让整套测试专用 helper 只在支持“删除当前工作目录”语义的平台上编译，避免 Windows runner 把测试清理差异误报成产品回归；不改变产品行为。
 - release: bump workspace package version to `0.1.0`.

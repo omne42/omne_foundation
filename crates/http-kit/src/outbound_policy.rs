@@ -183,6 +183,19 @@ fn host_matches_allowlist(host: &str, allowed: &str) -> bool {
     if allowed.is_empty() {
         return false;
     }
+    let host_ip = host_for_ip_literal(host)
+        .parse::<IpAddr>()
+        .ok()
+        .map(normalize_ip);
+    let allowed_ip = host_for_ip_literal(allowed)
+        .parse::<IpAddr>()
+        .ok()
+        .map(normalize_ip);
+    match (host_ip, allowed_ip) {
+        (Some(host_ip), Some(allowed_ip)) => return host_ip == allowed_ip,
+        (Some(_), None) | (None, Some(_)) => return false,
+        (None, None) => {}
+    }
     if host.eq_ignore_ascii_case(allowed) {
         return true;
     }
@@ -260,6 +273,21 @@ mod tests {
         };
         let url = reqwest::Url::parse("https://api.example.com/mcp").expect("parse url");
         validate_untrusted_outbound_url(&policy, &url).expect("allowlisted host");
+    }
+
+    #[test]
+    fn allowlist_requires_exact_ip_literal_match() {
+        let policy = UntrustedOutboundPolicy {
+            allowed_hosts: vec!["2.3.4".to_string(), "93.184.216.34".to_string()],
+            ..Default::default()
+        };
+        let exact = reqwest::Url::parse("https://93.184.216.34/mcp").expect("parse url");
+        validate_untrusted_outbound_url(&policy, &exact).expect("exact ip literal should pass");
+
+        let suffix = reqwest::Url::parse("https://1.2.3.4/mcp").expect("parse url");
+        let err =
+            validate_untrusted_outbound_url(&policy, &suffix).expect_err("suffix match blocks");
+        assert!(matches!(err, UntrustedOutboundError::HostNotAllowed { .. }));
     }
 
     #[test]

@@ -917,3 +917,69 @@ async fn load_override_path_is_fail_closed() {
     );
     assert!(msg.contains("missing.json"), "err={msg}");
 }
+
+#[tokio::test]
+async fn load_rejects_relative_override_path_outside_root() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let outside_config = outside.path().join("outside.json");
+    tokio::fs::write(
+        &outside_config,
+        r#"{ "version": 1, "servers": { "a": { "transport": "stdio", "argv": ["mcp-a"] } } }"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(root.path(), Some(PathBuf::from("../outside.json")))
+        .await
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("must be within root"), "err={msg}");
+}
+
+#[tokio::test]
+async fn load_rejects_absolute_override_path_outside_root() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let outside_config = outside.path().join("outside.json");
+    tokio::fs::write(
+        &outside_config,
+        r#"{ "version": 1, "servers": { "a": { "transport": "stdio", "argv": ["mcp-a"] } } }"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(root.path(), Some(outside_config.clone()))
+        .await
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("must be within root"), "err={msg}");
+    assert!(
+        msg.contains(&outside_config.display().to_string()),
+        "err={msg}"
+    );
+}
+
+#[tokio::test]
+async fn load_with_policy_allows_override_path_outside_root() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let outside_config = outside.path().join("outside.json");
+    tokio::fs::write(
+        &outside_config,
+        r#"{ "version": 1, "servers": { "a": { "transport": "stdio", "argv": ["mcp-a"] } } }"#,
+    )
+    .await
+    .unwrap();
+
+    let cfg = Config::load_with_policy(
+        root.path(),
+        Some(outside_config.clone()),
+        ConfigLoadPolicy::default().allow_override_outside_root(true),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(cfg.path(), Some(outside_config.as_path()));
+    assert!(cfg.servers().contains_key("a"));
+}

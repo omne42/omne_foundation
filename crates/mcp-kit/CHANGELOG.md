@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：`Config::load` / `load_required` 现在在库层默认拒绝逃出 root 的 override config path；只有显式使用新的 `ConfigLoadPolicy::allow_override_outside_root(true)` 才会放开，与 `mcpctl --allow-config-outside-root` 的危险 opt-in 语义对齐。
 - `mcp-kit`：`SharedManager` 的重入 fail-fast 语义现在在代码与变更记录里显式收口为“只针对当前 manager 的当前 handler 调用栈”；其他活跃 handler 不会再把外部正常调用误伤成 `REENTRANT_HANDLER_ERROR`。
 - `mcp-kit`：测试侧 `current_dir()` 不可用回归 helper 的条件导入现在与平台编译条件一致，避免 Windows runner 在 helper 被裁掉后把残留 import 视为编译错误；不改变产品行为。
 - `mcp-kit`：`mcpctl` 内用于模拟“当前工作目录不可用”的回归测试现在只在支持“删除当前目录”语义的平台上运行，避免 Windows runner 因平台文件锁语义差异把测试夹具失败误报成产品回归；不改变 CLI 行为。

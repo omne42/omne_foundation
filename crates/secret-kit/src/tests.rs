@@ -476,7 +476,6 @@ fn linux_process_start_ticks(pid: u32) -> std::io::Result<u64> {
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
 }
 
-#[cfg(all(unix, target_os = "linux"))]
 fn process_terminated_or_reused_or_zombie(identity: LinuxTestProcessIdentity) -> bool {
     let pid = identity.pid;
     let Some(expected_start_ticks) = identity.start_ticks else {
@@ -3020,10 +3019,21 @@ async fn missing_env_secret_reports_lookup_error() {
 #[tokio::test]
 async fn secret_command_runner_returns_after_successful_leader_exit() -> Result<()> {
     let dir = tempfile::tempdir().expect("tempdir");
+    let shell_pid_file = dir.path().join("secret-command-shell.pid");
     let pid_file = dir.path().join("secret-command-background.pid");
     let script = format!(
-        "sleep 30 </dev/null >/dev/null 2>&1 & echo $! > '{}'; sleep 0.2; printf ok",
-        pid_file.display()
+        "echo $$ > '{shell}'; \
+         sleep 30 </dev/null >/dev/null 2>&1 & \
+         bg=$!; \
+         echo $bg > '{background}'; \
+         while [ -r /proc/$bg/stat ]; do \
+           bg_pgid=$(awk '{{print $5}}' /proc/$bg/stat 2>/dev/null || true); \
+           [ \"$bg_pgid\" = \"$$\" ] && break; \
+           sleep 0.01; \
+         done; \
+         printf ok",
+        shell = shell_pid_file.display(),
+        background = pid_file.display()
     );
     let cmd = SecretCommand {
         program: "sh".to_string(),
@@ -3036,6 +3046,9 @@ async fn secret_command_runner_returns_after_successful_leader_exit() -> Result<
     let value = tokio::time::timeout(Duration::from_secs(3), run_secret_command(&cmd, &env))
         .await
         .expect("secret command should return after the leader exits")?;
+    wait_for_pid(&shell_pid_file)
+        .await
+        .expect("shell pid file should be written");
     let pid = wait_for_pid(&pid_file)
         .await
         .expect("background pid file should be written");
@@ -3091,7 +3104,16 @@ async fn secret_command_runner_cancellation_kills_orphaned_process_group() -> Re
     let shell_pid_file = dir.path().join("secret-command-shell.pid");
     let bg_pid_file = dir.path().join("secret-command-background.pid");
     let script = format!(
-        "echo $$ > '{shell}'; sleep 30 </dev/null >/dev/null 2>&1 & echo $! > '{background}'; sleep 0.2; exit 0",
+        "echo $$ > '{shell}'; \
+         sleep 30 </dev/null >/dev/null 2>&1 & \
+         bg=$!; \
+         echo $bg > '{background}'; \
+         while [ -r /proc/$bg/stat ]; do \
+           bg_pgid=$(awk '{{print $5}}' /proc/$bg/stat 2>/dev/null || true); \
+           [ \"$bg_pgid\" = \"$$\" ] && break; \
+           sleep 0.01; \
+         done; \
+         exit 0",
         shell = shell_pid_file.display(),
         background = bg_pid_file.display()
     );

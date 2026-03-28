@@ -11,6 +11,7 @@
 
 ### Changed
 - `mcp-kit`：`SharedManager` 的 config 驱动 `request` / `notify` / `ensure_connected` 现在和 `Manager` 一样，会把相对 `cwd` 锚定到 `config.thread_root()`；避免同一条基于 `mcp.json` 的连接在 shared 入口下退回 ambient `current_dir()` 语义，并补充 thread-root 相对 `cwd` 复用回归测试。
+- `mcp-kit`：`Manager::try_from_config` 现在会对完整 `Config` 做 fail-fast 校验，而不再只检查 `client`；手动构造的无效 server 配置会在构造期直接失败，不再拖到首次连接时才暴露。
 - `mcp-kit`：config 驱动的连接路径现在会把相对 `cwd` 锚定到 `mcp.json` 所在的 thread root，并把 `cwd` 复用判断收口到稳定目录身份；同一物理目录的 `.`/`..` 等不同词法写法不再误判成不同连接上下文。
 - `mcp-kit`：`Manager::try_from_config` 现在走完整 `Config::validate()`，会和名称/注释承诺一致地 fail-fast 校验 `client` 与全部 `servers`，不再把无效 server 配置拖到真正连接阶段才爆炸。
 - `mcp-kit`：`streamable_http` 现在会在配置校验阶段拒绝 `http_headers` / `env_http_headers` 里试图声明 transport 保留头（例如 `MCP-Protocol-Version`），避免用户配置重新覆盖握手边界。

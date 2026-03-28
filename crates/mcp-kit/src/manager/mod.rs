@@ -530,7 +530,7 @@ impl Manager {
     /// Build a `Manager` using client defaults from `config`.
     ///
     /// Note: this assumes `config.client()` is valid. Use `Manager::try_from_config` if you
-    /// manually constructed a config and want fail-fast validation.
+    /// manually constructed a config and want fail-fast validation for the full config.
     pub fn from_config(
         config: &Config,
         client_name: impl Into<String>,

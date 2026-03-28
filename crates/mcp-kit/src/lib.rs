@@ -38,6 +38,10 @@
 //! relative `cwd` values are resolved against the loaded `mcp.json` thread root when available,
 //! not against the ambient process directory.
 //!
+//! When you use config-driven connection helpers (`Manager::request`, `get_or_connect`, etc.),
+//! relative `cwd` values are resolved against the loaded `mcp.json` thread root when available,
+//! not against the ambient process directory.
+//!
 //! ## Non-goals
 //!
 //! - Implementing an MCP server

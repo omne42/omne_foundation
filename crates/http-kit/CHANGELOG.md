@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix `select_http_client_with_options(...)` so `enforce_public_ip=false` still rebuilds the unpinned client from `HttpClientOptions` instead of silently discarding the documented option set in favor of the caller's opaque base client.
 - Narrow `allow_localhost` so it only exempts loopback-style hostnames (`localhost`, `localhost.localdomain`, `*.localhost`) instead of also allowing `*.local`, `*.localdomain`, or single-label hosts.
 - Require exact IP-literal matches in `allowed_hosts` so malformed suffix entries such as `2.3.4` can no longer allow `1.2.3.4`.
 - Re-resolve DNS on every public-IP-pinned client selection instead of reusing a cross-request pinned client cache entry, so DNS failover or rebinding cannot keep routing traffic to a stale address set after connection errors.

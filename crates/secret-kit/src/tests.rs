@@ -60,6 +60,7 @@ fn write_executable_script(path: &Path, contents: &str) -> std::io::Result<()> {
 
 struct TestEnv {
     cache_partition: String,
+    runtime_cache_partition: Option<String>,
     vars: BTreeMap<String, String>,
     command_vars: BTreeMap<String, String>,
     command_programs: BTreeMap<String, String>,
@@ -69,6 +70,7 @@ impl Default for TestEnv {
     fn default() -> Self {
         Self {
             cache_partition: "default-test-env".to_string(),
+            runtime_cache_partition: Some("default-test-runtime".to_string()),
             vars: BTreeMap::new(),
             command_vars: BTreeMap::new(),
             command_programs: BTreeMap::new(),
@@ -87,6 +89,10 @@ impl SecretEnvironment for TestEnv {
 }
 
 impl SecretCommandRuntime for TestEnv {
+    fn secret_cache_partition(&self) -> Option<Cow<'_, str>> {
+        self.runtime_cache_partition.as_deref().map(Cow::Borrowed)
+    }
+
     fn get_command_env(&self, key: &str) -> Option<String> {
         self.command_vars
             .get(key)
@@ -127,6 +133,17 @@ where
 trait TestSecretResolverExt: SecretResolver {
     async fn resolve_secret_text(&self, spec: &str, env: &dyn SecretEnvironment) -> Result<String> {
         self.resolve_secret(spec, SecretResolutionContext::ambient(env))
+            .await
+            .map(|secret| secret.expose_secret().to_owned())
+    }
+
+    async fn resolve_secret_text_with_runtime(
+        &self,
+        spec: &str,
+        environment: &dyn SecretEnvironment,
+        runtime: &dyn SecretCommandRuntime,
+    ) -> Result<String> {
+        self.resolve_secret(spec, SecretResolutionContext::new(environment, runtime))
             .await
             .map(|secret| secret.expose_secret().to_owned())
     }
@@ -325,6 +342,14 @@ impl CacheAwareSecretResolver for SlowMismatchedHintResolver {
         Ok(Some("shared-hint".to_string()))
     }
 
+    fn lookup_secret_cache_partitioning(
+        &self,
+        _spec: &str,
+        _context: SecretResolutionContext<'_>,
+    ) -> Option<SecretCachePartitioning> {
+        Some(SecretCachePartitioning::Environment)
+    }
+
     async fn prepare_secret_resolution(
         &self,
         spec: &str,
@@ -354,6 +379,14 @@ impl CacheAwareSecretResolver for MismatchedHintResolver {
         _context: SecretResolutionContext<'_>,
     ) -> Result<Option<String>> {
         Ok(Some("shared-hint".to_string()))
+    }
+
+    fn lookup_secret_cache_partitioning(
+        &self,
+        _spec: &str,
+        _context: SecretResolutionContext<'_>,
+    ) -> Option<SecretCachePartitioning> {
+        Some(SecretCachePartitioning::Environment)
     }
 
     async fn prepare_secret_resolution(
@@ -406,6 +439,14 @@ impl CacheAwareSecretResolver for EnvironmentScopedResolver {
         Ok(Some(spec.to_string()))
     }
 
+    fn lookup_secret_cache_partitioning(
+        &self,
+        _spec: &str,
+        _context: SecretResolutionContext<'_>,
+    ) -> Option<SecretCachePartitioning> {
+        Some(SecretCachePartitioning::Environment)
+    }
+
     async fn prepare_secret_resolution(
         &self,
         spec: &str,
@@ -414,6 +455,66 @@ impl CacheAwareSecretResolver for EnvironmentScopedResolver {
         Ok(PreparedSecretResolution::cached(
             spec.to_string(),
             spec.to_string(),
+        ))
+    }
+
+    async fn resolve_prepared_secret(
+        &self,
+        prepared: Self::Prepared,
+        context: SecretResolutionContext<'_>,
+    ) -> Result<SecretString> {
+        self.resolve_secret(prepared.as_str(), context).await
+    }
+}
+
+#[derive(Default)]
+struct RuntimeScopedResolver {
+    calls: AtomicUsize,
+}
+
+impl SecretResolver for RuntimeScopedResolver {
+    async fn resolve_secret(
+        &self,
+        _spec: &str,
+        context: SecretResolutionContext<'_>,
+    ) -> Result<SecretString> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let value = context
+            .command_runtime()
+            .get_command_env("RUNTIME_SECRET")
+            .expect("test runtime secret should exist");
+        Ok(SecretString::from(value))
+    }
+}
+
+impl CacheAwareSecretResolver for RuntimeScopedResolver {
+    type Prepared = String;
+
+    fn lookup_secret_cache_scope(
+        &self,
+        spec: &str,
+        _context: SecretResolutionContext<'_>,
+    ) -> Result<Option<String>> {
+        Ok(Some(spec.to_string()))
+    }
+
+    fn lookup_secret_cache_partitioning(
+        &self,
+        _spec: &str,
+        _context: SecretResolutionContext<'_>,
+    ) -> Option<SecretCachePartitioning> {
+        Some(SecretCachePartitioning::EnvironmentAndCommandRuntime)
+    }
+
+    async fn prepare_secret_resolution(
+        &self,
+        spec: &str,
+        _context: SecretResolutionContext<'_>,
+    ) -> Result<PreparedSecretResolution<Self::Prepared>> {
+        Ok(PreparedSecretResolution::cached_with_partitioning(
+            spec.to_string(),
+            spec.to_string(),
+            SecretCachePartitioning::EnvironmentAndCommandRuntime,
         ))
     }
 
@@ -2411,6 +2512,69 @@ async fn caching_resolver_reuses_cache_across_equivalent_environment_instances()
     assert_eq!(first, "prod");
     assert_eq!(second, "prod");
     assert_eq!(resolver.inner().calls.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn caching_resolver_partitions_runtime_sensitive_cache_by_runtime_partition() -> Result<()> {
+    let resolver =
+        CachingSecretResolver::new(RuntimeScopedResolver::default(), Duration::from_secs(60));
+    let environment = TestEnv {
+        cache_partition: "shared-env".to_string(),
+        ..TestEnv::default()
+    };
+    let runtime_a = TestEnv {
+        runtime_cache_partition: Some("runtime-a".to_string()),
+        command_vars: BTreeMap::from([("RUNTIME_SECRET".to_string(), "alpha".to_string())]),
+        ..TestEnv::default()
+    };
+    let runtime_b = TestEnv {
+        runtime_cache_partition: Some("runtime-b".to_string()),
+        command_vars: BTreeMap::from([("RUNTIME_SECRET".to_string(), "bravo".to_string())]),
+        ..TestEnv::default()
+    };
+
+    let first = resolver
+        .resolve_secret_text_with_runtime("runtime-sensitive", &environment, &runtime_a)
+        .await?;
+    let second = resolver
+        .resolve_secret_text_with_runtime("runtime-sensitive", &environment, &runtime_b)
+        .await?;
+    let third = resolver
+        .resolve_secret_text_with_runtime("runtime-sensitive", &environment, &runtime_a)
+        .await?;
+
+    assert_eq!(first, "alpha");
+    assert_eq!(second, "bravo");
+    assert_eq!(third, "alpha");
+    assert_eq!(resolver.inner().calls.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn caching_resolver_skips_runtime_sensitive_cache_without_runtime_partition() -> Result<()> {
+    let resolver =
+        CachingSecretResolver::new(RuntimeScopedResolver::default(), Duration::from_secs(60));
+    let environment = TestEnv {
+        cache_partition: "shared-env".to_string(),
+        ..TestEnv::default()
+    };
+    let runtime = TestEnv {
+        runtime_cache_partition: None,
+        command_vars: BTreeMap::from([("RUNTIME_SECRET".to_string(), "alpha".to_string())]),
+        ..TestEnv::default()
+    };
+
+    let first = resolver
+        .resolve_secret_text_with_runtime("runtime-sensitive", &environment, &runtime)
+        .await?;
+    let second = resolver
+        .resolve_secret_text_with_runtime("runtime-sensitive", &environment, &runtime)
+        .await?;
+
+    assert_eq!(first, "alpha");
+    assert_eq!(second, "alpha");
+    assert_eq!(resolver.inner().calls.load(Ordering::SeqCst), 2);
     Ok(())
 }
 

@@ -12,6 +12,8 @@
 ### Changed
 - `mcp-kit`：config 驱动的连接路径现在会把相对 `cwd` 锚定到 `mcp.json` 所在的 thread root，并把 `cwd` 复用判断收口到稳定目录身份；同一物理目录的 `.`/`..` 等不同词法写法不再误判成不同连接上下文。
 - `mcp-kit`：`streamable_http` 现在会在配置校验阶段拒绝 `http_headers` / `env_http_headers` 里试图声明 transport 保留头（例如 `MCP-Protocol-Version`），避免用户配置重新覆盖握手边界。
+- `mcp-kit`：`SharedManager::disconnect_and_wait` 现在会把同 server 的 lifecycle gate 一直持有到 wait 结束，避免旧连接 teardown 仍在进行时，同名 server 的冷启动重连先一步穿透进来。
+- `mcp-kit`：`SharedManager` 的 crate-level 文档和类型注释现在明确声明它是“single-flight lifecycle gate”，而不是薄 `Arc<Mutex<Manager>>`/actor 替身，收口了同 server 生命周期门禁与 handler reentrant fail-fast 的真实语义边界。
 - `mcp-kit`：stdio transport 的 argv/env placeholder 展开现在直接生成 `OsString`，不会再因为中间经过 `String` 而损坏 non-UTF-8 `cwd` 或环境值；而仍要求文本语义的 URL/header placeholder 在遇到 non-UTF-8 `cwd` 时会显式报错，避免悄悄 lossy 降级。
 - `mcp-kit`：`Config::load` / `load_required` 现在在库层默认拒绝逃出 root 的 override config path；只有显式使用新的 `ConfigLoadPolicy::allow_override_outside_root(true)` 才会放开，与 `mcpctl --allow-config-outside-root` 的危险 opt-in 语义对齐。
 - `mcp-kit`：`SharedManager` 的重入 fail-fast 语义现在在代码与变更记录里显式收口为“只针对当前 manager 的当前 handler 调用栈”；其他活跃 handler 不会再把外部正常调用误伤成 `REENTRANT_HANDLER_ERROR`。

@@ -13,10 +13,11 @@ const REENTRANT_HANDLER_ERROR: &str = "SharedManager async operations cannot be 
 
 /// Cloneable wrapper around `Manager` for serialized shared async use.
 ///
-/// This wrapper serializes manager state access through a single async mutex. Connected
-/// request/notify operations release that lock before awaiting JSON-RPC I/O, while lifecycle and
-/// inspection operations still execute under the shared lock. It is intended for callers that want
-/// shared ownership ergonomics without introducing a second runtime or actor layer.
+/// This wrapper is intentionally a single-flight lifecycle gate, not an actor. It serializes
+/// manager state access through a single async mutex, while same-server connect/disconnect paths
+/// also share a per-server gate so cold starts and teardown cannot overlap. Connected
+/// request/notify operations release the manager lock before awaiting JSON-RPC I/O, while
+/// lifecycle and inspection operations still execute under the shared lock.
 ///
 /// Reentrant fail-fast is scoped to the current manager handler task, not to global handler
 /// activity. If some other handler for the same `Manager` is active elsewhere, external callers
@@ -27,8 +28,9 @@ const REENTRANT_HANDLER_ERROR: &str = "SharedManager async operations cannot be 
 /// - connected request/notify operations can overlap once they have borrowed a client handle
 /// - operations that still need the shared lock return an error on reentrant calls from
 ///   `Manager` server request/notification handlers instead of waiting forever
-/// - connect/disconnect lifecycle changes for the same server share a single gate so a slow
-///   connect cannot be committed after a concurrent disconnect has already reported success
+/// - connect/disconnect lifecycle changes for the same server share a single gate, and
+///   `disconnect_and_wait` keeps that gate until its wait finishes so a slow teardown cannot race
+///   with a replacement cold start
 #[derive(Clone)]
 pub struct SharedManager {
     inner: Arc<Mutex<Manager>>,
@@ -231,14 +233,13 @@ impl SharedManager {
         timeout: Duration,
         on_timeout: mcp_jsonrpc::WaitOnTimeout,
     ) -> anyhow::Result<Option<std::process::ExitStatus>> {
-        let disconnect = {
-            let _gate = self
-                .lock_connect_gate("disconnect_and_wait", server_name)
-                .await?;
-            self.lock_for_async_op("disconnect_and_wait")
-                .await?
-                .prepare_disconnect_for_wait_with_cwd_cleanup(server_name)
-        };
+        let _gate = self
+            .lock_connect_gate("disconnect_and_wait", server_name)
+            .await?;
+        let disconnect = self
+            .lock_for_async_op("disconnect_and_wait")
+            .await?
+            .prepare_disconnect_for_wait_with_cwd_cleanup(server_name);
         disconnect.wait_with_timeout(timeout, on_timeout).await
     }
 
@@ -1238,6 +1239,194 @@ mod tests {
         .unwrap();
 
         server_task.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shared_manager_disconnect_and_wait_blocks_same_server_reconnect_until_wait_finishes() {
+        use tokio::sync::oneshot;
+
+        let socket_path = unique_socket_path("disconnect-wait-gate");
+        let _ = std::fs::remove_file(&socket_path);
+        let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
+            return;
+        };
+
+        let (notify_started_tx, notify_started_rx) = oneshot::channel();
+        let (second_accept_seen_tx, second_accept_seen_rx) = oneshot::channel();
+
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (server_read, mut server_write) = tokio::io::split(stream);
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            assert_eq!(init_value["method"], "initialize");
+            let init_id = init_value["id"].clone();
+
+            let init_response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": init_id,
+                "result": { "serverInfo": { "name": "demo" } },
+            });
+            let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+            init_response_line.push('\n');
+            server_write
+                .write_all(init_response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let initialized_line = lines.next_line().await.unwrap().unwrap();
+            let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+            assert_eq!(initialized_value["method"], "notifications/initialized");
+
+            let notify = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "demo/notify",
+                "params": {},
+            });
+            let mut notify_line = serde_json::to_string(&notify).unwrap();
+            notify_line.push('\n');
+            server_write
+                .write_all(notify_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+            let _ = notify_started_tx.send(());
+
+            let eof = lines.next_line().await.unwrap();
+            assert!(eof.is_none(), "expected EOF after disconnect_and_wait");
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let _ = second_accept_seen_tx.send(());
+            let (server_read, mut server_write) = tokio::io::split(stream);
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            assert_eq!(init_value["method"], "initialize");
+            let init_id = init_value["id"].clone();
+
+            let init_response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": init_id,
+                "result": { "serverInfo": { "name": "demo-reconnect" } },
+            });
+            let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+            init_response_line.push('\n');
+            server_write
+                .write_all(init_response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let initialized_line = lines.next_line().await.unwrap().unwrap();
+            let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+            assert_eq!(initialized_value["method"], "notifications/initialized");
+
+            let request_line = lines.next_line().await.unwrap().unwrap();
+            let request_value: Value = serde_json::from_str(&request_line).unwrap();
+            assert_eq!(request_value["method"], "ping");
+            let request_id = request_value["id"].clone();
+
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": { "ok": true },
+            });
+            let mut response_line = serde_json::to_string(&response).unwrap();
+            response_line.push('\n');
+            server_write
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let eof = lines.next_line().await.unwrap();
+            assert!(eof.is_none(), "expected EOF after reconnect request");
+        });
+
+        let handler_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started_for_handler = Arc::clone(&handler_started);
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            ServerName::parse("srv").unwrap(),
+            ServerConfig::unix(socket_path.clone()).unwrap(),
+        );
+        let config = Config::new(ClientConfig::default(), servers);
+
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted)
+            .with_server_notification_handler(Arc::new(move |_ctx| {
+                let started_for_handler = Arc::clone(&started_for_handler);
+                Box::pin(async move {
+                    started_for_handler.store(true, std::sync::atomic::Ordering::Relaxed);
+                    std::future::pending::<()>().await;
+                })
+            }));
+        manager
+            .get_or_connect(&config, "srv", Path::new("/"))
+            .await
+            .unwrap();
+        notify_started_rx.await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !handler_started.load(std::sync::atomic::Ordering::Relaxed) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let shared = manager.into_shared();
+        let disconnect_shared = shared.clone();
+        let disconnect_task = tokio::spawn(async move {
+            disconnect_shared
+                .disconnect_and_wait(
+                    "srv",
+                    Duration::from_millis(100),
+                    mcp_jsonrpc::WaitOnTimeout::ReturnError,
+                )
+                .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let reconnect_shared = shared.clone();
+        let reconnect_task = tokio::spawn(async move {
+            reconnect_shared
+                .request(&config, "srv", "ping", None::<Value>, Path::new("/"))
+                .await
+        });
+
+        let mut second_accept_seen_rx = second_accept_seen_rx;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut second_accept_seen_rx)
+                .await
+                .is_err(),
+            "same-server reconnect should stay blocked until disconnect_and_wait returns"
+        );
+
+        let disconnect_err = disconnect_task.await.unwrap().unwrap_err();
+        let disconnect_err_chain = format!("{disconnect_err:#}");
+        assert!(
+            disconnect_err_chain.contains("wait timed out after"),
+            "{disconnect_err_chain}"
+        );
+
+        second_accept_seen_rx.await.unwrap();
+        let reconnect_result = tokio::time::timeout(Duration::from_secs(1), reconnect_task)
+            .await
+            .expect("reconnect request should finish after disconnect_and_wait returns")
+            .unwrap()
+            .unwrap();
+        assert_eq!(reconnect_result, serde_json::json!({ "ok": true }));
+
+        assert!(shared.disconnect("srv").await.unwrap());
+        server_task.await.unwrap();
+        let _ = std::fs::remove_file(socket_path);
     }
 
     #[cfg(unix)]

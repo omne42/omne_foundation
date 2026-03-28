@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::Event;
+use crate::SecretString;
 use crate::sinks::text::{TextLimits, format_event_body_and_tags_limited, truncate_chars};
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
@@ -14,7 +15,7 @@ const SERVERCHAN_TURBO_ALLOWED_HOSTS: [&str; 1] = ["sctapi.ftqq.com"];
 #[non_exhaustive]
 #[derive(Clone)]
 pub struct ServerChanConfig {
-    pub send_key: String,
+    pub send_key: SecretString,
     pub timeout: Duration,
     pub max_chars: usize,
     pub enforce_public_ip: bool,
@@ -32,7 +33,7 @@ impl std::fmt::Debug for ServerChanConfig {
 }
 
 impl ServerChanConfig {
-    pub fn new(send_key: impl Into<String>) -> Self {
+    pub fn new(send_key: impl Into<SecretString>) -> Self {
         Self {
             send_key: send_key.into(),
             timeout: Duration::from_secs(2),
@@ -67,7 +68,8 @@ enum ServerChanKind {
 }
 
 pub struct ServerChanSink {
-    api_url: reqwest::Url,
+    api_base_url: reqwest::Url,
+    send_key: SecretString,
     kind: ServerChanKind,
     http: HttpClientProfile,
     max_chars: usize,
@@ -77,7 +79,8 @@ pub struct ServerChanSink {
 impl std::fmt::Debug for ServerChanSink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServerChanSink")
-            .field("api_url", &redact_url(&self.api_url))
+            .field("api_base_url", &redact_url(&self.api_base_url))
+            .field("send_key", &"<redacted>")
             .field("kind", &self.kind)
             .field("max_chars", &self.max_chars)
             .field("enforce_public_ip", &self.enforce_public_ip)
@@ -87,20 +90,21 @@ impl std::fmt::Debug for ServerChanSink {
 
 impl ServerChanSink {
     pub fn new(config: ServerChanConfig) -> crate::Result<Self> {
-        let (kind, raw_api_url) = build_serverchan_url(&config.send_key)?;
+        let send_key = normalize_send_key(config.send_key)?;
+        let (kind, raw_api_base_url) = build_serverchan_base_url(send_key.expose_secret())?;
 
-        let api_url = match kind {
+        let api_base_url = match kind {
             ServerChanKind::Turbo => {
                 let url = parse_and_validate_https_url(
-                    raw_api_url.as_str(),
+                    raw_api_base_url.as_str(),
                     &SERVERCHAN_TURBO_ALLOWED_HOSTS,
                 )?;
                 validate_url_path_prefix(&url, "/")?;
                 url
             }
             ServerChanKind::Sc3 => {
-                let url = parse_and_validate_https_url_basic(raw_api_url.as_str())?;
-                validate_url_path_prefix(&url, "/send/")?;
+                let url = parse_and_validate_https_url_basic(raw_api_base_url.as_str())?;
+                validate_url_path_prefix(&url, "/send")?;
                 url
             }
         };
@@ -110,7 +114,8 @@ impl ServerChanSink {
             ..Default::default()
         })?;
         Ok(Self {
-            api_url,
+            api_base_url,
+            send_key,
             kind,
             http,
             max_chars: config.max_chars,
@@ -136,10 +141,33 @@ impl ServerChanSink {
         }
         Err(anyhow::anyhow!("serverchan api error: code={code} (response body omitted)").into())
     }
+
+    fn build_api_url(
+        kind: ServerChanKind,
+        api_base_url: &reqwest::Url,
+        send_key: &SecretString,
+    ) -> crate::Result<reqwest::Url> {
+        let mut url = api_base_url.clone();
+        let send_key = send_key.expose_secret();
+        {
+            let mut segments = url
+                .path_segments_mut()
+                .map_err(|_| anyhow::anyhow!("invalid serverchan url"))?;
+            match kind {
+                ServerChanKind::Turbo => {
+                    segments.push(&format!("{send_key}.send"));
+                }
+                ServerChanKind::Sc3 => {
+                    segments.push(&format!("{send_key}.send"));
+                }
+            }
+        }
+        Ok(url)
+    }
 }
 
-fn normalize_serverchan_send_key(send_key: &str) -> crate::Result<&str> {
-    let send_key = send_key.trim();
+fn normalize_serverchan_send_key(send_key: &SecretString) -> crate::Result<&str> {
+    let send_key = send_key.expose_secret().trim();
     if send_key.is_empty() {
         return Err(anyhow::anyhow!("serverchan send_key must not be empty").into());
     }
@@ -149,9 +177,12 @@ fn normalize_serverchan_send_key(send_key: &str) -> crate::Result<&str> {
     Ok(send_key)
 }
 
-fn build_serverchan_url(send_key: &str) -> crate::Result<(ServerChanKind, reqwest::Url)> {
-    let send_key = normalize_serverchan_send_key(send_key)?;
+fn normalize_send_key(send_key: SecretString) -> crate::Result<SecretString> {
+    let send_key = normalize_serverchan_send_key(&send_key)?;
+    Ok(SecretString::new(send_key))
+}
 
+fn build_serverchan_base_url(send_key: &str) -> crate::Result<(ServerChanKind, reqwest::Url)> {
     if let Some(rest) = send_key.strip_prefix("sctp") {
         let Some(pos) = rest.find('t') else {
             return Err(anyhow::anyhow!("invalid serverchan send_key").into());
@@ -170,25 +201,23 @@ fn build_serverchan_url(send_key: &str) -> crate::Result<(ServerChanKind, reqwes
         let host = format!("{uid}.push.ft07.com");
         let mut url = reqwest::Url::parse(&format!("https://{host}/"))
             .map_err(|err| anyhow::anyhow!("invalid url: {err}"))?;
-        {
-            let mut segments = url
-                .path_segments_mut()
-                .map_err(|_| anyhow::anyhow!("invalid serverchan url"))?;
-            segments.push("send");
-            segments.push(&format!("{send_key}.send"));
-        }
+        url.path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("invalid serverchan url"))?
+            .push("send");
         return Ok((ServerChanKind::Sc3, url));
     }
 
-    let mut url = reqwest::Url::parse("https://sctapi.ftqq.com/")
+    let url = reqwest::Url::parse("https://sctapi.ftqq.com/")
         .map_err(|err| anyhow::anyhow!("invalid url: {err}"))?;
-    {
-        let mut segments = url
-            .path_segments_mut()
-            .map_err(|_| anyhow::anyhow!("invalid serverchan url"))?;
-        segments.push(&format!("{send_key}.send"));
-    }
     Ok((ServerChanKind::Turbo, url))
+}
+
+#[cfg(test)]
+fn build_serverchan_url(send_key: &SecretString) -> crate::Result<(ServerChanKind, reqwest::Url)> {
+    let send_key = normalize_send_key(send_key.clone())?;
+    let (kind, base_url) = build_serverchan_base_url(send_key.expose_secret())?;
+    let url = ServerChanSink::build_api_url(kind, &base_url, &send_key)?;
+    Ok((kind, url))
 }
 
 impl Sink for ServerChanSink {
@@ -198,18 +227,16 @@ impl Sink for ServerChanSink {
 
     fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
+            let api_url = Self::build_api_url(self.kind, &self.api_base_url, &self.send_key)?;
             let client = self
                 .http
-                .select_for_url(&self.api_url, self.enforce_public_ip)
+                .select_for_url(&api_url, self.enforce_public_ip)
                 .await?;
 
             let payload = Self::build_payload(event, self.max_chars);
 
-            let resp = send_reqwest(
-                client.post(self.api_url.as_str()).json(&payload),
-                "serverchan",
-            )
-            .await?;
+            let resp =
+                send_reqwest(client.post(api_url.as_str()).json(&payload), "serverchan").await?;
             let body = read_json_body_after_http_success(resp, "serverchan").await?;
             Self::ensure_success_response(&body)
         })
@@ -237,12 +264,14 @@ mod tests {
 
     #[test]
     fn build_url_supports_turbo_and_sc3() {
-        let (kind, url) = build_serverchan_url("SCT123tABC").expect("turbo url");
+        let turbo_key = SecretString::from("SCT123tABC");
+        let (kind, url) = build_serverchan_url(&turbo_key).expect("turbo url");
         assert_eq!(kind, ServerChanKind::Turbo);
         assert_eq!(url.host_str().unwrap_or(""), "sctapi.ftqq.com");
         assert!(url.path().ends_with(".send"));
 
-        let (kind, url) = build_serverchan_url("sctp123tABC").expect("sc3 url");
+        let sc3_key = SecretString::from("sctp123tABC");
+        let (kind, url) = build_serverchan_url(&sc3_key).expect("sc3 url");
         assert_eq!(kind, ServerChanKind::Sc3);
         assert_eq!(url.host_str().unwrap_or(""), "123.push.ft07.com");
         assert!(url.path().starts_with("/send/"));

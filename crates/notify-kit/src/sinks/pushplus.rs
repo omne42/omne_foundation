@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::Event;
+use crate::SecretString;
 use crate::sinks::text::{TextLimits, format_event_body_and_tags_limited, truncate_chars};
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
@@ -13,7 +14,7 @@ const PUSHPLUS_ALLOWED_HOSTS: [&str; 1] = ["www.pushplus.plus"];
 #[non_exhaustive]
 #[derive(Clone)]
 pub struct PushPlusConfig {
-    pub token: String,
+    pub token: SecretString,
     pub channel: Option<String>,
     pub template: Option<String>,
     pub topic: Option<String>,
@@ -37,7 +38,7 @@ impl std::fmt::Debug for PushPlusConfig {
 }
 
 impl PushPlusConfig {
-    pub fn new(token: impl Into<String>) -> Self {
+    pub fn new(token: impl Into<SecretString>) -> Self {
         Self {
             token: token.into(),
             channel: None,
@@ -94,7 +95,7 @@ impl PushPlusConfig {
 
 pub struct PushPlusSink {
     api_url: reqwest::Url,
-    token: String,
+    token: SecretString,
     channel: Option<String>,
     template: Option<String>,
     topic: Option<String>,
@@ -119,10 +120,7 @@ impl std::fmt::Debug for PushPlusSink {
 
 impl PushPlusSink {
     pub fn new(config: PushPlusConfig) -> crate::Result<Self> {
-        let token = config.token.trim();
-        if token.is_empty() {
-            return Err(anyhow::anyhow!("pushplus token must not be empty").into());
-        }
+        let token = normalize_secret(config.token, "token")?;
         let channel = normalize_optional_trimmed(config.channel);
         let template = normalize_optional_trimmed(config.template);
         let topic = normalize_optional_trimmed(config.topic);
@@ -139,7 +137,7 @@ impl PushPlusSink {
         })?;
         Ok(Self {
             api_url,
-            token: token.to_string(),
+            token,
             channel,
             template,
             topic,
@@ -209,7 +207,7 @@ impl Sink for PushPlusSink {
 
             let payload = Self::build_payload(
                 event,
-                &self.token,
+                self.token.expose_secret(),
                 self.channel.as_deref(),
                 self.template.as_deref(),
                 self.topic.as_deref(),
@@ -232,6 +230,14 @@ impl Sink for PushPlusSink {
             Err(pushplus_api_error(code, msg))
         })
     }
+}
+
+fn normalize_secret(secret: SecretString, field: &str) -> crate::Result<SecretString> {
+    let secret = secret.expose_secret().trim();
+    if secret.is_empty() {
+        return Err(anyhow::anyhow!("pushplus {field} must not be empty").into());
+    }
+    Ok(SecretString::new(secret))
 }
 
 #[cfg(test)]
@@ -283,7 +289,7 @@ mod tests {
             .with_template(" txt ")
             .with_topic(" topic ");
         let sink = PushPlusSink::new(cfg).expect("build sink");
-        assert_eq!(sink.token, "tok");
+        assert_eq!(sink.token.expose_secret(), "tok");
         assert_eq!(sink.channel.as_deref(), Some("chan"));
         assert_eq!(sink.template.as_deref(), Some("txt"));
         assert_eq!(sink.topic.as_deref(), Some("topic"));

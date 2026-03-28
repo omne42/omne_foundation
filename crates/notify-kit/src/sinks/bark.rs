@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::Event;
+use crate::SecretString;
 use crate::sinks::text::{TextLimits, format_event_body_and_tags_limited, truncate_chars};
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
@@ -15,7 +16,7 @@ const BARK_ALLOWED_HOSTS: [&str; 1] = ["api.day.app"];
 #[non_exhaustive]
 #[derive(Clone)]
 pub struct BarkConfig {
-    pub device_key: String,
+    pub device_key: SecretString,
     pub group: Option<String>,
     pub timeout: Duration,
     pub max_chars: usize,
@@ -35,7 +36,7 @@ impl std::fmt::Debug for BarkConfig {
 }
 
 impl BarkConfig {
-    pub fn new(device_key: impl Into<String>) -> Self {
+    pub fn new(device_key: impl Into<SecretString>) -> Self {
         Self {
             device_key: device_key.into(),
             group: None,
@@ -72,7 +73,7 @@ impl BarkConfig {
 
 pub struct BarkSink {
     api_url: reqwest::Url,
-    device_key: String,
+    device_key: SecretString,
     group: Option<String>,
     http: HttpClientProfile,
     max_chars: usize,
@@ -93,10 +94,7 @@ impl std::fmt::Debug for BarkSink {
 
 impl BarkSink {
     pub fn new(config: BarkConfig) -> crate::Result<Self> {
-        let device_key = config.device_key.trim();
-        if device_key.is_empty() {
-            return Err(anyhow::anyhow!("bark device_key must not be empty").into());
-        }
+        let device_key = normalize_secret(config.device_key, "device_key")?;
         let group = normalize_optional_trimmed(config.group);
 
         let api_url =
@@ -109,7 +107,7 @@ impl BarkSink {
         })?;
         Ok(Self {
             api_url,
-            device_key: device_key.to_string(),
+            device_key,
             group,
             http,
             max_chars: config.max_chars,
@@ -145,6 +143,14 @@ fn normalize_optional_trimmed(value: Option<String>) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn normalize_secret(secret: SecretString, field: &str) -> crate::Result<SecretString> {
+    let secret = secret.expose_secret().trim();
+    if secret.is_empty() {
+        return Err(anyhow::anyhow!("bark {field} must not be empty").into());
+    }
+    Ok(SecretString::new(secret))
+}
+
 fn bark_api_error(code: i64, message: &str) -> crate::Error {
     let message = truncate_chars(message, 200);
     if message.is_empty() {
@@ -167,7 +173,7 @@ impl Sink for BarkSink {
 
             let payload = Self::build_payload(
                 event,
-                &self.device_key,
+                self.device_key.expose_secret(),
                 self.group.as_deref(),
                 self.max_chars,
             );
@@ -273,7 +279,7 @@ mod tests {
     fn trims_device_key_and_group() {
         let cfg = BarkConfig::new(" key ").with_group(" team ");
         let sink = BarkSink::new(cfg).expect("build sink");
-        assert_eq!(sink.device_key, "key");
+        assert_eq!(sink.device_key.expose_secret(), "key");
         assert_eq!(sink.group.as_deref(), Some("team"));
     }
 

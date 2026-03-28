@@ -1055,6 +1055,7 @@ dependencies = [
  "log-kit",
  "pulldown-cmark",
  "reqwest",
+ "secret-kit",
  "serde_json",
  "sha2",
  "structured-text-kit",

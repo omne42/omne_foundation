@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::Event;
+use crate::SecretString;
 use crate::sinks::text::{TextLimits, format_event_text_limited, truncate_chars};
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{build_http_client, read_json_body_after_http_success, redact_url, send_reqwest};
@@ -10,7 +11,7 @@ const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 #[non_exhaustive]
 #[derive(Clone)]
 pub struct TelegramBotConfig {
-    pub bot_token: String,
+    pub bot_token: SecretString,
     pub chat_id: String,
     pub timeout: Duration,
     pub max_chars: usize,
@@ -28,7 +29,7 @@ impl std::fmt::Debug for TelegramBotConfig {
 }
 
 impl TelegramBotConfig {
-    pub fn new(bot_token: impl Into<String>, chat_id: impl Into<String>) -> Self {
+    pub fn new(bot_token: impl Into<SecretString>, chat_id: impl Into<String>) -> Self {
         Self {
             bot_token: bot_token.into(),
             chat_id: chat_id.into(),
@@ -51,7 +52,8 @@ impl TelegramBotConfig {
 }
 
 pub struct TelegramBotSink {
-    api_url: reqwest::Url,
+    api_base: reqwest::Url,
+    bot_token: SecretString,
     chat_id: String,
     client: reqwest::Client,
     max_chars: usize,
@@ -60,7 +62,8 @@ pub struct TelegramBotSink {
 impl std::fmt::Debug for TelegramBotSink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TelegramBotSink")
-            .field("api_url", &redact_url(&self.api_url))
+            .field("api_base", &redact_url(&self.api_base))
+            .field("bot_token", &"<redacted>")
             .field("chat_id", &self.chat_id)
             .field("max_chars", &self.max_chars)
             .finish_non_exhaustive()
@@ -69,31 +72,36 @@ impl std::fmt::Debug for TelegramBotSink {
 
 impl TelegramBotSink {
     pub fn new(config: TelegramBotConfig) -> crate::Result<Self> {
-        let bot_token = config.bot_token.trim();
-        if bot_token.is_empty() {
-            return Err(anyhow::anyhow!("telegram bot_token must not be empty").into());
-        }
+        let bot_token = normalize_secret(config.bot_token, "bot_token")?;
         let chat_id = config.chat_id.trim();
         if chat_id.is_empty() {
             return Err(anyhow::anyhow!("telegram chat_id must not be empty").into());
         }
 
-        let mut api_url = reqwest::Url::parse(TELEGRAM_API_BASE)
+        let api_base = reqwest::Url::parse(TELEGRAM_API_BASE)
             .map_err(|err| anyhow::anyhow!("invalid telegram api base url: {err}"))?;
-        let bot_segment = format!("bot{bot_token}");
+        let client = build_http_client(config.timeout)?;
+        Ok(Self {
+            api_base,
+            bot_token,
+            chat_id: chat_id.to_string(),
+            client,
+            max_chars: config.max_chars,
+        })
+    }
+
+    fn build_api_url(
+        api_base: &reqwest::Url,
+        bot_token: &SecretString,
+    ) -> crate::Result<reqwest::Url> {
+        let mut api_url = api_base.clone();
+        let bot_segment = format!("bot{}", bot_token.expose_secret());
         api_url
             .path_segments_mut()
             .map_err(|_| anyhow::anyhow!("invalid telegram api base url"))?
             .push(&bot_segment)
             .push("sendMessage");
-
-        let client = build_http_client(config.timeout)?;
-        Ok(Self {
-            api_url,
-            chat_id: chat_id.to_string(),
-            client,
-            max_chars: config.max_chars,
-        })
+        Ok(api_url)
     }
 
     fn build_payload(event: &Event, chat_id: &str, max_chars: usize) -> serde_json::Value {
@@ -136,9 +144,10 @@ impl Sink for TelegramBotSink {
     fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
             let payload = Self::build_payload(event, &self.chat_id, self.max_chars);
+            let api_url = Self::build_api_url(&self.api_base, &self.bot_token)?;
 
             let resp = send_reqwest(
-                self.client.post(self.api_url.as_str()).json(&payload),
+                self.client.post(api_url.as_str()).json(&payload),
                 "telegram",
             )
             .await?;
@@ -152,6 +161,14 @@ impl Sink for TelegramBotSink {
             Err(Self::build_api_error(&body))
         })
     }
+}
+
+fn normalize_secret(secret: SecretString, field: &str) -> crate::Result<SecretString> {
+    let secret = secret.expose_secret().trim();
+    if secret.is_empty() {
+        return Err(anyhow::anyhow!("telegram {field} must not be empty").into());
+    }
+    Ok(SecretString::new(secret))
 }
 
 #[cfg(test)]
@@ -191,12 +208,14 @@ mod tests {
     fn bot_token_cannot_inject_url_structure() {
         let cfg = TelegramBotConfig::new("a/b?c#d", "123");
         let sink = TelegramBotSink::new(cfg).expect("build sink");
-        assert_eq!(sink.api_url.scheme(), "https");
-        assert_eq!(sink.api_url.host_str().unwrap_or(""), "api.telegram.org");
-        assert!(sink.api_url.query().is_none(), "query must be none");
-        assert!(sink.api_url.fragment().is_none(), "fragment must be none");
+        let api_url = TelegramBotSink::build_api_url(&sink.api_base, &sink.bot_token)
+            .expect("build request url");
+        assert_eq!(api_url.scheme(), "https");
+        assert_eq!(api_url.host_str().unwrap_or(""), "api.telegram.org");
+        assert!(api_url.query().is_none(), "query must be none");
+        assert!(api_url.fragment().is_none(), "fragment must be none");
 
-        let path = sink.api_url.path();
+        let path = api_url.path();
         assert!(path.starts_with("/bot"), "{path}");
         assert!(path.ends_with("/sendMessage"), "{path}");
     }
@@ -206,21 +225,16 @@ mod tests {
         let cfg = TelegramBotConfig::new(" token:secret ", " 123 ");
         let sink = TelegramBotSink::new(cfg).expect("build sink");
         assert_eq!(sink.chat_id, "123");
+        assert_eq!(sink.bot_token.expose_secret(), "token:secret");
+        let api_url = TelegramBotSink::build_api_url(&sink.api_base, &sink.bot_token)
+            .expect("build request url");
+        assert!(api_url.path().starts_with("/bot"), "{}", api_url.path());
         assert!(
-            sink.api_url.path().starts_with("/bot"),
+            api_url.path().ends_with("/sendMessage"),
             "{}",
-            sink.api_url.path()
+            api_url.path()
         );
-        assert!(
-            sink.api_url.path().ends_with("/sendMessage"),
-            "{}",
-            sink.api_url.path()
-        );
-        assert!(
-            !sink.api_url.as_str().contains("%20"),
-            "{}",
-            sink.api_url.as_str()
-        );
+        assert!(!api_url.as_str().contains("%20"), "{}", api_url.as_str());
     }
 
     #[test]

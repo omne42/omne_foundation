@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::Event;
+use crate::SecretString;
 use crate::sinks::text::{TextLimits, format_event_text_limited};
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{build_http_client, ensure_http_success, redact_url, send_reqwest};
@@ -13,7 +14,7 @@ pub struct GitHubCommentConfig {
     pub owner: String,
     pub repo: String,
     pub issue_number: u64,
-    pub token: String,
+    pub token: SecretString,
     pub timeout: Duration,
     pub max_chars: usize,
 }
@@ -36,7 +37,7 @@ impl GitHubCommentConfig {
         owner: impl Into<String>,
         repo: impl Into<String>,
         issue_number: u64,
-        token: impl Into<String>,
+        token: impl Into<SecretString>,
     ) -> Self {
         Self {
             owner: owner.into(),
@@ -66,7 +67,7 @@ pub struct GitHubCommentSink {
     owner: String,
     repo: String,
     issue_number: u64,
-    token: String,
+    token: SecretString,
     client: reqwest::Client,
     max_chars: usize,
 }
@@ -91,10 +92,7 @@ impl GitHubCommentSink {
         if config.issue_number == 0 {
             return Err(anyhow::anyhow!("github issue_number must be > 0").into());
         }
-        let token = config.token.trim();
-        if token.is_empty() {
-            return Err(anyhow::anyhow!("github token must not be empty").into());
-        }
+        let token = normalize_secret(config.token, "token")?;
 
         let api_url = build_issue_comment_url(owner, repo, config.issue_number)?;
         let client = build_http_client(config.timeout)?;
@@ -104,7 +102,7 @@ impl GitHubCommentSink {
             owner: owner.to_string(),
             repo: repo.to_string(),
             issue_number: config.issue_number,
-            token: token.to_string(),
+            token,
             client,
             max_chars: config.max_chars,
         })
@@ -169,7 +167,7 @@ impl Sink for GitHubCommentSink {
                     .header("Accept", "application/vnd.github+json")
                     .header("User-Agent", "notify-kit")
                     .header("X-GitHub-Api-Version", "2022-11-28")
-                    .bearer_auth(&self.token)
+                    .bearer_auth(self.token.expose_secret())
                     .json(&payload),
                 "github comment",
             )
@@ -177,6 +175,14 @@ impl Sink for GitHubCommentSink {
             Ok(ensure_http_success(resp, "github comment").await?)
         })
     }
+}
+
+fn normalize_secret(secret: SecretString, field: &str) -> crate::Result<SecretString> {
+    let secret = secret.expose_secret().trim();
+    if secret.is_empty() {
+        return Err(anyhow::anyhow!("github {field} must not be empty").into());
+    }
+    Ok(SecretString::new(secret))
 }
 
 #[cfg(test)]
@@ -238,6 +244,6 @@ mod tests {
         let sink = GitHubCommentSink::new(cfg).expect("build sink");
         assert_eq!(sink.owner, "owner");
         assert_eq!(sink.repo, "repo");
-        assert_eq!(sink.token, "tok");
+        assert_eq!(sink.token.expose_secret(), "tok");
     }
 }

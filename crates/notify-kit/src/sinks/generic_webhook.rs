@@ -111,7 +111,7 @@ pub struct GenericWebhookSink {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GenericWebhookValidationMode {
-    Relaxed,
+    StrictByDefault,
     Strict,
 }
 
@@ -136,7 +136,7 @@ impl std::fmt::Debug for GenericWebhookSink {
 
 impl GenericWebhookSink {
     pub fn new(config: GenericWebhookConfig) -> crate::Result<Self> {
-        Self::build_from_config(config, GenericWebhookValidationMode::Relaxed)
+        Self::build_from_config(config, GenericWebhookValidationMode::StrictByDefault)
     }
 
     pub fn new_strict(config: GenericWebhookConfig) -> crate::Result<Self> {
@@ -181,9 +181,10 @@ fn normalize_config(
         allowed_hosts,
     } = config;
 
+    let url = parse_and_validate_https_url_basic(&url)?;
     let payload_field = normalize_payload_field(payload_field)?;
-    let allowed_hosts = normalize_allowed_hosts(allowed_hosts, mode)?;
-    let path_prefix = path_prefix.and_then(normalize_optional_trimmed);
+    let (allowed_hosts, path_prefix) =
+        normalize_security_scope(&url, allowed_hosts, path_prefix, mode)?;
 
     validate_security_requirements(
         enforce_public_ip,
@@ -192,7 +193,7 @@ fn normalize_config(
         mode,
     )?;
     let path_prefix = validate_path_prefix(path_prefix, mode)?;
-    let url = validate_target_url(&url, &allowed_hosts, path_prefix.as_deref())?;
+    let url = validate_target_url(url, &allowed_hosts, path_prefix.as_deref())?;
 
     Ok(NormalizedGenericWebhookConfig {
         url,
@@ -211,11 +212,34 @@ fn normalize_payload_field(payload_field: String) -> crate::Result<String> {
     Ok(payload_field.to_string())
 }
 
+fn normalize_security_scope(
+    url: &reqwest::Url,
+    allowed_hosts: Vec<String>,
+    path_prefix: Option<String>,
+    mode: GenericWebhookValidationMode,
+) -> crate::Result<(Vec<String>, Option<String>)> {
+    let mut allowed_hosts = normalize_allowed_hosts(allowed_hosts, mode)?;
+    let mut path_prefix = path_prefix.and_then(normalize_optional_trimmed);
+
+    if mode == GenericWebhookValidationMode::StrictByDefault {
+        if allowed_hosts.is_empty() {
+            let host = url
+                .host_str()
+                .ok_or_else(|| anyhow::anyhow!("url must have a host"))?;
+            allowed_hosts.push(host.to_string());
+        }
+        if path_prefix.is_none() {
+            path_prefix = Some(url.path().to_string());
+        }
+    }
+
+    Ok((allowed_hosts, path_prefix))
+}
+
 fn validate_path_prefix(
     path_prefix: Option<String>,
     mode: GenericWebhookValidationMode,
 ) -> crate::Result<Option<String>> {
-    let path_prefix = path_prefix.and_then(normalize_optional_trimmed);
     if mode == GenericWebhookValidationMode::Strict {
         let Some(path_prefix) = path_prefix else {
             return Err(anyhow::anyhow!("generic webhook strict mode requires path_prefix").into());
@@ -255,6 +279,12 @@ fn validate_security_requirements(
                 anyhow::anyhow!("generic webhook strict mode requires public ip check").into(),
             );
         }
+        if mode == GenericWebhookValidationMode::StrictByDefault {
+            return Err(anyhow::anyhow!(
+                "generic webhook default constructor requires public ip check"
+            )
+            .into());
+        }
         if allowed_hosts.is_empty() {
             return Err(anyhow::anyhow!(
                 "generic webhook disabling public ip check requires allowed_hosts"
@@ -278,11 +308,10 @@ fn validate_security_requirements(
 }
 
 fn validate_target_url(
-    url: &str,
+    url: reqwest::Url,
     allowed_hosts: &[String],
     path_prefix: Option<&str>,
 ) -> crate::Result<reqwest::Url> {
-    let url = parse_and_validate_https_url_basic(url)?;
     if let Some(prefix) = path_prefix {
         validate_url_path_prefix(&url, prefix)?;
     }
@@ -386,7 +415,15 @@ mod tests {
         let cfg =
             GenericWebhookConfig::new("https://example.com/webhook").with_public_ip_check(false);
         let err = GenericWebhookSink::new(cfg).expect_err("expected invalid config");
-        assert!(err.to_string().contains("allowed_hosts"), "{err:#}");
+        assert!(err.to_string().contains("public ip"), "{err:#}");
+    }
+
+    #[test]
+    fn default_constructor_derives_host_and_path_guards_from_url() {
+        let cfg = GenericWebhookConfig::new("https://example.com/hooks/notify");
+        let sink = GenericWebhookSink::new(cfg).expect("build sink");
+        assert_eq!(sink.url.host_str().unwrap_or(""), "example.com");
+        assert!(sink.url.path().starts_with("/hooks/"));
     }
 
     #[test]

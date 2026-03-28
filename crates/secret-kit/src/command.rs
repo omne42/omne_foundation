@@ -193,9 +193,11 @@ where
                 };
                 exit_status = Some(wait_result);
                 exited = true;
-                if stdout_task.is_some() || stderr_task.is_some() {
-                    child.kill_tree();
-                }
+                // The command leader may exit while helper processes from the same group are still
+                // alive. Clean the process tree immediately on leader exit instead of waiting for
+                // the tail `Drop` path, so success/cancellation paths with already-drained
+                // stdout/stderr readers still reap orphaned descendants.
+                child.kill_tree();
             }
             stdout_result = async {
                 match stdout_task.as_mut() {

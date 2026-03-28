@@ -316,10 +316,10 @@ where
 
 async fn spawn_secret_command(
     cmd: &SecretCommand,
-    resolved_program: String,
+    resolved_program: OsString,
     snapshot: CommandEnvSnapshot,
 ) -> Result<(SecretCommandChild, CommandReadTask, CommandReadTask)> {
-    let mut command = tokio::process::Command::new(resolved_program);
+    let mut command = tokio::process::Command::new(&resolved_program);
     command.env_clear();
     apply_command_env(&mut command, cmd.program.as_str(), snapshot);
     command.args(&cmd.args);
@@ -459,26 +459,28 @@ fn resolve_command_program<E>(
     cmd: &SecretCommand,
     env: &E,
     snapshot: &CommandEnvSnapshot,
-) -> Result<String>
+) -> Result<OsString>
 where
     E: SecretCommandRuntime + ?Sized,
 {
     if let Some(program) = env.resolve_command_program(cmd.program.as_str()) {
         validate_command_program_override(cmd.program.as_str(), program.as_str())?;
-        return Ok(program);
+        return Ok(OsString::from(program));
     }
 
     let Some(provider) = SecretCliProgram::from_program(cmd.program.as_str()) else {
-        return Ok(cmd.program.clone());
+        return Ok(OsString::from(cmd.program.clone()));
     };
 
-    resolve_builtin_program(snapshot, provider).ok_or_else(|| {
-        secret_command_error!(
-            "error_detail.secret.command_spawn_failed",
-            "program" => cmd.program.as_str(),
-            "error" => format!("{} not found on ambient PATH", cmd.program.as_str())
-        )
-    })
+    resolve_builtin_program(snapshot, provider)
+        .map(PathBuf::into_os_string)
+        .ok_or_else(|| {
+            secret_command_error!(
+                "error_detail.secret.command_spawn_failed",
+                "program" => cmd.program.as_str(),
+                "error" => format!("{} not found on ambient PATH", cmd.program.as_str())
+            )
+        })
 }
 
 fn append_command_env(
@@ -804,17 +806,16 @@ fn is_command_search_path_env_var(key: &str) -> bool {
 fn resolve_builtin_program(
     snapshot: &CommandEnvSnapshot,
     program: SecretCliProgram,
-) -> Option<String> {
+) -> Option<PathBuf> {
     let path = lookup_env_pair(snapshot.ambient_pairs.as_slice(), "PATH")?;
     resolve_program_on_path(program.program_name(), path.as_os_str())
-        .map(|path| path.to_string_lossy().into_owned())
 }
 
 #[cfg(windows)]
 fn resolve_builtin_program(
     snapshot: &CommandEnvSnapshot,
     program: SecretCliProgram,
-) -> Option<String> {
+) -> Option<PathBuf> {
     let path = lookup_env_pair(snapshot.ambient_pairs.as_slice(), "PATH")?;
     let path_extensions = command_path_extensions(
         lookup_env_pair(snapshot.ambient_pairs.as_slice(), "PATHEXT").as_deref(),
@@ -824,7 +825,6 @@ fn resolve_builtin_program(
         path.as_os_str(),
         path_extensions.as_slice(),
     )
-    .map(|path| path.to_string_lossy().into_owned())
 }
 
 #[cfg(not(windows))]
@@ -919,8 +919,8 @@ fn is_launchable_program_path(path: &Path) -> bool {
 }
 
 #[cfg(test)]
-pub(crate) fn resolve_program_on_path_for_test(program: &str, path: &OsStr) -> Option<String> {
-    resolve_program_on_path(program, path).map(|path| path.to_string_lossy().into_owned())
+pub(crate) fn resolve_program_on_path_for_test(program: &str, path: &OsStr) -> Option<PathBuf> {
+    resolve_program_on_path(program, path)
 }
 
 #[cfg(all(test, windows))]
@@ -928,10 +928,9 @@ pub(crate) fn resolve_program_on_path_with_extensions_for_test(
     program: &str,
     path: &OsStr,
     path_ext: Option<&OsStr>,
-) -> Option<String> {
+) -> Option<PathBuf> {
     let path_extensions = command_path_extensions(path_ext);
     resolve_program_on_path_with_extensions(program, path, path_extensions.as_slice())
-        .map(|path| path.to_string_lossy().into_owned())
 }
 
 fn best_effort_zeroize_os_string(value: OsString) {

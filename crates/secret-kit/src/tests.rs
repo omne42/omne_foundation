@@ -1347,8 +1347,31 @@ fn resolve_program_on_path_returns_absolute_match() {
     let resolved = resolve_program_on_path_for_test("vault", dir.path().as_os_str())
         .expect("program should resolve from explicit PATH fragment");
 
-    assert_eq!(std::path::Path::new(&resolved), path.as_path());
-    assert!(std::path::Path::new(&resolved).is_absolute());
+    assert_eq!(resolved, path);
+    assert!(resolved.is_absolute());
+}
+
+#[cfg(unix)]
+#[test]
+fn resolve_program_on_path_preserves_non_utf8_absolute_match() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let parent = tempfile::tempdir().expect("tempdir");
+    let non_utf8_dir = parent
+        .path()
+        .join(std::path::PathBuf::from(OsString::from_vec(
+            b"secret-kit-non-utf8-\xff".to_vec(),
+        )));
+    std::fs::create_dir(&non_utf8_dir).expect("create non-utf8 directory");
+
+    let path = non_utf8_dir.join("vault");
+    write_executable_script(&path, "#!/bin/sh\nexit 0\n").expect("write executable");
+
+    let resolved = resolve_program_on_path_for_test("vault", non_utf8_dir.as_os_str())
+        .expect("program should resolve from non-utf8 PATH fragment");
+
+    assert_eq!(resolved, path);
 }
 
 #[cfg(unix)]
@@ -1379,7 +1402,7 @@ fn resolve_program_on_path_ignores_relative_search_entries() {
     let resolved = resolve_program_on_path_for_test("vault", search_path.as_os_str())
         .expect("resolver should ignore relative PATH entries");
 
-    assert_eq!(std::path::Path::new(&resolved), absolute_program.as_path());
+    assert_eq!(resolved, absolute_program);
 }
 
 #[cfg(unix)]
@@ -1406,7 +1429,7 @@ fn resolve_program_on_path_skips_non_executable_match() {
     let resolved = resolve_program_on_path_for_test("vault", search_path.as_os_str())
         .expect("resolver should skip non-executable candidate");
 
-    assert_eq!(std::path::Path::new(&resolved), executable.as_path());
+    assert_eq!(resolved, executable);
 }
 
 #[cfg(windows)]
@@ -1424,7 +1447,7 @@ fn resolve_program_on_path_uses_snapshot_pathext() {
         Some(OsStr::new(".CMD")),
     )
     .expect("program should resolve through snapshot PATHEXT");
-    assert_eq!(std::path::Path::new(&resolved), path.as_path());
+    assert_eq!(resolved, path);
 
     let missing = crate::command::resolve_program_on_path_with_extensions_for_test(
         "vault",
@@ -1469,6 +1492,54 @@ async fn resolve_secret_uses_ambient_snapshot_path_for_builtin_resolution() -> R
     tokio::time::sleep(Duration::from_millis(10)).await;
     let value = resolve_secret_text("secret://vault/secret/demo?field=token", &env).await?;
     assert_eq!(value, "resolved-from-snapshot");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn resolve_secret_uses_non_utf8_ambient_snapshot_path_for_builtin_resolution() -> Result<()> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    struct AmbientPathEnv {
+        path: OsString,
+    }
+
+    impl SecretEnvironment for AmbientPathEnv {
+        fn get_secret(&self, _key: &str) -> Option<SecretString> {
+            None
+        }
+    }
+
+    impl SecretCommandRuntime for AmbientPathEnv {
+        fn ambient_command_env_os_pairs(
+            &self,
+            _program: &str,
+        ) -> Box<dyn Iterator<Item = (OsString, OsString)> + '_> {
+            Box::new(std::iter::once((OsString::from("PATH"), self.path.clone())))
+        }
+    }
+
+    let parent = tempfile::tempdir().expect("tempdir");
+    let non_utf8_dir = parent
+        .path()
+        .join(std::path::PathBuf::from(OsString::from_vec(
+            b"secret-kit-non-utf8-\xff".to_vec(),
+        )));
+    std::fs::create_dir(&non_utf8_dir).expect("create non-utf8 directory");
+
+    let vault_path = non_utf8_dir.join("vault");
+    write_executable_script(
+        &vault_path,
+        "#!/bin/sh\nprintf resolved-from-non-utf8-snapshot\n",
+    )?;
+
+    let env = AmbientPathEnv {
+        path: non_utf8_dir.as_os_str().to_os_string(),
+    };
+
+    let value = resolve_secret_text("secret://vault/secret/demo?field=token", &env).await?;
+    assert_eq!(value, "resolved-from-non-utf8-snapshot");
     Ok(())
 }
 

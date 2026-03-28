@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `secret-kit` 现在在内建 CLI 的 ambient `PATH` 解析链路里保留已解析程序路径的 `OsString/PathBuf` 形态，不再把 non-UTF-8 可执行路径经 `to_string_lossy()` 降成文本后再交给 `Command::new(...)`，避免在非 UTF-8 目录下把 `vault`/`aws`/`gcloud`/`az` 解析到错误路径。
 - `CachingSecretResolver` 现在允许 cacheable resolver 显式声明 `SecretCommandRuntime` 是否属于缓存边界；runtime-sensitive secret 会把 command runtime partition 一并纳入 cache key，缺失稳定 runtime partition 时 fail-closed 禁止复用，避免同一 environment 分区下误复用不同 CLI/runtime 上下文的 secret。
 - `secret-kit` 现在把内建 ambient command runtime 也视为“不稳定 cache 边界”：ambient 路径默认不提供 runtime cache partition，因此 runtime-sensitive secret 不会在 ambient `PATH`/进程环境上下文上静默复用缓存，除非调用方显式提供稳定 runtime partition。
 - Collapse the cache-hint fast-path lookup in `CachingSecretResolver` so the crate stays clean under the workspace `clippy::all` local gate after the mismatched-hint fix.

@@ -17,8 +17,13 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 行为要点：
 
 - `cwd`：child 的工作目录是 `--root`（CLI）或你传入 `Manager::connect(..., cwd)` 的目录
-- `stderr`：默认继承到父进程（便于直接看到报错）
+- `stderr`：默认收口到空设备；`mcp-kit` 不会把 child 的 stderr 直接继承到宿主进程
 - `kill_on_drop = true`：连接被 drop 时，child 会被结束
+
+如果你需要直接观察 server 的 stderr：
+
+- 让外层 supervisor/调用方自己 spawn 子进程并接管 stderr
+- 然后改用 `Manager::connect_io(...)` 把已经建立好的 stdio 管道接进来
 
 安全：
 

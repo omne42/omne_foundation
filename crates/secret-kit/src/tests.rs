@@ -3020,10 +3020,25 @@ async fn missing_env_secret_reports_lookup_error() {
 #[tokio::test]
 async fn secret_command_runner_returns_after_successful_leader_exit() -> Result<()> {
     let dir = tempfile::tempdir().expect("tempdir");
+    let shell_pid_file = dir.path().join("secret-command-shell.pid");
+    let shell_pgid_file = dir.path().join("secret-command-shell.pgid");
     let pid_file = dir.path().join("secret-command-background.pid");
     let script = format!(
-        "sleep 30 </dev/null >/dev/null 2>&1 & echo $! > '{}'; sleep 0.2; printf ok",
-        pid_file.display()
+        "echo $$ > '{shell}'; \
+         awk '{{print $5}}' /proc/$$/stat > '{shell_pgid}'; \
+         sleep 30 </dev/null >/dev/null 2>&1 & \
+         bg=$!; \
+         echo $bg > '{background}'; \
+         while [ -r /proc/$bg/stat ]; do \
+           bg_pgid=$(awk '{{print $5}}' /proc/$bg/stat 2>/dev/null || true); \
+           shell_pgid=$(cat '{shell_pgid}' 2>/dev/null || true); \
+           [ -n \"$shell_pgid\" ] && [ \"$bg_pgid\" = \"$shell_pgid\" ] && break; \
+           sleep 0.01; \
+         done; \
+         printf ok",
+        shell = shell_pid_file.display(),
+        shell_pgid = shell_pgid_file.display(),
+        background = pid_file.display()
     );
     let cmd = SecretCommand {
         program: "sh".to_string(),
@@ -3036,6 +3051,9 @@ async fn secret_command_runner_returns_after_successful_leader_exit() -> Result<
     let value = tokio::time::timeout(Duration::from_secs(3), run_secret_command(&cmd, &env))
         .await
         .expect("secret command should return after the leader exits")?;
+    wait_for_pid(&shell_pid_file)
+        .await
+        .expect("shell pid file should be written");
     let pid = wait_for_pid(&pid_file)
         .await
         .expect("background pid file should be written");
@@ -3089,10 +3107,23 @@ async fn secret_command_runner_cancellation_kills_child_process_group() -> Resul
 async fn secret_command_runner_cancellation_kills_orphaned_process_group() -> Result<()> {
     let dir = tempfile::tempdir().expect("tempdir");
     let shell_pid_file = dir.path().join("secret-command-shell.pid");
+    let shell_pgid_file = dir.path().join("secret-command-shell.pgid");
     let bg_pid_file = dir.path().join("secret-command-background.pid");
     let script = format!(
-        "echo $$ > '{shell}'; sleep 30 </dev/null >/dev/null 2>&1 & echo $! > '{background}'; sleep 0.2; exit 0",
+        "echo $$ > '{shell}'; \
+         awk '{{print $5}}' /proc/$$/stat > '{shell_pgid}'; \
+         sleep 30 </dev/null >/dev/null 2>&1 & \
+         bg=$!; \
+         echo $bg > '{background}'; \
+         while [ -r /proc/$bg/stat ]; do \
+           bg_pgid=$(awk '{{print $5}}' /proc/$bg/stat 2>/dev/null || true); \
+           shell_pgid=$(cat '{shell_pgid}' 2>/dev/null || true); \
+           [ -n \"$shell_pgid\" ] && [ \"$bg_pgid\" = \"$shell_pgid\" ] && break; \
+           sleep 0.01; \
+         done; \
+         exit 0",
         shell = shell_pid_file.display(),
+        shell_pgid = shell_pgid_file.display(),
         background = bg_pid_file.display()
     );
     let cmd = SecretCommand {

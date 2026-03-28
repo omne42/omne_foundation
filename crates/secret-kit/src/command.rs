@@ -20,7 +20,7 @@ use crate::{
 
 struct SecretCommandChild {
     child: tokio::process::Child,
-    cleanup: ProcessTreeCleanup,
+    cleanup: Option<ProcessTreeCleanup>,
 }
 
 impl SecretCommandChild {
@@ -32,7 +32,10 @@ impl SecretCommandChild {
                 "error" => err.to_string()
             )
         })?;
-        Ok(Self { child, cleanup })
+        Ok(Self {
+            child,
+            cleanup: Some(cleanup),
+        })
     }
 
     fn take_stdout(&mut self, program: &str) -> Result<tokio::process::ChildStdout> {
@@ -58,22 +61,28 @@ impl SecretCommandChild {
     }
 
     async fn kill(&mut self) -> std::io::Result<()> {
-        if self.cleanup.start_termination() == CleanupDisposition::TreeTerminationInitiated {
-            return Ok(());
+        if let Some(mut cleanup) = self.cleanup.take() {
+            if cleanup.start_termination() == CleanupDisposition::TreeTerminationInitiated {
+                return Ok(());
+            }
+            start_process_tree_cleanup(cleanup);
         }
-        self.cleanup.kill_tree();
         self.child.kill().await
     }
 
-    fn kill_tree(&self) {
-        self.cleanup.kill_tree();
+    fn kill_tree(&mut self) {
+        if let Some(cleanup) = self.cleanup.take() {
+            start_process_tree_cleanup(cleanup);
+        }
     }
 }
 
 impl Drop for SecretCommandChild {
     fn drop(&mut self) {
-        let _ = self.cleanup.start_termination();
-        self.cleanup.kill_tree();
+        if let Some(mut cleanup) = self.cleanup.take() {
+            let _ = cleanup.start_termination();
+            start_process_tree_cleanup(cleanup);
+        }
     }
 }
 
@@ -81,6 +90,30 @@ type CommandReadTask = tokio::task::JoinHandle<std::io::Result<(SecretBytes, boo
 
 const TEXT_FILE_BUSY_RETRY_ATTEMPTS: usize = 5;
 const TEXT_FILE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(20);
+#[cfg(all(unix, target_os = "linux"))]
+const PROCESS_TREE_CLEANUP_RETRY_ATTEMPTS: usize = 120;
+#[cfg(all(unix, target_os = "linux"))]
+const PROCESS_TREE_CLEANUP_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+fn start_process_tree_cleanup(cleanup: ProcessTreeCleanup) {
+    #[cfg(all(unix, target_os = "linux"))]
+    {
+        std::thread::spawn(move || {
+            cleanup.kill_tree();
+            // Linux orphan cleanup relies on `/proc` to observe surviving process-group members
+            // after the leader exits. That observation can lag well past the caller's return on
+            // slower CI runners, so keep retrying in the background for the full regression-test
+            // observation window without delaying success or cancellation paths.
+            for _ in 0..PROCESS_TREE_CLEANUP_RETRY_ATTEMPTS {
+                std::thread::sleep(PROCESS_TREE_CLEANUP_RETRY_DELAY);
+                cleanup.kill_tree();
+            }
+        });
+    }
+
+    #[cfg(not(all(unix, target_os = "linux")))]
+    cleanup.kill_tree();
+}
 
 fn ensure_tokio_time_driver(program: &str) -> Result<()> {
     std::panic::catch_unwind(|| {
@@ -193,9 +226,10 @@ where
                 };
                 exit_status = Some(wait_result);
                 exited = true;
-                if stdout_task.is_some() || stderr_task.is_some() {
-                    child.kill_tree();
-                }
+                // The command leader may exit while helper processes from the same group are still
+                // alive. Trigger cleanup immediately on leader exit instead of waiting for the tail
+                // `Drop` path so successful commands still reap orphaned descendants promptly.
+                child.kill_tree();
             }
             stdout_result = async {
                 match stdout_task.as_mut() {

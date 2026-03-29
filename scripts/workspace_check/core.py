@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from check_common.context import CheckContext, run_command
+from .dependency_direction import run_dependency_direction_checks
 from .docs_system import run_docs_system_checks
 from .mcp_kit_assets import run_mcp_kit_asset_checks
 from .notify_kit_assets import run_notify_kit_asset_checks
@@ -28,6 +29,7 @@ def workspace_member_packages(ctx: CheckContext) -> list[str]:
 
 def run_local_checks(ctx: CheckContext) -> None:
     run_docs_system_checks(ctx)
+    run_dependency_direction_checks(ctx)
     fmt_command = ["cargo", "fmt"]
     for package in workspace_member_packages(ctx):
         fmt_command.extend(["-p", package])
@@ -102,7 +104,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "mode",
         nargs="?",
         default="local",
-        choices=("local", "ci", "docs-system", "asset-checks", "secret-kit-target"),
+        choices=(
+            "local",
+            "ci",
+            "docs-system",
+            "dependency-direction",
+            "asset-checks",
+            "secret-kit-target",
+        ),
     )
     parser.add_argument("extra", nargs="?")
     parser.add_argument(
@@ -127,6 +136,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.mode == "docs-system":
         run_docs_system_checks(ctx)
+        return 0
+    if args.mode == "dependency-direction":
+        run_dependency_direction_checks(ctx)
         return 0
     if args.mode == "asset-checks":
         run_asset_checks(ctx, args.extra or "all")

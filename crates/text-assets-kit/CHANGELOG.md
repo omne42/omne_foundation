@@ -17,3 +17,4 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Established crate-local changelog ownership now that `omne_foundation` tracks release notes per crate instead of at the repository root.
 - Renamed the old mixed `runtime-assets-kit` boundary to `text-assets-kit` and narrowed it to generic text-resource path validation, secure filesystem access, data-root helpers, and bootstrap/rollback primitives.
 - Kept the shared text-manifest bootstrap path public so downstream domain adapters can reuse it without reaching into private modules.
+- Clarified that bootstrap/rollback only serializes same-root attempts and performs best-effort cleanup for the current attempt; it does not promise crash-safe or power-loss-recovery transactions.

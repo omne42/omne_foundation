@@ -16,7 +16,7 @@
 - 资源路径规范化与 identity 规则
 - 文本资源清单与目录快照
 - 受限文件系统访问
-- bootstrap 事务、失败回滚与跨进程锁
+- bootstrap 并发串行化、同次尝试失败后的 best-effort rollback 与跨进程锁
 - 文本目录遍历与树扫描
 
 不负责：
@@ -35,6 +35,7 @@
 - 文本文件大小和目录总大小限制
 - 目录遍历、symlink、越界路径约束
 - 通用文本资源 manifest bootstrap
+- 同一 root 的 bootstrap/load 尝试串行化，以及同次尝试后续失败时的 best-effort 清理
 - 已加载文本目录快照与树扫描
 - `materialize_resource_root(...)`
 - `scan_text_directory(...)`
@@ -62,7 +63,13 @@
 - `src/resource_bootstrap.rs`
   - bootstrap、创建报告与失败回滚
 - `src/bootstrap_lock.rs`
-  - bootstrap 事务锁与跨进程协调
+  - bootstrap 并发串行化与跨进程协调
+
+## bootstrap/rollback 语义
+
+- `text-assets-kit` 会串行化同一 resource root 上的并发 bootstrap 尝试，避免一个尝试的 rollback 与另一个尝试的 load 互相踩到。
+- 如果同一次 bootstrap 尝试里后续步骤失败，它会按创建报告对本次新建的文件/目录做 best-effort rollback。
+- 这不是 crash-safe 或断电恢复事务：如果进程在 bootstrap 写入后异常退出，已创建的文件可能仍然留在磁盘上。
 
 ## 与其他 crate 的关系
 

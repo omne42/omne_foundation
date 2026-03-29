@@ -1832,6 +1832,9 @@ where
                         close_invalid_message(&responder, reason).await;
                         return;
                     }
+                    if responder.is_closed() {
+                        return;
+                    }
                 }
                 Ok(false) => {
                     responder
@@ -1915,6 +1918,20 @@ async fn handle_incoming_value(
             handle_incoming_item(other, true, &ctx, None, &mut stack).await
         }
     }
+}
+
+async fn close_notification_queue_overflow(
+    ctx: &IncomingValueContext<'_>,
+    reason: String,
+    counter: &AtomicU64,
+) {
+    counter.fetch_add(1, Ordering::Relaxed);
+    ctx.responder
+        .close_with_error(
+            reason.clone(),
+            Error::protocol(ProtocolErrorKind::Other, reason),
+        )
+        .await;
 }
 
 struct IncomingValueContext<'a> {
@@ -2052,14 +2069,20 @@ async fn handle_incoming_item(
                     match ctx.notify_tx.try_send(Notification { method, params }) {
                         Ok(()) => {}
                         Err(mpsc::error::TrySendError::Full(_)) => {
-                            ctx.stats
-                                .dropped_notifications_full
-                                .fetch_add(1, Ordering::Relaxed);
+                            close_notification_queue_overflow(
+                                ctx,
+                                "server notification queue is full; closing connection to avoid silent data loss".to_string(),
+                                &ctx.stats.dropped_notifications_full,
+                            )
+                            .await;
                         }
                         Err(mpsc::error::TrySendError::Closed(_)) => {
-                            ctx.stats
-                                .dropped_notifications_closed
-                                .fetch_add(1, Ordering::Relaxed);
+                            close_notification_queue_overflow(
+                                ctx,
+                                "server notification handler is unavailable; closing connection to avoid silent data loss".to_string(),
+                                &ctx.stats.dropped_notifications_closed,
+                            )
+                            .await;
                         }
                     }
                     return Ok(());
@@ -3101,7 +3124,7 @@ mod stats_tests {
     }
 
     #[tokio::test]
-    async fn stats_tracks_dropped_notifications() {
+    async fn notification_queue_overflow_closes_client_and_tracks_stats() {
         let (client_stream, server_stream) = tokio::io::duplex(1024);
         let (client_read, client_write) = tokio::io::split(client_stream);
         let (_server_read, mut server_write) = tokio::io::split(server_stream);
@@ -3111,6 +3134,7 @@ mod stats_tests {
         let client = Client::connect_io_with_options(client_read, client_write, options)
             .await
             .unwrap();
+        let handle = client.handle();
 
         let note = serde_json::json!({
             "jsonrpc": "2.0",
@@ -3125,7 +3149,7 @@ mod stats_tests {
 
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                if client.stats().dropped_notifications_full >= 1 {
+                if handle.is_closed() {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -3133,6 +3157,14 @@ mod stats_tests {
         })
         .await
         .unwrap();
+
+        assert_eq!(client.stats().dropped_notifications_full, 1);
+        assert!(
+            handle
+                .close_reason()
+                .unwrap_or_default()
+                .contains("notification queue is full")
+        );
     }
 }
 

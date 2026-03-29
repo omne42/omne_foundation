@@ -302,7 +302,7 @@ fn server_config_validate_rejects_stdio_stdout_log_with_zero_max_bytes() {
 }
 
 #[test]
-fn server_config_validate_rejects_stdio_stdout_log_with_zero_max_parts() {
+fn server_config_validate_allows_stdio_stdout_log_with_zero_max_parts() {
     let mut cfg = ServerConfig::stdio(vec!["mcp-a".to_string()]).unwrap();
     cfg.set_stdout_log(Some(StdoutLogConfig {
         path: PathBuf::from("logs/stdout.log"),
@@ -310,7 +310,7 @@ fn server_config_validate_rejects_stdio_stdout_log_with_zero_max_parts() {
         max_parts: Some(0),
     }))
     .unwrap();
-    assert!(cfg.validate().is_err());
+    cfg.validate().expect("max_parts=0 should mean unlimited");
 }
 
 #[tokio::test]

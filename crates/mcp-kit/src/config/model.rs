@@ -81,9 +81,6 @@ impl StdoutLogConfig {
         if self.max_bytes_per_part == 0 {
             anyhow::bail!("mcp stdout_log.max_bytes_per_part must be >= 1");
         }
-        if matches!(self.max_parts, Some(0)) {
-            anyhow::bail!("mcp stdout_log.max_parts must be >= 1 (or None for unlimited)");
-        }
         Ok(())
     }
 }

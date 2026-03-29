@@ -760,10 +760,9 @@ impl Manager {
         cwd: &Path,
         base: Option<&Path>,
     ) -> anyhow::Result<()> {
-        self.connection_cwds.insert(
-            parse_server_name_anyhow(server_name).expect("validated server name"),
-            resolve_connection_cwd_with_base(base, cwd)?,
-        );
+        let server_name = parse_server_name_anyhow(server_name)?;
+        self.connection_cwds
+            .insert(server_name, resolve_connection_cwd_with_base(base, cwd)?);
         Ok(())
     }
 

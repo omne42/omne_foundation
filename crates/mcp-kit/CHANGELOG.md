@@ -10,6 +10,9 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：`SharedManager` 的 config 驱动 cold-start `request` / `notify` 现在会把同 server 的 lifecycle gate 一直持有到连接完成且首次 I/O 收尾，避免不同 clone 在 connect 与首次发包之间穿插 `disconnect`/重连，把请求打到错误连接、误报 `not connected`，或在旧连接刚建好就被抢先切断。
+- `mcp-kit`：`SharedManager` 在 reentrant handler 场景下处理 request/notify 的 JSON-RPC/IO cleanup 时，不再因为 cleanup 抢不到共享锁而把原始传输错误覆盖成 `REENTRANT_HANDLER_ERROR`；现在会保留原始错误，并在必要时把断连 cleanup 延后到后台任务完成。
+- `mcp-kit`：配置加载与 connection cwd 记录路径上不再依赖隐式 `expect()` 契约；候选配置层缺少 path、或内部 server name 失配时都会返回结构化错误，而不是 panic。
 - `mcp-kit`：`stdout_log.max_parts` 现在在 `mcp.json`、手动 Rust `StdoutLogConfig` 构造和底层 `mcp-jsonrpc` 之间统一语义；`0`/`Some(0)` 都表示 unlimited，避免公开配置契约与 `validate()` 路径继续分裂。
 - `mcp-kit`：typed `Resource.size` 现在收紧为非负整数（`Option<u64>`），反序列化负数会直接 fail-closed，避免把 MCP `resources/list` 的非负大小不变量丢成 `Option<i64>`。
 - `mcp-kit`：`streamable_http` 的 `env_http_headers` 现在同时禁止覆盖 `Authorization` 与 `MCP-Protocol-Version`；`bearer_token_env_var` 继续独占 `Authorization` 的 transport 装配路径，并补充回归测试锁住这个边界。

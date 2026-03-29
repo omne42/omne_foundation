@@ -38,6 +38,8 @@
   - 单个已初始化会话
 - [`src/shared_manager.rs`](./src/shared_manager.rs)
   - 面向共享调用方的 single-flight 生命周期包装
+- [`src/error.rs`](./src/error.rs)
+  - crate 级公开错误边界，暴露 `ErrorKind` / `Result`
 - [`src/mcp.rs`](./src/mcp.rs)
   - 常用 MCP method 的轻量 typed wrapper
 - [`src/security.rs`](./src/security.rs)

@@ -46,6 +46,12 @@ pub(crate) use streamable_http_validation::should_disconnect_after_jsonrpc_error
 static NEXT_MANAGER_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_CONNECTION_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
+macro_rules! public_bail {
+    ($($arg:tt)*) => {
+        return Err(anyhow::anyhow!($($arg)*).into())
+    };
+}
+
 fn next_connection_id() -> u64 {
     NEXT_CONNECTION_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
 }
@@ -300,7 +306,7 @@ impl Connection {
     ///
     /// Note: this can hang indefinitely if the child process does not exit. Prefer
     /// `Connection::wait_with_timeout` if you need an upper bound.
-    pub async fn wait(mut self) -> anyhow::Result<Option<std::process::ExitStatus>> {
+    pub async fn wait(mut self) -> crate::Result<Option<std::process::ExitStatus>> {
         let status = self.client.wait().await.context("close jsonrpc client")?;
         let status = match status {
             Some(status) => Some(status),
@@ -325,7 +331,7 @@ impl Connection {
         }
 
         if let Some(err) = first_handler_task_error {
-            return Err(err);
+            return Err(err.into());
         }
 
         Ok(status)
@@ -339,7 +345,7 @@ impl Connection {
         mut self,
         timeout: Duration,
         on_timeout: mcp_jsonrpc::WaitOnTimeout,
-    ) -> anyhow::Result<Option<std::process::ExitStatus>> {
+    ) -> crate::Result<Option<std::process::ExitStatus>> {
         ensure_tokio_time_driver("Connection::wait_with_timeout")?;
         let deadline = tokio::time::Instant::now() + timeout;
         let remaining_budget = || deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -352,26 +358,26 @@ impl Connection {
             Err(err) => {
                 let err = anyhow::Error::new(err).context("close jsonrpc client");
                 if !contains_wait_timeout(&err) {
-                    return Err(err);
+                    return Err(err.into());
                 }
 
                 match on_timeout {
-                    mcp_jsonrpc::WaitOnTimeout::ReturnError => return Err(err),
+                    mcp_jsonrpc::WaitOnTimeout::ReturnError => return Err(err.into()),
                     mcp_jsonrpc::WaitOnTimeout::Kill { kill_timeout } => {
                         let Some(child) = &mut self.child else {
-                            return Err(err);
+                            return Err(err.into());
                         };
                         let child_id = child.id();
                         if let Err(kill_err) = child.start_kill() {
                             match child.try_wait() {
                                 Ok(Some(status)) => Some(status),
                                 Ok(None) => {
-                                    anyhow::bail!(
+                                    public_bail!(
                                         "wait timed out after {timeout:?}; failed to kill detached child (id={child_id:?}): {kill_err}"
                                     )
                                 }
                                 Err(try_wait_err) => {
-                                    anyhow::bail!(
+                                    public_bail!(
                                         "wait timed out after {timeout:?}; failed to kill detached child (id={child_id:?}): {kill_err}; try_wait failed: {try_wait_err}"
                                     )
                                 }
@@ -379,7 +385,7 @@ impl Connection {
                         } else {
                             match tokio::time::timeout(kill_timeout, child.wait()).await {
                                 Ok(status) => Some(status?),
-                                Err(_) => anyhow::bail!(
+                                Err(_) => public_bail!(
                                     "wait timed out after {timeout:?}; killed detached child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
                                 ),
                             }
@@ -395,7 +401,7 @@ impl Connection {
                     Ok(status) => Some(status?),
                     Err(_) => match on_timeout {
                         mcp_jsonrpc::WaitOnTimeout::ReturnError => {
-                            anyhow::bail!("wait timed out after {timeout:?}")
+                            public_bail!("wait timed out after {timeout:?}")
                         }
                         mcp_jsonrpc::WaitOnTimeout::Kill { kill_timeout } => {
                             let child_id = child.id();
@@ -403,12 +409,12 @@ impl Connection {
                                 match child.try_wait() {
                                     Ok(Some(status)) => Some(status),
                                     Ok(None) => {
-                                        anyhow::bail!(
+                                        public_bail!(
                                             "wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}"
                                         )
                                     }
                                     Err(try_wait_err) => {
-                                        anyhow::bail!(
+                                        public_bail!(
                                             "wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}; try_wait failed: {try_wait_err}"
                                         )
                                     }
@@ -416,7 +422,7 @@ impl Connection {
                             } else {
                                 match tokio::time::timeout(kill_timeout, child.wait()).await {
                                     Ok(status) => Some(status?),
-                                    Err(_) => anyhow::bail!(
+                                    Err(_) => public_bail!(
                                         "wait timed out after {timeout:?}; killed child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
                                     ),
                                 }
@@ -480,7 +486,7 @@ impl Connection {
         }
 
         if let Some(err) = first_handler_task_error {
-            return Err(err);
+            return Err(err.into());
         }
 
         Ok(status)
@@ -517,7 +523,7 @@ impl Manager {
         client_name: impl Into<String>,
         client_version: impl Into<String>,
         timeout: Duration,
-    ) -> anyhow::Result<Self> {
+    ) -> crate::Result<Self> {
         config.validate()?;
         Ok(Self::from_config(
             config,
@@ -889,11 +895,12 @@ impl Manager {
         server_name: &str,
         server_cfg: &ServerConfig,
         cwd: &Path,
-    ) -> anyhow::Result<()> {
-        self.connect_with_builder(server_name, server_cfg, cwd, None, || {
-            parse_server_name_anyhow(server_name)
-        })
-        .await
+    ) -> crate::Result<()> {
+        Ok(self
+            .connect_with_builder(server_name, server_cfg, cwd, None, || {
+                parse_server_name_anyhow(server_name)
+            })
+            .await?)
     }
 
     async fn connect_with_builder<F>(
@@ -947,9 +954,9 @@ impl Manager {
         &mut self,
         server_name: &str,
         client: mcp_jsonrpc::Client,
-    ) -> anyhow::Result<()> {
+    ) -> crate::Result<()> {
         if self.trust_mode == TrustMode::Untrusted {
-            anyhow::bail!(
+            public_bail!(
                 "refusing to attach custom JSON-RPC client in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) or use Manager::connect_jsonrpc_unchecked)"
             );
         }
@@ -965,13 +972,14 @@ impl Manager {
         &mut self,
         server_name: &str,
         client: mcp_jsonrpc::Client,
-    ) -> anyhow::Result<()> {
-        self.connect_jsonrpc_with_builder(
-            server_name,
-            || parse_server_name_anyhow(server_name),
-            client,
-        )
-        .await
+    ) -> crate::Result<()> {
+        Ok(self
+            .connect_jsonrpc_with_builder(
+                server_name,
+                || parse_server_name_anyhow(server_name),
+                client,
+            )
+            .await?)
     }
 
     async fn connect_jsonrpc_with_builder<F>(
@@ -1005,13 +1013,13 @@ impl Manager {
         server_name: &str,
         read: R,
         write: W,
-    ) -> anyhow::Result<()>
+    ) -> crate::Result<()>
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
         if self.trust_mode == TrustMode::Untrusted {
-            anyhow::bail!(
+            public_bail!(
                 "refusing to attach custom JSON-RPC IO in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) or use Manager::connect_io_unchecked)"
             );
         }
@@ -1028,7 +1036,7 @@ impl Manager {
         server_name: &str,
         read: R,
         write: W,
-    ) -> anyhow::Result<()>
+    ) -> crate::Result<()>
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
@@ -1042,8 +1050,9 @@ impl Manager {
         let client = mcp_jsonrpc::Client::connect_io(read, write)
             .await
             .context("connect jsonrpc io")?;
-        self.install_connection_parsed(server_name_key, client, None)
-            .await
+        Ok(self
+            .install_connection_parsed(server_name_key, client, None)
+            .await?)
     }
 
     pub async fn get_or_connect(
@@ -1051,14 +1060,15 @@ impl Manager {
         config: &Config,
         server_name: &str,
         cwd: &Path,
-    ) -> anyhow::Result<()> {
+    ) -> crate::Result<()> {
         let server_cfg = config
             .server(server_name)
             .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
-        self.connect_with_builder(server_name, server_cfg, cwd, config.thread_root(), || {
-            parse_server_name_anyhow(server_name)
-        })
-        .await
+        Ok(self
+            .connect_with_builder(server_name, server_cfg, cwd, config.thread_root(), || {
+                parse_server_name_anyhow(server_name)
+            })
+            .await?)
     }
 
     pub async fn get_or_connect_named(
@@ -1066,19 +1076,20 @@ impl Manager {
         config: &Config,
         server_name: &ServerName,
         cwd: &Path,
-    ) -> anyhow::Result<()> {
+    ) -> crate::Result<()> {
         let server_cfg = config
             .server_named(server_name)
             .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
         let server_name_key = server_name.clone();
-        self.connect_with_builder(
-            server_name.as_str(),
-            server_cfg,
-            cwd,
-            config.thread_root(),
-            || Ok(server_name_key),
-        )
-        .await
+        Ok(self
+            .connect_with_builder(
+                server_name.as_str(),
+                server_cfg,
+                cwd,
+                config.thread_root(),
+                || Ok(server_name_key),
+            )
+            .await?)
     }
 
     pub async fn get_or_connect_session(
@@ -1086,10 +1097,11 @@ impl Manager {
         config: &Config,
         server_name: &str,
         cwd: &Path,
-    ) -> anyhow::Result<Session> {
+    ) -> crate::Result<Session> {
         self.get_or_connect(config, server_name, cwd).await?;
-        self.take_session(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))
+        Ok(self
+            .take_session(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
     }
 
     pub async fn get_or_connect_session_named(
@@ -1097,10 +1109,11 @@ impl Manager {
         config: &Config,
         server_name: &ServerName,
         cwd: &Path,
-    ) -> anyhow::Result<Session> {
+    ) -> crate::Result<Session> {
         self.get_or_connect_named(config, server_name, cwd).await?;
-        self.take_session_named(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))
+        Ok(self
+            .take_session_named(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
     }
 
     pub async fn connect_named(
@@ -1108,12 +1121,13 @@ impl Manager {
         server_name: &ServerName,
         server_cfg: &ServerConfig,
         cwd: &Path,
-    ) -> anyhow::Result<()> {
+    ) -> crate::Result<()> {
         let server_name_key = server_name.clone();
-        self.connect_with_builder(server_name.as_str(), server_cfg, cwd, None, || {
-            Ok(server_name_key)
-        })
-        .await
+        Ok(self
+            .connect_with_builder(server_name.as_str(), server_cfg, cwd, None, || {
+                Ok(server_name_key)
+            })
+            .await?)
     }
 
     /// Remove a cached connection (if any) without waiting for shutdown.
@@ -1143,10 +1157,11 @@ impl Manager {
         server_name: &str,
         timeout: Duration,
         on_timeout: mcp_jsonrpc::WaitOnTimeout,
-    ) -> anyhow::Result<Option<std::process::ExitStatus>> {
-        self.prepare_disconnect_for_wait_with_cwd_cleanup(server_name)
+    ) -> crate::Result<Option<std::process::ExitStatus>> {
+        Ok(self
+            .prepare_disconnect_for_wait_with_cwd_cleanup(server_name)
             .wait_with_timeout(timeout, on_timeout)
-            .await
+            .await?)
     }
 
     pub async fn disconnect_and_wait_named(
@@ -1154,7 +1169,7 @@ impl Manager {
         server_name: &ServerName,
         timeout: Duration,
         on_timeout: mcp_jsonrpc::WaitOnTimeout,
-    ) -> anyhow::Result<Option<std::process::ExitStatus>> {
+    ) -> crate::Result<Option<std::process::ExitStatus>> {
         self.disconnect_and_wait(server_name.as_str(), timeout, on_timeout)
             .await
     }
@@ -1234,10 +1249,11 @@ impl Manager {
         server_name: &str,
         server_cfg: &ServerConfig,
         cwd: &Path,
-    ) -> anyhow::Result<Session> {
+    ) -> crate::Result<Session> {
         self.connect(server_name, server_cfg, cwd).await?;
-        self.take_session(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))
+        Ok(self
+            .take_session(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
     }
 
     pub async fn connect_session_named(
@@ -1245,30 +1261,33 @@ impl Manager {
         server_name: &ServerName,
         server_cfg: &ServerConfig,
         cwd: &Path,
-    ) -> anyhow::Result<Session> {
+    ) -> crate::Result<Session> {
         self.connect_named(server_name, server_cfg, cwd).await?;
-        self.take_session_named(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))
+        Ok(self
+            .take_session_named(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
     }
 
     pub async fn connect_jsonrpc_session(
         &mut self,
         server_name: &str,
         client: mcp_jsonrpc::Client,
-    ) -> anyhow::Result<Session> {
+    ) -> crate::Result<Session> {
         self.connect_jsonrpc(server_name, client).await?;
-        self.take_session(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))
+        Ok(self
+            .take_session(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
     }
 
     pub async fn connect_jsonrpc_session_named(
         &mut self,
         server_name: &ServerName,
         client: mcp_jsonrpc::Client,
-    ) -> anyhow::Result<Session> {
+    ) -> crate::Result<Session> {
         self.connect_jsonrpc(server_name.as_str(), client).await?;
-        self.take_session_named(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))
+        Ok(self
+            .take_session_named(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
     }
 
     pub async fn connect_io_session<R, W>(
@@ -1276,14 +1295,15 @@ impl Manager {
         server_name: &str,
         read: R,
         write: W,
-    ) -> anyhow::Result<Session>
+    ) -> crate::Result<Session>
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
         self.connect_io(server_name, read, write).await?;
-        self.take_session(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))
+        Ok(self
+            .take_session(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
     }
 
     pub async fn connect_io_session_named<R, W>(
@@ -1291,14 +1311,15 @@ impl Manager {
         server_name: &ServerName,
         read: R,
         write: W,
-    ) -> anyhow::Result<Session>
+    ) -> crate::Result<Session>
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
         self.connect_io(server_name.as_str(), read, write).await?;
-        self.take_session_named(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))
+        Ok(self
+            .take_session_named(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
     }
 
     pub async fn request(
@@ -1308,7 +1329,7 @@ impl Manager {
         method: &str,
         params: Option<Value>,
         cwd: &Path,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         self.get_or_connect(config, server_name, cwd).await?;
         self.request_connected(server_name, method, params).await
     }
@@ -1320,7 +1341,7 @@ impl Manager {
         method: &str,
         params: Option<Value>,
         cwd: &Path,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         self.request(config, server_name.as_str(), method, params, cwd)
             .await
     }
@@ -1332,7 +1353,7 @@ impl Manager {
         method: &str,
         params: Option<Value>,
         cwd: &Path,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         self.connect(server_name, server_cfg, cwd).await?;
         self.request_connected(server_name, method, params).await
     }
@@ -1343,7 +1364,7 @@ impl Manager {
         server_name: &str,
         params: Option<R::Params>,
         cwd: &Path,
-    ) -> anyhow::Result<R::Result> {
+    ) -> crate::Result<R::Result> {
         let params = match params {
             Some(params) => Some(serde_json::to_value(params).with_context(|| {
                 format!("serialize MCP params: {} (server={server_name})", R::METHOD)
@@ -1353,19 +1374,19 @@ impl Manager {
         let result = self
             .request(config, server_name, R::METHOD, params, cwd)
             .await?;
-        serde_json::from_value(result).with_context(|| {
+        Ok(serde_json::from_value(result).with_context(|| {
             format!(
                 "deserialize MCP result: {} (server={server_name})",
                 R::METHOD
             )
-        })
+        })?)
     }
 
     pub async fn request_typed_connected<R: McpRequest>(
         &mut self,
         server_name: &str,
         params: Option<R::Params>,
-    ) -> anyhow::Result<R::Result> {
+    ) -> crate::Result<R::Result> {
         let params = match params {
             Some(params) => Some(serde_json::to_value(params).with_context(|| {
                 format!("serialize MCP params: {} (server={server_name})", R::METHOD)
@@ -1375,12 +1396,12 @@ impl Manager {
         let result = self
             .request_connected(server_name, R::METHOD, params)
             .await?;
-        serde_json::from_value(result).with_context(|| {
+        Ok(serde_json::from_value(result).with_context(|| {
             format!(
                 "deserialize MCP result: {} (server={server_name})",
                 R::METHOD
             )
-        })
+        })?)
     }
 
     pub async fn notify(
@@ -1390,7 +1411,7 @@ impl Manager {
         method: &str,
         params: Option<Value>,
         cwd: &Path,
-    ) -> anyhow::Result<()> {
+    ) -> crate::Result<()> {
         self.get_or_connect(config, server_name, cwd).await?;
         self.notify_connected(server_name, method, params).await
     }
@@ -1402,7 +1423,7 @@ impl Manager {
         method: &str,
         params: Option<Value>,
         cwd: &Path,
-    ) -> anyhow::Result<()> {
+    ) -> crate::Result<()> {
         self.connect(server_name, server_cfg, cwd).await?;
         self.notify_connected(server_name, method, params).await
     }
@@ -1413,7 +1434,7 @@ impl Manager {
         server_name: &str,
         params: Option<N::Params>,
         cwd: &Path,
-    ) -> anyhow::Result<()> {
+    ) -> crate::Result<()> {
         let params = match params {
             Some(params) => Some(serde_json::to_value(params).with_context(|| {
                 format!("serialize MCP params: {} (server={server_name})", N::METHOD)
@@ -1428,7 +1449,7 @@ impl Manager {
         &mut self,
         server_name: &str,
         params: Option<N::Params>,
-    ) -> anyhow::Result<()> {
+    ) -> crate::Result<()> {
         let params = match params {
             Some(params) => Some(serde_json::to_value(params).with_context(|| {
                 format!("serialize MCP params: {} (server={server_name})", N::METHOD)
@@ -1443,7 +1464,7 @@ impl Manager {
         config: &Config,
         server_name: &str,
         cwd: &Path,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         self.request(config, server_name, "tools/list", None, cwd)
             .await
     }
@@ -1453,7 +1474,7 @@ impl Manager {
         config: &Config,
         server_name: &str,
         cwd: &Path,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         self.request(config, server_name, "resources/list", None, cwd)
             .await
     }
@@ -1463,7 +1484,7 @@ impl Manager {
         config: &Config,
         server_name: &str,
         cwd: &Path,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         self.request(config, server_name, "resources/templates/list", None, cwd)
             .await
     }
@@ -1474,7 +1495,7 @@ impl Manager {
         server_name: &str,
         uri: &str,
         cwd: &Path,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         let params = serde_json::json!({ "uri": uri });
         self.request(config, server_name, "resources/read", Some(params), cwd)
             .await
@@ -1486,7 +1507,7 @@ impl Manager {
         server_name: &str,
         uri: &str,
         cwd: &Path,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         let params = serde_json::json!({ "uri": uri });
         self.request(
             config,
@@ -1504,7 +1525,7 @@ impl Manager {
         server_name: &str,
         uri: &str,
         cwd: &Path,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         let params = serde_json::json!({ "uri": uri });
         self.request(
             config,
@@ -1521,7 +1542,7 @@ impl Manager {
         config: &Config,
         server_name: &str,
         cwd: &Path,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         self.request(config, server_name, "prompts/list", None, cwd)
             .await
     }
@@ -1533,7 +1554,7 @@ impl Manager {
         prompt: &str,
         arguments: Option<Value>,
         cwd: &Path,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         let mut params = serde_json::json!({ "name": prompt });
         if let Some(arguments) = arguments {
             params["arguments"] = arguments;
@@ -1549,7 +1570,7 @@ impl Manager {
         tool: &str,
         arguments: Option<Value>,
         cwd: &Path,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         let mut params = serde_json::json!({ "name": tool });
         if let Some(arguments) = arguments {
             params["arguments"] = arguments;
@@ -1563,7 +1584,7 @@ impl Manager {
         config: &Config,
         server_name: &str,
         cwd: &Path,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         self.request(config, server_name, "ping", None, cwd).await
     }
 
@@ -1573,7 +1594,7 @@ impl Manager {
         server_name: &str,
         level: &str,
         cwd: &Path,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         let params = serde_json::json!({ "level": level });
         self.request(config, server_name, "logging/setLevel", Some(params), cwd)
             .await
@@ -1585,7 +1606,7 @@ impl Manager {
         server_name: &str,
         params: Value,
         cwd: &Path,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         self.request(
             config,
             server_name,
@@ -1596,12 +1617,12 @@ impl Manager {
         .await
     }
 
-    pub async fn list_tools_connected(&mut self, server_name: &str) -> anyhow::Result<Value> {
+    pub async fn list_tools_connected(&mut self, server_name: &str) -> crate::Result<Value> {
         self.request_connected(server_name, "tools/list", None)
             .await
     }
 
-    pub async fn list_resources_connected(&mut self, server_name: &str) -> anyhow::Result<Value> {
+    pub async fn list_resources_connected(&mut self, server_name: &str) -> crate::Result<Value> {
         self.request_connected(server_name, "resources/list", None)
             .await
     }
@@ -1609,7 +1630,7 @@ impl Manager {
     pub async fn list_resource_templates_connected(
         &mut self,
         server_name: &str,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         self.request_connected(server_name, "resources/templates/list", None)
             .await
     }
@@ -1618,7 +1639,7 @@ impl Manager {
         &mut self,
         server_name: &str,
         uri: &str,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         let params = serde_json::json!({ "uri": uri });
         self.request_connected(server_name, "resources/read", Some(params))
             .await
@@ -1628,7 +1649,7 @@ impl Manager {
         &mut self,
         server_name: &str,
         uri: &str,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         let params = serde_json::json!({ "uri": uri });
         self.request_connected(server_name, "resources/subscribe", Some(params))
             .await
@@ -1638,13 +1659,13 @@ impl Manager {
         &mut self,
         server_name: &str,
         uri: &str,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         let params = serde_json::json!({ "uri": uri });
         self.request_connected(server_name, "resources/unsubscribe", Some(params))
             .await
     }
 
-    pub async fn list_prompts_connected(&mut self, server_name: &str) -> anyhow::Result<Value> {
+    pub async fn list_prompts_connected(&mut self, server_name: &str) -> crate::Result<Value> {
         self.request_connected(server_name, "prompts/list", None)
             .await
     }
@@ -1654,7 +1675,7 @@ impl Manager {
         server_name: &str,
         prompt: &str,
         arguments: Option<Value>,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         let mut params = serde_json::json!({ "name": prompt });
         if let Some(arguments) = arguments {
             params["arguments"] = arguments;
@@ -1663,7 +1684,7 @@ impl Manager {
             .await
     }
 
-    pub async fn ping_connected(&mut self, server_name: &str) -> anyhow::Result<Value> {
+    pub async fn ping_connected(&mut self, server_name: &str) -> crate::Result<Value> {
         self.request_connected(server_name, "ping", None).await
     }
 
@@ -1671,7 +1692,7 @@ impl Manager {
         &mut self,
         server_name: &str,
         level: &str,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         let params = serde_json::json!({ "level": level });
         self.request_connected(server_name, "logging/setLevel", Some(params))
             .await
@@ -1681,7 +1702,7 @@ impl Manager {
         &mut self,
         server_name: &str,
         params: Value,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         self.request_connected(server_name, "completion/complete", Some(params))
             .await
     }
@@ -1691,10 +1712,10 @@ impl Manager {
         server_name: &str,
         method: &str,
         params: Option<Value>,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         let Some(prepared) = self.try_prepare_connected_client(server_name, None)? else {
             let server_name = normalize_server_name_lookup(server_name);
-            anyhow::bail!("mcp server not connected: {server_name}");
+            public_bail!("mcp server not connected: {server_name}");
         };
         let server_name = prepared.server_name;
         let result = Self::request_raw_handle(
@@ -1713,7 +1734,7 @@ impl Manager {
             }
         }
 
-        result
+        Ok(result?)
     }
 
     pub async fn request_connected_named(
@@ -1721,7 +1742,7 @@ impl Manager {
         server_name: &ServerName,
         method: &str,
         params: Option<Value>,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         self.request_connected(server_name.as_str(), method, params)
             .await
     }
@@ -1731,10 +1752,10 @@ impl Manager {
         server_name: &str,
         method: &str,
         params: Option<Value>,
-    ) -> anyhow::Result<()> {
+    ) -> crate::Result<()> {
         let Some(prepared) = self.try_prepare_connected_client(server_name, None)? else {
             let server_name = normalize_server_name_lookup(server_name);
-            anyhow::bail!("mcp server not connected: {server_name}");
+            public_bail!("mcp server not connected: {server_name}");
         };
         let server_name = prepared.server_name;
         let result = Self::notify_raw_handle(
@@ -1753,7 +1774,7 @@ impl Manager {
             }
         }
 
-        result
+        Ok(result?)
     }
 
     pub async fn notify_connected_named(
@@ -1761,7 +1782,7 @@ impl Manager {
         server_name: &ServerName,
         method: &str,
         params: Option<Value>,
-    ) -> anyhow::Result<()> {
+    ) -> crate::Result<()> {
         self.notify_connected(server_name.as_str(), method, params)
             .await
     }

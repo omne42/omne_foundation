@@ -48,6 +48,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `FeishuWebhookSink::new_strict` / `new_with_secret_strict`：在构造阶段额外做一次 DNS 公网 IP 校验。
 
 ### Changed
+- `GitHubCommentSink` 现在复用 `github-kit` 提供的 GitHub API base/header/url helper，并新增 `GitHubCommentConfig::with_api_base(...)`，让 GitHub Enterprise 之类的自定义 API base 不再被 sink 内部硬编码挡住。
 - `TelegramBotConfig` / `GitHubCommentConfig` / `FeishuWebhookConfig` 及对应 sinks 现在用 `secret-kit::SecretString` 持有长期凭证；`FeishuWebhookSink` 的 webhook secret、tenant access token 与 app secret 也切到同一安全容器，减少 foundation 层把敏感值长期留在普通 `String` 中的路径。
 - `notify-kit`：其余长期凭证持有也统一收口到 `secret-kit::SecretString`。`Bark.device_key`、`DingTalk.secret`、`PushPlus.token`、`ServerChan.send_key` 不再以裸 `String` 长期保存在 config/sink 里；`ServerChan` 还把 send key 从持久化 URL 中拆出，改为按发送请求临时拼装目标 URL。
 - `GenericWebhookSink::new` 现在默认按目标 URL 自动推导 host/path 边界并走 strict-by-default 校验；调用方不再需要额外记住 `new_strict(...)` 才能拿到安全默认值，而显式 `new_strict(...)` 仍保留给需要自定义 allow-list/path 前缀的场景。

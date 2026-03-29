@@ -4,6 +4,8 @@ use thiserror::Error;
 pub enum GitHubApiError {
     #[error("github repository must be `owner/repo`, got `{repo}`")]
     InvalidRepository { repo: String },
+    #[error("invalid github api base: {details}")]
+    InvalidApiBase { details: String },
     #[error("no usable github api base configured")]
     NoApiBaseConfigured,
     #[error("failed to fetch latest release metadata for {repo}: {details}")]

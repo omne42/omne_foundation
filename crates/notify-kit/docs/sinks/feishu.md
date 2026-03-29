@@ -153,8 +153,25 @@ let sink = FeishuWebhookSink::new(cfg)?;
 说明：
 
 - 远程图片 URL 默认禁用；如确实需要，可显式调用 `.with_remote_image_urls(true)` 后再允许下载并上传
+- 远程图片下载始终强制做 DNS 公网 IP 校验；即使 webhook 主请求显式关闭了 `with_public_ip_check(false)`，图片下载也不会因此放宽到内网 / special-use 目标
 - 图片 URL 仅支持 `https`
-- 本地文件路径默认禁用；如确实需要，可显式调用 `.with_local_image_files(true)` 后再读取并上传
+- 本地文件路径默认禁用；如确实需要，需要同时显式配置：
+
+```rust,no_run,edition2024
+# extern crate notify_kit;
+# fn main() -> notify_kit::Result<()> {
+use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+
+let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx")
+    .with_app_credentials("cli_xxx", "app_secret_xxx")
+    .with_local_image_files(true)
+    .with_local_image_root("/abs/path/to/exported-images");
+let sink = FeishuWebhookSink::new(cfg)?;
+# Ok(())
+# }
+```
+
+- 只会读取显式 `local_image_root(s)` 之下的文件；超出 root、`..` 逃逸、symlink 组件和其他特殊路径都会 fail closed
 - 非 Unix 平台如果无法提供安全的 no-follow 打开语义，会直接拒绝本地图片读取，而不是退化成跟随 symlink/reparse point
 - 上传失败时不会中断整条消息，自动回退为文本链接表示
 

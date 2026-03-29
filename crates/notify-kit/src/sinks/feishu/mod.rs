@@ -1,11 +1,13 @@
 mod media;
 mod payload;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use self::media::{
-    AccessTokenCache, FeishuAppCredentials, normalize_app_credentials, normalize_secret,
+    AccessTokenCache, FeishuAppCredentials, normalize_app_credentials, normalize_local_image_roots,
+    normalize_secret,
 };
 use crate::Event;
 use crate::SecretString;
@@ -30,6 +32,7 @@ pub struct FeishuWebhookConfig {
     pub enable_markdown_rich_text: bool,
     pub allow_remote_image_urls: bool,
     pub allow_local_image_files: bool,
+    pub local_image_roots: Vec<PathBuf>,
     pub image_upload_max_bytes: usize,
     pub app_id: Option<String>,
     pub app_secret: Option<SecretString>,
@@ -45,6 +48,7 @@ impl std::fmt::Debug for FeishuWebhookConfig {
             .field("enable_markdown_rich_text", &self.enable_markdown_rich_text)
             .field("allow_remote_image_urls", &self.allow_remote_image_urls)
             .field("allow_local_image_files", &self.allow_local_image_files)
+            .field("local_image_roots", &self.local_image_roots)
             .field("image_upload_max_bytes", &self.image_upload_max_bytes)
             .field("app_id", &self.app_id.as_ref().map(|_| "<redacted>"))
             .field(
@@ -65,6 +69,7 @@ impl FeishuWebhookConfig {
             enable_markdown_rich_text: true,
             allow_remote_image_urls: false,
             allow_local_image_files: false,
+            local_image_roots: Vec::new(),
             image_upload_max_bytes: FEISHU_DEFAULT_IMAGE_UPLOAD_MAX_BYTES,
             app_id: None,
             app_secret: None,
@@ -108,6 +113,22 @@ impl FeishuWebhookConfig {
     }
 
     #[must_use]
+    pub fn with_local_image_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.local_image_roots.push(root.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_local_image_roots<I, P>(mut self, roots: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        self.local_image_roots = roots.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
     pub fn with_image_upload_max_bytes(mut self, max_bytes: usize) -> Self {
         self.image_upload_max_bytes = max_bytes;
         self
@@ -134,6 +155,7 @@ pub struct FeishuWebhookSink {
     enable_markdown_rich_text: bool,
     allow_remote_image_urls: bool,
     allow_local_image_files: bool,
+    local_image_roots: Vec<PathBuf>,
     image_upload_max_bytes: usize,
     app_credentials: Option<FeishuAppCredentials>,
     tenant_access_token: Arc<tokio::sync::Mutex<TenantAccessTokenState>>,
@@ -156,6 +178,7 @@ impl std::fmt::Debug for FeishuWebhookSink {
             .field("enable_markdown_rich_text", &self.enable_markdown_rich_text)
             .field("allow_remote_image_urls", &self.allow_remote_image_urls)
             .field("allow_local_image_files", &self.allow_local_image_files)
+            .field("local_image_roots", &self.local_image_roots)
             .field("image_upload_max_bytes", &self.image_upload_max_bytes)
             .field(
                 "app_credentials",
@@ -213,6 +236,8 @@ impl FeishuWebhookSink {
         }
 
         let app_credentials = normalize_app_credentials(config.app_id, config.app_secret)?;
+        let local_image_roots =
+            normalize_local_image_roots(config.allow_local_image_files, config.local_image_roots)?;
         let webhook_url = parse_and_validate_https_url(
             &config.webhook_url,
             &["open.feishu.cn", "open.larksuite.com"],
@@ -241,6 +266,7 @@ impl FeishuWebhookSink {
             enable_markdown_rich_text: config.enable_markdown_rich_text,
             allow_remote_image_urls: config.allow_remote_image_urls,
             allow_local_image_files: config.allow_local_image_files,
+            local_image_roots,
             image_upload_max_bytes: config.image_upload_max_bytes,
             app_credentials,
             tenant_access_token: Arc::new(tokio::sync::Mutex::new(TenantAccessTokenState::Empty)),
@@ -258,6 +284,8 @@ impl FeishuWebhookSink {
         }
 
         let app_credentials = normalize_app_credentials(config.app_id, config.app_secret)?;
+        let local_image_roots =
+            normalize_local_image_roots(config.allow_local_image_files, config.local_image_roots)?;
         let webhook_url = parse_and_validate_https_url(
             &config.webhook_url,
             &["open.feishu.cn", "open.larksuite.com"],
@@ -280,6 +308,7 @@ impl FeishuWebhookSink {
             enable_markdown_rich_text: config.enable_markdown_rich_text,
             allow_remote_image_urls: config.allow_remote_image_urls,
             allow_local_image_files: config.allow_local_image_files,
+            local_image_roots,
             image_upload_max_bytes: config.image_upload_max_bytes,
             app_credentials,
             tenant_access_token: Arc::new(tokio::sync::Mutex::new(TenantAccessTokenState::Empty)),
@@ -394,12 +423,34 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn unix_socket_test_root() -> PathBuf {
+        let candidate = PathBuf::from("/dev/shm");
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_dir() => candidate,
+            _ => local_image_test_root(),
+        }
+    }
+
+    #[cfg(unix)]
     fn unique_unix_socket_test_path() -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("unix epoch")
             .as_nanos();
-        PathBuf::from(format!("nk-{}-{unique:x}.sock", std::process::id()))
+        unix_socket_test_root().join(format!(
+            "nk-{}-{:08x}.sock",
+            std::process::id(),
+            unique as u32
+        ))
+    }
+
+    fn local_image_enabled_config() -> FeishuWebhookConfig {
+        let root = local_image_test_root().join(unique_local_image_test_name("local-root"));
+        std::fs::create_dir_all(&root).expect("create local image root");
+        FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+            .with_app_credentials("app_id", "app_secret")
+            .with_local_image_files(true)
+            .with_local_image_root(root)
     }
 
     #[test]
@@ -598,28 +649,62 @@ mod tests {
     }
 
     #[test]
+    fn local_image_opt_in_requires_explicit_roots() {
+        let err = FeishuWebhookSink::new(
+            FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+                .with_app_credentials("app_id", "app_secret")
+                .with_local_image_files(true),
+        )
+        .expect_err("local image opt-in without roots should fail closed");
+        assert!(
+            err.to_string().contains("configured local image root"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn remote_images_always_enforce_public_ip_checks() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            let sink = FeishuWebhookSink::new(
+                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+                    .with_app_credentials("app_id", "app_secret")
+                    .with_public_ip_check(false)
+                    .with_remote_image_urls(true),
+            )
+            .expect("build sink");
+
+            let err = sink
+                .load_image("https://localhost/image.png")
+                .await
+                .expect_err("remote image fetch should still fail closed");
+            assert!(
+                err.to_string().contains("host is not allowed")
+                    || err.to_string().contains("resolved ip is not allowed"),
+                "{err:#}"
+            );
+        });
+    }
+
+    #[test]
     fn local_image_files_require_explicit_opt_in() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("build runtime");
         rt.block_on(async {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("unix epoch")
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "notify-kit-feishu-local-image-{}-{unique}.png",
-                std::process::id()
+            let config = local_image_enabled_config();
+            let root = config.local_image_roots.first().expect("configured root");
+            let path = root.join(format!(
+                "{}.png",
+                unique_local_image_test_name("notify-kit-feishu-local-image")
             ));
             std::fs::write(&path, b"png").expect("write local image");
 
-            let sink = FeishuWebhookSink::new(
-                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
-                    .with_app_credentials("app_id", "app_secret")
-                    .with_local_image_files(true),
-            )
-            .expect("build sink");
+            let sink = FeishuWebhookSink::new(config).expect("build sink");
 
             let loaded = sink
                 .load_image(path.to_str().expect("utf8 path"))
@@ -633,28 +718,59 @@ mod tests {
     }
 
     #[test]
+    fn local_image_files_reject_paths_outside_configured_roots() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            let allowed_root =
+                local_image_test_root().join(unique_local_image_test_name("allowed"));
+            let outside_path = local_image_test_root().join(format!(
+                "{}-outside.png",
+                unique_local_image_test_name("outside")
+            ));
+            std::fs::create_dir_all(&allowed_root).expect("create allowed root");
+            std::fs::write(&outside_path, b"png").expect("write outside image");
+
+            let sink = FeishuWebhookSink::new(
+                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+                    .with_app_credentials("app_id", "app_secret")
+                    .with_local_image_files(true)
+                    .with_local_image_root(allowed_root.clone()),
+            )
+            .expect("build sink");
+
+            let err = sink
+                .load_image(outside_path.to_str().expect("utf8 path"))
+                .await
+                .expect_err("paths outside configured roots should be rejected");
+            assert!(
+                err.to_string()
+                    .contains("outside configured local image roots"),
+                "{err:#}"
+            );
+
+            let _ = std::fs::remove_dir_all(allowed_root);
+            let _ = std::fs::remove_file(outside_path);
+        });
+    }
+
+    #[test]
     fn local_image_files_reject_non_regular_paths() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("build runtime");
         rt.block_on(async {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("unix epoch")
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "notify-kit-feishu-local-image-dir-{}-{unique}",
-                std::process::id()
+            let config = local_image_enabled_config();
+            let root = config.local_image_roots.first().expect("configured root");
+            let path = root.join(unique_local_image_test_name(
+                "notify-kit-feishu-local-image-dir",
             ));
             std::fs::create_dir_all(&path).expect("create local image dir");
 
-            let sink = FeishuWebhookSink::new(
-                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
-                    .with_app_credentials("app_id", "app_secret")
-                    .with_local_image_files(true),
-            )
-            .expect("build sink");
+            let sink = FeishuWebhookSink::new(config).expect("build sink");
 
             let err = sink
                 .load_image(path.to_str().expect("utf8 path"))
@@ -674,25 +790,25 @@ mod tests {
             .build()
             .expect("build runtime");
         rt.block_on(async {
-            let root = local_image_test_root();
+            let config = local_image_enabled_config();
+            let root = config
+                .local_image_roots
+                .first()
+                .expect("configured root")
+                .clone();
             let name = unique_local_image_test_name("notify-kit-feishu-local-image");
             let target = root.join(format!("{name}-target.png"));
             let link = root.join(format!("{name}-link.png"));
             std::fs::write(&target, b"png").expect("write symlink target");
             symlink(&target, &link).expect("create symlink");
 
-            let sink = FeishuWebhookSink::new(
-                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
-                    .with_app_credentials("app_id", "app_secret")
-                    .with_local_image_files(true),
-            )
-            .expect("build sink");
+            let sink = FeishuWebhookSink::new(config).expect("build sink");
 
             let err = sink
                 .load_image(link.to_str().expect("utf8 path"))
                 .await
                 .expect_err("symlinks should be rejected");
-            assert!(err.to_string().contains("must not be a symlink"), "{err:#}");
+            assert!(err.to_string().contains("symlink component"), "{err:#}");
 
             let _ = std::fs::remove_file(link);
             let _ = std::fs::remove_file(target);
@@ -721,7 +837,8 @@ mod tests {
             let sink = FeishuWebhookSink::new(
                 FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
                     .with_app_credentials("app_id", "app_secret")
-                    .with_local_image_files(true),
+                    .with_local_image_files(true)
+                    .with_local_image_root(base.clone()),
             )
             .expect("build sink");
 
@@ -729,7 +846,7 @@ mod tests {
                 .load_image(link_dir.join(image_name).to_str().expect("utf8 path"))
                 .await
                 .expect_err("symlink ancestors should be rejected");
-            assert!(err.to_string().contains("symlink ancestor"), "{err:#}");
+            assert!(err.to_string().contains("symlink component"), "{err:#}");
 
             let _ = std::fs::remove_file(&target);
             let _ = std::fs::remove_file(&link_dir);
@@ -751,7 +868,8 @@ mod tests {
             let sink = FeishuWebhookSink::new(
                 FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
                     .with_app_credentials("app_id", "app_secret")
-                    .with_local_image_files(true),
+                    .with_local_image_files(true)
+                    .with_local_image_root(path.parent().expect("socket parent").to_path_buf()),
             )
             .expect("build sink");
 
@@ -780,12 +898,7 @@ mod tests {
             ));
             std::fs::write(&path, b"png").expect("write local image");
 
-            let sink = FeishuWebhookSink::new(
-                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
-                    .with_app_credentials("app_id", "app_secret")
-                    .with_local_image_files(true),
-            )
-            .expect("build sink");
+            let sink = FeishuWebhookSink::new(local_image_enabled_config()).expect("build sink");
 
             let err = sink
                 .load_image(path.to_str().expect("utf8 path"))
@@ -807,19 +920,19 @@ mod tests {
             .build()
             .expect("build runtime");
         rt.block_on(async {
-            let path = local_image_test_root().join(format!(
+            let config = local_image_enabled_config().with_image_upload_max_bytes(4);
+            let root = config
+                .local_image_roots
+                .first()
+                .expect("configured root")
+                .clone();
+            let path = root.join(format!(
                 "{}.png",
                 unique_local_image_test_name("notify-kit-feishu-local-image-large")
             ));
             std::fs::write(&path, vec![b'x'; 5]).expect("write oversized image");
 
-            let sink = FeishuWebhookSink::new(
-                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
-                    .with_app_credentials("app_id", "app_secret")
-                    .with_local_image_files(true)
-                    .with_image_upload_max_bytes(4),
-            )
-            .expect("build sink");
+            let sink = FeishuWebhookSink::new(config).expect("build sink");
 
             let err = sink
                 .load_image(path.to_str().expect("utf8 path"))

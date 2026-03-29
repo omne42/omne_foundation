@@ -82,13 +82,32 @@
 `pre-commit` 会直接执行 workspace 级 Rust 本地门禁。当前包含：
 
 - 文档系统入口检查
+- workspace 内部 crate 依赖方向检查
 - `cargo fmt --all -- --check`
 - `cargo check --workspace --all-targets --all-features`
 - `cargo test --workspace --all-features`
 
-也就是说，提交前默认要满足文档结构、格式、编译和测试这四类本地门禁。
+也就是说，提交前默认要满足文档结构、依赖方向、格式、编译和测试这五类本地门禁。
 
 `scripts/workspace_check/` 是这里的共享实现；`scripts/check-workspace.sh` 只是保留给手动执行和 CI 复用的薄入口。
+
+### dependency direction gate
+
+`scripts/workspace_check/` 现在还会机械检查 workspace 内部 crate 依赖方向。
+
+当前做法是维护一份与 [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md) 对齐的稳定 allowlist，只允许声明过的内部依赖组合继续存在；一旦某个 crate 新增了未记录的 workspace 依赖，`local` / `ci` 和单独的：
+
+```bash
+scripts/check-workspace.sh dependency-direction
+```
+
+都会直接失败。
+
+这条 gate 的目的不是阻止正常演进，而是把“新增内部依赖”变成一个显式动作：
+
+- 先决定边界是否合理
+- 再同步更新 `ARCHITECTURE.md`
+- 然后让 gate 接受新的依赖方向
 
 ## asset checks
 
@@ -150,6 +169,7 @@
 
 - `ci`
 - `docs-system`
+- `dependency-direction`
 - `asset-checks [all|policy-meta|mcp-kit|notify-kit]`
 - `secret-kit-target <target-triple>`
 
@@ -157,6 +177,7 @@
 
 - `ci` 在 `local` 基础上增加 `clippy` 和全量 asset checks
 - `docs-system` 只运行文档系统入口与链接约束检查
+- `dependency-direction` 只运行 workspace 内部 crate 依赖方向 gate
 - `secret-kit-target` 用于检查 `secret-kit` 的特定 target 编译
 
 ## `commit-msg` 当前做什么

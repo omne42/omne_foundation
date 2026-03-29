@@ -3182,22 +3182,16 @@ async fn untrusted_manager_refuses_streamable_http_hostname_resolving_to_non_glo
     );
 }
 
-#[tokio::test]
-async fn untrusted_manager_refuses_streamable_http_sensitive_headers() {
-    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
-    assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
-
+#[test]
+fn streamable_http_validate_rejects_reserved_authorization_env_header() {
     let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
-    server_cfg.http_headers_mut().unwrap().insert(
-        "Authorization".to_string(),
-        "Bearer local-secret".to_string(),
-    );
+    server_cfg
+        .env_http_headers_mut()
+        .unwrap()
+        .insert("Authorization".to_string(), "MCP_TOKEN".to_string());
 
-    let err = manager
-        .connect("srv", &server_cfg, Path::new("."))
-        .await
-        .unwrap_err();
-    assert!(err.to_string().contains("sensitive http header"));
+    let err = server_cfg.validate().unwrap_err();
+    assert!(err.to_string().contains("reserved by transport"));
 }
 
 #[test]

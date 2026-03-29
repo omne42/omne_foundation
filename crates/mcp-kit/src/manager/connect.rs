@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::Context;
 use tokio::process::{Child, Command};
 
+use crate::protocol::{AUTHORIZATION_HEADER, MCP_PROTOCOL_VERSION_HEADER};
 use crate::{ServerConfig, Transport, TrustMode, UntrustedStreamableHttpPolicy};
 
 use super::placeholders::{
@@ -14,8 +15,6 @@ use super::placeholders::{
 use super::streamable_http_validation::{
     validate_streamable_http_config, validate_streamable_http_url_untrusted_dns,
 };
-
-const MCP_PROTOCOL_VERSION_HEADER: &str = "MCP-Protocol-Version";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConnectContext {
@@ -321,13 +320,13 @@ fn build_streamable_http_headers(
         debug_assert_eq!(ctx.trust_mode, TrustMode::Trusted);
         let token = std::env::var(env_var)
             .with_context(|| format!("read bearer token env var: {env_var}"))?;
-        headers.insert("Authorization".to_string(), format!("Bearer {token}"));
+        headers.insert(AUTHORIZATION_HEADER.to_string(), format!("Bearer {token}"));
     }
 
     if !server_cfg.env_http_headers().is_empty() {
         debug_assert_eq!(ctx.trust_mode, TrustMode::Trusted);
         for (header, env_var) in server_cfg.env_http_headers().iter() {
-            if is_reserved_streamable_http_header(header) {
+            if is_reserved_streamable_http_env_header(header) {
                 anyhow::bail!(
                     "mcp server {server_name}: http header env var targets a reserved transport header: {header}"
                 );
@@ -343,6 +342,10 @@ fn build_streamable_http_headers(
 
 fn is_reserved_streamable_http_header(header: &str) -> bool {
     header.eq_ignore_ascii_case(MCP_PROTOCOL_VERSION_HEADER)
+}
+
+fn is_reserved_streamable_http_env_header(header: &str) -> bool {
+    is_reserved_streamable_http_header(header) || header.eq_ignore_ascii_case(AUTHORIZATION_HEADER)
 }
 
 pub(super) fn absolutize_with_base(path: &Path, base: &Path) -> PathBuf {
@@ -400,4 +403,62 @@ pub(super) fn stdout_log_path_within_root(stdout_log_path: &Path, root: &Path) -
         return false;
     };
     resolved_stdout_log_path.starts_with(&resolved_root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MCP_PROTOCOL_VERSION;
+
+    fn trusted_connect_context() -> ConnectContext {
+        ConnectContext {
+            trust_mode: TrustMode::Trusted,
+            untrusted_streamable_http_policy: UntrustedStreamableHttpPolicy::default(),
+            allow_stdout_log_outside_root: false,
+            protocol_version: MCP_PROTOCOL_VERSION.to_string(),
+            request_timeout: Duration::from_secs(5),
+        }
+    }
+
+    #[test]
+    fn env_http_headers_cannot_override_authorization() {
+        let ctx = trusted_connect_context();
+        let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+        server_cfg
+            .env_http_headers_mut()
+            .unwrap()
+            .insert(AUTHORIZATION_HEADER.to_string(), "MCP_TOKEN".to_string());
+
+        let err = build_streamable_http_headers(&ctx, "srv", &server_cfg, Path::new("."))
+            .expect_err("reserved Authorization env header should be rejected");
+        assert!(
+            err.to_string()
+                .contains("http header env var targets a reserved transport header"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn bearer_token_env_var_still_populates_authorization_header() {
+        let ctx = trusted_connect_context();
+        let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+        let env_var = "PATH";
+        server_cfg
+            .set_bearer_token_env_var(Some(env_var.to_string()))
+            .unwrap();
+        let token = std::env::var(env_var).expect("PATH should be present in test environment");
+
+        let headers = build_streamable_http_headers(&ctx, "srv", &server_cfg, Path::new("."))
+            .expect("bearer token env var should remain supported");
+        let expected_authorization = format!("Bearer {token}");
+
+        assert_eq!(
+            headers.get(AUTHORIZATION_HEADER).map(String::as_str),
+            Some(expected_authorization.as_str())
+        );
+        assert_eq!(
+            headers.get(MCP_PROTOCOL_VERSION_HEADER).map(String::as_str),
+            Some(MCP_PROTOCOL_VERSION)
+        );
+    }
 }

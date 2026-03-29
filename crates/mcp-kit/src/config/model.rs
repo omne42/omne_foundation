@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::ServerName;
+use crate::protocol::{AUTHORIZATION_HEADER, MCP_PROTOCOL_VERSION_HEADER};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -141,7 +142,14 @@ fn empty_kv_map() -> &'static BTreeMap<String, String> {
 }
 
 fn is_reserved_streamable_http_header(header: &HeaderName) -> bool {
-    header.as_str().eq_ignore_ascii_case("mcp-protocol-version")
+    header
+        .as_str()
+        .eq_ignore_ascii_case(MCP_PROTOCOL_VERSION_HEADER)
+        || header.as_str().eq_ignore_ascii_case(AUTHORIZATION_HEADER)
+}
+
+fn is_reserved_streamable_http_env_header(header: &HeaderName) -> bool {
+    is_reserved_streamable_http_header(header)
 }
 
 impl ServerConfig {
@@ -293,7 +301,7 @@ impl ServerConfig {
                             "mcp server transport=streamable_http: invalid env_http_headers key: {header}"
                         )
                     })?;
-                    if is_reserved_streamable_http_header(&header_name) {
+                    if is_reserved_streamable_http_env_header(&header_name) {
                         anyhow::bail!(
                             "mcp server transport=streamable_http: env_http_headers key is reserved by transport: {header}"
                         );

@@ -1,36 +1,141 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    Other,
+    RuntimeUnavailable,
+    SinkFailures,
+}
+
 #[derive(Debug)]
-pub struct Error(anyhow::Error);
+pub struct SinkFailure {
+    index: usize,
+    sink_name: &'static str,
+    error: Box<Error>,
+}
+
+impl SinkFailure {
+    pub fn new(index: usize, sink_name: &'static str, error: Error) -> Self {
+        Self {
+            index,
+            sink_name,
+            error: Box::new(error),
+        }
+    }
+
+    #[must_use]
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    #[must_use]
+    pub fn sink_name(&self) -> &'static str {
+        self.sink_name
+    }
+
+    #[must_use]
+    pub fn error(&self) -> &Error {
+        &self.error
+    }
+}
+
+impl std::fmt::Display for SinkFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if f.alternate() {
+            write!(f, "- {}: {:#}", self.sink_name, self.error)
+        } else {
+            write!(f, "- {}: {}", self.sink_name, self.error)
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ErrorRepr {
+    Other(anyhow::Error),
+    SinkFailures(Vec<SinkFailure>),
+}
+
+#[derive(Debug)]
+pub struct Error {
+    kind: ErrorKind,
+    repr: ErrorRepr,
+}
+
+impl Error {
+    fn new(kind: ErrorKind, repr: ErrorRepr) -> Self {
+        Self { kind, repr }
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> ErrorKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn sink_failures(&self) -> Option<&[SinkFailure]> {
+        match &self.repr {
+            ErrorRepr::SinkFailures(failures) => Some(failures.as_slice()),
+            ErrorRepr::Other(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn from_sink_failures(failures: Vec<SinkFailure>) -> Self {
+        Self::new(ErrorKind::SinkFailures, ErrorRepr::SinkFailures(failures))
+    }
+}
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if f.alternate() {
-            write!(f, "{:#}", self.0)
-        } else {
-            write!(f, "{}", self.0)
+        match &self.repr {
+            ErrorRepr::Other(err) => {
+                if f.alternate() {
+                    write!(f, "{err:#}")
+                } else {
+                    write!(f, "{err}")
+                }
+            }
+            ErrorRepr::SinkFailures(failures) => {
+                write!(f, "one or more sinks failed:")?;
+                for failure in failures {
+                    write!(f, "\n{failure}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.0.source()
+        match &self.repr {
+            ErrorRepr::Other(err) => err.source(),
+            ErrorRepr::SinkFailures(_) => None,
+        }
     }
 }
 
 impl From<anyhow::Error> for Error {
     fn from(err: anyhow::Error) -> Self {
-        Self(err)
+        Self::new(ErrorKind::Other, ErrorRepr::Other(err))
+    }
+}
+
+impl From<crate::TryNotifyError> for Error {
+    fn from(err: crate::TryNotifyError) -> Self {
+        Self::new(
+            ErrorKind::RuntimeUnavailable,
+            ErrorRepr::Other(anyhow::Error::new(err)),
+        )
     }
 }
 
 impl From<http_kit::Error> for Error {
     fn from(err: http_kit::Error) -> Self {
-        Self(anyhow::Error::new(err))
+        Self::from(anyhow::Error::new(err))
     }
 }
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
-        Self(anyhow::Error::from(err))
+        Self::from(anyhow::Error::from(err))
     }
 }

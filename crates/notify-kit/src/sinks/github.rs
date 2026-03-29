@@ -8,7 +8,10 @@ use github_kit::{
     DEFAULT_GITHUB_API_BASE, GitHubApiRequestOptions, apply_github_api_headers,
     build_github_api_url,
 };
-use http_kit::{build_http_client, ensure_http_success, redact_url, send_reqwest};
+use http_kit::{
+    HttpClientOptions, HttpClientProfile, build_http_client_profile, ensure_http_success,
+    redact_url, send_reqwest,
+};
 
 #[non_exhaustive]
 #[derive(Clone)]
@@ -20,6 +23,7 @@ pub struct GitHubCommentConfig {
     pub token: SecretString,
     pub timeout: Duration,
     pub max_chars: usize,
+    pub enforce_public_ip: bool,
 }
 
 impl std::fmt::Debug for GitHubCommentConfig {
@@ -32,6 +36,7 @@ impl std::fmt::Debug for GitHubCommentConfig {
             .field("token", &"<redacted>")
             .field("timeout", &self.timeout)
             .field("max_chars", &self.max_chars)
+            .field("enforce_public_ip", &self.enforce_public_ip)
             .finish()
     }
 }
@@ -51,6 +56,7 @@ impl GitHubCommentConfig {
             token: token.into(),
             timeout: Duration::from_secs(2),
             max_chars: 65000,
+            enforce_public_ip: true,
         }
     }
 
@@ -71,6 +77,12 @@ impl GitHubCommentConfig {
         self.max_chars = max_chars;
         self
     }
+
+    #[must_use]
+    pub fn with_public_ip_check(mut self, enforce_public_ip: bool) -> Self {
+        self.enforce_public_ip = enforce_public_ip;
+        self
+    }
 }
 
 pub struct GitHubCommentSink {
@@ -79,8 +91,9 @@ pub struct GitHubCommentSink {
     repo: String,
     issue_number: u64,
     token: SecretString,
-    client: reqwest::Client,
+    http: HttpClientProfile,
     max_chars: usize,
+    enforce_public_ip: bool,
 }
 
 impl std::fmt::Debug for GitHubCommentSink {
@@ -92,6 +105,7 @@ impl std::fmt::Debug for GitHubCommentSink {
             .field("issue_number", &self.issue_number)
             .field("token", &"<redacted>")
             .field("max_chars", &self.max_chars)
+            .field("enforce_public_ip", &self.enforce_public_ip)
             .finish_non_exhaustive()
     }
 }
@@ -106,7 +120,10 @@ impl GitHubCommentSink {
         let token = normalize_secret(config.token, "token")?;
 
         let api_url = build_issue_comment_url(&config.api_base, owner, repo, config.issue_number)?;
-        let client = build_http_client(config.timeout)?;
+        let http = build_http_client_profile(&HttpClientOptions {
+            timeout: Some(config.timeout),
+            ..Default::default()
+        })?;
 
         Ok(Self {
             api_url,
@@ -114,8 +131,9 @@ impl GitHubCommentSink {
             repo: repo.to_string(),
             issue_number: config.issue_number,
             token,
-            client,
+            http,
             max_chars: config.max_chars,
+            enforce_public_ip: config.enforce_public_ip,
         })
     }
 
@@ -170,9 +188,13 @@ impl Sink for GitHubCommentSink {
 
     fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
+            let client = self
+                .http
+                .select_for_url(&self.api_url, self.enforce_public_ip)
+                .await?;
             let payload = Self::build_payload(event, self.max_chars);
             let request = apply_github_api_headers(
-                self.client.post(self.api_url.as_str()).json(&payload),
+                client.post(self.api_url.as_str()).json(&payload),
                 GitHubApiRequestOptions::new()
                     .with_user_agent("notify-kit")
                     .with_bearer_token(Some(self.token.expose_secret())),

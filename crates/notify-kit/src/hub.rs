@@ -1,5 +1,4 @@
 use std::collections::{BTreeSet, HashSet};
-use std::fmt::Write as _;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,6 +6,7 @@ use std::time::Duration;
 use futures_util::FutureExt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
+use crate::error::SinkFailure;
 use crate::event::Event;
 use crate::log::{warn_hub_notify_dropped, warn_hub_notify_failed};
 use crate::sinks::Sink;
@@ -233,11 +233,9 @@ impl Hub {
         }
 
         tokio::runtime::Handle::try_current()
-            .map_err(|_| crate::Error::from(anyhow::Error::from(TryNotifyError::NoTokioRuntime)))?;
+            .map_err(|_| crate::Error::from(TryNotifyError::NoTokioRuntime))?;
         if !has_tokio_time_driver() {
-            return Err(crate::Error::from(anyhow::Error::from(
-                TryNotifyError::NoTokioRuntime,
-            )));
+            return Err(crate::Error::from(TryNotifyError::NoTokioRuntime));
         }
         let _permit = self
             .inner
@@ -353,18 +351,12 @@ impl HubInner {
         if failures.len() > 1 {
             failures.sort_unstable_by_key(|(idx, _, _)| *idx);
         }
-        let mut msg = String::with_capacity(24 + failures.len().saturating_mul(64));
-        msg.push_str("one or more sinks failed:");
-        for (_idx, name, err) in failures {
-            msg.push('\n');
-            msg.push_str("- ");
-            msg.push_str(name);
-            msg.push_str(": ");
-            if write!(&mut msg, "{err:#}").is_err() {
-                return anyhow::anyhow!("failed to format sink error").into();
-            }
-        }
-        anyhow::anyhow!(msg).into()
+        crate::Error::from_sink_failures(
+            failures
+                .into_iter()
+                .map(|(idx, name, err)| SinkFailure::new(idx, name, err))
+                .collect(),
+        )
     }
 }
 
@@ -513,6 +505,12 @@ mod tests {
             let event = Event::new("kind", Severity::Info, "title");
 
             let err = hub.send(event).await.expect_err("expected sink failure");
+            assert_eq!(err.kind(), crate::ErrorKind::SinkFailures);
+            let failures = err.sink_failures().expect("structured sink failures");
+            assert_eq!(failures.len(), 1);
+            assert_eq!(failures[0].index(), 1);
+            assert_eq!(failures[0].sink_name(), "bad");
+            assert_eq!(failures[0].error().kind(), crate::ErrorKind::Other);
             let msg = err.to_string();
             assert!(msg.contains("one or more sinks failed:"), "{msg}");
             assert!(msg.contains("- bad: boom"), "{msg}");
@@ -542,6 +540,7 @@ mod tests {
             let event = Event::new("kind", Severity::Info, "title");
 
             let err = hub.send(event).await.expect_err("expected timeout");
+            assert_eq!(err.kind(), crate::ErrorKind::SinkFailures);
             let msg = err.to_string();
             assert!(msg.contains("timeout after"), "{msg}");
         });
@@ -625,6 +624,7 @@ mod tests {
             let event = Event::new("kind", Severity::Info, "title");
 
             let err = hub.send(event).await.expect_err("expected panic failure");
+            assert_eq!(err.kind(), crate::ErrorKind::SinkFailures);
             let msg = err.to_string();
             assert!(msg.contains("- panic:"), "{msg}");
         });
@@ -653,6 +653,7 @@ mod tests {
             let event = Event::new("kind", Severity::Info, "title");
 
             let err = hub.send(event).await.expect_err("expected panic failure");
+            assert_eq!(err.kind(), crate::ErrorKind::SinkFailures);
             let msg = err.to_string();
             assert!(msg.contains("- <unknown>: sink panicked"), "{msg}");
         });
@@ -705,6 +706,10 @@ mod tests {
             let event = Event::new("kind", Severity::Info, "title");
 
             let err = hub.send(event).await.expect_err("expected sink failure");
+            let failures = err.sink_failures().expect("structured sink failures");
+            assert_eq!(failures.len(), 2);
+            assert_eq!(failures[0].sink_name(), "first");
+            assert_eq!(failures[1].sink_name(), "second");
             let msg = err.to_string();
             let first = msg.find("- first:").expect("contains first");
             let second = msg.find("- second:").expect("contains second");
@@ -787,6 +792,7 @@ mod tests {
                 .send(Event::new("kind", Severity::Info, "title"))
                 .await
                 .expect_err("missing time driver should fail");
+            assert_eq!(err.kind(), crate::ErrorKind::RuntimeUnavailable);
             let msg = err.to_string();
             assert!(msg.contains("time driver"), "{msg}");
         });

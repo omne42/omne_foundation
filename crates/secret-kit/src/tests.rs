@@ -1,7 +1,10 @@
 use std::borrow::Cow;
 use std::error::Error as _;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use super::*;
 use crate::command::{
@@ -153,6 +156,27 @@ trait TestSecretResolverExt: SecretResolver {
 
 impl<T> TestSecretResolverExt for T where T: SecretResolver + ?Sized {}
 
+#[tokio::test]
+async fn secret_resolver_trait_object_resolves_secret() -> Result<()> {
+    let mut env = TestEnv::default();
+    env.vars
+        .insert("OPENAI_API_KEY".to_string(), "test-secret".to_string());
+
+    let boxed_resolver: Box<dyn SecretResolver> = Box::new(DefaultSecretResolver);
+    let boxed_value = boxed_resolver
+        .resolve_secret_text("secret://env/OPENAI_API_KEY", &env)
+        .await?;
+    assert_eq!(boxed_value, "test-secret");
+
+    let arc_resolver: Arc<dyn SecretResolver> = Arc::new(DefaultSecretResolver);
+    let arc_value = arc_resolver
+        .resolve_secret_text("secret://env/OPENAI_API_KEY", &env)
+        .await?;
+
+    assert_eq!(arc_value, "test-secret");
+    Ok(())
+}
+
 fn test_cache_scope(spec: &str) -> Option<String> {
     match SecretSpec::parse(spec).ok()? {
         SecretSpec::File { path } if Path::new(&path).is_absolute() => {
@@ -169,13 +193,15 @@ struct CountingResolver {
 }
 
 impl SecretResolver for CountingResolver {
-    async fn resolve_secret(
-        &self,
-        _spec: &str,
-        _context: SecretResolutionContext<'_>,
-    ) -> Result<SecretString> {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-        Ok(SecretString::from(format!("value-{call}")))
+    fn resolve_secret<'a>(
+        &'a self,
+        _spec: &'a str,
+        _context: SecretResolutionContext<'a>,
+    ) -> SecretResolveFuture<'a> {
+        Box::pin(async move {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(SecretString::from(format!("value-{call}")))
+        })
     }
 }
 
@@ -208,16 +234,18 @@ struct RetryResolver {
 }
 
 impl SecretResolver for RetryResolver {
-    async fn resolve_secret(
-        &self,
-        _spec: &str,
-        _context: SecretResolutionContext<'_>,
-    ) -> Result<SecretString> {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-        if call == 1 {
-            return Err(invalid_response!("error_detail.secret.not_resolvable"));
-        }
-        Ok(SecretString::from("recovered"))
+    fn resolve_secret<'a>(
+        &'a self,
+        _spec: &'a str,
+        _context: SecretResolutionContext<'a>,
+    ) -> SecretResolveFuture<'a> {
+        Box::pin(async move {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == 1 {
+                return Err(invalid_response!("error_detail.secret.not_resolvable"));
+            }
+            Ok(SecretString::from("recovered"))
+        })
     }
 }
 
@@ -259,14 +287,16 @@ impl Default for SlowResolver {
 }
 
 impl SecretResolver for SlowResolver {
-    async fn resolve_secret(
-        &self,
-        _spec: &str,
-        _context: SecretResolutionContext<'_>,
-    ) -> Result<SecretString> {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-        tokio::time::sleep(self.delay).await;
-        Ok(SecretString::from(format!("value-{call}")))
+    fn resolve_secret<'a>(
+        &'a self,
+        _spec: &'a str,
+        _context: SecretResolutionContext<'a>,
+    ) -> SecretResolveFuture<'a> {
+        Box::pin(async move {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            tokio::time::sleep(self.delay).await;
+            Ok(SecretString::from(format!("value-{call}")))
+        })
     }
 }
 
@@ -299,15 +329,17 @@ struct MismatchedHintResolver {
 }
 
 impl SecretResolver for MismatchedHintResolver {
-    async fn resolve_secret(
-        &self,
-        spec: &str,
-        _context: SecretResolutionContext<'_>,
-    ) -> Result<SecretString> {
-        Ok(SecretString::from(format!(
-            "{spec}-{}",
-            self.calls.fetch_add(1, Ordering::SeqCst) + 1
-        )))
+    fn resolve_secret<'a>(
+        &'a self,
+        spec: &'a str,
+        _context: SecretResolutionContext<'a>,
+    ) -> SecretResolveFuture<'a> {
+        Box::pin(async move {
+            Ok(SecretString::from(format!(
+                "{spec}-{}",
+                self.calls.fetch_add(1, Ordering::SeqCst) + 1
+            )))
+        })
     }
 }
 
@@ -319,17 +351,19 @@ struct SlowMismatchedHintResolver {
 }
 
 impl SecretResolver for SlowMismatchedHintResolver {
-    async fn resolve_secret(
-        &self,
-        spec: &str,
-        _context: SecretResolutionContext<'_>,
-    ) -> Result<SecretString> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
-        self.max_active.fetch_max(active, Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        self.active.fetch_sub(1, Ordering::SeqCst);
-        Ok(SecretString::from(spec.to_string()))
+    fn resolve_secret<'a>(
+        &'a self,
+        spec: &'a str,
+        _context: SecretResolutionContext<'a>,
+    ) -> SecretResolveFuture<'a> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(SecretString::from(spec.to_string()))
+        })
     }
 }
 
@@ -417,16 +451,18 @@ struct EnvironmentScopedResolver {
 }
 
 impl SecretResolver for EnvironmentScopedResolver {
-    async fn resolve_secret(
-        &self,
-        spec: &str,
-        context: SecretResolutionContext<'_>,
-    ) -> Result<SecretString> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(context
-            .environment()
-            .get_secret(spec)
-            .expect("test env secret should exist for environment-scoped cache test"))
+    fn resolve_secret<'a>(
+        &'a self,
+        spec: &'a str,
+        context: SecretResolutionContext<'a>,
+    ) -> SecretResolveFuture<'a> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(context
+                .environment()
+                .get_secret(spec)
+                .expect("test env secret should exist for environment-scoped cache test"))
+        })
     }
 }
 
@@ -475,17 +511,19 @@ struct RuntimeScopedResolver {
 }
 
 impl SecretResolver for RuntimeScopedResolver {
-    async fn resolve_secret(
-        &self,
-        _spec: &str,
-        context: SecretResolutionContext<'_>,
-    ) -> Result<SecretString> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        let value = context
-            .command_runtime()
-            .get_command_env("RUNTIME_SECRET")
-            .expect("test runtime secret should exist");
-        Ok(SecretString::from(value))
+    fn resolve_secret<'a>(
+        &'a self,
+        _spec: &'a str,
+        context: SecretResolutionContext<'a>,
+    ) -> SecretResolveFuture<'a> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let value = context
+                .command_runtime()
+                .get_command_env("RUNTIME_SECRET")
+                .expect("test runtime secret should exist");
+            Ok(SecretString::from(value))
+        })
     }
 }
 
@@ -2659,17 +2697,19 @@ async fn caching_resolver_skips_runtime_sensitive_cache_with_ambient_runtime() -
     }
 
     impl SecretResolver for AmbientRuntimeResolver {
-        async fn resolve_secret(
-            &self,
-            spec: &str,
-            context: SecretResolutionContext<'_>,
-        ) -> Result<SecretString> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            let value = context
-                .command_runtime()
-                .get_command_env(spec)
-                .expect("ambient runtime variable should exist");
-            Ok(SecretString::from(value))
+        fn resolve_secret<'a>(
+            &'a self,
+            spec: &'a str,
+            context: SecretResolutionContext<'a>,
+        ) -> SecretResolveFuture<'a> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let value = context
+                    .command_runtime()
+                    .get_command_env(spec)
+                    .expect("ambient runtime variable should exist");
+                Ok(SecretString::from(value))
+            })
         }
     }
 
@@ -2785,13 +2825,15 @@ async fn caching_resolver_skips_cache_with_empty_scope() -> Result<()> {
     }
 
     impl SecretResolver for EmptyScopeResolver {
-        async fn resolve_secret(
-            &self,
-            _spec: &str,
-            _context: SecretResolutionContext<'_>,
-        ) -> Result<SecretString> {
-            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-            Ok(SecretString::from(format!("value-{call}")))
+        fn resolve_secret<'a>(
+            &'a self,
+            _spec: &'a str,
+            _context: SecretResolutionContext<'a>,
+        ) -> SecretResolveFuture<'a> {
+            Box::pin(async move {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+                Ok(SecretString::from(format!("value-{call}")))
+            })
         }
     }
 

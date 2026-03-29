@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `SecretResolver` 现在返回 boxed future 并保持 object-safe，调用方可以用 `Arc<dyn SecretResolver>` 之类的动态组装边界而不必锁死在静态泛型上；同时补了 trait-object 回归测试。
 - `secret-kit`：把 secret value 容器与 command-runtime/context trait 从 `lib.rs` 拆到独立模块，收窄 crate 入口文件的职责边界；公开 API 与行为保持不变。
 - `secret-kit` 现在在内建 CLI 的 ambient `PATH` 解析链路里保留已解析程序路径的 `OsString/PathBuf` 形态，不再把 non-UTF-8 可执行路径经 `to_string_lossy()` 降成文本后再交给 `Command::new(...)`，避免在非 UTF-8 目录下把 `vault`/`aws`/`gcloud`/`az` 解析到错误路径。
 - `CachingSecretResolver` 现在允许 cacheable resolver 显式声明 `SecretCommandRuntime` 是否属于缓存边界；runtime-sensitive secret 会把 command runtime partition 一并纳入 cache key，缺失稳定 runtime partition 时 fail-closed 禁止复用，避免同一 environment 分区下误复用不同 CLI/runtime 上下文的 secret。

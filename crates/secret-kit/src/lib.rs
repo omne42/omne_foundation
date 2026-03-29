@@ -134,6 +134,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsStr;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -145,6 +146,8 @@ pub use runtime::{
 pub use types::{Result, SecretError};
 pub use value::SecretString;
 use value::{SecretBytes, read_limited, secret_string_from_bytes};
+
+pub type SecretResolveFuture<'a> = Pin<Box<dyn Future<Output = Result<SecretString>> + Send + 'a>>;
 
 macro_rules! invalid_response {
     ($code:literal $(,)?) => {
@@ -189,11 +192,37 @@ macro_rules! secret_json_error {
 }
 
 pub trait SecretResolver: Send + Sync {
-    fn resolve_secret(
-        &self,
-        spec: &str,
-        context: SecretResolutionContext<'_>,
-    ) -> impl Future<Output = Result<SecretString>> + Send;
+    fn resolve_secret<'a>(
+        &'a self,
+        spec: &'a str,
+        context: SecretResolutionContext<'a>,
+    ) -> SecretResolveFuture<'a>;
+}
+
+impl<R> SecretResolver for Box<R>
+where
+    R: SecretResolver + ?Sized,
+{
+    fn resolve_secret<'a>(
+        &'a self,
+        spec: &'a str,
+        context: SecretResolutionContext<'a>,
+    ) -> SecretResolveFuture<'a> {
+        self.as_ref().resolve_secret(spec, context)
+    }
+}
+
+impl<R> SecretResolver for std::sync::Arc<R>
+where
+    R: SecretResolver + ?Sized,
+{
+    fn resolve_secret<'a>(
+        &'a self,
+        spec: &'a str,
+        context: SecretResolutionContext<'a>,
+    ) -> SecretResolveFuture<'a> {
+        self.as_ref().resolve_secret(spec, context)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,12 +332,12 @@ pub trait CacheAwareSecretResolver: SecretResolver {
 pub struct DefaultSecretResolver;
 
 impl SecretResolver for DefaultSecretResolver {
-    async fn resolve_secret(
-        &self,
-        spec: &str,
-        context: SecretResolutionContext<'_>,
-    ) -> Result<SecretString> {
-        resolve_secret_in_context(spec, context).await
+    fn resolve_secret<'a>(
+        &'a self,
+        spec: &'a str,
+        context: SecretResolutionContext<'a>,
+    ) -> SecretResolveFuture<'a> {
+        Box::pin(async move { resolve_secret_in_context(spec, context).await })
     }
 }
 
@@ -458,50 +487,52 @@ impl<R> SecretResolver for CachingSecretResolver<R>
 where
     R: CacheAwareSecretResolver + Send + Sync,
 {
-    async fn resolve_secret(
-        &self,
-        spec: &str,
-        context: SecretResolutionContext<'_>,
-    ) -> Result<SecretString> {
-        loop {
-            if let Some(key) = self
-                .inner
-                .lookup_secret_cache_scope(spec, context)?
-                .and_then(|scope| {
-                    self.inner
-                        .lookup_secret_cache_partitioning(spec, context)
-                        .and_then(|partitioning| {
-                            SecretCacheKey::for_context(scope, partitioning, context)
-                        })
-                })
-                && let Some(value) = self.cached_value(&key)
-            {
-                return Ok(value);
-            }
-
-            let prepared = self.inner.prepare_secret_resolution(spec, context).await?;
-            let prepared_key = prepared.cache_key(context);
-
-            let Some(key) = prepared_key else {
-                return self
+    fn resolve_secret<'a>(
+        &'a self,
+        spec: &'a str,
+        context: SecretResolutionContext<'a>,
+    ) -> SecretResolveFuture<'a> {
+        Box::pin(async move {
+            loop {
+                if let Some(key) = self
                     .inner
-                    .resolve_prepared_secret(prepared.into_prepared(), context)
-                    .await;
-            };
-
-            match self.lookup_cache(&key) {
-                SecretCacheLookup::Hit(value) => return Ok(value),
-                SecretCacheLookup::Wait(mut waiter_done) => {
-                    let _ = waiter_done.recv().await;
+                    .lookup_secret_cache_scope(spec, context)?
+                    .and_then(|scope| {
+                        self.inner
+                            .lookup_secret_cache_partitioning(spec, context)
+                            .and_then(|partitioning| {
+                                SecretCacheKey::for_context(scope, partitioning, context)
+                            })
+                    })
+                    && let Some(value) = self.cached_value(&key)
+                {
+                    return Ok(value);
                 }
-                SecretCacheLookup::Leader(waiter_done) => {
-                    let fill = SecretCacheFillGuard::new(self, key.clone(), waiter_done);
+
+                let prepared = self.inner.prepare_secret_resolution(spec, context).await?;
+                let prepared_key = prepared.cache_key(context);
+
+                let Some(key) = prepared_key else {
                     return self
-                        .resolve_with_fill(prepared.into_prepared(), context, fill)
+                        .inner
+                        .resolve_prepared_secret(prepared.into_prepared(), context)
                         .await;
+                };
+
+                match self.lookup_cache(&key) {
+                    SecretCacheLookup::Hit(value) => return Ok(value),
+                    SecretCacheLookup::Wait(mut waiter_done) => {
+                        let _ = waiter_done.recv().await;
+                    }
+                    SecretCacheLookup::Leader(waiter_done) => {
+                        let fill = SecretCacheFillGuard::new(self, key.clone(), waiter_done);
+                        return self
+                            .resolve_with_fill(prepared.into_prepared(), context, fill)
+                            .await;
+                    }
                 }
             }
-        }
+        })
     }
 }
 

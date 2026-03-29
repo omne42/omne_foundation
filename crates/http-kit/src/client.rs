@@ -1,20 +1,13 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Mutex as TokioMutex, RwLock, Semaphore};
+use tokio::sync::Semaphore;
 
 use crate::public_ip::validate_public_addrs;
 
 const DEFAULT_DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_MAX_DNS_LOOKUPS_INFLIGHT: usize = 32;
-// Re-resolve DNS on every pinned-client selection instead of reusing a cross-request pinned
-// client cache entry, so failover or rebinding cannot keep routing requests through a stale
-// address set for an arbitrary TTL window.
-const DEFAULT_PINNED_CLIENT_TTL: Duration = Duration::ZERO;
-const DEFAULT_MAX_PINNED_CLIENT_CACHE_ENTRIES: usize = 256;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PinnedRedirectOrigin {
     host: String,
@@ -38,87 +31,19 @@ impl PinnedRedirectOrigin {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct PinnedClientOptionsKey {
-    timeout: Option<Duration>,
-    connect_timeout: Option<Duration>,
-    follow_redirects: bool,
-    no_proxy: bool,
-    default_headers: Vec<(String, Vec<u8>)>,
-}
-
-impl PinnedClientOptionsKey {
-    fn from_pinned_options(options: &HttpClientOptions) -> Self {
-        Self::from_options_with_no_proxy(options, true)
-    }
-
-    fn from_options_with_no_proxy(options: &HttpClientOptions, no_proxy: bool) -> Self {
-        let mut default_headers = options
-            .default_headers
-            .iter()
-            .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
-            .collect::<Vec<_>>();
-        default_headers.sort();
-        Self {
-            timeout: options.timeout,
-            connect_timeout: options.connect_timeout,
-            follow_redirects: options.follow_redirects,
-            no_proxy,
-            default_headers,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct PinnedClientKey {
-    host: String,
-    scheme: String,
-    port: u16,
-    options: PinnedClientOptionsKey,
-}
-
-#[derive(Clone)]
-struct CachedPinnedClient {
-    client: reqwest::Client,
-    expires_at: Instant,
-}
-
 struct HttpClientSharedState {
-    pinned_client_cache: RwLock<HashMap<PinnedClientKey, CachedPinnedClient>>,
-    pinned_client_build_locks: Mutex<HashMap<PinnedClientKey, Weak<TokioMutex<()>>>>,
     dns_lookup_semaphore: Arc<Semaphore>,
 }
 
 impl Default for HttpClientSharedState {
     fn default() -> Self {
         Self {
-            pinned_client_cache: RwLock::new(HashMap::new()),
-            pinned_client_build_locks: Mutex::new(HashMap::new()),
             dns_lookup_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_DNS_LOOKUPS_INFLIGHT)),
         }
     }
 }
 
 impl HttpClientSharedState {
-    fn pinned_client_cache_reuse_enabled(&self) -> bool {
-        DEFAULT_PINNED_CLIENT_TTL > Duration::ZERO
-    }
-
-    fn lock_pinned_client_build_locks(
-        &self,
-    ) -> std::sync::MutexGuard<'_, HashMap<PinnedClientKey, Weak<TokioMutex<()>>>> {
-        self.pinned_client_build_locks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn cleanup_pinned_client_build_lock_entry(&self, key: &PinnedClientKey) {
-        let mut locks = self.lock_pinned_client_build_locks();
-        if locks.get(key).is_some_and(|weak| weak.strong_count() == 0) {
-            locks.remove(key);
-        }
-    }
-
     fn dns_lookup_semaphore(&self) -> &Arc<Semaphore> {
         &self.dns_lookup_semaphore
     }
@@ -176,82 +101,12 @@ fn dns_lookup_timeout_message() -> String {
     format!("dns lookup timeout (capped at {DEFAULT_DNS_LOOKUP_TIMEOUT:?})")
 }
 
-struct PinnedClientBuildLockCleanupGuard {
-    shared_state: Arc<HttpClientSharedState>,
-    key: PinnedClientKey,
-    armed: bool,
-}
-
-impl PinnedClientBuildLockCleanupGuard {
-    fn new(shared_state: Arc<HttpClientSharedState>, key: PinnedClientKey) -> Self {
-        Self {
-            shared_state,
-            key,
-            armed: true,
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for PinnedClientBuildLockCleanupGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            self.shared_state
-                .cleanup_pinned_client_build_lock_entry(&self.key);
-        }
-    }
-}
-
 fn remaining_dns_timeout(deadline: Instant) -> crate::Result<Duration> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining == Duration::ZERO {
         return Err(anyhow::anyhow!(dns_lookup_timeout_message()).into());
     }
     Ok(remaining)
-}
-
-fn cap_pinned_client_cache_entries(
-    cache: &mut HashMap<PinnedClientKey, CachedPinnedClient>,
-    max: usize,
-    keep: &PinnedClientKey,
-) {
-    if max == 0 {
-        cache.clear();
-        return;
-    }
-
-    while cache.len() > max {
-        let Some(key) = cache
-            .iter()
-            .filter(|(key, _)| *key != keep)
-            .min_by_key(|(key, value)| (value.expires_at, (*key).clone()))
-            .map(|(key, _)| key.clone())
-        else {
-            break;
-        };
-        cache.remove(&key);
-    }
-}
-
-fn pinned_client_key(
-    options: &HttpClientOptions,
-    url: &reqwest::Url,
-) -> crate::Result<PinnedClientKey> {
-    let host = url
-        .host_str()
-        .ok_or_else(|| anyhow::anyhow!("url must have a host"))?;
-    let port = url
-        .port_or_known_default()
-        .ok_or_else(|| anyhow::anyhow!("url must have an explicit or known default port"))?;
-    Ok(PinnedClientKey {
-        host: host.to_string(),
-        scheme: url.scheme().to_string(),
-        port,
-        options: PinnedClientOptionsKey::from_pinned_options(options),
-    })
 }
 
 fn redirect_policy(follow_redirects: bool) -> reqwest::redirect::Policy {
@@ -472,96 +327,7 @@ async fn select_pinned_http_client_with_options(
     options: &HttpClientOptions,
     url: &reqwest::Url,
 ) -> crate::Result<reqwest::Client> {
-    let key = pinned_client_key(options, url)?;
-    if shared_state.pinned_client_cache_reuse_enabled() {
-        let lookup_now = Instant::now();
-        let should_cleanup_expired_cache_entry = {
-            let cache = shared_state.pinned_client_cache.read().await;
-            match cache.get(&key) {
-                Some(cached) if cached.expires_at > lookup_now => return Ok(cached.client.clone()),
-                Some(_) => true,
-                None => false,
-            }
-        };
-
-        if should_cleanup_expired_cache_entry {
-            let mut cache = shared_state.pinned_client_cache.write().await;
-            let now = Instant::now();
-            if cache
-                .get(&key)
-                .is_some_and(|cached| cached.expires_at <= now)
-            {
-                cache.remove(&key);
-            }
-        }
-    } else {
-        let mut cache = shared_state.pinned_client_cache.write().await;
-        cache.remove(&key);
-    }
-
-    let mut build_lock_cleanup =
-        PinnedClientBuildLockCleanupGuard::new(Arc::clone(&shared_state), key.clone());
-    let key_lock = {
-        let mut locks = shared_state.lock_pinned_client_build_locks();
-        locks.retain(|_, lock| lock.strong_count() > 0);
-        if let Some(existing) = locks.get(&key).and_then(Weak::upgrade) {
-            existing
-        } else {
-            let new_lock = Arc::new(TokioMutex::new(()));
-            locks.insert(key.clone(), Arc::downgrade(&new_lock));
-            new_lock
-        }
-    };
-
-    let result: crate::Result<reqwest::Client> = async {
-        let _build_guard = key_lock.lock().await;
-        if shared_state.pinned_client_cache_reuse_enabled() {
-            let now = Instant::now();
-            let cached_client = {
-                let cache = shared_state.pinned_client_cache.read().await;
-                cache.get(&key).and_then(|cached| {
-                    if cached.expires_at > now {
-                        Some(cached.client.clone())
-                    } else {
-                        None
-                    }
-                })
-            };
-            if let Some(client) = cached_client {
-                return Ok(client);
-            }
-
-            let client =
-                build_http_client_pinned_async(shared_state.as_ref(), options, url).await?;
-            let now = Instant::now();
-            {
-                let mut cache = shared_state.pinned_client_cache.write().await;
-                cache.retain(|_, v| v.expires_at > now);
-                cache.insert(
-                    key.clone(),
-                    CachedPinnedClient {
-                        client: client.clone(),
-                        expires_at: now + DEFAULT_PINNED_CLIENT_TTL,
-                    },
-                );
-                cap_pinned_client_cache_entries(
-                    &mut cache,
-                    DEFAULT_MAX_PINNED_CLIENT_CACHE_ENTRIES,
-                    &key,
-                );
-            }
-            Ok(client)
-        } else {
-            build_http_client_pinned_async(shared_state.as_ref(), options, url).await
-        }
-    }
-    .await;
-
-    drop(key_lock);
-    shared_state.cleanup_pinned_client_build_lock_entry(&key);
-    build_lock_cleanup.disarm();
-
-    result
+    build_http_client_pinned_async(shared_state.as_ref(), options, url).await
 }
 
 pub async fn select_http_client_from_profile(
@@ -614,10 +380,6 @@ mod tests {
         }
     }
 
-    fn pinned_key_for_timeout(url: &reqwest::Url, timeout: Duration) -> PinnedClientKey {
-        pinned_client_key(&timeout_only_options(timeout), url).expect("build pinned client key")
-    }
-
     #[test]
     fn dns_lookup_timeout_prefers_connect_timeout() {
         let timeout = dns_lookup_timeout_for_options(&HttpClientOptions {
@@ -660,62 +422,6 @@ mod tests {
         let err =
             remaining_dns_timeout(Instant::now()).expect_err("elapsed deadline should be rejected");
         assert!(err.to_string().contains("dns lookup timeout"), "{err:#}");
-    }
-
-    #[test]
-    fn pinned_client_key_keeps_sub_millisecond_timeout_precision() {
-        let url = reqwest::Url::parse("https://example.com/webhook").expect("parse url");
-        let lhs = pinned_key_for_timeout(&url, Duration::from_micros(500));
-        let rhs = pinned_key_for_timeout(&url, Duration::from_micros(900));
-        assert_ne!(lhs, rhs);
-    }
-
-    #[test]
-    fn pinned_client_key_distinguishes_port_and_default_headers() {
-        let https = reqwest::Url::parse("https://example.com/webhook").expect("parse https url");
-        let http = reqwest::Url::parse("http://example.com/webhook").expect("parse http url");
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("x-test", reqwest::header::HeaderValue::from_static("one"));
-
-        let with_headers = pinned_client_key(
-            &HttpClientOptions {
-                timeout: Some(Duration::from_secs(1)),
-                default_headers: headers,
-                ..Default::default()
-            },
-            &https,
-        )
-        .expect("key with headers");
-        let without_headers = pinned_key_for_timeout(&https, Duration::from_secs(1));
-        let different_port = pinned_key_for_timeout(&http, Duration::from_secs(1));
-
-        assert_ne!(with_headers, without_headers);
-        assert_ne!(without_headers, different_port);
-    }
-
-    #[test]
-    fn pinned_client_key_normalizes_proxy_mode() {
-        let url = reqwest::Url::parse("https://example.com/webhook").expect("parse url");
-        let key_with_proxy_env = pinned_client_key(
-            &HttpClientOptions {
-                timeout: Some(Duration::from_secs(1)),
-                no_proxy: false,
-                ..Default::default()
-            },
-            &url,
-        )
-        .expect("key with proxy env");
-        let key_without_proxy_env = pinned_client_key(
-            &HttpClientOptions {
-                timeout: Some(Duration::from_secs(1)),
-                no_proxy: true,
-                ..Default::default()
-            },
-            &url,
-        )
-        .expect("key without proxy env");
-
-        assert_eq!(key_with_proxy_env, key_without_proxy_env);
     }
 
     #[test]
@@ -1146,155 +852,7 @@ mod tests {
     }
 
     #[test]
-    fn select_http_client_from_profile_cleans_build_lock_on_error() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build tokio runtime");
-
-        rt.block_on(async {
-            let url =
-                reqwest::Url::parse("https://lock-cleanup.invalid/webhook").expect("parse url");
-            let key = pinned_key_for_timeout(&url, Duration::ZERO);
-
-            let profile = build_http_client_profile(&timeout_only_options(Duration::ZERO))
-                .expect("build client profile");
-            {
-                let mut cache = profile.shared_state.pinned_client_cache.write().await;
-                cache.remove(&key);
-            }
-            {
-                let mut locks = profile.shared_state.lock_pinned_client_build_locks();
-                locks.remove(&key);
-            }
-            let err = profile
-                .select_for_url(&url, true)
-                .await
-                .expect_err("expected dns timeout error");
-            assert!(err.to_string().contains("dns lookup timeout"), "{err:#}");
-
-            let locks = profile.shared_state.lock_pinned_client_build_locks();
-            assert!(
-                !locks.contains_key(&key),
-                "build lock entry should be removed after failed request"
-            );
-        });
-    }
-
-    #[test]
-    fn select_http_client_from_profile_cleans_build_lock_on_cancel() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build tokio runtime");
-
-        rt.block_on(async {
-            let timeout = Duration::from_secs(1);
-            let url =
-                reqwest::Url::parse("https://lock-cancel.invalid/webhook").expect("parse url");
-            let key = pinned_key_for_timeout(&url, timeout);
-
-            let profile =
-                build_http_client_profile(&timeout_only_options(timeout)).expect("build profile");
-            {
-                let mut cache = profile.shared_state.pinned_client_cache.write().await;
-                cache.remove(&key);
-            }
-            {
-                let mut locks = profile.shared_state.lock_pinned_client_build_locks();
-                locks.remove(&key);
-            }
-            let semaphore_permits = profile
-                .shared_state
-                .dns_lookup_semaphore()
-                .clone()
-                .acquire_many_owned(DEFAULT_MAX_DNS_LOOKUPS_INFLIGHT as u32)
-                .await
-                .expect("acquire dns semaphore permits");
-            let task = tokio::spawn({
-                let profile = profile.clone();
-                let url = url.clone();
-                async move {
-                    let _ = profile.select_for_url(&url, true).await;
-                }
-            });
-
-            let inserted = tokio::time::timeout(Duration::from_millis(200), async {
-                loop {
-                    if profile
-                        .shared_state
-                        .lock_pinned_client_build_locks()
-                        .contains_key(&key)
-                    {
-                        break;
-                    }
-                    tokio::task::yield_now().await;
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-            })
-            .await
-            .is_ok();
-            assert!(inserted, "expected build lock entry before cancellation");
-
-            task.abort();
-            let _ = task.await;
-            drop(semaphore_permits);
-            tokio::task::yield_now().await;
-
-            let locks = profile.shared_state.lock_pinned_client_build_locks();
-            assert!(
-                !locks.contains_key(&key),
-                "build lock entry should be removed after cancelled request"
-            );
-        });
-    }
-
-    #[test]
-    fn select_http_client_from_profile_cleans_expired_cache_entry_when_refresh_fails() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build tokio runtime");
-
-        rt.block_on(async {
-            let timeout = Duration::ZERO;
-            let url = reqwest::Url::parse("https://expired-cache-cleanup.invalid/webhook")
-                .expect("parse url");
-            let key = pinned_key_for_timeout(&url, timeout);
-
-            let profile =
-                build_http_client_profile(&timeout_only_options(timeout)).expect("build profile");
-            {
-                let mut cache = profile.shared_state.pinned_client_cache.write().await;
-                cache.remove(&key);
-                cache.insert(
-                    key.clone(),
-                    CachedPinnedClient {
-                        client: build_http_client(Duration::from_millis(10)).expect("build client"),
-                        expires_at: Instant::now() - Duration::from_secs(1),
-                    },
-                );
-            }
-            {
-                let mut locks = profile.shared_state.lock_pinned_client_build_locks();
-                locks.remove(&key);
-            }
-            let err = profile
-                .select_for_url(&url, true)
-                .await
-                .expect_err("expected dns timeout error");
-            assert!(err.to_string().contains("dns lookup timeout"), "{err:#}");
-
-            let cache = profile.shared_state.pinned_client_cache.read().await;
-            assert!(
-                !cache.contains_key(&key),
-                "expired cache entry should be removed after failed refresh"
-            );
-        });
-    }
-
-    #[test]
-    fn select_http_client_from_profile_re_resolves_dns_instead_of_reusing_cross_request_cache() {
+    fn select_http_client_from_profile_re_resolves_dns_on_every_pinned_selection() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1304,36 +862,14 @@ mod tests {
             let timeout = Duration::ZERO;
             let url = reqwest::Url::parse("https://future-cache-bypass.invalid/webhook")
                 .expect("parse url");
-            let key = pinned_key_for_timeout(&url, timeout);
 
             let profile =
                 build_http_client_profile(&timeout_only_options(timeout)).expect("build profile");
-            {
-                let mut cache = profile.shared_state.pinned_client_cache.write().await;
-                cache.remove(&key);
-                cache.insert(
-                    key.clone(),
-                    CachedPinnedClient {
-                        client: build_http_client(Duration::from_millis(10)).expect("build client"),
-                        expires_at: Instant::now() + Duration::from_secs(60),
-                    },
-                );
-            }
-            {
-                let mut locks = profile.shared_state.lock_pinned_client_build_locks();
-                locks.remove(&key);
-            }
             let err = profile
                 .select_for_url(&url, true)
                 .await
-                .expect_err("selection should ignore seeded cross-request cache");
+                .expect_err("expected dns timeout error");
             assert!(err.to_string().contains("dns lookup timeout"), "{err:#}");
-
-            let cache = profile.shared_state.pinned_client_cache.read().await;
-            assert!(
-                !cache.contains_key(&key),
-                "seeded cross-request cache entry should be cleared instead of being reused"
-            );
         });
     }
 

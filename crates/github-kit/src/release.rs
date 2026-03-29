@@ -1,5 +1,6 @@
 use http_kit::{
-    read_json_body_after_http_success_limited, redact_url_for_error, redact_url_str, send_reqwest,
+    UntrustedOutboundPolicy, read_json_body_after_http_success_limited, redact_url_for_error,
+    redact_url_str, send_reqwest, validate_untrusted_outbound_url,
 };
 use serde::Deserialize;
 
@@ -48,6 +49,10 @@ pub async fn fetch_latest_release<S: AsRef<str>>(
             }
         };
         let redacted_url = redact_url_for_error(&url);
+        if let Err(reason) = validate_api_url_for_bearer_token(&url, options) {
+            errors.push(format!("{redacted_url} -> {reason}"));
+            continue;
+        }
 
         let response = match send_reqwest(
             apply_github_api_headers(client.get(url.clone()), options),
@@ -112,6 +117,25 @@ fn normalize_repository(repo: &str) -> Result<(&str, &str)> {
     Ok((owner, name))
 }
 
+fn validate_api_url_for_bearer_token(
+    url: &reqwest::Url,
+    options: GitHubApiRequestOptions<'_>,
+) -> std::result::Result<(), String> {
+    if !options.has_bearer_token() {
+        return Ok(());
+    }
+
+    if url.scheme() != "https" {
+        return Err("bearer token requires an https github api base".to_string());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("bearer token requires a github api base without credentials".to_string());
+    }
+
+    validate_untrusted_outbound_url(&UntrustedOutboundPolicy::default(), url)
+        .map_err(|err| format!("bearer token requires a public github api base: {err}"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
@@ -147,18 +171,8 @@ mod tests {
                 expected_path: "/api-fail/repos/cli/cli/releases/latest".to_string(),
                 expected_headers: vec![
                     ("accept".to_string(), "application/vnd.github+json".to_string()),
-                    (
-                        "user-agent".to_string(),
-                        "toolchain-installer".to_string(),
-                    ),
-                    (
-                        "authorization".to_string(),
-                        "Bearer secret-token".to_string(),
-                    ),
-                    (
-                        "x-github-api-version".to_string(),
-                        "2022-11-28".to_string(),
-                    ),
+                    ("user-agent".to_string(), "toolchain-installer".to_string()),
+                    ("x-github-api-version".to_string(), "2022-11-28".to_string()),
                 ],
                 status_line: "HTTP/1.1 500 Internal Server Error",
                 body: "{\"message\":\"try next\"}".to_string(),
@@ -167,18 +181,8 @@ mod tests {
                 expected_path: "/api-ok/repos/cli/cli/releases/latest".to_string(),
                 expected_headers: vec![
                     ("accept".to_string(), "application/vnd.github+json".to_string()),
-                    (
-                        "user-agent".to_string(),
-                        "toolchain-installer".to_string(),
-                    ),
-                    (
-                        "authorization".to_string(),
-                        "Bearer secret-token".to_string(),
-                    ),
-                    (
-                        "x-github-api-version".to_string(),
-                        "2022-11-28".to_string(),
-                    ),
+                    ("user-agent".to_string(), "toolchain-installer".to_string()),
+                    ("x-github-api-version".to_string(), "2022-11-28".to_string()),
                 ],
                 status_line: "HTTP/1.1 200 OK",
                 body: r#"{"tag_name":"v2.0.0","assets":[{"name":"asset.tar.gz","browser_download_url":"https://example.invalid/asset.tar.gz","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}"#.to_string(),
@@ -191,9 +195,7 @@ mod tests {
             &client,
             &[format!("{base}/api-fail"), format!("{base}/api-ok")],
             "cli/cli",
-            GitHubApiRequestOptions::new()
-                .with_user_agent("toolchain-installer")
-                .with_bearer_token(Some(" secret-token ")),
+            GitHubApiRequestOptions::new().with_user_agent("toolchain-installer"),
         )
         .await
         .expect("release");
@@ -246,6 +248,72 @@ mod tests {
         assert_eq!(release.tag_name, "v2.0.0");
         assert_eq!(release.assets[0].name, long_asset_name);
         handle.join().expect("mock server thread");
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_release_allows_local_api_base_without_bearer_token() {
+        let responses = vec![MockHttpResponse {
+            expected_path: "/api-ok/repos/cli/cli/releases/latest".to_string(),
+            expected_headers: vec![
+                (
+                    "accept".to_string(),
+                    "application/vnd.github+json".to_string(),
+                ),
+                ("user-agent".to_string(), "toolchain-installer".to_string()),
+                ("x-github-api-version".to_string(), "2022-11-28".to_string()),
+            ],
+            status_line: "HTTP/1.1 200 OK",
+            body: r#"{"tag_name":"v2.0.0","assets":[]}"#.to_string(),
+        }];
+        let (base, handle) = spawn_mock_server(responses);
+        let client = reqwest::Client::new();
+
+        let release = fetch_latest_release(
+            &client,
+            &[format!("{base}/api-ok")],
+            "cli/cli",
+            GitHubApiRequestOptions::new().with_user_agent("toolchain-installer"),
+        )
+        .await
+        .expect("release");
+
+        assert_eq!(release.tag_name, "v2.0.0");
+        handle.join().expect("mock server thread");
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_release_rejects_insecure_api_base_when_bearer_token_present() {
+        let client = reqwest::Client::new();
+
+        let err = fetch_latest_release(
+            &client,
+            &["http://api.github.example.invalid/v3"],
+            "cli/cli",
+            GitHubApiRequestOptions::new().with_bearer_token(Some("secret-token")),
+        )
+        .await
+        .expect_err("insecure base should fail");
+
+        let message = err.to_string();
+        assert!(message.contains("https github api base"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_release_rejects_local_api_base_when_bearer_token_present() {
+        let client = reqwest::Client::new();
+
+        let err = fetch_latest_release(
+            &client,
+            &["https://127.0.0.1/api"],
+            "cli/cli",
+            GitHubApiRequestOptions::new().with_bearer_token(Some("secret-token")),
+        )
+        .await
+        .expect_err("local base should fail");
+
+        let message = err.to_string();
+        assert!(message.contains("public github api base"), "{message}");
+        assert!(message.contains("127.0.0.1"), "{message}");
     }
 
     #[tokio::test]

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- refuse to send GitHub bearer tokens to non-HTTPS, localhost, single-label, or private-IP API bases while still allowing tokenless local/mock API bases in tests and controlled callers
 - add `github-kit` for pure GitHub release API client access
 - export shared GitHub API base/url/header helpers so other foundation crates can reuse the canonical request contract instead of rebuilding it locally
 - redact fallback release-fetch error targets so api-base credentials, paths, and queries never leak into aggregated diagnostics

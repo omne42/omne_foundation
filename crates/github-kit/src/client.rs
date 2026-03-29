@@ -55,6 +55,10 @@ impl<'a> GitHubApiRequestOptions<'a> {
         }
         self
     }
+
+    pub(crate) fn has_bearer_token(&self) -> bool {
+        self.bearer_token.is_some()
+    }
 }
 
 pub fn apply_github_api_headers(

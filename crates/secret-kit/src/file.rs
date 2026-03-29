@@ -1,14 +1,12 @@
 use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
 
-use omne_fs_primitives::{
-    Dir, MissingRootPolicy, open_directory_component, open_regular_file_at, open_root,
-};
-use structured_text_kit::structured_text;
-
 use crate::{
     MAX_SECRET_FILE_BYTES, MAX_SECRET_FILE_SYMLINK_DEPTH, Result, SecretBytes, SecretError,
     SecretString, read_limited, secret_string_from_bytes,
+};
+use omne_fs_primitives::{
+    Dir, MissingRootPolicy, open_directory_component, open_regular_file_at, open_root,
 };
 
 struct OpenedSecretFile {

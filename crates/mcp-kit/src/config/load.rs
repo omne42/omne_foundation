@@ -450,7 +450,7 @@ impl Config {
     pub async fn load_required(
         thread_root: &Path,
         override_path: Option<PathBuf>,
-    ) -> anyhow::Result<Self> {
+    ) -> crate::Result<Self> {
         Self::load_required_with_policy(thread_root, override_path, ConfigLoadPolicy::default())
             .await
     }
@@ -460,19 +460,20 @@ impl Config {
         thread_root: &Path,
         override_path: Option<PathBuf>,
         policy: ConfigLoadPolicy,
-    ) -> anyhow::Result<Self> {
+    ) -> crate::Result<Self> {
         let cfg = Self::load_with_policy(thread_root, override_path, policy).await?;
         if cfg.path().is_none() {
-            anyhow::bail!(
+            return Err(anyhow::anyhow!(
                 "mcp config not found under root {} (tried: {})",
                 thread_root.display(),
                 DEFAULT_CONFIG_CANDIDATES.join(", ")
-            );
+            )
+            .into());
         }
         Ok(cfg)
     }
 
-    pub async fn load(thread_root: &Path, override_path: Option<PathBuf>) -> anyhow::Result<Self> {
+    pub async fn load(thread_root: &Path, override_path: Option<PathBuf>) -> crate::Result<Self> {
         Self::load_with_policy(thread_root, override_path, ConfigLoadPolicy::default()).await
     }
 
@@ -485,7 +486,7 @@ impl Config {
         thread_root: &Path,
         override_path: Option<PathBuf>,
         policy: ConfigLoadPolicy,
-    ) -> anyhow::Result<Self> {
+    ) -> crate::Result<Self> {
         let Some((path, json)) =
             load_initial_path_and_value(thread_root, override_path, policy).await?
         else {
@@ -496,6 +497,6 @@ impl Config {
             });
         };
         let cfg = parse_config_file(Some(path.as_path()), json)?;
-        build_v1_config(thread_root, Some(path), cfg)
+        Ok(build_v1_config(thread_root, Some(path), cfg)?)
     }
 }

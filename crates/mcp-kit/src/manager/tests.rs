@@ -1457,7 +1457,7 @@ async fn session_notify_timeout_is_bounded_when_close_path_blocks() {
         started.elapsed()
     );
     assert!(
-        contains_wait_timeout(&err),
+        contains_wait_timeout(err.as_anyhow()),
         "timeout should preserve structured wait-timeout error, err={err:#}"
     );
 }
@@ -1532,7 +1532,7 @@ async fn session_notify_timeout_returns_without_waiting_for_close_budget() {
         started.elapsed()
     );
     assert!(
-        contains_wait_timeout(&err),
+        contains_wait_timeout(err.as_anyhow()),
         "timeout should preserve structured wait-timeout error, err={err:#}"
     );
 }
@@ -1600,7 +1600,7 @@ async fn session_notify_timeout_marks_closed_once_with_first_reason() {
         .expect_err("first notify should time out");
     assert!(entered.load(Ordering::Relaxed));
     assert!(
-        contains_wait_timeout(&first_err),
+        contains_wait_timeout(first_err.as_anyhow()),
         "timeout should preserve structured wait-timeout error, err={first_err:#}"
     );
 
@@ -1623,7 +1623,7 @@ async fn session_notify_timeout_marks_closed_once_with_first_reason() {
         second_started.elapsed()
     );
     assert!(
-        !contains_wait_timeout(&second_err),
+        !contains_wait_timeout(second_err.as_anyhow()),
         "second notify should not re-timeout once closed, err={second_err:#}"
     );
     assert!(

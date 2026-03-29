@@ -69,7 +69,7 @@ impl Session {
     ///
     /// Note: this can hang indefinitely if the child does not exit. Prefer
     /// `Session::wait_with_timeout` if you need an upper bound.
-    pub async fn wait(self) -> anyhow::Result<Option<std::process::ExitStatus>> {
+    pub async fn wait(self) -> crate::Result<Option<std::process::ExitStatus>> {
         let Session {
             server_name,
             connection,
@@ -79,6 +79,7 @@ impl Session {
             .wait()
             .await
             .with_context(|| format!("close session (server={server_name})"))
+            .map_err(crate::Error::from)
     }
 
     /// Closes this session and waits for the underlying child process to exit, up to `timeout`.
@@ -88,7 +89,7 @@ impl Session {
         self,
         timeout: Duration,
         on_timeout: mcp_jsonrpc::WaitOnTimeout,
-    ) -> anyhow::Result<Option<std::process::ExitStatus>> {
+    ) -> crate::Result<Option<std::process::ExitStatus>> {
         let Session {
             server_name,
             connection,
@@ -98,6 +99,7 @@ impl Session {
             .wait_with_timeout(timeout, on_timeout)
             .await
             .with_context(|| format!("close session (server={server_name})"))
+            .map_err(crate::Error::from)
     }
 
     /// Override the per-request timeout used by `Session::{request,notify}`.
@@ -108,7 +110,7 @@ impl Session {
         self
     }
 
-    pub async fn request(&self, method: &str, params: Option<Value>) -> anyhow::Result<Value> {
+    pub async fn request(&self, method: &str, params: Option<Value>) -> crate::Result<Value> {
         let result = self
             .connection
             .client()
@@ -116,18 +118,22 @@ impl Session {
             .await;
         match result {
             Ok(value) => Ok(value),
-            Err(err) if err.is_wait_timeout() => Err(anyhow::Error::new(err).context(format!(
-                "mcp request timed out after {:?}: {method} (server={})",
-                self.request_timeout, self.server_name
-            ))),
-            Err(err) => Err(anyhow::Error::new(err).context(format!(
-                "mcp request failed: {method} (server={})",
-                self.server_name
-            ))),
+            Err(err) if err.is_wait_timeout() => Err(anyhow::Error::new(err)
+                .context(format!(
+                    "mcp request timed out after {:?}: {method} (server={})",
+                    self.request_timeout, self.server_name
+                ))
+                .into()),
+            Err(err) => Err(anyhow::Error::new(err)
+                .context(format!(
+                    "mcp request failed: {method} (server={})",
+                    self.server_name
+                ))
+                .into()),
         }
     }
 
-    pub async fn notify(&self, method: &str, params: Option<Value>) -> anyhow::Result<()> {
+    pub async fn notify(&self, method: &str, params: Option<Value>) -> crate::Result<()> {
         crate::manager::ensure_tokio_time_driver("Session::notify")?;
         let timeout = self.request_timeout;
         let outcome = tokio::time::timeout(
@@ -136,12 +142,14 @@ impl Session {
         )
         .await;
         match outcome {
-            Ok(result) => result.with_context(|| {
-                format!(
-                    "mcp notification failed: {method} (server={})",
-                    self.server_name
-                )
-            }),
+            Ok(result) => result
+                .with_context(|| {
+                    format!(
+                        "mcp notification failed: {method} (server={})",
+                        self.server_name
+                    )
+                })
+                .map_err(crate::Error::from),
             Err(_) => {
                 let timeout_message = format!(
                     "mcp notification timed out after {timeout:?}: {method} (server={})",
@@ -156,7 +164,8 @@ impl Session {
                 Err(anyhow::Error::new(mcp_jsonrpc::Error::protocol(
                     mcp_jsonrpc::ProtocolErrorKind::WaitTimeout,
                     timeout_message,
-                )))
+                ))
+                .into())
             }
         }
     }
@@ -164,7 +173,7 @@ impl Session {
     pub async fn request_typed<R: McpRequest>(
         &self,
         params: Option<R::Params>,
-    ) -> anyhow::Result<R::Result> {
+    ) -> crate::Result<R::Result> {
         let params = match params {
             Some(params) => Some(serde_json::to_value(params).with_context(|| {
                 format!(
@@ -176,19 +185,19 @@ impl Session {
             None => None,
         };
         let result = self.request(R::METHOD, params).await?;
-        serde_json::from_value(result).with_context(|| {
+        Ok(serde_json::from_value(result).with_context(|| {
             format!(
                 "deserialize MCP result: {} (server={})",
                 R::METHOD,
                 self.server_name
             )
-        })
+        })?)
     }
 
     pub async fn notify_typed<N: McpNotification>(
         &self,
         params: Option<N::Params>,
-    ) -> anyhow::Result<()> {
+    ) -> crate::Result<()> {
         let params = match params {
             Some(params) => Some(serde_json::to_value(params).with_context(|| {
                 format!(
@@ -202,46 +211,42 @@ impl Session {
         self.notify(N::METHOD, params).await
     }
 
-    pub async fn ping(&self) -> anyhow::Result<Value> {
+    pub async fn ping(&self) -> crate::Result<Value> {
         self.request("ping", None).await
     }
 
-    pub async fn list_tools(&self) -> anyhow::Result<Value> {
+    pub async fn list_tools(&self) -> crate::Result<Value> {
         self.request("tools/list", None).await
     }
 
-    pub async fn list_resources(&self) -> anyhow::Result<Value> {
+    pub async fn list_resources(&self) -> crate::Result<Value> {
         self.request("resources/list", None).await
     }
 
-    pub async fn list_resource_templates(&self) -> anyhow::Result<Value> {
+    pub async fn list_resource_templates(&self) -> crate::Result<Value> {
         self.request("resources/templates/list", None).await
     }
 
-    pub async fn read_resource(&self, uri: &str) -> anyhow::Result<Value> {
+    pub async fn read_resource(&self, uri: &str) -> crate::Result<Value> {
         let params = serde_json::json!({ "uri": uri });
         self.request("resources/read", Some(params)).await
     }
 
-    pub async fn subscribe_resource(&self, uri: &str) -> anyhow::Result<Value> {
+    pub async fn subscribe_resource(&self, uri: &str) -> crate::Result<Value> {
         let params = serde_json::json!({ "uri": uri });
         self.request("resources/subscribe", Some(params)).await
     }
 
-    pub async fn unsubscribe_resource(&self, uri: &str) -> anyhow::Result<Value> {
+    pub async fn unsubscribe_resource(&self, uri: &str) -> crate::Result<Value> {
         let params = serde_json::json!({ "uri": uri });
         self.request("resources/unsubscribe", Some(params)).await
     }
 
-    pub async fn list_prompts(&self) -> anyhow::Result<Value> {
+    pub async fn list_prompts(&self) -> crate::Result<Value> {
         self.request("prompts/list", None).await
     }
 
-    pub async fn get_prompt(
-        &self,
-        prompt: &str,
-        arguments: Option<Value>,
-    ) -> anyhow::Result<Value> {
+    pub async fn get_prompt(&self, prompt: &str, arguments: Option<Value>) -> crate::Result<Value> {
         let mut params = serde_json::json!({ "name": prompt });
         if let Some(arguments) = arguments {
             params["arguments"] = arguments;
@@ -249,7 +254,7 @@ impl Session {
         self.request("prompts/get", Some(params)).await
     }
 
-    pub async fn call_tool(&self, tool: &str, arguments: Option<Value>) -> anyhow::Result<Value> {
+    pub async fn call_tool(&self, tool: &str, arguments: Option<Value>) -> crate::Result<Value> {
         let mut params = serde_json::json!({ "name": tool });
         if let Some(arguments) = arguments {
             params["arguments"] = arguments;
@@ -257,12 +262,12 @@ impl Session {
         self.request("tools/call", Some(params)).await
     }
 
-    pub async fn set_logging_level(&self, level: &str) -> anyhow::Result<Value> {
+    pub async fn set_logging_level(&self, level: &str) -> crate::Result<Value> {
         let params = serde_json::json!({ "level": level });
         self.request("logging/setLevel", Some(params)).await
     }
 
-    pub async fn complete(&self, params: Value) -> anyhow::Result<Value> {
+    pub async fn complete(&self, params: Value) -> crate::Result<Value> {
         self.request("completion/complete", Some(params)).await
     }
 }

@@ -49,6 +49,7 @@
 //! - Automatic reconnect/daemonization
 
 mod config;
+mod error;
 mod manager;
 pub mod mcp;
 mod protocol;
@@ -60,6 +61,7 @@ mod shared_manager;
 pub use config::{
     ClientConfig, Config, ConfigLoadPolicy, Root, ServerConfig, StdoutLogConfig, Transport,
 };
+pub use error::{Error, ErrorKind, Result};
 pub use manager::{
     Connection, Manager, ProtocolVersionCheck, ProtocolVersionMismatch, ServerNotificationContext,
     ServerNotificationHandler, ServerRequestContext, ServerRequestHandler, ServerRequestOutcome,

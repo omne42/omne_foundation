@@ -136,9 +136,10 @@ impl SharedManager {
     }
 
     /// Inspect manager state under the shared lock without exposing borrowed data directly.
-    pub async fn inspect<R>(&self, f: impl FnOnce(&Manager) -> R) -> anyhow::Result<R> {
-        self.with_manager_lock("inspect", |manager| f(manager))
-            .await
+    pub async fn inspect<R>(&self, f: impl FnOnce(&Manager) -> R) -> crate::Result<R> {
+        Ok(self
+            .with_manager_lock("inspect", |manager| f(manager))
+            .await?)
     }
 
     async fn try_prepare_connected_client(
@@ -274,22 +275,25 @@ impl SharedManager {
         });
     }
 
-    pub async fn is_connected(&self, server_name: &str) -> anyhow::Result<bool> {
-        self.with_manager_lock("is_connected", |manager| manager.is_connected(server_name))
-            .await
+    pub async fn is_connected(&self, server_name: &str) -> crate::Result<bool> {
+        Ok(self
+            .with_manager_lock("is_connected", |manager| manager.is_connected(server_name))
+            .await?)
     }
 
-    pub async fn connected_server_names(&self) -> anyhow::Result<Vec<ServerName>> {
-        self.with_manager_lock("connected_server_names", |manager| {
-            manager.connected_server_names()
-        })
-        .await
+    pub async fn connected_server_names(&self) -> crate::Result<Vec<ServerName>> {
+        Ok(self
+            .with_manager_lock("connected_server_names", |manager| {
+                manager.connected_server_names()
+            })
+            .await?)
     }
 
-    pub async fn disconnect(&self, server_name: &str) -> anyhow::Result<bool> {
+    pub async fn disconnect(&self, server_name: &str) -> crate::Result<bool> {
         let _gate = self.lock_connect_gate("disconnect", server_name).await?;
-        self.with_manager_lock("disconnect", |manager| manager.disconnect(server_name))
-            .await
+        Ok(self
+            .with_manager_lock("disconnect", |manager| manager.disconnect(server_name))
+            .await?)
     }
 
     pub async fn disconnect_and_wait(
@@ -297,7 +301,7 @@ impl SharedManager {
         server_name: &str,
         timeout: Duration,
         on_timeout: mcp_jsonrpc::WaitOnTimeout,
-    ) -> anyhow::Result<Option<std::process::ExitStatus>> {
+    ) -> crate::Result<Option<std::process::ExitStatus>> {
         let _gate = self
             .lock_connect_gate("disconnect_and_wait", server_name)
             .await?;
@@ -305,7 +309,7 @@ impl SharedManager {
             .lock_for_async_op("disconnect_and_wait")
             .await?
             .prepare_disconnect_for_wait_with_cwd_cleanup(server_name);
-        disconnect.wait_with_timeout(timeout, on_timeout).await
+        Ok(disconnect.wait_with_timeout(timeout, on_timeout).await?)
     }
 
     pub async fn request(
@@ -315,7 +319,7 @@ impl SharedManager {
         method: &str,
         params: Option<Value>,
         cwd: &Path,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         let (prepared, _gate) = self
             .prepare_connected_client_with_gate("request", config, server_name, cwd)
             .await?;
@@ -336,7 +340,7 @@ impl SharedManager {
                 .await;
             }
         }
-        result
+        Ok(result?)
     }
 
     pub async fn request_connected(
@@ -344,12 +348,12 @@ impl SharedManager {
         server_name: &str,
         method: &str,
         params: Option<Value>,
-    ) -> anyhow::Result<Value> {
+    ) -> crate::Result<Value> {
         let Some(prepared) = self
             .try_prepare_connected_client("request_connected", server_name, None)
             .await?
         else {
-            anyhow::bail!("mcp server not connected: {}", server_name.trim());
+            return Err(anyhow::anyhow!("mcp server not connected: {}", server_name.trim()).into());
         };
 
         let result = Manager::request_raw_handle(
@@ -371,7 +375,7 @@ impl SharedManager {
             }
         }
 
-        result
+        Ok(result?)
     }
 
     pub async fn request_typed<R: McpRequest>(
@@ -380,7 +384,7 @@ impl SharedManager {
         server_name: &str,
         params: Option<R::Params>,
         cwd: &Path,
-    ) -> anyhow::Result<R::Result> {
+    ) -> crate::Result<R::Result> {
         let params = match params {
             Some(params) => Some(serde_json::to_value(params).with_context(|| {
                 format!("serialize MCP params: {} (server={server_name})", R::METHOD)
@@ -390,19 +394,19 @@ impl SharedManager {
         let result = self
             .request(config, server_name, R::METHOD, params, cwd)
             .await?;
-        serde_json::from_value(result).with_context(|| {
+        Ok(serde_json::from_value(result).with_context(|| {
             format!(
                 "deserialize MCP result: {} (server={server_name})",
                 R::METHOD
             )
-        })
+        })?)
     }
 
     pub async fn request_typed_connected<R: McpRequest>(
         &self,
         server_name: &str,
         params: Option<R::Params>,
-    ) -> anyhow::Result<R::Result> {
+    ) -> crate::Result<R::Result> {
         let params = match params {
             Some(params) => Some(serde_json::to_value(params).with_context(|| {
                 format!("serialize MCP params: {} (server={server_name})", R::METHOD)
@@ -412,12 +416,12 @@ impl SharedManager {
         let result = self
             .request_connected(server_name, R::METHOD, params)
             .await?;
-        serde_json::from_value(result).with_context(|| {
+        Ok(serde_json::from_value(result).with_context(|| {
             format!(
                 "deserialize MCP result: {} (server={server_name})",
                 R::METHOD
             )
-        })
+        })?)
     }
 
     pub async fn notify(
@@ -427,7 +431,7 @@ impl SharedManager {
         method: &str,
         params: Option<Value>,
         cwd: &Path,
-    ) -> anyhow::Result<()> {
+    ) -> crate::Result<()> {
         let (prepared, _gate) = self
             .prepare_connected_client_with_gate("notify", config, server_name, cwd)
             .await?;
@@ -450,7 +454,7 @@ impl SharedManager {
                 .await;
             }
         }
-        result
+        Ok(result?)
     }
 
     pub async fn notify_connected(
@@ -458,12 +462,12 @@ impl SharedManager {
         server_name: &str,
         method: &str,
         params: Option<Value>,
-    ) -> anyhow::Result<()> {
+    ) -> crate::Result<()> {
         let Some(prepared) = self
             .try_prepare_connected_client("notify_connected", server_name, None)
             .await?
         else {
-            anyhow::bail!("mcp server not connected: {}", server_name.trim());
+            return Err(anyhow::anyhow!("mcp server not connected: {}", server_name.trim()).into());
         };
 
         let result = Manager::notify_raw_handle(
@@ -487,7 +491,7 @@ impl SharedManager {
             }
         }
 
-        result
+        Ok(result?)
     }
 
     pub async fn notify_typed<N: McpNotification>(
@@ -496,7 +500,7 @@ impl SharedManager {
         server_name: &str,
         params: Option<N::Params>,
         cwd: &Path,
-    ) -> anyhow::Result<()> {
+    ) -> crate::Result<()> {
         let params = match params {
             Some(params) => Some(serde_json::to_value(params).with_context(|| {
                 format!("serialize MCP params: {} (server={server_name})", N::METHOD)
@@ -511,7 +515,7 @@ impl SharedManager {
         &self,
         server_name: &str,
         params: Option<N::Params>,
-    ) -> anyhow::Result<()> {
+    ) -> crate::Result<()> {
         let params = match params {
             Some(params) => Some(serde_json::to_value(params).with_context(|| {
                 format!("serialize MCP params: {} (server={server_name})", N::METHOD)
@@ -521,49 +525,52 @@ impl SharedManager {
         self.notify_connected(server_name, N::METHOD, params).await
     }
 
-    pub async fn server_handler_timeout_count(&self, server_name: &str) -> anyhow::Result<u64> {
-        self.with_manager_lock("server_handler_timeout_count", |manager| {
-            manager.server_handler_timeout_count(server_name)
-        })
-        .await
+    pub async fn server_handler_timeout_count(&self, server_name: &str) -> crate::Result<u64> {
+        Ok(self
+            .with_manager_lock("server_handler_timeout_count", |manager| {
+                manager.server_handler_timeout_count(server_name)
+            })
+            .await?)
     }
 
     /// Returns a snapshot of timeout counts for all servers without draining shared state.
-    pub async fn server_handler_timeout_counts(&self) -> anyhow::Result<HashMap<ServerName, u64>> {
-        self.with_manager_lock("server_handler_timeout_counts", |manager| {
-            manager.server_handler_timeout_counts()
-        })
-        .await
+    pub async fn server_handler_timeout_counts(&self) -> crate::Result<HashMap<ServerName, u64>> {
+        Ok(self
+            .with_manager_lock("server_handler_timeout_counts", |manager| {
+                manager.server_handler_timeout_counts()
+            })
+            .await?)
     }
 
     /// Takes timeout counts for all servers and resets the shared counters for every clone.
     pub async fn take_server_handler_timeout_counts(
         &self,
-    ) -> anyhow::Result<HashMap<ServerName, u64>> {
-        self.with_manager_lock("take_server_handler_timeout_counts", |manager| {
-            manager.take_server_handler_timeout_counts()
-        })
-        .await
+    ) -> crate::Result<HashMap<ServerName, u64>> {
+        Ok(self
+            .with_manager_lock("take_server_handler_timeout_counts", |manager| {
+                manager.take_server_handler_timeout_counts()
+            })
+            .await?)
     }
 
     /// Returns recorded protocol-version mismatches without draining shared state.
-    pub async fn protocol_version_mismatches(
-        &self,
-    ) -> anyhow::Result<Vec<ProtocolVersionMismatch>> {
-        self.with_manager_lock("protocol_version_mismatches", |manager| {
-            manager.protocol_version_mismatches().to_vec()
-        })
-        .await
+    pub async fn protocol_version_mismatches(&self) -> crate::Result<Vec<ProtocolVersionMismatch>> {
+        Ok(self
+            .with_manager_lock("protocol_version_mismatches", |manager| {
+                manager.protocol_version_mismatches().to_vec()
+            })
+            .await?)
     }
 
     /// Takes recorded protocol-version mismatches and clears them for every clone.
     pub async fn take_protocol_version_mismatches(
         &self,
-    ) -> anyhow::Result<Vec<ProtocolVersionMismatch>> {
-        self.with_manager_lock("take_protocol_version_mismatches", |manager| {
-            manager.take_protocol_version_mismatches()
-        })
-        .await
+    ) -> crate::Result<Vec<ProtocolVersionMismatch>> {
+        Ok(self
+            .with_manager_lock("take_protocol_version_mismatches", |manager| {
+                manager.take_protocol_version_mismatches()
+            })
+            .await?)
     }
 }
 

@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `secret-kit` 现在把内建 provider 的 parse/command 细节下沉到 `spec/providers.rs` 私有模块，`spec.rs` 只保留通用 `secret://` 入口、env/file 语义和共享 helper，从而把核心流程与 provider 专属 CLI 策略分层开来而不改变公开 `SecretSpec`/`secret://` 契约。
 - `SecretResolver` 现在返回 boxed future 并保持 object-safe，调用方可以用 `Arc<dyn SecretResolver>` 之类的动态组装边界而不必锁死在静态泛型上；同时补了 trait-object 回归测试。
 - `secret-kit`：把 secret value 容器与 command-runtime/context trait 从 `lib.rs` 拆到独立模块，收窄 crate 入口文件的职责边界；公开 API 与行为保持不变。
 - `secret-kit` 现在在内建 CLI 的 ambient `PATH` 解析链路里保留已解析程序路径的 `OsString/PathBuf` 形态，不再把 non-UTF-8 可执行路径经 `to_string_lossy()` 降成文本后再交给 `Command::new(...)`，避免在非 UTF-8 目录下把 `vault`/`aws`/`gcloud`/`az` 解析到错误路径。

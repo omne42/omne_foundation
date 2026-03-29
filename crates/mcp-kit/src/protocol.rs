@@ -5,6 +5,8 @@ use serde::de::DeserializeOwned;
 ///
 /// This matches the MCP schema version used by the upstream MCP specification.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+pub(crate) const MCP_PROTOCOL_VERSION_HEADER: &str = "MCP-Protocol-Version";
+pub(crate) const AUTHORIZATION_HEADER: &str = "Authorization";
 
 /// Typed MCP request (method + params + result).
 ///

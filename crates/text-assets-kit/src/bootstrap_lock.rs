@@ -57,7 +57,7 @@ impl Drop for BootstrapTransactionGuard {
 /// advisory file locking extends the exclusion across other cooperating local
 /// processes that resolve the same lock directory.
 pub fn lock_bootstrap_transaction(root: &Path) -> io::Result<BootstrapTransactionGuard> {
-    let root = bootstrap_root_key(root);
+    let root = bootstrap_root_key(root)?;
     let mut held_roots = lock_unpoisoned(&BOOTSTRAP_TRANSACTION_STATE.held_roots);
     while held_roots.contains(&root) {
         held_roots = wait_unpoisoned(&BOOTSTRAP_TRANSACTION_STATE.ready, held_roots);
@@ -81,28 +81,61 @@ pub fn lock_bootstrap_transaction(root: &Path) -> io::Result<BootstrapTransactio
     })
 }
 
-fn bootstrap_root_key(root: &Path) -> BootstrapRootKey {
+fn bootstrap_root_key(root: &Path) -> io::Result<BootstrapRootKey> {
+    bootstrap_root_key_with(root, &symlink_metadata_path, &canonicalize_path)
+}
+
+fn bootstrap_root_key_with(
+    root: &Path,
+    symlink_metadata: &impl Fn(&Path) -> io::Result<std::fs::Metadata>,
+    canonicalize: &impl Fn(&Path) -> io::Result<PathBuf>,
+) -> io::Result<BootstrapRootKey> {
     let mut existing = root;
     let mut missing_components = Vec::new();
 
-    while std::fs::symlink_metadata(existing).is_err() {
+    while let Err(error) = symlink_metadata(existing) {
+        if error.kind() != io::ErrorKind::NotFound {
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "inspect bootstrap root prefix {}: {error}",
+                    existing.display()
+                ),
+            ));
+        }
         let Some(component) = existing.file_name() else {
-            return normalized_bootstrap_root_key(root, true);
+            return Ok(normalized_bootstrap_root_key(root, true));
         };
         missing_components.push(component.to_os_string());
         let Some(parent) = existing.parent() else {
-            return normalized_bootstrap_root_key(root, true);
+            return Ok(normalized_bootstrap_root_key(root, true));
         };
         existing = parent;
     }
 
     let case_sensitive = bootstrap_root_case_sensitive(existing);
-    let mut canonical = std::fs::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
+    let mut canonical = canonicalize(existing).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "canonicalize bootstrap root prefix {}: {error}",
+                existing.display()
+            ),
+        )
+    })?;
     for component in missing_components.iter().rev() {
         canonical.push(component);
     }
 
-    normalized_bootstrap_root_key(&canonical, case_sensitive)
+    Ok(normalized_bootstrap_root_key(&canonical, case_sensitive))
+}
+
+fn symlink_metadata_path(path: &Path) -> io::Result<std::fs::Metadata> {
+    std::fs::symlink_metadata(path)
+}
+
+fn canonicalize_path(path: &Path) -> io::Result<PathBuf> {
+    std::fs::canonicalize(path)
 }
 
 fn open_bootstrap_lock_file(root: &BootstrapRootKey) -> io::Result<AdvisoryLockGuard> {
@@ -449,6 +482,7 @@ mod tests {
         });
 
         let blocked_root_key = bootstrap_root_key(&root_a);
+        let blocked_root_key = blocked_root_key.expect("blocked root key");
         wait_for_reserved_root(&blocked_root_key, Duration::from_secs(1));
 
         let waiting_root = root_b.clone();
@@ -529,8 +563,8 @@ mod tests {
     fn bootstrap_root_key_is_case_insensitive_on_windows() {
         let temp = TempDir::new().expect("temp dir");
         assert_eq!(
-            bootstrap_root_key(&temp.path().join("Catalog")),
-            bootstrap_root_key(&temp.path().join("catalog"))
+            bootstrap_root_key(&temp.path().join("Catalog")).expect("catalog key"),
+            bootstrap_root_key(&temp.path().join("catalog")).expect("catalog key")
         );
     }
 
@@ -561,13 +595,57 @@ mod tests {
         let temp = TempDir::new().expect("temp dir");
         let root_a = temp.path().join(OsString::from_vec(vec![b'r', 0xFF, b't']));
         let root_b = temp.path().join(OsString::from_vec(vec![b'r', 0xFE, b't']));
-        let key_a = bootstrap_root_key(&root_a);
-        let key_b = bootstrap_root_key(&root_b);
+        let key_a = bootstrap_root_key(&root_a).expect("non-utf8 key");
+        let key_b = bootstrap_root_key(&root_b).expect("non-utf8 key");
 
         assert_ne!(key_a, key_b);
         assert_ne!(
             stable_bootstrap_lock_hash(&key_a),
             stable_bootstrap_lock_hash(&key_b)
+        );
+    }
+
+    #[test]
+    fn bootstrap_root_key_rejects_non_not_found_metadata_errors() {
+        let temp = TempDir::new().expect("temp dir");
+        let file_path = temp.path().join("not-a-directory");
+        fs::write(&file_path, "file").expect("write file");
+
+        let error = bootstrap_root_key(&file_path.join("child"))
+            .expect_err("non-directory prefix should not be treated as a missing path");
+        assert_ne!(error.kind(), io::ErrorKind::NotFound);
+        assert!(
+            error.to_string().contains("inspect bootstrap root prefix"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn bootstrap_root_key_propagates_canonicalize_errors() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path().join("catalog");
+        let prefix = temp.path().to_path_buf();
+        let metadata = std::fs::symlink_metadata(&prefix).expect("prefix metadata");
+
+        let error = bootstrap_root_key_with(
+            &root,
+            &|path| {
+                if path == prefix.as_path() {
+                    Ok(metadata.clone())
+                } else {
+                    Err(io::Error::from(io::ErrorKind::NotFound))
+                }
+            },
+            &|_| Err(io::Error::new(io::ErrorKind::PermissionDenied, "blocked")),
+        )
+        .expect_err("canonicalize failure should bubble up");
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            error
+                .to_string()
+                .contains("canonicalize bootstrap root prefix"),
+            "{error}"
         );
     }
 

@@ -368,13 +368,36 @@ fn normalize_path_for_prefix_check(path: &Path) -> PathBuf {
     normalized
 }
 
+fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
+    let normalized = normalize_path_for_prefix_check(path);
+    let mut existing = normalized.as_path();
+    let mut missing_components = Vec::new();
+
+    while std::fs::symlink_metadata(existing).is_err() {
+        let component = existing.file_name()?;
+        missing_components.push(component.to_os_string());
+        existing = existing.parent()?;
+    }
+
+    let mut resolved = std::fs::canonicalize(existing).ok()?;
+    for component in missing_components.iter().rev() {
+        resolved.push(component);
+    }
+    Some(resolved)
+}
+
 pub(super) fn stdout_log_path_within_root(stdout_log_path: &Path, root: &Path) -> bool {
     if !root.is_absolute() {
         return false;
     }
 
     let resolved_stdout_log_path = absolutize_with_base(stdout_log_path, root);
-    let normalized_root = normalize_path_for_prefix_check(root);
-    let normalized_stdout_log_path = normalize_path_for_prefix_check(&resolved_stdout_log_path);
-    normalized_stdout_log_path.starts_with(&normalized_root)
+    let Some(resolved_root) = canonicalize_existing_prefix(root) else {
+        return false;
+    };
+    let Some(resolved_stdout_log_path) = canonicalize_existing_prefix(&resolved_stdout_log_path)
+    else {
+        return false;
+    };
+    resolved_stdout_log_path.starts_with(&resolved_root)
 }

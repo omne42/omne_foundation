@@ -147,6 +147,37 @@ fn stdout_log_path_within_root_accepts_absolute_path_after_root_absolutize() {
     assert!(stdout_log_path_within_root(&log_path, &root));
 }
 
+#[cfg(unix)]
+#[test]
+fn stdout_log_path_within_root_rejects_symlink_escape() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let root = tempdir.path().join("workspace");
+    let outside = tempdir.path().join("outside");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("logs")).unwrap();
+
+    assert!(!stdout_log_path_within_root(
+        Path::new("logs/server.stdout.log"),
+        &root
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn stdout_log_path_within_root_accepts_symlink_that_stays_within_root() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let root = tempdir.path().join("workspace");
+    let real_logs = root.join("real-logs");
+    std::fs::create_dir_all(&real_logs).unwrap();
+    std::os::unix::fs::symlink(&real_logs, root.join("logs")).unwrap();
+
+    assert!(stdout_log_path_within_root(
+        Path::new("logs/server.stdout.log"),
+        &root
+    ));
+}
+
 #[test]
 fn connection_wait_with_timeout_returns_error_without_tokio_time_driver() {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -277,6 +308,7 @@ fn try_from_config_rejects_invalid_server_config() {
             Err(err) => err,
         };
     let msg = err.to_string();
+    assert!(msg.contains("server=srv"), "err={err:#}");
     assert!(msg.contains("invalid mcp server config"), "err={err:#}");
     assert!(msg.contains("reserved by transport"), "err={err:#}");
 }

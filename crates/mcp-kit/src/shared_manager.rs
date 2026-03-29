@@ -579,7 +579,9 @@ mod tests {
     use std::path::PathBuf;
     #[cfg(not(windows))]
     use std::sync::OnceLock;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    #[cfg(unix)]
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
 

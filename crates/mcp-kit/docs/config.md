@@ -86,7 +86,7 @@ CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
     - 额外约束：默认要求 `path` 位于 `--root` 之下（需要写到 root 外时，CLI：`--allow-stdout-log-outside-root`；代码：`Manager::with_allow_stdout_log_outside_root(true)`）
     - 额外约束：出于安全考虑，`path` 不允许包含任何 symlink 路径组件（含父目录/目标文件）
   - `max_bytes_per_part`（可选，默认 1MiB，最小 1）
-  - `max_parts`（可选，默认 32，最小 1；`0` 表示不做保留上限：无限保留）
+  - `max_parts`（可选，默认 32，最小 1；`0` 表示不做保留上限：无限保留；手动构造 Rust `StdoutLogConfig` 时也接受 `Some(0)`，并按 unlimited 处理）
 
 stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)。
 

@@ -115,7 +115,7 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- --help
 
 - `client.protocol_version` / `client.capabilities`：覆盖 MCP initialize 里的 client 配置。
 - `client.roots`：启用 roots 能力，并自动响应 server→client 的 `roots/list`。
-- `servers.<name>.stdout_log`：将 server stdout 旋转落盘（见 `mcp_jsonrpc::StdoutLog`），支持 `max_bytes_per_part` 与 `max_parts`（0 表示不做保留上限）。
+- `servers.<name>.stdout_log`：将 server stdout 旋转落盘（见 `mcp_jsonrpc::StdoutLog`），支持 `max_bytes_per_part` 与 `max_parts`（`0` 或 Rust API 的 `None` 都表示不做保留上限）。
 - `servers.<name>.inherit_env`：仅 `transport=stdio` 生效；是否继承当前进程环境变量（默认 `false`）。当为 `false` 时会清空子进程 env（仅保留少量基础变量并再注入 `servers.<name>.env`），用于降低宿主 secrets 泄露风险。
 - `transport=unix`：连接已有 unix socket MCP server（见 `servers.<name>.unix_path`）。
 - `transport=streamable_http`：连接远程 MCP server（见 `servers.<name>.url` 或 `servers.<name>.sse_url + servers.<name>.http_url`），可选 `servers.<name>.bearer_token_env_var` / `servers.<name>.http_headers` / `servers.<name>.env_http_headers`。

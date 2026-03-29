@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：`stdout_log.max_parts` 现在在 `mcp.json`、手动 Rust `StdoutLogConfig` 构造和底层 `mcp-jsonrpc` 之间统一语义；`0`/`Some(0)` 都表示 unlimited，避免公开配置契约与 `validate()` 路径继续分裂。
 - `mcp-kit`：`streamable_http` 的 `env_http_headers` 现在同时禁止覆盖 `Authorization` 与 `MCP-Protocol-Version`；`bearer_token_env_var` 继续独占 `Authorization` 的 transport 装配路径，并补充回归测试锁住这个边界。
 - `mcp-kit`：`SharedManager` 的 config 驱动 `request` / `notify` / `ensure_connected` 现在和 `Manager` 一样，会把相对 `cwd` 锚定到 `config.thread_root()`；避免同一条基于 `mcp.json` 的连接在 shared 入口下退回 ambient `current_dir()` 语义，并补充 thread-root 相对 `cwd` 复用回归测试。
 - `mcp-kit`：`Manager::try_from_config` 现在会对完整 `Config` 做 fail-fast 校验，而不再只检查 `client`；手动构造的无效 server 配置会在构造期直接失败，不再拖到首次连接时才暴露。

@@ -131,564 +131,62 @@
 //! - ❌ 不要假设秘密源总是可用（总是处理错误）
 //! - ❌ 不要混合多个秘密源（使用统一的 `secret://` 格式）
 
-use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
-use std::error::Error as StdError;
-use std::ffi::{OsStr, OsString};
-use std::fmt::{self, Display, Formatter};
+use std::ffi::OsStr;
 use std::future::Future;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use error_kit::{ErrorCategory, ErrorCode, ErrorRecord, ErrorRetryAdvice};
 use tokio::sync::broadcast;
-use zeroize::Zeroize;
 
-use structured_text_kit::{CatalogTextRef, StructuredText, structured_text};
-
-#[derive(Debug)]
-pub enum SecretError {
-    Io {
-        text: StructuredText,
-        source: std::io::Error,
-    },
-    Json {
-        text: StructuredText,
-        source: serde_json::Error,
-    },
-    Lookup(StructuredText),
-    InvalidSpec(StructuredText),
-    Command(StructuredText),
-}
-
-pub type Result<T> = std::result::Result<T, SecretError>;
-
-/// Heap-backed secret text that redacts itself in `Debug` output and zeroizes its shared buffer
-/// when the last handle drops.
-#[derive(Clone, Default)]
-pub struct SecretString(Arc<SecretText>);
-
-#[derive(Default)]
-struct SecretText(String);
-
-impl SecretText {
-    fn into_inner(mut self) -> String {
-        std::mem::take(&mut self.0)
-    }
-}
-
-impl SecretString {
-    #[must_use]
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(Arc::new(SecretText(value.into())))
-    }
-
-    /// Borrow the plaintext secret.
-    ///
-    /// This returns a normal `&str`. If the caller copies it into another `String`, logs it, or
-    /// stores it elsewhere, that external copy is outside `SecretString`'s zeroization contract.
-    #[must_use]
-    pub fn expose_secret(&self) -> &str {
-        self.0.0.as_str()
-    }
-
-    /// Extract the owned secret string without cloning.
-    ///
-    /// This only succeeds when the current handle uniquely owns the underlying buffer.
-    pub fn into_inner(self) -> std::result::Result<String, Self> {
-        match Arc::try_unwrap(self.0) {
-            Ok(inner) => Ok(inner.into_inner()),
-            Err(shared) => Err(Self(shared)),
-        }
-    }
-
-    /// Consume the secret and return owned plaintext.
-    ///
-    /// This reuses the underlying allocation when the current handle is unique and clones only
-    /// when the secret buffer is shared, such as after cache hits.
-    ///
-    /// The returned `String` is ordinary owned plaintext. Once it leaves `SecretString`, the
-    /// caller is responsible for its lifetime and any further scrubbing.
-    #[must_use]
-    pub fn into_owned(self) -> String {
-        match self.into_inner() {
-            Ok(value) => value,
-            Err(shared) => shared.expose_secret().to_owned(),
-        }
-    }
-}
-
-impl fmt::Debug for SecretString {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str("SecretString(<redacted>)")
-    }
-}
-
-impl Drop for SecretText {
-    fn drop(&mut self) {
-        self.0.zeroize();
-    }
-}
-
-impl From<String> for SecretString {
-    fn from(value: String) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&str> for SecretString {
-    fn from(value: &str) -> Self {
-        Self::new(value)
-    }
-}
-
-/// Raw secret bytes that zeroize their current buffer on drop.
-#[derive(Default)]
-struct SecretBytes(Vec<u8>);
-
-impl SecretBytes {
-    fn with_capacity(capacity: usize) -> Self {
-        Self(Vec::with_capacity(capacity))
-    }
-
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    fn extend_from_slice(&mut self, bytes: &[u8]) {
-        self.0.extend_from_slice(bytes);
-    }
-
-    fn into_inner(mut self) -> Vec<u8> {
-        std::mem::take(&mut self.0)
-    }
-}
-
-impl AsRef<[u8]> for SecretBytes {
-    fn as_ref(&self) -> &[u8] {
-        self.0.as_slice()
-    }
-}
-
-impl fmt::Debug for SecretBytes {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "SecretBytes(<redacted>, len={})", self.0.len())
-    }
-}
-
-impl Drop for SecretBytes {
-    fn drop(&mut self) {
-        self.0.zeroize();
-    }
-}
-
-struct ZeroizingByteBuffer<const N: usize>([u8; N]);
-
-impl<const N: usize> ZeroizingByteBuffer<N> {
-    fn new() -> Self {
-        Self([0u8; N])
-    }
-}
-
-impl<const N: usize> AsRef<[u8]> for ZeroizingByteBuffer<N> {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl<const N: usize> AsMut<[u8]> for ZeroizingByteBuffer<N> {
-    fn as_mut(&mut self) -> &mut [u8] {
-        &mut self.0
-    }
-}
-
-impl<const N: usize> Drop for ZeroizingByteBuffer<N> {
-    fn drop(&mut self) {
-        self.0.zeroize();
-    }
-}
-
-impl SecretError {
-    fn io_retry_advice(source: &std::io::Error) -> ErrorRetryAdvice {
-        match source.kind() {
-            std::io::ErrorKind::NotFound
-            | std::io::ErrorKind::PermissionDenied
-            | std::io::ErrorKind::InvalidInput
-            | std::io::ErrorKind::InvalidData
-            | std::io::ErrorKind::Unsupported => ErrorRetryAdvice::DoNotRetry,
-            _ => ErrorRetryAdvice::Retryable,
-        }
-    }
-
-    fn command_retry_advice(text: &StructuredText) -> ErrorRetryAdvice {
-        match text.as_catalog().map(CatalogTextRef::code) {
-            Some("error_detail.secret.command_timeout")
-            | Some("error_detail.secret.command_spawn_failed")
-            | Some("error_detail.secret.command_output_read_failed") => ErrorRetryAdvice::Retryable,
-            _ => ErrorRetryAdvice::DoNotRetry,
-        }
-    }
-
-    #[must_use]
-    pub fn structured_text(&self) -> &StructuredText {
-        match self {
-            Self::Io { text, .. }
-            | Self::Json { text, .. }
-            | Self::Lookup(text)
-            | Self::InvalidSpec(text)
-            | Self::Command(text) => text,
-        }
-    }
-
-    #[must_use]
-    pub fn error_code(&self) -> ErrorCode {
-        match self {
-            Self::Io { .. } => {
-                ErrorCode::try_new("secret.io").expect("literal error code should validate")
-            }
-            Self::Json { .. } => {
-                ErrorCode::try_new("secret.json").expect("literal error code should validate")
-            }
-            Self::Lookup(_) => {
-                ErrorCode::try_new("secret.lookup").expect("literal error code should validate")
-            }
-            Self::InvalidSpec(_) => ErrorCode::try_new("secret.invalid_spec")
-                .expect("literal error code should validate"),
-            Self::Command(_) => {
-                ErrorCode::try_new("secret.command").expect("literal error code should validate")
-            }
-        }
-    }
-
-    #[must_use]
-    pub fn error_category(&self) -> ErrorCategory {
-        match self {
-            Self::Io { .. } => ErrorCategory::ExternalDependency,
-            Self::Json { .. } => ErrorCategory::InvalidInput,
-            Self::Lookup(_) => ErrorCategory::NotFound,
-            Self::InvalidSpec(_) => ErrorCategory::InvalidInput,
-            Self::Command(_) => ErrorCategory::ExternalDependency,
-        }
-    }
-
-    #[must_use]
-    pub fn retry_advice(&self) -> ErrorRetryAdvice {
-        match self {
-            Self::Io { source, .. } => Self::io_retry_advice(source),
-            Self::Json { .. } => ErrorRetryAdvice::DoNotRetry,
-            Self::Lookup(_) => ErrorRetryAdvice::DoNotRetry,
-            Self::InvalidSpec(_) => ErrorRetryAdvice::DoNotRetry,
-            Self::Command(text) => Self::command_retry_advice(text),
-        }
-    }
-
-    #[must_use]
-    pub fn error_record(&self) -> ErrorRecord {
-        ErrorRecord::new(self.error_code(), self.structured_text().clone())
-            .with_category(self.error_category())
-            .with_retry_advice(self.retry_advice())
-    }
-
-    #[must_use]
-    pub fn into_error_record(self) -> ErrorRecord {
-        let category = self.error_category();
-        let retry_advice = self.retry_advice();
-        match self {
-            Self::Io { text, source } => ErrorRecord::new(
-                ErrorCode::try_new("secret.io").expect("literal error code should validate"),
-                text,
-            )
-            .with_category(category)
-            .with_retry_advice(retry_advice)
-            .with_source(source),
-            Self::Json { text, source } => ErrorRecord::new(
-                ErrorCode::try_new("secret.json").expect("literal error code should validate"),
-                text,
-            )
-            .with_category(category)
-            .with_retry_advice(retry_advice)
-            .with_source(source),
-            Self::Lookup(text) => ErrorRecord::new(
-                ErrorCode::try_new("secret.lookup").expect("literal error code should validate"),
-                text,
-            )
-            .with_category(category)
-            .with_retry_advice(retry_advice),
-            Self::InvalidSpec(text) => ErrorRecord::new(
-                ErrorCode::try_new("secret.invalid_spec")
-                    .expect("literal error code should validate"),
-                text,
-            )
-            .with_category(category)
-            .with_retry_advice(retry_advice),
-            Self::Command(text) => ErrorRecord::new(
-                ErrorCode::try_new("secret.command").expect("literal error code should validate"),
-                text,
-            )
-            .with_category(category)
-            .with_retry_advice(retry_advice),
-        }
-    }
-
-    fn io(text: StructuredText, source: std::io::Error) -> Self {
-        Self::Io { text, source }
-    }
-
-    fn json(text: StructuredText, source: serde_json::Error) -> Self {
-        Self::Json { text, source }
-    }
-
-    fn lookup(text: StructuredText) -> Self {
-        Self::Lookup(text)
-    }
-}
-
-impl Display for SecretError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io { text, source } => write!(
-                f,
-                "secret io error: {}: {source}",
-                text.diagnostic_display()
-            ),
-            Self::Json { text, source } => {
-                write!(
-                    f,
-                    "secret json error: {}: {source}",
-                    text.diagnostic_display()
-                )
-            }
-            Self::Lookup(text) => {
-                write!(f, "secret lookup error: {}", text.diagnostic_display())
-            }
-            Self::InvalidSpec(text) => {
-                write!(f, "invalid secret spec: {}", text.diagnostic_display())
-            }
-            Self::Command(text) => {
-                write!(f, "secret command error: {}", text.diagnostic_display())
-            }
-        }
-    }
-}
-
-impl StdError for SecretError {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::Json { source, .. } => Some(source),
-            Self::Lookup(_) | Self::InvalidSpec(_) | Self::Command(_) => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for SecretError {
-    fn from(source: std::io::Error) -> Self {
-        let error = source.to_string();
-        Self::io(
-            structured_text!("error_detail.secret.io_error", "error" => error),
-            source,
-        )
-    }
-}
-
-impl From<serde_json::Error> for SecretError {
-    fn from(source: serde_json::Error) -> Self {
-        let error = source.to_string();
-        Self::json(
-            structured_text!("error_detail.secret.json_error", "error" => error),
-            source,
-        )
-    }
-}
-
-impl From<SecretError> for ErrorRecord {
-    fn from(error: SecretError) -> Self {
-        error.into_error_record()
-    }
-}
+pub use runtime::{
+    AmbientSecretCommandRuntime, SecretCommandRuntime, SecretEnvironment, SecretResolutionContext,
+};
+pub use types::{Result, SecretError};
+pub use value::SecretString;
+use value::{SecretBytes, read_limited, secret_string_from_bytes};
 
 macro_rules! invalid_response {
     ($code:literal $(,)?) => {
-        SecretError::InvalidSpec(structured_text!($code))
+        SecretError::InvalidSpec(structured_text_kit::structured_text!($code))
     };
     ($code:literal, $($rest:tt)*) => {
-        SecretError::InvalidSpec(structured_text!($code, $($rest)*))
+        SecretError::InvalidSpec(structured_text_kit::structured_text!($code, $($rest)*))
     };
 }
 
 macro_rules! secret_command_error {
     ($code:literal $(,)?) => {
-        SecretError::Command(structured_text!($code))
+        SecretError::Command(structured_text_kit::structured_text!($code))
     };
     ($code:literal, $($rest:tt)*) => {
-        SecretError::Command(structured_text!($code, $($rest)*))
+        SecretError::Command(structured_text_kit::structured_text!($code, $($rest)*))
     };
 }
 
 macro_rules! secret_io_error {
     ($code:literal, $source:expr $(,)?) => {
-        SecretError::io(structured_text!($code), $source)
+        SecretError::io(structured_text_kit::structured_text!($code), $source)
     };
     ($code:literal, $source:expr, $($rest:tt)*) => {
-        SecretError::io(structured_text!($code, $($rest)*), $source)
+        SecretError::io(
+            structured_text_kit::structured_text!($code, $($rest)*),
+            $source,
+        )
     };
 }
 
 macro_rules! secret_json_error {
     ($code:literal, $source:expr $(,)?) => {
-        SecretError::json(structured_text!($code), $source)
+        SecretError::json(structured_text_kit::structured_text!($code), $source)
     };
     ($code:literal, $source:expr, $($rest:tt)*) => {
-        SecretError::json(structured_text!($code, $($rest)*), $source)
+        SecretError::json(
+            structured_text_kit::structured_text!($code, $($rest)*),
+            $source,
+        )
     };
 }
-
-pub trait SecretEnvironment: Send + Sync {
-    fn get_secret(&self, key: &str) -> Option<SecretString>;
-
-    /// Stable partition key used by [`CachingSecretResolver`] to isolate cached secrets.
-    ///
-    /// The value should be stable for the lifetime of the environment instance and should reflect
-    /// the non-secret context that can affect secret resolution, such as a deployment name,
-    /// account identifier, or configuration profile.
-    /// It must never contain secret material or request-unique noise. A partition derived from a
-    /// secret value defeats the point of cache isolation, and a partition that changes on every
-    /// request silently disables reuse.
-    /// Different resolution contexts must return different partitions. Reusing a partition means
-    /// the caller is asserting that cacheable secrets resolve identically across those instances.
-    ///
-    /// Returning `None` disables cache reuse for this environment. Empty partitions are treated
-    /// the same way. This is the safe default when no stable, non-secret partition key exists.
-    fn secret_cache_partition(&self) -> Option<Cow<'_, str>> {
-        None
-    }
-}
-
-/// Command-execution policy used by CLI-backed secret providers.
-///
-/// This is intentionally separate from [`SecretEnvironment`]. Secret lookup is domain state;
-/// child-process environment shaping and binary resolution are runtime policy.
-///
-/// Async secret resolution for CLI-backed providers enforces command timeouts via `tokio::time`,
-/// so callers need a Tokio runtime with the time driver enabled.
-pub trait SecretCommandRuntime: Send + Sync {
-    /// Stable partition key used by [`CachingSecretResolver`] for runtime-sensitive secrets.
-    ///
-    /// Cacheable resolutions that depend on command discovery, explicit command environment, or
-    /// other runtime policy should include this partition in their cache key. Returning `None`
-    /// disables cache reuse for runtime-sensitive secrets, which is the safe default when no
-    /// stable, non-secret runtime identity exists. The built-in ambient runtime intentionally
-    /// returns `None` here because the process environment and `PATH` are not a stable cache
-    /// boundary.
-    fn secret_cache_partition(&self) -> Option<Cow<'_, str>> {
-        None
-    }
-
-    /// Targeted command-environment lookup for control-plane settings and runtime overrides.
-    ///
-    /// This does not automatically populate spawned child processes. Use `command_env_pairs` or
-    /// `command_env_os_pairs` for explicit child environment injection.
-    /// Secret command timeout tuning also does not consult this hook; if you want a resolver-local
-    /// timeout, put the `SECRET_COMMAND_TIMEOUT_*` variables into the explicit command
-    /// snapshot instead of relying on ambient process state.
-    fn get_command_env(&self, key: &str) -> Option<String> {
-        std::env::var(key).ok()
-    }
-
-    /// Targeted command-environment lookup for control-plane settings and runtime overrides.
-    ///
-    /// Look up a command-environment value while sharing the same explicit snapshot used for child
-    /// process injection when possible.
-    fn get_command_env_os(&self, key: &OsStr) -> Option<OsString> {
-        self.command_env_os_pairs()
-            .find_map(|(candidate, value)| {
-                os_env_var_name_matches(candidate.as_os_str(), key).then_some(value)
-            })
-            .or_else(|| {
-                key.to_str()
-                    .and_then(|key| self.get_command_env(key).map(OsString::from))
-            })
-    }
-
-    /// Explicit child-process environment snapshot.
-    ///
-    /// Values returned here are injected into spawned commands after the ambient allowlist.
-    fn command_env_pairs(&self) -> Box<dyn Iterator<Item = (String, String)> + '_> {
-        Box::new(std::iter::empty())
-    }
-
-    fn command_env_os_pairs(&self) -> Box<dyn Iterator<Item = (OsString, OsString)> + '_> {
-        Box::new(
-            self.command_env_pairs()
-                .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-        )
-    }
-
-    fn ambient_command_env_pairs(
-        &self,
-        program: &str,
-    ) -> Box<dyn Iterator<Item = (String, String)> + '_> {
-        command::filtered_ambient_command_env_pairs(program)
-    }
-
-    fn ambient_command_env_os_pairs(
-        &self,
-        program: &str,
-    ) -> Box<dyn Iterator<Item = (OsString, OsString)> + '_> {
-        command::filtered_ambient_command_env_os_pairs(program)
-    }
-
-    /// Resolve the executable used for a secret CLI command.
-    ///
-    /// Built-in providers only accept absolute override paths whose basename still matches the
-    /// original provider binary (for example `/tmp/vault` for `vault`). Without an override they
-    /// resolve the program from absolute entries in the ambient allowlisted `PATH` snapshot, not
-    /// from explicit `command_env_pairs` injection.
-    fn resolve_command_program(&self, _program: &str) -> Option<String> {
-        None
-    }
-}
-
-#[derive(Clone, Copy)]
-pub struct SecretResolutionContext<'a> {
-    environment: &'a dyn SecretEnvironment,
-    command_runtime: &'a dyn SecretCommandRuntime,
-}
-
-impl<'a> SecretResolutionContext<'a> {
-    #[must_use]
-    pub fn new(
-        environment: &'a dyn SecretEnvironment,
-        command_runtime: &'a dyn SecretCommandRuntime,
-    ) -> Self {
-        Self {
-            environment,
-            command_runtime,
-        }
-    }
-
-    #[must_use]
-    pub fn ambient(environment: &'a dyn SecretEnvironment) -> Self {
-        Self::new(environment, &AMBIENT_SECRET_COMMAND_RUNTIME)
-    }
-
-    #[must_use]
-    pub fn environment(self) -> &'a dyn SecretEnvironment {
-        self.environment
-    }
-
-    #[must_use]
-    pub fn command_runtime(self) -> &'a dyn SecretCommandRuntime {
-        self.command_runtime
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct AmbientSecretCommandRuntime;
-
-impl SecretCommandRuntime for AmbientSecretCommandRuntime {}
-
-static AMBIENT_SECRET_COMMAND_RUNTIME: AmbientSecretCommandRuntime = AmbientSecretCommandRuntime;
 
 pub trait SecretResolver: Send + Sync {
     fn resolve_secret(
@@ -1112,7 +610,10 @@ impl SecretCacheState {
 mod command;
 mod file;
 mod json;
+mod runtime;
 mod spec;
+mod types;
+mod value;
 
 use spec::{
     prepare_default_secret_resolution, resolve_prepared_default_secret, resolve_secret_in_context,
@@ -1173,49 +674,6 @@ const MAX_SECRET_FILE_BYTES: usize = 64 * 1024;
 const MAX_SECRET_FILE_SYMLINK_DEPTH: usize = 16;
 const SECRET_COMMAND_TIMEOUT_MS_ENV: &str = "SECRET_COMMAND_TIMEOUT_MS";
 const SECRET_COMMAND_TIMEOUT_SECS_ENV: &str = "SECRET_COMMAND_TIMEOUT_SECS";
-
-async fn read_limited<R>(mut reader: R, max_bytes: usize) -> std::io::Result<(SecretBytes, bool)>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    use tokio::io::AsyncReadExt as _;
-
-    let mut out = SecretBytes::with_capacity(max_bytes);
-    let mut buf = ZeroizingByteBuffer::<4096>::new();
-    let mut truncated = false;
-    loop {
-        let remaining = max_bytes.saturating_sub(out.len());
-        let read_len = buf.as_ref().len().min(remaining.saturating_add(1).max(1));
-        let n = reader.read(&mut buf.as_mut()[..read_len]).await?;
-        if n == 0 {
-            break;
-        }
-
-        if n > remaining {
-            out.extend_from_slice(&buf.as_ref()[..remaining]);
-            truncated = true;
-            break;
-        }
-
-        out.extend_from_slice(&buf.as_ref()[..n]);
-    }
-    Ok((out, truncated))
-}
-
-fn secret_string_from_bytes(
-    bytes: SecretBytes,
-    invalid_utf8_error: impl FnOnce(std::str::Utf8Error) -> SecretError,
-) -> Result<SecretString> {
-    match String::from_utf8(bytes.into_inner()) {
-        Ok(value) => Ok(SecretString::from(value)),
-        Err(err) => {
-            let utf8_error = err.utf8_error();
-            let mut bytes = err.into_bytes();
-            bytes.zeroize();
-            Err(invalid_utf8_error(utf8_error))
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests;

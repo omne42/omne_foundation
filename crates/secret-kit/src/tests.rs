@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::error::Error as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -12,6 +13,7 @@ use crate::spec::{
     SecretCommand, build_secret_command, prepare_default_secret_resolution,
     resolve_prepared_default_secret,
 };
+use error_kit::{ErrorCategory, ErrorRetryAdvice};
 use structured_text_kit::{CatalogTextRef, StructuredText, structured_text};
 
 fn assert_catalog_code(text: &StructuredText, expected: &str) {

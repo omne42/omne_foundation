@@ -9,7 +9,7 @@ use std::time::Duration;
 use omne_process_primitives::{
     CleanupDisposition, ProcessTreeCleanup, configure_command_for_process_tree,
 };
-use structured_text_kit::{CatalogText, StructuredText, StructuredTextScalarArg, structured_text};
+use structured_text_kit::{CatalogText, StructuredText, StructuredTextScalarArg};
 use zeroize::Zeroize;
 
 use crate::spec::SecretCommand;

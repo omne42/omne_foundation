@@ -10,6 +10,8 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：config 驱动的连接复用现在不再只按 server 名短路；`Manager`/`SharedManager` 会记录首次连接的有效 `ServerConfig`，后续复用若缺少配置元数据或配置内容已变化，会 fail-closed 要求先断开重连，避免 `mcp.json` 的 transport/URL/header/argv/env 变更静默失效。
+- `mcp-kit`：typed MCP request/notification 的参数序列化与结果反序列化 helper 现在集中收口到 `mcp.rs`，`Manager` / `SharedManager` / `Session` 复用同一套逻辑，减少协议方法扩展时的重复样板和漂移面。
 - `mcp-kit`：公开 fallible API 现在统一返回 crate 自己的 `mcp_kit::Error` / `mcp_kit::Result`，并通过 `ErrorKind` 稳定区分 config、connection、protocol、timeout、manager-state 等失败类别；不再把 `Config` / `Manager` / `SharedManager` / `Session` 的外部错误边界直接暴露成 `anyhow::Result`。
 - `mcp-kit`：`ServerNameError` 的 structured error code 映射现在在内部字面量漂移时会回退到稳定的 internal code，而不是因为 `ErrorCode::try_new(...)` 直接 panic。
 - `mcp-kit`：crate 级 `README.md` 现在收紧为地图式入口，只保留领域、边界、结构地图和文档下钻路径；配置 schema、CLI 用法与示例统一回到 `docs/`。

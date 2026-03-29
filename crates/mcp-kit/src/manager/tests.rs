@@ -562,6 +562,96 @@ async fn prepare_transport_connect_rejects_different_cwd_context() {
     );
 }
 
+#[tokio::test]
+async fn prepare_transport_connect_rejects_reuse_without_config_metadata() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let _server_stream = server_stream;
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .unwrap();
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    let server_name = ServerName::parse("srv").unwrap();
+    manager.conns.insert(
+        server_name.clone(),
+        Connection {
+            id: 1,
+            child: None,
+            client,
+            handler_tasks: Vec::new(),
+        },
+    );
+    manager
+        .record_connection_cwd("srv", Path::new("/workspace/a"))
+        .unwrap();
+
+    let mut servers = std::collections::BTreeMap::new();
+    servers.insert(
+        server_name,
+        ServerConfig::unix(PathBuf::from("/tmp/mock.sock")).unwrap(),
+    );
+    let config = Config::new(crate::ClientConfig::default(), servers);
+
+    let err = match manager.prepare_transport_connect(&config, "srv", Path::new("/workspace/a")) {
+        Ok(_) => panic!("config-driven reuse without metadata should fail closed"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("without reusable config metadata"),
+        "{err:#}"
+    );
+}
+
+#[tokio::test]
+async fn prepare_transport_connect_rejects_different_effective_config() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let _server_stream = server_stream;
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .unwrap();
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    let server_name = ServerName::parse("srv").unwrap();
+    manager.conns.insert(
+        server_name.clone(),
+        Connection {
+            id: 1,
+            child: None,
+            client,
+            handler_tasks: Vec::new(),
+        },
+    );
+    manager
+        .record_connection_cwd("srv", Path::new("/workspace/a"))
+        .unwrap();
+    manager
+        .record_connection_server_config(
+            "srv",
+            &ServerConfig::unix(PathBuf::from("/tmp/original.sock")).unwrap(),
+        )
+        .unwrap();
+
+    let mut servers = std::collections::BTreeMap::new();
+    servers.insert(
+        server_name,
+        ServerConfig::unix(PathBuf::from("/tmp/changed.sock")).unwrap(),
+    );
+    let config = Config::new(crate::ClientConfig::default(), servers);
+
+    let err = match manager.prepare_transport_connect(&config, "srv", Path::new("/workspace/a")) {
+        Ok(_) => panic!("different effective config should not be silently reused"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("different effective config"),
+        "{err:#}"
+    );
+}
+
 #[cfg(not(windows))]
 #[test]
 fn prepare_transport_connect_resolves_relative_cwd_from_config_thread_root() {

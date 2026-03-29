@@ -232,6 +232,7 @@ pub struct Manager {
     active_handler_scopes: Arc<AtomicU64>,
     conns: HashMap<ServerName, Connection>,
     connection_cwds: HashMap<ServerName, PathBuf>,
+    connection_server_configs: HashMap<ServerName, ServerConfig>,
     init_results: HashMap<ServerName, Value>,
     client_name: String,
     client_version: String,
@@ -575,6 +576,7 @@ impl Manager {
             active_handler_scopes: Arc::new(AtomicU64::new(0)),
             conns: HashMap::new(),
             connection_cwds: HashMap::new(),
+            connection_server_configs: HashMap::new(),
             init_results: HashMap::new(),
             client_name: client_name.into(),
             client_version: client_version.into(),
@@ -774,6 +776,41 @@ impl Manager {
 
     pub(crate) fn clear_connection_cwd(&mut self, server_name: &str) {
         self.connection_cwds.remove(server_name);
+        self.clear_connection_server_config(server_name);
+    }
+
+    pub(crate) fn record_connection_server_config(
+        &mut self,
+        server_name: &str,
+        server_config: &ServerConfig,
+    ) -> anyhow::Result<()> {
+        let server_name = parse_server_name_anyhow(server_name)?;
+        self.connection_server_configs
+            .insert(server_name, server_config.clone());
+        Ok(())
+    }
+
+    pub(crate) fn clear_connection_server_config(&mut self, server_name: &str) {
+        self.connection_server_configs.remove(server_name);
+    }
+
+    fn ensure_connection_server_config_matches(
+        &self,
+        server_name: &str,
+        requested: &ServerConfig,
+    ) -> anyhow::Result<()> {
+        let Some(connected) = self.connection_server_configs.get(server_name) else {
+            anyhow::bail!(
+                "mcp server {server_name} is already connected without reusable config metadata and cannot be reused from config (disconnect first)"
+            );
+        };
+        if connected == requested {
+            return Ok(());
+        }
+
+        anyhow::bail!(
+            "mcp server {server_name} is already connected with a different effective config and cannot be reused (disconnect first)"
+        );
     }
 
     fn ensure_connection_cwd_matches(
@@ -823,6 +860,20 @@ impl Manager {
         }))
     }
 
+    pub(crate) fn try_prepare_reusable_connected_client(
+        &mut self,
+        server_name: &str,
+        server_cfg: &ServerConfig,
+        cwd: Option<&Path>,
+    ) -> anyhow::Result<Option<PreparedConnectedClient>> {
+        let prepared = self.try_prepare_connected_client(server_name, cwd)?;
+        let Some(prepared) = prepared else {
+            return Ok(None);
+        };
+        self.ensure_connection_server_config_matches(prepared.server_name.as_str(), server_cfg)?;
+        Ok(Some(prepared))
+    }
+
     pub(crate) fn prepare_transport_connect(
         &mut self,
         config: &Config,
@@ -836,6 +887,7 @@ impl Manager {
         let config_root = config.thread_root();
         if self.is_connected_and_alive(server_name_key.as_str()) {
             self.ensure_connection_cwd_matches(server_name_key.as_str(), cwd, config_root)?;
+            self.ensure_connection_server_config_matches(server_name_key.as_str(), server_cfg)?;
             return Ok(None);
         }
         self.clear_connection_cwd(server_name_key.as_str());
@@ -918,6 +970,7 @@ impl Manager {
         let server_name_key = build_server_name()?;
         if self.is_connected_and_alive(server_name_key.as_str()) {
             self.ensure_connection_cwd_matches(server_name_key.as_str(), &cwd, None)?;
+            self.ensure_connection_server_config_matches(server_name_key.as_str(), server_cfg)?;
             return Ok(());
         }
         self.clear_connection_cwd(server_name_key.as_str());
@@ -935,7 +988,7 @@ impl Manager {
         };
         let (client, child) = connect_transport(&ctx, server_name, server_cfg, &cwd).await?;
 
-        let install = self.prepare_transport_install(&server_name_key, &cwd);
+        let install = self.prepare_transport_install(&server_name_key, &cwd, server_cfg);
         match install.run(client, child).await {
             Ok(completed) => self.commit_transport_install(completed),
             Err(err) => {
@@ -1365,21 +1418,11 @@ impl Manager {
         params: Option<R::Params>,
         cwd: &Path,
     ) -> crate::Result<R::Result> {
-        let params = match params {
-            Some(params) => Some(serde_json::to_value(params).with_context(|| {
-                format!("serialize MCP params: {} (server={server_name})", R::METHOD)
-            })?),
-            None => None,
-        };
+        let params = crate::mcp::serialize_request_params::<R>(server_name, params)?;
         let result = self
             .request(config, server_name, R::METHOD, params, cwd)
             .await?;
-        Ok(serde_json::from_value(result).with_context(|| {
-            format!(
-                "deserialize MCP result: {} (server={server_name})",
-                R::METHOD
-            )
-        })?)
+        crate::mcp::deserialize_request_result::<R>(server_name, result)
     }
 
     pub async fn request_typed_connected<R: McpRequest>(
@@ -1387,21 +1430,11 @@ impl Manager {
         server_name: &str,
         params: Option<R::Params>,
     ) -> crate::Result<R::Result> {
-        let params = match params {
-            Some(params) => Some(serde_json::to_value(params).with_context(|| {
-                format!("serialize MCP params: {} (server={server_name})", R::METHOD)
-            })?),
-            None => None,
-        };
+        let params = crate::mcp::serialize_request_params::<R>(server_name, params)?;
         let result = self
             .request_connected(server_name, R::METHOD, params)
             .await?;
-        Ok(serde_json::from_value(result).with_context(|| {
-            format!(
-                "deserialize MCP result: {} (server={server_name})",
-                R::METHOD
-            )
-        })?)
+        crate::mcp::deserialize_request_result::<R>(server_name, result)
     }
 
     pub async fn notify(
@@ -1435,12 +1468,7 @@ impl Manager {
         params: Option<N::Params>,
         cwd: &Path,
     ) -> crate::Result<()> {
-        let params = match params {
-            Some(params) => Some(serde_json::to_value(params).with_context(|| {
-                format!("serialize MCP params: {} (server={server_name})", N::METHOD)
-            })?),
-            None => None,
-        };
+        let params = crate::mcp::serialize_notification_params::<N>(server_name, params)?;
         self.notify(config, server_name, N::METHOD, params, cwd)
             .await
     }
@@ -1450,12 +1478,7 @@ impl Manager {
         server_name: &str,
         params: Option<N::Params>,
     ) -> crate::Result<()> {
-        let params = match params {
-            Some(params) => Some(serde_json::to_value(params).with_context(|| {
-                format!("serialize MCP params: {} (server={server_name})", N::METHOD)
-            })?),
-            None => None,
-        };
+        let params = crate::mcp::serialize_notification_params::<N>(server_name, params)?;
         self.notify_connected(server_name, N::METHOD, params).await
     }
 

@@ -3,10 +3,53 @@
 //! These types are intentionally a *subset* of the full MCP schema and are designed
 //! to provide ergonomic, strongly-typed method names + params for clients.
 
+use anyhow::Context;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use crate::{McpNotification, McpRequest, Root};
+
+pub(crate) fn serialize_request_params<R: McpRequest>(
+    server_name: &str,
+    params: Option<R::Params>,
+) -> crate::Result<Option<Value>> {
+    params
+        .map(|params| {
+            serde_json::to_value(params).with_context(|| {
+                format!("serialize MCP params: {} (server={server_name})", R::METHOD)
+            })
+        })
+        .transpose()
+        .map_err(Into::into)
+}
+
+pub(crate) fn deserialize_request_result<R: McpRequest>(
+    server_name: &str,
+    result: Value,
+) -> crate::Result<R::Result> {
+    serde_json::from_value(result)
+        .with_context(|| {
+            format!(
+                "deserialize MCP result: {} (server={server_name})",
+                R::METHOD
+            )
+        })
+        .map_err(Into::into)
+}
+
+pub(crate) fn serialize_notification_params<N: McpNotification>(
+    server_name: &str,
+    params: Option<N::Params>,
+) -> crate::Result<Option<Value>> {
+    params
+        .map(|params| {
+            serde_json::to_value(params).with_context(|| {
+                format!("serialize MCP params: {} (server={server_name})", N::METHOD)
+            })
+        })
+        .transpose()
+        .map_err(Into::into)
+}
 
 pub enum PingRequest {}
 

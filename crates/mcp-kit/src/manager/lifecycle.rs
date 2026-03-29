@@ -5,7 +5,7 @@ use anyhow::Context;
 use serde_json::Value;
 use tokio::process::Child;
 
-use crate::ServerName;
+use crate::{ServerConfig, ServerName};
 
 use super::{
     Connection, Manager, ProtocolVersionCheck, ProtocolVersionMismatch,
@@ -42,11 +42,13 @@ pub(crate) struct CompletedConnectionInstall {
 
 pub(crate) struct PreparedTransportInstall {
     cwd: std::path::PathBuf,
+    server_config: ServerConfig,
     install: PreparedConnectionInstall,
 }
 
 pub(crate) struct CompletedTransportInstall {
     cwd: std::path::PathBuf,
+    server_config: ServerConfig,
     completed: CompletedConnectionInstall,
 }
 
@@ -229,6 +231,7 @@ impl PreparedTransportInstall {
     ) -> anyhow::Result<CompletedTransportInstall> {
         Ok(CompletedTransportInstall {
             cwd: self.cwd,
+            server_config: self.server_config,
             completed: self.install.run(client, child).await?,
         })
     }
@@ -314,9 +317,11 @@ impl Manager {
         &self,
         server_name: &ServerName,
         cwd: &Path,
+        server_config: &ServerConfig,
     ) -> PreparedTransportInstall {
         PreparedTransportInstall {
             cwd: cwd.to_path_buf(),
+            server_config: server_config.clone(),
             install: self.prepare_connection_install(server_name),
         }
     }
@@ -356,6 +361,7 @@ impl Manager {
     ) -> anyhow::Result<()> {
         let server_name = completed.completed.server_name.clone();
         self.commit_connection_install(completed.completed);
+        self.record_connection_server_config(server_name.as_str(), &completed.server_config)?;
         self.record_connection_cwd(server_name.as_str(), &completed.cwd)?;
         Ok(())
     }

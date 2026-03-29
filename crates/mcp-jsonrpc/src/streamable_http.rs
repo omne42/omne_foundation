@@ -304,7 +304,7 @@ impl Client {
         let session_id: Arc<tokio::sync::Mutex<Option<String>>> =
             Arc::new(tokio::sync::Mutex::new(None));
 
-        let (sse_wake_tx, sse_wake_rx) = mpsc::channel::<SseWakeReason>(4);
+        let (sse_wake_tx, sse_wake_rx) = mpsc::unbounded_channel::<SseWakeReason>();
         let sse_client = http_client_profile
             .select_for_url(&sse_url, enforce_public_ip)
             .await
@@ -515,7 +515,7 @@ struct HttpPostBridge {
     http_client_profile: HttpClientProfile,
     post_url: reqwest::Url,
     session_id: Arc<tokio::sync::Mutex<Option<String>>>,
-    sse_wake: mpsc::Sender<SseWakeReason>,
+    sse_wake: mpsc::UnboundedSender<SseWakeReason>,
     max_message_bytes: usize,
     request_timeout: Option<Duration>,
     error_body_preview_bytes: usize,
@@ -656,7 +656,7 @@ impl HttpPostBridge {
                 }
             }
             if let Some(reason) = wake_reason {
-                let _ = sse_wake.try_send(reason);
+                let _ = sse_wake.send(reason);
             }
 
             let status = resp.status();

@@ -174,40 +174,17 @@ impl Session {
         &self,
         params: Option<R::Params>,
     ) -> crate::Result<R::Result> {
-        let params = match params {
-            Some(params) => Some(serde_json::to_value(params).with_context(|| {
-                format!(
-                    "serialize MCP params: {} (server={})",
-                    R::METHOD,
-                    self.server_name
-                )
-            })?),
-            None => None,
-        };
+        let params = crate::mcp::serialize_request_params::<R>(self.server_name.as_str(), params)?;
         let result = self.request(R::METHOD, params).await?;
-        Ok(serde_json::from_value(result).with_context(|| {
-            format!(
-                "deserialize MCP result: {} (server={})",
-                R::METHOD,
-                self.server_name
-            )
-        })?)
+        crate::mcp::deserialize_request_result::<R>(self.server_name.as_str(), result)
     }
 
     pub async fn notify_typed<N: McpNotification>(
         &self,
         params: Option<N::Params>,
     ) -> crate::Result<()> {
-        let params = match params {
-            Some(params) => Some(serde_json::to_value(params).with_context(|| {
-                format!(
-                    "serialize MCP params: {} (server={})",
-                    N::METHOD,
-                    self.server_name
-                )
-            })?),
-            None => None,
-        };
+        let params =
+            crate::mcp::serialize_notification_params::<N>(self.server_name.as_str(), params)?;
         self.notify(N::METHOD, params).await
     }
 

@@ -3,7 +3,6 @@ use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
-use anyhow::Context;
 use serde_json::Value;
 use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard};
 
@@ -153,6 +152,21 @@ impl SharedManager {
             .try_prepare_connected_client(server_name, cwd)
     }
 
+    async fn try_prepare_reusable_connected_client(
+        &self,
+        operation: &'static str,
+        config: &Config,
+        server_name: &str,
+        cwd: Option<&Path>,
+    ) -> anyhow::Result<Option<crate::manager::PreparedConnectedClient>> {
+        let server_cfg = config
+            .server(server_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
+        self.lock_for_async_op(operation)
+            .await?
+            .try_prepare_reusable_connected_client(server_name, server_cfg, cwd)
+    }
+
     async fn ensure_connected_while_gated(
         &self,
         operation: &'static str,
@@ -163,7 +177,7 @@ impl SharedManager {
         let cwd = crate::manager::resolve_connection_cwd_with_base(config.thread_root(), cwd)?;
 
         if self
-            .try_prepare_connected_client(operation, server_name, Some(&cwd))
+            .try_prepare_reusable_connected_client(operation, config, server_name, Some(&cwd))
             .await?
             .is_some()
         {
@@ -190,7 +204,11 @@ impl SharedManager {
         let install = self
             .lock_for_async_op(operation)
             .await?
-            .prepare_transport_install(&prepared.server_name_key, &prepared.cwd);
+            .prepare_transport_install(
+                &prepared.server_name_key,
+                &prepared.cwd,
+                &prepared.server_cfg,
+            );
 
         match install.run(client, child).await {
             Ok(completed) => self
@@ -217,7 +235,7 @@ impl SharedManager {
         let gate = self.lock_connect_gate(operation, server_name).await?;
 
         if let Some(prepared) = self
-            .try_prepare_connected_client(operation, server_name, Some(&cwd))
+            .try_prepare_reusable_connected_client(operation, config, server_name, Some(&cwd))
             .await?
         {
             return Ok((prepared, gate));
@@ -385,21 +403,11 @@ impl SharedManager {
         params: Option<R::Params>,
         cwd: &Path,
     ) -> crate::Result<R::Result> {
-        let params = match params {
-            Some(params) => Some(serde_json::to_value(params).with_context(|| {
-                format!("serialize MCP params: {} (server={server_name})", R::METHOD)
-            })?),
-            None => None,
-        };
+        let params = crate::mcp::serialize_request_params::<R>(server_name, params)?;
         let result = self
             .request(config, server_name, R::METHOD, params, cwd)
             .await?;
-        Ok(serde_json::from_value(result).with_context(|| {
-            format!(
-                "deserialize MCP result: {} (server={server_name})",
-                R::METHOD
-            )
-        })?)
+        crate::mcp::deserialize_request_result::<R>(server_name, result)
     }
 
     pub async fn request_typed_connected<R: McpRequest>(
@@ -407,21 +415,11 @@ impl SharedManager {
         server_name: &str,
         params: Option<R::Params>,
     ) -> crate::Result<R::Result> {
-        let params = match params {
-            Some(params) => Some(serde_json::to_value(params).with_context(|| {
-                format!("serialize MCP params: {} (server={server_name})", R::METHOD)
-            })?),
-            None => None,
-        };
+        let params = crate::mcp::serialize_request_params::<R>(server_name, params)?;
         let result = self
             .request_connected(server_name, R::METHOD, params)
             .await?;
-        Ok(serde_json::from_value(result).with_context(|| {
-            format!(
-                "deserialize MCP result: {} (server={server_name})",
-                R::METHOD
-            )
-        })?)
+        crate::mcp::deserialize_request_result::<R>(server_name, result)
     }
 
     pub async fn notify(
@@ -501,12 +499,7 @@ impl SharedManager {
         params: Option<N::Params>,
         cwd: &Path,
     ) -> crate::Result<()> {
-        let params = match params {
-            Some(params) => Some(serde_json::to_value(params).with_context(|| {
-                format!("serialize MCP params: {} (server={server_name})", N::METHOD)
-            })?),
-            None => None,
-        };
+        let params = crate::mcp::serialize_notification_params::<N>(server_name, params)?;
         self.notify(config, server_name, N::METHOD, params, cwd)
             .await
     }
@@ -516,12 +509,7 @@ impl SharedManager {
         server_name: &str,
         params: Option<N::Params>,
     ) -> crate::Result<()> {
-        let params = match params {
-            Some(params) => Some(serde_json::to_value(params).with_context(|| {
-                format!("serialize MCP params: {} (server={server_name})", N::METHOD)
-            })?),
-            None => None,
-        };
+        let params = crate::mcp::serialize_notification_params::<N>(server_name, params)?;
         self.notify_connected(server_name, N::METHOD, params).await
     }
 
@@ -576,7 +564,6 @@ impl SharedManager {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
     use std::collections::BTreeMap;
     use std::path::Path;
     #[cfg(not(windows))]
@@ -594,11 +581,9 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     use tokio::sync::oneshot;
 
-    #[cfg(unix)]
-    use crate::{ClientConfig, Config, ServerConfig, ServerName};
     use crate::{
-        Manager, McpRequest, ProtocolVersionCheck, ServerRequestHandler, ServerRequestOutcome,
-        SharedManager, TrustMode,
+        ClientConfig, Config, Manager, McpRequest, ProtocolVersionCheck, ServerConfig, ServerName,
+        ServerRequestHandler, ServerRequestOutcome, SharedManager, TrustMode,
     };
 
     struct NestedRequest;
@@ -1053,8 +1038,13 @@ mod tests {
             .record_connection_cwd("srv", Path::new("/workspace/a"))
             .unwrap();
 
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            ServerName::parse("srv").unwrap(),
+            ServerConfig::stdio(vec!["mock-server".to_string()]).unwrap(),
+        );
         let shared = manager.into_shared();
-        let config = crate::Config::new(crate::ClientConfig::default(), Default::default());
+        let config = Config::new(ClientConfig::default(), servers);
         let err = shared
             .request(&config, "srv", "ping", None, Path::new("/workspace/b"))
             .await
@@ -2588,6 +2578,9 @@ mod tests {
                 config.thread_root(),
             )
             .expect("record cwd identity");
+        manager
+            .record_connection_server_config("srv", config.server("srv").expect("config server"))
+            .expect("record config identity");
 
         let shared = manager.into_shared();
         let result = shared
@@ -2601,6 +2594,83 @@ mod tests {
             .await
             .expect("same thread-root-relative cwd should reuse connection");
         assert_eq!(result, serde_json::json!({ "ok": true }));
+        server_task.await.unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn shared_manager_request_rejects_different_effective_config() {
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let server_task = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            assert_eq!(init_value["method"], "initialize");
+            let init_id = init_value["id"].clone();
+
+            let init_response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": init_id,
+                "result": { "serverInfo": { "name": "demo" } },
+            });
+            let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+            init_response_line.push('\n');
+            server_write
+                .write_all(init_response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let initialized_line = lines.next_line().await.unwrap().unwrap();
+            let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+            assert_eq!(initialized_value["method"], "notifications/initialized");
+
+            let eof = lines.next_line().await.unwrap();
+            assert!(eof.is_none(), "request should fail before reuse I/O");
+        });
+
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted);
+        manager
+            .connect_io("srv", client_read, client_write)
+            .await
+            .unwrap();
+        manager
+            .record_connection_cwd("srv", Path::new("/workspace/a"))
+            .unwrap();
+        manager
+            .record_connection_server_config(
+                "srv",
+                &ServerConfig::unix(PathBuf::from("/tmp/original.sock")).unwrap(),
+            )
+            .unwrap();
+
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            ServerName::parse("srv").unwrap(),
+            ServerConfig::unix(PathBuf::from("/tmp/changed.sock")).unwrap(),
+        );
+        let config = Config::new(ClientConfig::default(), servers);
+
+        let shared = manager.into_shared();
+        let err = shared
+            .request(
+                &config,
+                "srv",
+                "ping",
+                None::<Value>,
+                Path::new("/workspace/a"),
+            )
+            .await
+            .expect_err("different effective config should not be silently reused");
+        assert!(
+            err.to_string().contains("different effective config"),
+            "{err:#}"
+        );
+        drop(shared);
         server_task.await.unwrap();
     }
 

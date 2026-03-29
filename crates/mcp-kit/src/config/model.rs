@@ -65,7 +65,7 @@ pub struct Root {
     pub name: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StdoutLogConfig {
     pub path: PathBuf,
     pub max_bytes_per_part: u64,
@@ -98,14 +98,14 @@ pub struct Config {
     pub(super) servers: BTreeMap<ServerName, ServerConfig>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerConfig {
     Stdio(StdioServerConfig),
     Unix(UnixServerConfig),
     StreamableHttp(StreamableHttpServerConfig),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StdioServerConfig {
     argv: Vec<String>,
     /// When true, inherit the current process environment when spawning a
@@ -120,12 +120,12 @@ pub struct StdioServerConfig {
     stdout_log: Option<StdoutLogConfig>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnixServerConfig {
     unix_path: PathBuf,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamableHttpServerConfig {
     urls: StreamableHttpUrls,
     bearer_token_env_var: Option<String>,
@@ -133,7 +133,7 @@ pub struct StreamableHttpServerConfig {
     env_http_headers: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum StreamableHttpUrls {
     Single { url: String },
     Split { sse_url: String, http_url: String },

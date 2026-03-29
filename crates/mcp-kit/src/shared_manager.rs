@@ -152,7 +152,7 @@ impl SharedManager {
             .try_prepare_connected_client(server_name, cwd)
     }
 
-    async fn ensure_connected(
+    async fn ensure_connected_while_gated(
         &self,
         operation: &'static str,
         config: &Config,
@@ -160,7 +160,6 @@ impl SharedManager {
         cwd: &Path,
     ) -> anyhow::Result<()> {
         let cwd = crate::manager::resolve_connection_cwd_with_base(config.thread_root(), cwd)?;
-        let _gate = self.lock_connect_gate(operation, server_name).await?;
 
         if self
             .try_prepare_connected_client(operation, server_name, Some(&cwd))
@@ -209,6 +208,75 @@ impl SharedManager {
         }
     }
 
+    async fn prepare_connected_client_with_gate(
+        &self,
+        operation: &'static str,
+        config: &Config,
+        server_name: &str,
+        cwd: &Path,
+    ) -> anyhow::Result<(crate::manager::PreparedConnectedClient, OwnedMutexGuard<()>)> {
+        let cwd = crate::manager::resolve_connection_cwd_with_base(config.thread_root(), cwd)?;
+        let gate = self.lock_connect_gate(operation, server_name).await?;
+
+        if let Some(prepared) = self
+            .try_prepare_connected_client(operation, server_name, Some(&cwd))
+            .await?
+        {
+            return Ok((prepared, gate));
+        }
+
+        self.ensure_connected_while_gated(operation, config, server_name, &cwd)
+            .await?;
+
+        let prepared = self
+            .try_prepare_connected_client(operation, server_name, Some(&cwd))
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "mcp server became unavailable before {operation}: {}",
+                    server_name.trim()
+                )
+            })?;
+        Ok((prepared, gate))
+    }
+
+    async fn cleanup_connection_after_error(&self, server_name: String, connection_id: u64) {
+        let disconnect = if self.is_reentrant_handler_call() {
+            match self.inner.try_lock() {
+                Ok(mut manager) => manager
+                    .prepare_disconnect_for_wait_if_connection_with_cwd_cleanup(
+                        &server_name,
+                        connection_id,
+                    ),
+                Err(_) => {
+                    self.spawn_connection_cleanup(server_name, connection_id);
+                    return;
+                }
+            }
+        } else {
+            let mut manager = self.inner.lock().await;
+            manager.prepare_disconnect_for_wait_if_connection_with_cwd_cleanup(
+                &server_name,
+                connection_id,
+            )
+        };
+        disconnect.wait_for_jsonrpc_error_cleanup().await;
+    }
+
+    fn spawn_connection_cleanup(&self, server_name: String, connection_id: u64) {
+        let shared = self.clone();
+        tokio::spawn(async move {
+            let disconnect = {
+                let mut manager = shared.inner.lock().await;
+                manager.prepare_disconnect_for_wait_if_connection_with_cwd_cleanup(
+                    &server_name,
+                    connection_id,
+                )
+            };
+            disconnect.wait_for_jsonrpc_error_cleanup().await;
+        });
+    }
+
     pub async fn is_connected(&self, server_name: &str) -> anyhow::Result<bool> {
         self.with_manager_lock("is_connected", |manager| manager.is_connected(server_name))
             .await
@@ -251,37 +319,27 @@ impl SharedManager {
         params: Option<Value>,
         cwd: &Path,
     ) -> anyhow::Result<Value> {
-        let cwd = crate::manager::resolve_connection_cwd_with_base(config.thread_root(), cwd)?;
-        if let Some(prepared) = self
-            .try_prepare_connected_client("request", server_name, Some(&cwd))
-            .await?
-        {
-            let result = Manager::request_raw_handle(
-                prepared.timeout,
-                &prepared.server_name,
-                &prepared.client,
-                method,
-                params,
-            )
-            .await;
-            if let Err(err) = &result {
-                if crate::manager::should_disconnect_after_jsonrpc_error(err) {
-                    let disconnect = self
-                        .lock_for_async_op("request_cleanup")
-                        .await?
-                        .prepare_disconnect_for_wait_if_connection_with_cwd_cleanup(
-                            &prepared.server_name,
-                            prepared.connection_id,
-                        );
-                    disconnect.wait_for_jsonrpc_error_cleanup().await;
-                }
-            }
-            return result;
-        }
-
-        self.ensure_connected("request_connect", config, server_name, &cwd)
+        let (prepared, _gate) = self
+            .prepare_connected_client_with_gate("request", config, server_name, cwd)
             .await?;
-        self.request_connected(server_name, method, params).await
+        let result = Manager::request_raw_handle(
+            prepared.timeout,
+            &prepared.server_name,
+            &prepared.client,
+            method,
+            params,
+        )
+        .await;
+        if let Err(err) = &result {
+            if crate::manager::should_disconnect_after_jsonrpc_error(err) {
+                self.cleanup_connection_after_error(
+                    prepared.server_name.clone(),
+                    prepared.connection_id,
+                )
+                .await;
+            }
+        }
+        result
     }
 
     pub async fn request_connected(
@@ -308,14 +366,11 @@ impl SharedManager {
 
         if let Err(err) = &result {
             if crate::manager::should_disconnect_after_jsonrpc_error(err) {
-                let disconnect = self
-                    .lock_for_async_op("request_connected_cleanup")
-                    .await?
-                    .prepare_disconnect_for_wait_if_connection_with_cwd_cleanup(
-                        &prepared.server_name,
-                        prepared.connection_id,
-                    );
-                disconnect.wait_for_jsonrpc_error_cleanup().await;
+                self.cleanup_connection_after_error(
+                    prepared.server_name.clone(),
+                    prepared.connection_id,
+                )
+                .await;
             }
         }
 
@@ -376,39 +431,29 @@ impl SharedManager {
         params: Option<Value>,
         cwd: &Path,
     ) -> anyhow::Result<()> {
-        let cwd = crate::manager::resolve_connection_cwd_with_base(config.thread_root(), cwd)?;
-        if let Some(prepared) = self
-            .try_prepare_connected_client("notify", server_name, Some(&cwd))
-            .await?
-        {
-            let result = Manager::notify_raw_handle(
-                prepared.timeout,
-                &prepared.server_name,
-                &prepared.client,
-                method,
-                params,
-            )
-            .await;
-            if let Err(err) = &result {
-                if crate::manager::should_disconnect_after_jsonrpc_error(err)
-                    || crate::manager::contains_wait_timeout(err)
-                {
-                    let disconnect = self
-                        .lock_for_async_op("notify_cleanup")
-                        .await?
-                        .prepare_disconnect_for_wait_if_connection_with_cwd_cleanup(
-                            &prepared.server_name,
-                            prepared.connection_id,
-                        );
-                    disconnect.wait_for_jsonrpc_error_cleanup().await;
-                }
-            }
-            return result;
-        }
-
-        self.ensure_connected("notify_connect", config, server_name, &cwd)
+        let (prepared, _gate) = self
+            .prepare_connected_client_with_gate("notify", config, server_name, cwd)
             .await?;
-        self.notify_connected(server_name, method, params).await
+        let result = Manager::notify_raw_handle(
+            prepared.timeout,
+            &prepared.server_name,
+            &prepared.client,
+            method,
+            params,
+        )
+        .await;
+        if let Err(err) = &result {
+            if crate::manager::should_disconnect_after_jsonrpc_error(err)
+                || crate::manager::contains_wait_timeout(err)
+            {
+                self.cleanup_connection_after_error(
+                    prepared.server_name.clone(),
+                    prepared.connection_id,
+                )
+                .await;
+            }
+        }
+        result
     }
 
     pub async fn notify_connected(
@@ -437,14 +482,11 @@ impl SharedManager {
             if crate::manager::should_disconnect_after_jsonrpc_error(err)
                 || crate::manager::contains_wait_timeout(err)
             {
-                let disconnect = self
-                    .lock_for_async_op("notify_connected_cleanup")
-                    .await?
-                    .prepare_disconnect_for_wait_if_connection_with_cwd_cleanup(
-                        &prepared.server_name,
-                        prepared.connection_id,
-                    );
-                disconnect.wait_for_jsonrpc_error_cleanup().await;
+                self.cleanup_connection_after_error(
+                    prepared.server_name.clone(),
+                    prepared.connection_id,
+                )
+                .await;
             }
         }
 
@@ -537,7 +579,7 @@ mod tests {
     use std::path::PathBuf;
     #[cfg(not(windows))]
     use std::sync::OnceLock;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
 
@@ -2759,6 +2801,279 @@ mod tests {
         assert!(shared.disconnect("srv").await.unwrap());
         server_task.await.unwrap();
 
+        let _ = std::fs::remove_file(socket_path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shared_manager_disconnect_waits_until_borrowed_client_gate_is_released() {
+        let socket_path = unique_socket_path("borrowed-client-gate");
+        let _ = std::fs::remove_file(&socket_path);
+        let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
+            return;
+        };
+
+        let (first_init_seen_tx, first_init_seen_rx) = oneshot::channel();
+        let (release_first_init_tx, release_first_init_rx) = oneshot::channel();
+        let (connection_closed_tx, connection_closed_rx) = oneshot::channel();
+
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (server_read, mut server_write) = tokio::io::split(stream);
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            assert_eq!(init_value["method"], "initialize");
+            let init_id = init_value["id"].clone();
+            first_init_seen_tx.send(()).unwrap();
+            release_first_init_rx.await.unwrap();
+
+            let init_response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": init_id,
+                "result": { "serverInfo": { "name": "demo-a" } },
+            });
+            let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+            init_response_line.push('\n');
+            server_write
+                .write_all(init_response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let initialized_line = lines.next_line().await.unwrap().unwrap();
+            let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+            assert_eq!(initialized_value["method"], "notifications/initialized");
+
+            let eof = lines.next_line().await.unwrap();
+            connection_closed_tx.send(()).unwrap();
+            assert!(eof.is_none(), "connection should close after disconnect");
+        });
+
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            ServerName::parse("srv").unwrap(),
+            ServerConfig::unix(socket_path.clone()).unwrap(),
+        );
+        let config = Arc::new(Config::new(ClientConfig::default(), servers));
+
+        let shared = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted)
+            .into_shared();
+
+        let (prepared_ready_tx, prepared_ready_rx) = oneshot::channel();
+        let (release_gate_tx, release_gate_rx) = oneshot::channel();
+        let first_shared = shared.clone();
+        let first_config = Arc::clone(&config);
+        let prepared_client = tokio::spawn(async move {
+            let (_prepared, gate) = first_shared
+                .prepare_connected_client_with_gate(
+                    "test_prepare",
+                    first_config.as_ref(),
+                    "srv",
+                    Path::new("/workspace/a"),
+                )
+                .await
+                .unwrap();
+            prepared_ready_tx.send(()).unwrap();
+            release_gate_rx.await.unwrap();
+            drop(gate);
+        });
+
+        first_init_seen_rx.await.unwrap();
+
+        let disconnect_finished = Arc::new(AtomicBool::new(false));
+        let disconnect_shared = shared.clone();
+        let disconnect_finished_task = Arc::clone(&disconnect_finished);
+        let disconnect_task = tokio::spawn(async move {
+            let disconnected = disconnect_shared.disconnect("srv").await.unwrap();
+            assert!(
+                disconnected,
+                "disconnect should tear down the borrowed connection"
+            );
+            disconnect_finished_task.store(true, Ordering::SeqCst);
+        });
+
+        release_first_init_tx.send(()).unwrap();
+
+        prepared_ready_rx
+            .await
+            .expect("first cold-start should borrow client before disconnect proceeds");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !disconnect_finished.load(Ordering::SeqCst),
+            "disconnect should still be blocked while the borrowed client gate is held"
+        );
+
+        release_gate_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            disconnect_task.await.unwrap();
+            connection_closed_rx.await.unwrap()
+        })
+        .await
+        .expect("disconnect should finish once the borrowed client gate is released");
+
+        tokio::time::timeout(Duration::from_secs(1), prepared_client)
+            .await
+            .unwrap()
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), server_task)
+            .await
+            .expect("server task should observe the disconnect sequence")
+            .unwrap();
+        let _ = std::fs::remove_file(socket_path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shared_manager_cold_start_request_holds_gate_until_first_io_completes() {
+        let socket_path = unique_socket_path("request-first-io-gate");
+        let _ = std::fs::remove_file(&socket_path);
+        let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
+            return;
+        };
+
+        let (first_init_seen_tx, first_init_seen_rx) = oneshot::channel();
+        let (release_first_init_tx, release_first_init_rx) = oneshot::channel();
+        let (first_request_seen_tx, first_request_seen_rx) = oneshot::channel();
+        let (release_first_response_tx, release_first_response_rx) = oneshot::channel();
+        let (connection_closed_tx, connection_closed_rx) = oneshot::channel();
+
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (server_read, mut server_write) = tokio::io::split(stream);
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            assert_eq!(init_value["method"], "initialize");
+            let init_id = init_value["id"].clone();
+            first_init_seen_tx.send(()).unwrap();
+            release_first_init_rx.await.unwrap();
+
+            let init_response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": init_id,
+                "result": { "serverInfo": { "name": "demo-a" } },
+            });
+            let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+            init_response_line.push('\n');
+            server_write
+                .write_all(init_response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let initialized_line = lines.next_line().await.unwrap().unwrap();
+            let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+            assert_eq!(initialized_value["method"], "notifications/initialized");
+
+            let request_line = lines.next_line().await.unwrap().unwrap();
+            let request_value: Value = serde_json::from_str(&request_line).unwrap();
+            assert_eq!(request_value["method"], "ping");
+            let request_id = request_value["id"].clone();
+            first_request_seen_tx.send(()).unwrap();
+            release_first_response_rx.await.unwrap();
+
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": { "server": "a" },
+            });
+            let mut response_line = serde_json::to_string(&response).unwrap();
+            response_line.push('\n');
+            server_write
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let eof = lines.next_line().await.unwrap();
+            connection_closed_tx.send(()).unwrap();
+            assert!(
+                eof.is_none(),
+                "disconnect should land after the first request finishes"
+            );
+        });
+
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            ServerName::parse("srv").unwrap(),
+            ServerConfig::unix(socket_path.clone()).unwrap(),
+        );
+        let config = Arc::new(Config::new(ClientConfig::default(), servers));
+
+        let shared = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted)
+            .into_shared();
+
+        let request_finished = Arc::new(AtomicBool::new(false));
+        let request_finished_task = Arc::clone(&request_finished);
+        let first_shared = shared.clone();
+        let first_config = Arc::clone(&config);
+        let first_request = tokio::spawn(async move {
+            let result = first_shared
+                .request(
+                    first_config.as_ref(),
+                    "srv",
+                    "ping",
+                    None::<Value>,
+                    Path::new("/workspace/a"),
+                )
+                .await;
+            request_finished_task.store(true, Ordering::SeqCst);
+            result
+        });
+
+        first_init_seen_rx.await.unwrap();
+
+        let disconnect_finished = Arc::new(AtomicBool::new(false));
+        let disconnect_shared = shared.clone();
+        let disconnect_finished_task = Arc::clone(&disconnect_finished);
+        let disconnect_task = tokio::spawn(async move {
+            let disconnected = disconnect_shared.disconnect("srv").await.unwrap();
+            assert!(
+                disconnected,
+                "disconnect should tear down the connection after the first request"
+            );
+            disconnect_finished_task.store(true, Ordering::SeqCst);
+        });
+
+        release_first_init_tx.send(()).unwrap();
+        first_request_seen_rx.await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !disconnect_finished.load(Ordering::SeqCst),
+            "disconnect should stay blocked while the cold-start request is still in flight"
+        );
+        assert!(
+            !request_finished.load(Ordering::SeqCst),
+            "request should still be waiting on the delayed server response"
+        );
+
+        release_first_response_tx.send(()).unwrap();
+
+        let first_result = tokio::time::timeout(Duration::from_secs(1), first_request)
+            .await
+            .expect("first request should finish once the server responds")
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_result, serde_json::json!({ "server": "a" }));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            disconnect_task.await.unwrap();
+            connection_closed_rx.await.unwrap()
+        })
+        .await
+        .expect("disconnect should finish after the first request releases the gate");
+
+        tokio::time::timeout(Duration::from_secs(1), server_task)
+            .await
+            .expect("server task should observe the delayed disconnect")
+            .unwrap();
         let _ = std::fs::remove_file(socket_path);
     }
 }

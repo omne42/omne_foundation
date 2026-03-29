@@ -114,10 +114,15 @@ async fn load_initial_path_and_value(
                     .layers()
                     .last()
                     .and_then(|layer| layer.path())
-                    .expect("candidate file layer must have a path")
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "mcp config loader returned a candidate file layer without a path"
+                        )
+                    })?
                     .to_path_buf();
-                (path, loaded.into_value())
-            })),
+                Ok::<_, anyhow::Error>((path, loaded.into_value()))
+            })
+            .transpose()?),
     }
 }
 

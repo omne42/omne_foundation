@@ -189,20 +189,17 @@ impl SharedManager {
         let install = self
             .lock_for_async_op(operation)
             .await?
-            .prepare_connection_install(&prepared.server_name_key);
-        let install_server_name = install.server_name().clone();
+            .prepare_transport_install(&prepared.server_name_key, &prepared.cwd);
 
         match install.run(client, child).await {
-            Ok(completed) => {
-                let mut manager = self.lock_for_async_op(operation).await?;
-                manager.commit_connection_install(completed);
-                manager.record_connection_cwd(prepared.server_name_key.as_str(), &prepared.cwd)?;
-                Ok(())
-            }
+            Ok(completed) => self
+                .lock_for_async_op(operation)
+                .await?
+                .commit_transport_install(completed),
             Err(err) => {
                 self.lock_for_async_op(operation)
                     .await?
-                    .cleanup_failed_connection_install(&install_server_name);
+                    .cleanup_failed_connection_install(&prepared.server_name_key);
                 Err(err)
             }
         }

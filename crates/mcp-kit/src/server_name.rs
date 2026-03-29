@@ -152,7 +152,13 @@ impl From<ServerNameError> for ErrorRecord {
 }
 
 fn literal_error_code(code: &'static str) -> ErrorCode {
-    ErrorCode::try_new(code).expect("literal error code should validate")
+    const FALLBACK_CODE: &str = "mcp_kit.server_name.internal";
+
+    match ErrorCode::try_new(code) {
+        Ok(code) => code,
+        Err(_) => ErrorCode::try_new(FALLBACK_CODE)
+            .unwrap_or_else(|_| unreachable!("fallback server name error code must stay valid")),
+    }
 }
 
 #[cfg(test)]
@@ -187,5 +193,11 @@ mod tests {
             record.user_text().freeform_text(),
             Some("invalid server name: bad name (allowed: [A-Za-z0-9_-]+)")
         );
+    }
+
+    #[test]
+    fn invalid_literal_error_code_falls_back_to_internal_code() {
+        let code = literal_error_code("mcp_kit.server name.invalid");
+        assert_eq!(code.as_str(), "mcp_kit.server_name.internal");
     }
 }

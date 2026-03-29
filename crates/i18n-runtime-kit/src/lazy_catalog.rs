@@ -3,9 +3,9 @@ use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 
 use i18n_kit::{Catalog, Locale, TemplateArg};
+use text_assets_kit::{LazyInitError, LazyValue};
 
 use crate::catalog_error::{CatalogInitError, CatalogLocaleError};
-use crate::lazy_state::{LazyInitError, LazyValue};
 use crate::{resolve_locale_from_argv, resolve_locale_from_cli_args};
 
 /// Lazily initializes a shared catalog.

@@ -9,9 +9,8 @@ use i18n_kit::{
     validate_locale_source_limits, validate_locale_source_path,
 };
 use text_assets_kit::{
-    ResourceManifest, TextDirectory, bootstrap_text_resources_with_report,
-    lock_bootstrap_transaction, materialize_resource_root, rollback_created_resources,
-    scan_text_directory,
+    BootstrapLoadError, ResourceManifest, TextDirectory, bootstrap_text_resources_then_load,
+    materialize_resource_root, scan_text_directory,
 };
 
 const MAX_CATALOG_DIRECTORIES: usize = 2048;
@@ -90,28 +89,17 @@ where
         FallbackStrategy,
     ) -> Result<DynamicJsonCatalog, DynamicCatalogError>,
 {
-    let root = materialize_resource_root(root).map_err(ResourceCatalogError::Bootstrap)?;
     validate_catalog_manifest(manifest, default_locale, fallback_strategy)
         .map_err(ResourceCatalogError::Load)?;
-    let resource_paths = manifest
-        .resources()
-        .iter()
-        .map(|resource| resource.relative_path().to_owned())
-        .collect::<Vec<_>>();
-    let _bootstrap_transaction =
-        lock_bootstrap_transaction(&root).map_err(ResourceCatalogError::Bootstrap)?;
-    let report = bootstrap_text_resources_with_report(&root, manifest)
-        .map_err(ResourceCatalogError::Bootstrap)?;
-    match load(&root, &resource_paths, default_locale, fallback_strategy) {
+    match bootstrap_text_resources_then_load(root, manifest, |root, resource_paths| {
+        load(root, resource_paths, default_locale, fallback_strategy)
+    }) {
         Ok(catalog) => Ok(catalog),
-        Err(error) => {
-            if let Err(rollback_error) = rollback_created_resources(&report) {
-                return Err(ResourceCatalogError::Bootstrap(
-                    catalog_bootstrap_cleanup_error(error, rollback_error),
-                ));
-            }
-            Err(ResourceCatalogError::Load(error))
-        }
+        Err(BootstrapLoadError::Bootstrap(error)) => Err(ResourceCatalogError::Bootstrap(error)),
+        Err(BootstrapLoadError::Load(error)) => Err(ResourceCatalogError::Load(error)),
+        Err(BootstrapLoadError::Rollback { load, rollback }) => Err(
+            ResourceCatalogError::Bootstrap(catalog_bootstrap_cleanup_error(load, rollback)),
+        ),
     }
 }
 

@@ -1,5 +1,7 @@
 mod bootstrap_lock;
 mod data_root;
+mod lazy_value;
+mod managed_bootstrap;
 mod resource_bootstrap;
 mod resource_path;
 mod secure_fs;
@@ -9,6 +11,8 @@ mod text_tree_scan;
 
 pub use bootstrap_lock::{BootstrapTransactionGuard, lock_bootstrap_transaction};
 pub use data_root::{DataRootOptions, DataRootScope, ensure_data_root, resolve_data_root};
+pub use lazy_value::{LazyInitError, LazyValue};
+pub use managed_bootstrap::{BootstrapLoadError, bootstrap_text_resources_then_load};
 pub use resource_bootstrap::{
     BootstrapReport, bootstrap_text_resources, bootstrap_text_resources_with_report,
     rollback_created_resources,

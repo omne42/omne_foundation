@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex as TokioMutex, RwLock, Semaphore};
@@ -83,12 +83,46 @@ struct CachedPinnedClient {
     expires_at: Instant,
 }
 
-static PINNED_CLIENT_CACHE: OnceLock<RwLock<HashMap<PinnedClientKey, CachedPinnedClient>>> =
-    OnceLock::new();
-static PINNED_CLIENT_BUILD_LOCKS: OnceLock<Mutex<HashMap<PinnedClientKey, Weak<TokioMutex<()>>>>> =
-    OnceLock::new();
-static DNS_LOOKUP_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
-static DNS_LOOKUP_TIMEOUT_MESSAGE: OnceLock<String> = OnceLock::new();
+struct HttpClientSharedState {
+    pinned_client_cache: RwLock<HashMap<PinnedClientKey, CachedPinnedClient>>,
+    pinned_client_build_locks: Mutex<HashMap<PinnedClientKey, Weak<TokioMutex<()>>>>,
+    dns_lookup_semaphore: Arc<Semaphore>,
+}
+
+impl Default for HttpClientSharedState {
+    fn default() -> Self {
+        Self {
+            pinned_client_cache: RwLock::new(HashMap::new()),
+            pinned_client_build_locks: Mutex::new(HashMap::new()),
+            dns_lookup_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_DNS_LOOKUPS_INFLIGHT)),
+        }
+    }
+}
+
+impl HttpClientSharedState {
+    fn pinned_client_cache_reuse_enabled(&self) -> bool {
+        DEFAULT_PINNED_CLIENT_TTL > Duration::ZERO
+    }
+
+    fn lock_pinned_client_build_locks(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<PinnedClientKey, Weak<TokioMutex<()>>>> {
+        self.pinned_client_build_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn cleanup_pinned_client_build_lock_entry(&self, key: &PinnedClientKey) {
+        let mut locks = self.lock_pinned_client_build_locks();
+        if locks.get(key).is_some_and(|weak| weak.strong_count() == 0) {
+            locks.remove(key);
+        }
+    }
+
+    fn dns_lookup_semaphore(&self) -> &Arc<Semaphore> {
+        &self.dns_lookup_semaphore
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct HttpClientOptions {
@@ -115,6 +149,7 @@ impl Default for HttpClientOptions {
 pub struct HttpClientProfile {
     client: reqwest::Client,
     options: HttpClientOptions,
+    shared_state: Arc<HttpClientSharedState>,
 }
 
 impl HttpClientProfile {
@@ -137,46 +172,23 @@ impl HttpClientProfile {
     }
 }
 
-fn dns_lookup_timeout_message() -> &'static str {
-    DNS_LOOKUP_TIMEOUT_MESSAGE
-        .get_or_init(|| format!("dns lookup timeout (capped at {DEFAULT_DNS_LOOKUP_TIMEOUT:?})"))
-        .as_str()
-}
-
-fn pinned_client_cache() -> &'static RwLock<HashMap<PinnedClientKey, CachedPinnedClient>> {
-    PINNED_CLIENT_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
-}
-
-fn pinned_client_cache_reuse_enabled() -> bool {
-    DEFAULT_PINNED_CLIENT_TTL > Duration::ZERO
-}
-
-fn pinned_client_build_locks() -> &'static Mutex<HashMap<PinnedClientKey, Weak<TokioMutex<()>>>> {
-    PINNED_CLIENT_BUILD_LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn lock_pinned_client_build_locks()
--> std::sync::MutexGuard<'static, HashMap<PinnedClientKey, Weak<TokioMutex<()>>>> {
-    pinned_client_build_locks()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-fn cleanup_pinned_client_build_lock_entry(key: &PinnedClientKey) {
-    let mut locks = lock_pinned_client_build_locks();
-    if locks.get(key).is_some_and(|weak| weak.strong_count() == 0) {
-        locks.remove(key);
-    }
+fn dns_lookup_timeout_message() -> String {
+    format!("dns lookup timeout (capped at {DEFAULT_DNS_LOOKUP_TIMEOUT:?})")
 }
 
 struct PinnedClientBuildLockCleanupGuard {
+    shared_state: Arc<HttpClientSharedState>,
     key: PinnedClientKey,
     armed: bool,
 }
 
 impl PinnedClientBuildLockCleanupGuard {
-    fn new(key: PinnedClientKey) -> Self {
-        Self { key, armed: true }
+    fn new(shared_state: Arc<HttpClientSharedState>, key: PinnedClientKey) -> Self {
+        Self {
+            shared_state,
+            key,
+            armed: true,
+        }
     }
 
     fn disarm(&mut self) {
@@ -187,13 +199,10 @@ impl PinnedClientBuildLockCleanupGuard {
 impl Drop for PinnedClientBuildLockCleanupGuard {
     fn drop(&mut self) {
         if self.armed {
-            cleanup_pinned_client_build_lock_entry(&self.key);
+            self.shared_state
+                .cleanup_pinned_client_build_lock_entry(&self.key);
         }
     }
-}
-
-fn dns_lookup_semaphore() -> &'static Arc<Semaphore> {
-    DNS_LOOKUP_SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(DEFAULT_MAX_DNS_LOOKUPS_INFLIGHT)))
 }
 
 fn remaining_dns_timeout(deadline: Instant) -> crate::Result<Duration> {
@@ -335,6 +344,7 @@ pub fn build_http_client_profile(options: &HttpClientOptions) -> crate::Result<H
     Ok(HttpClientProfile {
         client: build_http_client_with_options(options)?,
         options: options.clone(),
+        shared_state: Arc::new(HttpClientSharedState::default()),
     })
 }
 
@@ -366,6 +376,7 @@ pub async fn send_reqwest(
 }
 
 async fn resolve_url_to_public_addrs_async(
+    shared_state: &HttpClientSharedState,
     url: &reqwest::Url,
     timeout: Duration,
 ) -> crate::Result<Vec<SocketAddr>> {
@@ -385,7 +396,7 @@ async fn resolve_url_to_public_addrs_async(
     let lookup = {
         let _permit = tokio::time::timeout(
             remaining_dns_timeout(deadline)?,
-            dns_lookup_semaphore().acquire(),
+            shared_state.dns_lookup_semaphore().acquire(),
         )
         .await
         .map_err(|_| anyhow::anyhow!(dns_lookup_timeout_message()))?
@@ -447,23 +458,25 @@ fn build_http_client_pinned_with_addrs(
 }
 
 async fn build_http_client_pinned_async(
+    shared_state: &HttpClientSharedState,
     options: &HttpClientOptions,
     url: &reqwest::Url,
 ) -> crate::Result<reqwest::Client> {
     let lookup_timeout = dns_lookup_timeout_for_options(options);
-    let addrs = resolve_url_to_public_addrs_async(url, lookup_timeout).await?;
+    let addrs = resolve_url_to_public_addrs_async(shared_state, url, lookup_timeout).await?;
     build_http_client_pinned_with_addrs(options, url, &addrs)
 }
 
 async fn select_pinned_http_client_with_options(
+    shared_state: Arc<HttpClientSharedState>,
     options: &HttpClientOptions,
     url: &reqwest::Url,
 ) -> crate::Result<reqwest::Client> {
     let key = pinned_client_key(options, url)?;
-    if pinned_client_cache_reuse_enabled() {
+    if shared_state.pinned_client_cache_reuse_enabled() {
         let lookup_now = Instant::now();
         let should_cleanup_expired_cache_entry = {
-            let cache = pinned_client_cache().read().await;
+            let cache = shared_state.pinned_client_cache.read().await;
             match cache.get(&key) {
                 Some(cached) if cached.expires_at > lookup_now => return Ok(cached.client.clone()),
                 Some(_) => true,
@@ -472,7 +485,7 @@ async fn select_pinned_http_client_with_options(
         };
 
         if should_cleanup_expired_cache_entry {
-            let mut cache = pinned_client_cache().write().await;
+            let mut cache = shared_state.pinned_client_cache.write().await;
             let now = Instant::now();
             if cache
                 .get(&key)
@@ -482,13 +495,14 @@ async fn select_pinned_http_client_with_options(
             }
         }
     } else {
-        let mut cache = pinned_client_cache().write().await;
+        let mut cache = shared_state.pinned_client_cache.write().await;
         cache.remove(&key);
     }
 
-    let mut build_lock_cleanup = PinnedClientBuildLockCleanupGuard::new(key.clone());
+    let mut build_lock_cleanup =
+        PinnedClientBuildLockCleanupGuard::new(Arc::clone(&shared_state), key.clone());
     let key_lock = {
-        let mut locks = lock_pinned_client_build_locks();
+        let mut locks = shared_state.lock_pinned_client_build_locks();
         locks.retain(|_, lock| lock.strong_count() > 0);
         if let Some(existing) = locks.get(&key).and_then(Weak::upgrade) {
             existing
@@ -501,10 +515,10 @@ async fn select_pinned_http_client_with_options(
 
     let result: crate::Result<reqwest::Client> = async {
         let _build_guard = key_lock.lock().await;
-        if pinned_client_cache_reuse_enabled() {
+        if shared_state.pinned_client_cache_reuse_enabled() {
             let now = Instant::now();
             let cached_client = {
-                let cache = pinned_client_cache().read().await;
+                let cache = shared_state.pinned_client_cache.read().await;
                 cache.get(&key).and_then(|cached| {
                     if cached.expires_at > now {
                         Some(cached.client.clone())
@@ -517,10 +531,11 @@ async fn select_pinned_http_client_with_options(
                 return Ok(client);
             }
 
-            let client = build_http_client_pinned_async(options, url).await?;
+            let client =
+                build_http_client_pinned_async(shared_state.as_ref(), options, url).await?;
             let now = Instant::now();
             {
-                let mut cache = pinned_client_cache().write().await;
+                let mut cache = shared_state.pinned_client_cache.write().await;
                 cache.retain(|_, v| v.expires_at > now);
                 cache.insert(
                     key.clone(),
@@ -537,13 +552,13 @@ async fn select_pinned_http_client_with_options(
             }
             Ok(client)
         } else {
-            build_http_client_pinned_async(options, url).await
+            build_http_client_pinned_async(shared_state.as_ref(), options, url).await
         }
     }
     .await;
 
     drop(key_lock);
-    cleanup_pinned_client_build_lock_entry(&key);
+    shared_state.cleanup_pinned_client_build_lock_entry(&key);
     build_lock_cleanup.disarm();
 
     result
@@ -560,7 +575,8 @@ pub async fn select_http_client_from_profile(
 
     // The pinned path disables proxy resolution so the actual socket still targets the
     // DNS-validated address set instead of an intermediate proxy endpoint.
-    select_pinned_http_client_with_options(&profile.options, url).await
+    select_pinned_http_client_with_options(Arc::clone(&profile.shared_state), &profile.options, url)
+        .await
 }
 
 pub async fn select_http_client_with_options(
@@ -579,7 +595,8 @@ pub async fn select_http_client_with_options(
     // `reqwest::Client` does not expose a safe way to clone its opaque builder state while
     // swapping in per-host DNS pinning. Callers that need the same configuration on both paths
     // should prefer `HttpClientProfile`, which keeps the reusable options explicit.
-    select_pinned_http_client_with_options(options, url).await
+    select_pinned_http_client_with_options(Arc::new(HttpClientSharedState::default()), options, url)
+        .await
 }
 
 #[cfg(test)]
@@ -1140,24 +1157,23 @@ mod tests {
                 reqwest::Url::parse("https://lock-cleanup.invalid/webhook").expect("parse url");
             let key = pinned_key_for_timeout(&url, Duration::ZERO);
 
+            let profile = build_http_client_profile(&timeout_only_options(Duration::ZERO))
+                .expect("build client profile");
             {
-                let mut cache = pinned_client_cache().write().await;
+                let mut cache = profile.shared_state.pinned_client_cache.write().await;
                 cache.remove(&key);
             }
             {
-                let mut locks = lock_pinned_client_build_locks();
+                let mut locks = profile.shared_state.lock_pinned_client_build_locks();
                 locks.remove(&key);
             }
-
-            let profile = build_http_client_profile(&timeout_only_options(Duration::ZERO))
-                .expect("build client profile");
             let err = profile
                 .select_for_url(&url, true)
                 .await
                 .expect_err("expected dns timeout error");
             assert!(err.to_string().contains("dns lookup timeout"), "{err:#}");
 
-            let locks = lock_pinned_client_build_locks();
+            let locks = profile.shared_state.lock_pinned_client_build_locks();
             assert!(
                 !locks.contains_key(&key),
                 "build lock entry should be removed after failed request"
@@ -1178,23 +1194,23 @@ mod tests {
                 reqwest::Url::parse("https://lock-cancel.invalid/webhook").expect("parse url");
             let key = pinned_key_for_timeout(&url, timeout);
 
+            let profile =
+                build_http_client_profile(&timeout_only_options(timeout)).expect("build profile");
             {
-                let mut cache = pinned_client_cache().write().await;
+                let mut cache = profile.shared_state.pinned_client_cache.write().await;
                 cache.remove(&key);
             }
             {
-                let mut locks = lock_pinned_client_build_locks();
+                let mut locks = profile.shared_state.lock_pinned_client_build_locks();
                 locks.remove(&key);
             }
-
-            let semaphore_permits = dns_lookup_semaphore()
+            let semaphore_permits = profile
+                .shared_state
+                .dns_lookup_semaphore()
                 .clone()
                 .acquire_many_owned(DEFAULT_MAX_DNS_LOOKUPS_INFLIGHT as u32)
                 .await
                 .expect("acquire dns semaphore permits");
-
-            let profile =
-                build_http_client_profile(&timeout_only_options(timeout)).expect("build profile");
             let task = tokio::spawn({
                 let profile = profile.clone();
                 let url = url.clone();
@@ -1205,7 +1221,11 @@ mod tests {
 
             let inserted = tokio::time::timeout(Duration::from_millis(200), async {
                 loop {
-                    if lock_pinned_client_build_locks().contains_key(&key) {
+                    if profile
+                        .shared_state
+                        .lock_pinned_client_build_locks()
+                        .contains_key(&key)
+                    {
                         break;
                     }
                     tokio::task::yield_now().await;
@@ -1221,7 +1241,7 @@ mod tests {
             drop(semaphore_permits);
             tokio::task::yield_now().await;
 
-            let locks = lock_pinned_client_build_locks();
+            let locks = profile.shared_state.lock_pinned_client_build_locks();
             assert!(
                 !locks.contains_key(&key),
                 "build lock entry should be removed after cancelled request"
@@ -1242,8 +1262,10 @@ mod tests {
                 .expect("parse url");
             let key = pinned_key_for_timeout(&url, timeout);
 
+            let profile =
+                build_http_client_profile(&timeout_only_options(timeout)).expect("build profile");
             {
-                let mut cache = pinned_client_cache().write().await;
+                let mut cache = profile.shared_state.pinned_client_cache.write().await;
                 cache.remove(&key);
                 cache.insert(
                     key.clone(),
@@ -1254,19 +1276,16 @@ mod tests {
                 );
             }
             {
-                let mut locks = lock_pinned_client_build_locks();
+                let mut locks = profile.shared_state.lock_pinned_client_build_locks();
                 locks.remove(&key);
             }
-
-            let profile =
-                build_http_client_profile(&timeout_only_options(timeout)).expect("build profile");
             let err = profile
                 .select_for_url(&url, true)
                 .await
                 .expect_err("expected dns timeout error");
             assert!(err.to_string().contains("dns lookup timeout"), "{err:#}");
 
-            let cache = pinned_client_cache().read().await;
+            let cache = profile.shared_state.pinned_client_cache.read().await;
             assert!(
                 !cache.contains_key(&key),
                 "expired cache entry should be removed after failed refresh"
@@ -1287,8 +1306,10 @@ mod tests {
                 .expect("parse url");
             let key = pinned_key_for_timeout(&url, timeout);
 
+            let profile =
+                build_http_client_profile(&timeout_only_options(timeout)).expect("build profile");
             {
-                let mut cache = pinned_client_cache().write().await;
+                let mut cache = profile.shared_state.pinned_client_cache.write().await;
                 cache.remove(&key);
                 cache.insert(
                     key.clone(),
@@ -1299,23 +1320,38 @@ mod tests {
                 );
             }
             {
-                let mut locks = lock_pinned_client_build_locks();
+                let mut locks = profile.shared_state.lock_pinned_client_build_locks();
                 locks.remove(&key);
             }
-
-            let profile =
-                build_http_client_profile(&timeout_only_options(timeout)).expect("build profile");
             let err = profile
                 .select_for_url(&url, true)
                 .await
                 .expect_err("selection should ignore seeded cross-request cache");
             assert!(err.to_string().contains("dns lookup timeout"), "{err:#}");
 
-            let cache = pinned_client_cache().read().await;
+            let cache = profile.shared_state.pinned_client_cache.read().await;
             assert!(
                 !cache.contains_key(&key),
                 "seeded cross-request cache entry should be cleared instead of being reused"
             );
         });
+    }
+
+    #[test]
+    fn build_http_client_profile_uses_explicit_per_profile_shared_state() {
+        let profile_a = build_http_client_profile(&timeout_only_options(Duration::from_secs(1)))
+            .expect("build profile a");
+        let profile_b = build_http_client_profile(&timeout_only_options(Duration::from_secs(1)))
+            .expect("build profile b");
+        let profile_a_clone = profile_a.clone();
+
+        assert!(
+            Arc::ptr_eq(&profile_a.shared_state, &profile_a_clone.shared_state),
+            "cloned profile should keep the same explicit shared state"
+        );
+        assert!(
+            !Arc::ptr_eq(&profile_a.shared_state, &profile_b.shared_state),
+            "distinct profiles should not share process-global pinned-client state"
+        );
     }
 }

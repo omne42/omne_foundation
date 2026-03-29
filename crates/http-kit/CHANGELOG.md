@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Replace process-global pinned-client cache/build-lock/DNS state with explicit per-`HttpClientProfile` shared state, and keep `select_http_client_with_options(...)` isolated so unrelated callers no longer contend through hidden process-wide HTTP state.
+- Rejoin `http-kit` to workspace dependency/lint governance via workspace-managed dependencies and `[lints] workspace = true`.
 - Fix `select_http_client_with_options(...)` so `enforce_public_ip=false` still rebuilds the unpinned client from `HttpClientOptions` instead of silently discarding the documented option set in favor of the caller's opaque base client.
 - Narrow `allow_localhost` so it only exempts loopback-style hostnames (`localhost`, `localhost.localdomain`, `*.localhost`) instead of also allowing `*.local`, `*.localdomain`, or single-label hosts.
 - Require exact IP-literal matches in `allowed_hosts` so malformed suffix entries such as `2.3.4` can no longer allow `1.2.3.4`.

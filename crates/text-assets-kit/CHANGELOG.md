@@ -6,6 +6,9 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ## [Unreleased]
 
+### Added
+- Added shared `LazyValue` / `LazyInitError` primitives plus `bootstrap_text_resources_then_load(...)`, so domain runtime adapters can reuse the same lazy-init and bootstrap+rollback orchestration without reimplementing it per crate.
+
 ### Fixed
 - `text-assets-kit`：Unix 下的 bootstrap advisory lock 目录不再固定落在全局 `/tmp/.text-assets-kit-bootstrap-locks`；现在优先使用用户级 runtime 目录（`$XDG_RUNTIME_DIR` 或 `/run/user/<uid>`），缺失时退回 `/tmp/.text-assets-kit-bootstrap-locks/uid-<uid>` 的每用户命名空间，避免跨用户共享同一全局锁目录。
 - Kept the unix socket entry regression test under a short non-symlink temp root so hook and CI runs do not fail on host `sun_path` limits before the real validation path executes.

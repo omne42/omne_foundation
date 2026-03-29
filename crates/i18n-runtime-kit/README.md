@@ -58,8 +58,8 @@
   - CLI / argv locale 解析与 env fallback 选择
 - `src/catalog_error.rs`
   - runtime 初始化错误、CLI locale 错误和句柄级 locale 错误包装
-- `src/lazy_state.rs`
-  - runtime 侧懒初始化并发控制
+- 共享懒初始化并发控制与 bootstrap/rollback 流程
+  - 由 [`text-assets-kit`](../text-assets-kit/README.md) 提供通用原语，`i18n-runtime-kit` 只保留 i18n 域加载与错误映射
 
 ## 与其他 crate 的关系
 

@@ -1,7 +1,7 @@
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::ThreadId;
 
-pub(crate) enum LazyState<T: ?Sized, E> {
+enum LazyState<T: ?Sized, E> {
     Uninitialized,
     Initializing {
         thread_id: ThreadId,
@@ -15,25 +15,26 @@ pub(crate) enum LazyState<T: ?Sized, E> {
 }
 
 #[derive(Debug)]
-pub(crate) enum LazyInitError<E> {
+pub enum LazyInitError<E> {
     Inner(Arc<E>),
     ReentrantInitialization,
 }
 
-pub(crate) struct LazyValue<T: ?Sized, E> {
+pub struct LazyValue<T: ?Sized, E> {
     state: Mutex<LazyState<T, E>>,
     ready: Condvar,
 }
 
 impl<T: ?Sized, E> LazyValue<T, E> {
-    pub(crate) const fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self {
             state: Mutex::new(LazyState::Uninitialized),
             ready: Condvar::new(),
         }
     }
 
-    pub(crate) fn set(&self, value: Arc<T>) {
+    pub fn set(&self, value: Arc<T>) {
         *lock_unpoisoned(&self.state) = LazyState::Initialized(value);
         self.ready.notify_all();
     }
@@ -45,7 +46,7 @@ impl<T: ?Sized, E> LazyValue<T, E> {
     /// must also avoid cross-thread or cross-task cycles where the initializer
     /// waits for work that re-enters the same `LazyValue`; that pattern cannot
     /// be detected here and may deadlock.
-    pub(crate) fn get_or_init(
+    pub fn get_or_init(
         &self,
         initializer: impl FnOnce() -> Result<Arc<T>, E>,
     ) -> Result<Arc<T>, LazyInitError<E>> {
@@ -145,6 +146,12 @@ impl<T: ?Sized, E> LazyValue<T, E> {
     }
 }
 
+impl<T: ?Sized, E> Default for LazyValue<T, E> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 struct InitializationGuard<'a, T: ?Sized, E> {
     value: &'a LazyValue<T, E>,
     thread_id: ThreadId,
@@ -177,8 +184,7 @@ impl<T: ?Sized, E> Drop for InitializationGuard<'_, T, E> {
             LazyState::Initializing {
                 thread_id,
                 waiting_threads: _,
-            }
-                if *thread_id == self.thread_id
+            } if *thread_id == self.thread_id
         ) {
             *guard = LazyState::Uninitialized;
             self.value.ready.notify_all();
@@ -323,7 +329,7 @@ mod tests {
 
         assert!(
             result_rx.recv_timeout(Duration::from_millis(200)).is_err(),
-            "waiter should wait for initialization to complete",
+            "waiter should block until the in-flight attempt settles",
         );
 
         release_tx.send(()).expect("release initializer");
@@ -331,86 +337,90 @@ mod tests {
             .join()
             .expect("join initializer thread")
             .expect_err("initializer should fail");
+        waiting_handle.join().expect("join waiter thread");
+
         assert!(matches!(init_error, LazyInitError::Inner(error) if *error == "init failed"));
-        waiting_handle.join().expect("join waiting thread");
         assert_eq!(
             result_rx
                 .recv_timeout(Duration::from_secs(1))
-                .expect("waiter should observe the failure"),
+                .expect("waiter result should be published"),
             Err("init failed"),
         );
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
-
-        let value = lazy
-            .get_or_init(|| -> Result<Arc<u32>, &'static str> { Ok(Arc::new(7)) })
-            .expect("next call should retry after the shared failure");
-        assert_eq!(*value, 7);
-    }
-
-    #[test]
-    fn retry_in_progress_remains_uninitialized_until_success() {
-        let lazy = Arc::new(LazyValue::<u32, &'static str>::new());
-
-        let error = lazy
-            .get_or_init(|| Err("init failed"))
-            .expect_err("initialization should fail");
-        assert!(matches!(error, LazyInitError::Inner(_)));
-
-        let (entered_tx, entered_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
-        let retrying = Arc::clone(&lazy);
-        let handle = thread::spawn(move || {
-            retrying
-                .get_or_init(|| -> Result<Arc<u32>, &'static str> {
-                    entered_tx.send(()).expect("signal retry entered");
-                    release_rx.recv().expect("release retry");
-                    Ok(Arc::new(11))
-                })
-                .expect("retry should succeed")
-        });
-
-        entered_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("retry should start");
-
         assert!(!is_initialized(&lazy));
-
-        release_tx.send(()).expect("release retry");
-        let value = handle.join().expect("join retry thread");
-        assert_eq!(*value, 11);
-        assert!(is_initialized(&lazy));
-    }
-
-    #[test]
-    fn panicked_retry_leaves_value_uninitialized() {
-        let lazy = LazyValue::<u32, &'static str>::new();
-
-        let error = lazy
-            .get_or_init(|| Err("init failed"))
-            .expect_err("initialization should fail");
-        assert!(matches!(error, LazyInitError::Inner(_)));
-
-        let panic = catch_unwind(AssertUnwindSafe(|| {
-            let _ = lazy
-                .get_or_init(|| -> Result<Arc<u32>, &'static str> { panic!("initializer panic") });
-        }));
-        assert!(panic.is_err());
-
-        assert!(!is_initialized(&lazy));
-    }
-
-    #[test]
-    fn set_installs_initialized_value_without_running_initializer() {
-        let lazy = LazyValue::<u32, &'static str>::new();
-        lazy.set(Arc::new(7));
 
         let value = lazy
             .get_or_init(|| -> Result<Arc<u32>, &'static str> {
-                panic!("initializer should not run after set")
+                assert_eq!(attempts.fetch_add(1, Ordering::SeqCst), 1);
+                Ok(Arc::new(9))
             })
-            .expect("set value should be returned");
-
-        assert_eq!(*value, 7);
+            .expect("retry should succeed");
+        assert_eq!(*value, 9);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert!(is_initialized(&lazy));
+    }
+
+    #[test]
+    fn panic_during_initialization_resets_state_for_retry() {
+        let lazy = Arc::new(LazyValue::<u32, &'static str>::new());
+        let panicking = Arc::clone(&lazy);
+
+        let panic_payload = catch_unwind(AssertUnwindSafe(move || {
+            let _ = panicking.get_or_init(|| -> Result<Arc<u32>, &'static str> { panic!("boom") });
+        }))
+        .expect_err("initializer panic should unwind");
+        let panic_text = if let Some(text) = panic_payload.downcast_ref::<&'static str>() {
+            *text
+        } else {
+            panic!("unexpected panic payload")
+        };
+        assert_eq!(panic_text, "boom");
+        assert!(!is_initialized(&lazy));
+
+        let value = lazy
+            .get_or_init(|| -> Result<Arc<u32>, &'static str> { Ok(Arc::new(5)) })
+            .expect("retry after panic should succeed");
+        assert_eq!(*value, 5);
+        assert!(is_initialized(&lazy));
+    }
+
+    #[test]
+    fn set_publishes_replacement_value() {
+        let lazy = LazyValue::<u32, &'static str>::new();
+        lazy.set(Arc::new(1));
+        assert_eq!(
+            *lazy
+                .get_or_init(|| -> Result<Arc<u32>, &'static str> {
+                    panic!("set value should bypass initializer")
+                })
+                .expect("set value should be visible"),
+            1,
+        );
+
+        lazy.set(Arc::new(7));
+        assert_eq!(
+            *lazy
+                .get_or_init(|| -> Result<Arc<u32>, &'static str> {
+                    panic!("replacement should stay visible")
+                })
+                .expect("replacement should be visible"),
+            7,
+        );
+    }
+
+    #[test]
+    fn same_thread_reentrancy_is_rejected() {
+        fn reentrant_init(lazy: &LazyValue<u32, &'static str>) -> Result<Arc<u32>, &'static str> {
+            match lazy.get_or_init(|| Ok(Arc::new(2))) {
+                Err(LazyInitError::ReentrantInitialization) => Ok(Arc::new(1)),
+                _ => panic!("expected reentrant initialization error"),
+            }
+        }
+
+        let lazy = LazyValue::<u32, &'static str>::new();
+        let value = lazy
+            .get_or_init(|| reentrant_init(&lazy))
+            .expect("outer initialization should recover");
+        assert_eq!(*value, 1);
     }
 }

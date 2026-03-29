@@ -2,10 +2,9 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::lazy_state::{LazyInitError, LazyValue};
 use text_assets_kit::{
-    ResourceManifest, TextDirectory, bootstrap_text_resources_with_report,
-    lock_bootstrap_transaction, materialize_resource_root, rollback_created_resources,
+    BootstrapLoadError, LazyInitError, LazyValue, ResourceManifest, TextDirectory,
+    bootstrap_text_resources_then_load,
 };
 
 #[derive(Debug)]
@@ -50,21 +49,11 @@ fn bootstrap_prompt_directory_with_loader<L>(
 where
     L: FnOnce(&Path, &[String]) -> io::Result<TextDirectory>,
 {
-    let root = materialize_resource_root(root)?;
-    let resource_paths = manifest
-        .resources()
-        .iter()
-        .map(|resource| resource.relative_path().to_owned())
-        .collect::<Vec<_>>();
-    let _bootstrap_transaction = lock_bootstrap_transaction(&root)?;
-    let report = bootstrap_text_resources_with_report(&root, manifest)?;
-    match load(&root, &resource_paths) {
+    match bootstrap_text_resources_then_load(root, manifest, load) {
         Ok(directory) => Ok(directory),
-        Err(error) => {
-            if let Err(rollback_error) = rollback_created_resources(&report) {
-                return Err(prompt_bootstrap_cleanup_error(error, rollback_error));
-            }
-            Err(error)
+        Err(BootstrapLoadError::Bootstrap(error) | BootstrapLoadError::Load(error)) => Err(error),
+        Err(BootstrapLoadError::Rollback { load, rollback }) => {
+            Err(prompt_bootstrap_cleanup_error(load, rollback))
         }
     }
 }

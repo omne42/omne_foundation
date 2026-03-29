@@ -1,4 +1,3 @@
-mod lazy_state;
 mod prompts;
 
 pub use prompts::{

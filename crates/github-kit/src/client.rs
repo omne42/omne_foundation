@@ -1,6 +1,9 @@
 use reqwest::RequestBuilder;
 use reqwest::header::{ACCEPT, USER_AGENT};
 
+use crate::error::{GitHubApiError, Result};
+
+pub const DEFAULT_GITHUB_API_BASE: &str = "https://api.github.com";
 pub const DEFAULT_GITHUB_API_VERSION: &str = "2022-11-28";
 pub const DEFAULT_GITHUB_USER_AGENT: &str = "github-kit";
 pub const GITHUB_API_ACCEPT: &str = "application/vnd.github+json";
@@ -54,7 +57,7 @@ impl<'a> GitHubApiRequestOptions<'a> {
     }
 }
 
-pub(crate) fn apply_github_api_headers(
+pub fn apply_github_api_headers(
     mut request: RequestBuilder,
     options: GitHubApiRequestOptions<'_>,
 ) -> RequestBuilder {
@@ -68,4 +71,29 @@ pub(crate) fn apply_github_api_headers(
     }
 
     request
+}
+
+pub fn build_github_api_url<I, S>(api_base: &str, segments: I) -> Result<reqwest::Url>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let trimmed = api_base.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err(GitHubApiError::NoApiBaseConfigured);
+    }
+
+    let mut url = reqwest::Url::parse(trimmed).map_err(|err| GitHubApiError::InvalidApiBase {
+        details: err.to_string(),
+    })?;
+    let mut path_segments =
+        url.path_segments_mut()
+            .map_err(|_| GitHubApiError::InvalidApiBase {
+                details: "base URL cannot accept path segments".to_string(),
+            })?;
+    for segment in segments {
+        path_segments.push(segment.as_ref());
+    }
+    drop(path_segments);
+    Ok(url)
 }

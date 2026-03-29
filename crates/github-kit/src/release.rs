@@ -3,7 +3,7 @@ use http_kit::{
 };
 use serde::Deserialize;
 
-use crate::client::{GitHubApiRequestOptions, apply_github_api_headers};
+use crate::client::{GitHubApiRequestOptions, apply_github_api_headers, build_github_api_url};
 use crate::error::{GitHubApiError, Result};
 
 const GITHUB_LATEST_RELEASE_MAX_JSON_BYTES: usize = 512 * 1024;
@@ -39,7 +39,8 @@ pub async fn fetch_latest_release<S: AsRef<str>>(
         }
         attempted = true;
 
-        let url = match build_latest_release_url(trimmed, owner, name) {
+        let url = match build_github_api_url(trimmed, ["repos", owner, name, "releases", "latest"])
+        {
             Ok(url) => url,
             Err(err) => {
                 errors.push(format!("{} -> {err}", redact_url_str(trimmed)));
@@ -111,19 +112,6 @@ fn normalize_repository(repo: &str) -> Result<(&str, &str)> {
     Ok((owner, name))
 }
 
-fn build_latest_release_url(
-    base: &str,
-    owner: &str,
-    name: &str,
-) -> std::result::Result<reqwest::Url, String> {
-    let mut url =
-        reqwest::Url::parse(base).map_err(|err| format!("invalid github api base: {err}"))?;
-    url.path_segments_mut()
-        .map_err(|_| "invalid github api base".to_string())?
-        .extend(["repos", owner, name, "releases", "latest"]);
-    Ok(url)
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
@@ -136,6 +124,20 @@ mod tests {
     fn reject_invalid_repository_identifier() {
         let err = normalize_repository("invalid").expect_err("invalid repo should fail");
         assert!(err.to_string().contains("owner/repo"));
+    }
+
+    #[test]
+    fn build_api_url_preserves_base_path_prefix() {
+        let url = build_github_api_url(
+            "https://example.invalid/api/v3/",
+            ["repos", "omne42", "repo", "issues", "1", "comments"],
+        )
+        .expect("url");
+
+        assert_eq!(
+            url.as_str(),
+            "https://example.invalid/api/v3/repos/omne42/repo/issues/1/comments"
+        );
     }
 
     #[tokio::test]

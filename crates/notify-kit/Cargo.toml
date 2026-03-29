@@ -18,6 +18,7 @@ base64 = "0.22"
 futures-util = "0.3"
 hmac = "0.12"
 http-kit = { path = "../http-kit" }
+github-kit = { path = "../github-kit" }
 libc = "0.2"
 log-kit = { path = "../log-kit" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "stream"] }

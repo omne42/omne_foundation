@@ -4,13 +4,16 @@ use crate::Event;
 use crate::SecretString;
 use crate::sinks::text::{TextLimits, format_event_text_limited};
 use crate::sinks::{BoxFuture, Sink};
+use github_kit::{
+    DEFAULT_GITHUB_API_BASE, GitHubApiRequestOptions, apply_github_api_headers,
+    build_github_api_url,
+};
 use http_kit::{build_http_client, ensure_http_success, redact_url, send_reqwest};
-
-const GITHUB_API_BASE: &str = "https://api.github.com";
 
 #[non_exhaustive]
 #[derive(Clone)]
 pub struct GitHubCommentConfig {
+    pub api_base: String,
     pub owner: String,
     pub repo: String,
     pub issue_number: u64,
@@ -22,6 +25,7 @@ pub struct GitHubCommentConfig {
 impl std::fmt::Debug for GitHubCommentConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GitHubCommentConfig")
+            .field("api_base", &self.api_base)
             .field("owner", &self.owner)
             .field("repo", &self.repo)
             .field("issue_number", &self.issue_number)
@@ -40,6 +44,7 @@ impl GitHubCommentConfig {
         token: impl Into<SecretString>,
     ) -> Self {
         Self {
+            api_base: DEFAULT_GITHUB_API_BASE.to_string(),
             owner: owner.into(),
             repo: repo.into(),
             issue_number,
@@ -52,6 +57,12 @@ impl GitHubCommentConfig {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn with_api_base(mut self, api_base: impl Into<String>) -> Self {
+        self.api_base = api_base.into();
         self
     }
 
@@ -94,7 +105,7 @@ impl GitHubCommentSink {
         }
         let token = normalize_secret(config.token, "token")?;
 
-        let api_url = build_issue_comment_url(owner, repo, config.issue_number)?;
+        let api_url = build_issue_comment_url(&config.api_base, owner, repo, config.issue_number)?;
         let client = build_http_client(config.timeout)?;
 
         Ok(Self {
@@ -132,24 +143,24 @@ fn normalize_github_identifier<'a>(kind: &'static str, value: &'a str) -> crate:
 }
 
 fn build_issue_comment_url(
+    api_base: &str,
     owner: &str,
     repo: &str,
     issue_number: u64,
 ) -> crate::Result<reqwest::Url> {
-    let mut url = reqwest::Url::parse(GITHUB_API_BASE)
-        .map_err(|err| anyhow::anyhow!("invalid github api base url: {err}"))?;
     let issue_segment = issue_number.to_string();
-    url.path_segments_mut()
-        .map_err(|_| anyhow::anyhow!("invalid github api base url"))?
-        .extend([
+    build_github_api_url(
+        api_base,
+        [
             "repos",
             owner,
             repo,
             "issues",
             issue_segment.as_str(),
             "comments",
-        ]);
-    Ok(url)
+        ],
+    )
+    .map_err(|err| anyhow::Error::new(err).into())
 }
 
 impl Sink for GitHubCommentSink {
@@ -160,18 +171,14 @@ impl Sink for GitHubCommentSink {
     fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
             let payload = Self::build_payload(event, self.max_chars);
+            let request = apply_github_api_headers(
+                self.client.post(self.api_url.as_str()).json(&payload),
+                GitHubApiRequestOptions::new()
+                    .with_user_agent("notify-kit")
+                    .with_bearer_token(Some(self.token.expose_secret())),
+            );
 
-            let resp = send_reqwest(
-                self.client
-                    .post(self.api_url.as_str())
-                    .header("Accept", "application/vnd.github+json")
-                    .header("User-Agent", "notify-kit")
-                    .header("X-GitHub-Api-Version", "2022-11-28")
-                    .bearer_auth(self.token.expose_secret())
-                    .json(&payload),
-                "github comment",
-            )
-            .await?;
+            let resp = send_reqwest(request, "github comment").await?;
             Ok(ensure_http_success(resp, "github comment").await?)
         })
     }
@@ -245,5 +252,16 @@ mod tests {
         assert_eq!(sink.owner, "owner");
         assert_eq!(sink.repo, "repo");
         assert_eq!(sink.token.expose_secret(), "tok");
+    }
+
+    #[test]
+    fn preserves_custom_api_base_path() {
+        let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok")
+            .with_api_base("https://github.example.com/api/v3/");
+        let sink = GitHubCommentSink::new(cfg).expect("build sink");
+        assert_eq!(
+            sink.api_url.as_str(),
+            "https://github.example.com/api/v3/repos/owner/repo/issues/1/comments"
+        );
     }
 }

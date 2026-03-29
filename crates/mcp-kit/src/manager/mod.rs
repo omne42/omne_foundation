@@ -928,10 +928,14 @@ impl Manager {
         };
         let (client, child) = connect_transport(&ctx, server_name, server_cfg, &cwd).await?;
 
-        self.install_connection_parsed(server_name_key, client, child)
-            .await?;
-        self.record_connection_cwd(server_name, &cwd)?;
-        Ok(())
+        let install = self.prepare_transport_install(&server_name_key, &cwd);
+        match install.run(client, child).await {
+            Ok(completed) => self.commit_transport_install(completed),
+            Err(err) => {
+                self.cleanup_failed_connection_install(&server_name_key);
+                Err(err)
+            }
+        }
     }
 
     /// Attach an already-connected `mcp_jsonrpc::Client` and perform MCP initialize.

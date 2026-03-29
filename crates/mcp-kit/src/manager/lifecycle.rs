@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -37,6 +38,16 @@ pub(crate) struct CompletedConnectionInstall {
     init_result: Value,
     mismatch_update: ProtocolVersionMismatchUpdate,
     connection: Connection,
+}
+
+pub(crate) struct PreparedTransportInstall {
+    cwd: std::path::PathBuf,
+    install: PreparedConnectionInstall,
+}
+
+pub(crate) struct CompletedTransportInstall {
+    cwd: std::path::PathBuf,
+    completed: CompletedConnectionInstall,
 }
 
 impl InitializeSnapshot {
@@ -120,10 +131,6 @@ impl InitializeSnapshot {
 }
 
 impl PreparedConnectionInstall {
-    pub(crate) fn server_name(&self) -> &ServerName {
-        &self.server_name
-    }
-
     pub(crate) async fn run(
         self,
         mut client: mcp_jsonrpc::Client,
@@ -214,6 +221,19 @@ impl PreparedConnectionInstall {
     }
 }
 
+impl PreparedTransportInstall {
+    pub(crate) async fn run(
+        self,
+        client: mcp_jsonrpc::Client,
+        child: Option<Child>,
+    ) -> anyhow::Result<CompletedTransportInstall> {
+        Ok(CompletedTransportInstall {
+            cwd: self.cwd,
+            completed: self.install.run(client, child).await?,
+        })
+    }
+}
+
 pub(crate) struct PreparedDisconnect {
     server_name: String,
     connection: Option<Connection>,
@@ -290,6 +310,17 @@ impl Manager {
         }
     }
 
+    pub(crate) fn prepare_transport_install(
+        &self,
+        server_name: &ServerName,
+        cwd: &Path,
+    ) -> PreparedTransportInstall {
+        PreparedTransportInstall {
+            cwd: cwd.to_path_buf(),
+            install: self.prepare_connection_install(server_name),
+        }
+    }
+
     pub(crate) fn cleanup_failed_connection_install(&mut self, server_name: &ServerName) {
         self.clear_connection_side_state(server_name.as_str(), false);
     }
@@ -317,6 +348,16 @@ impl Manager {
             .insert(completed.server_name.clone(), completed.init_result);
         self.conns
             .insert(completed.server_name, completed.connection);
+    }
+
+    pub(crate) fn commit_transport_install(
+        &mut self,
+        completed: CompletedTransportInstall,
+    ) -> anyhow::Result<()> {
+        let server_name = completed.completed.server_name.clone();
+        self.commit_connection_install(completed.completed);
+        self.record_connection_cwd(server_name.as_str(), &completed.cwd)?;
+        Ok(())
     }
 
     pub(crate) fn prepare_disconnect_for_wait(&mut self, server_name: &str) -> PreparedDisconnect {

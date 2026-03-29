@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Remove the dead default pinned-client cache/expiry branch and keep only per-key build locking plus DNS re-resolution, so the public-IP pinned path now matches its actual always-rebuild behavior without carrying misleading cache state.
 - Replace process-global pinned-client cache/build-lock/DNS state with explicit per-`HttpClientProfile` shared state, and keep `select_http_client_with_options(...)` isolated so unrelated callers no longer contend through hidden process-wide HTTP state.
 - Rejoin `http-kit` to workspace dependency/lint governance via workspace-managed dependencies and `[lints] workspace = true`.
 - Fix `select_http_client_with_options(...)` so `enforce_public_ip=false` still rebuilds the unpinned client from `HttpClientOptions` instead of silently discarding the documented option set in favor of the caller's opaque base client.

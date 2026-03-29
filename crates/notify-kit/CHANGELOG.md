@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Added
+- `Event::new_structured` / `with_title_text` / `with_body_text` / `with_tag_text`，并在 `Event` 上新增 `title_text` / `body_text` / `tag_texts`，让通知边界可以保留 `structured-text-kit` 语义而不必提前压平成裸字符串。
 - `log-kit` 集成：关键 warning 路径开始以稳定 `log_code` + 结构化字段形式发射到 `tracing`。
 - `Hub::try_notify`：当缺少 Tokio runtime 时返回错误（避免静默丢通知）。
 - `Hub::send(event).await`：提供可观测的发送结果（等待所有 sinks 完成/超时）。
@@ -48,6 +49,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `FeishuWebhookSink::new_strict` / `new_with_secret_strict`：在构造阶段额外做一次 DNS 公网 IP 校验。
 
 ### Changed
+- `FeishuWebhookSink`：远程 Markdown 图片下载现在始终强制做 DNS 公网 IP 校验，不再跟随 webhook 主请求的 `with_public_ip_check(false)` 放宽，避免正文图片路径引入 SSRF 到内网 / special-use HTTPS 目标。
+- `FeishuWebhookSink`：本地图片 opt-in 从“只开布尔开关”收紧为“显式开启 + 显式 `local_image_root(s)` allowlist”；加载前会先做绝对路径归一、root 边界检查，并拒绝 `..` 逃逸、symlink 组件和其他特殊路径。
 - `notify-kit::Error` 现在保留结构化错误种类与 `sink_failures()` 访问面；`Hub` 的多 sink 失败不再只压平成一段字符串，下游可以稳定检查失败 sink 的索引、名称与原始错误。
 - `GitHubCommentSink` / `TelegramBotSink` 现在和其他严格 sink 一样复用 `http-kit::HttpClientProfile::select_for_url(...)`，默认启用公网 IP 校验，并新增 `with_public_ip_check(...)` 配置入口。
 - `notify-kit` crate 发布包现在只包含 Rust 库发布所需的 `src/`、`Cargo.toml`、`README.md` 与 `CHANGELOG.md`，不再把 bots、文档和脚本一并打进 package。

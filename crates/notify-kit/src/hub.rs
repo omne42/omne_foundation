@@ -253,6 +253,9 @@ impl Hub {
         enabled.contains(kind)
     }
 
+    // Keep returning the original event on backpressure so callers can
+    // preserve existing retry/drop behavior without reconstructing it.
+    #[allow(clippy::result_large_err)]
     fn try_notify_spawn(
         &self,
         handle: tokio::runtime::Handle,

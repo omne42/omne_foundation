@@ -48,6 +48,9 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `FeishuWebhookSink::new_strict` / `new_with_secret_strict`：在构造阶段额外做一次 DNS 公网 IP 校验。
 
 ### Changed
+- `notify-kit::Error` 现在保留结构化错误种类与 `sink_failures()` 访问面；`Hub` 的多 sink 失败不再只压平成一段字符串，下游可以稳定检查失败 sink 的索引、名称与原始错误。
+- `GitHubCommentSink` / `TelegramBotSink` 现在和其他严格 sink 一样复用 `http-kit::HttpClientProfile::select_for_url(...)`，默认启用公网 IP 校验，并新增 `with_public_ip_check(...)` 配置入口。
+- `notify-kit` crate 发布包现在只包含 Rust 库发布所需的 `src/`、`Cargo.toml`、`README.md` 与 `CHANGELOG.md`，不再把 bots、文档和脚本一并打进 package。
 - `GitHubCommentSink` 现在复用 `github-kit` 提供的 GitHub API base/header/url helper，并新增 `GitHubCommentConfig::with_api_base(...)`，让 GitHub Enterprise 之类的自定义 API base 不再被 sink 内部硬编码挡住。
 - `TelegramBotConfig` / `GitHubCommentConfig` / `FeishuWebhookConfig` 及对应 sinks 现在用 `secret-kit::SecretString` 持有长期凭证；`FeishuWebhookSink` 的 webhook secret、tenant access token 与 app secret 也切到同一安全容器，减少 foundation 层把敏感值长期留在普通 `String` 中的路径。
 - `notify-kit`：其余长期凭证持有也统一收口到 `secret-kit::SecretString`。`Bark.device_key`、`DingTalk.secret`、`PushPlus.token`、`ServerChan.send_key` 不再以裸 `String` 长期保存在 config/sink 里；`ServerChan` 还把 send key 从持久化 URL 中拆出，改为按发送请求临时拼装目标 URL。

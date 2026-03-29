@@ -7,7 +7,7 @@ mod hub;
 mod log;
 mod sinks;
 
-pub use crate::error::Error;
+pub use crate::error::{Error, ErrorKind, SinkFailure};
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub use crate::event::{Event, Severity};

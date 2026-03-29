@@ -3,6 +3,7 @@ name = "notify-kit"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+include = ["/src/**", "/Cargo.toml", "/README.md", "/CHANGELOG.md"]
 
 [lints]
 workspace = true

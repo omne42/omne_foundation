@@ -56,6 +56,12 @@ where
     }
 }
 
+/// Serializes same-root bootstrap/load attempts and rolls back resources
+/// created by this attempt if the later `load` step fails.
+///
+/// Rollback is best-effort and scoped to files/directories created during the
+/// current attempt. This helper does not provide a crash-safe or power-loss
+/// recovery transaction.
 pub fn bootstrap_text_resources_then_load<T, E, L>(
     root: &Path,
     manifest: &ResourceManifest,

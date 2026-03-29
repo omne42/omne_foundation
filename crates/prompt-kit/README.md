@@ -46,7 +46,7 @@
 
 - `src/prompts.rs`
   - prompt bootstrap、惰性目录句柄与错误包装
-- 共享懒初始化并发控制与 bootstrap/rollback 流程
+- 共享懒初始化并发控制与 best-effort bootstrap/rollback 流程
   - 由 [`text-assets-kit`](../text-assets-kit/README.md) 提供通用原语，`prompt-kit` 只保留 prompt 域错误映射
 
 ## 当前定位

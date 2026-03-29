@@ -194,7 +194,7 @@ pub struct Resource {
     pub mime_type: Option<String>,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size: Option<i64>,
+    pub size: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub uri: String,
@@ -485,4 +485,46 @@ pub enum ResourcesListChangedNotification {}
 impl McpNotification for ResourcesListChangedNotification {
     const METHOD: &'static str = "notifications/resources/list_changed";
     type Params = ();
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::Resource;
+
+    #[test]
+    fn resource_size_rejects_negative_numbers() {
+        let error = serde_json::from_value::<Resource>(json!({
+            "name": "asset",
+            "uri": "file:///asset",
+            "size": -1
+        }))
+        .expect_err("negative sizes must be rejected");
+
+        assert!(
+            error.to_string().contains("invalid value") || error.to_string().contains("u64"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resource_size_round_trips_non_negative_numbers() {
+        let resource = serde_json::from_value::<Resource>(json!({
+            "name": "asset",
+            "uri": "file:///asset",
+            "size": 42
+        }))
+        .expect("non-negative sizes should deserialize");
+
+        assert_eq!(resource.size, Some(42));
+        assert_eq!(
+            serde_json::to_value(&resource).expect("resource should serialize"),
+            json!({
+                "name": "asset",
+                "uri": "file:///asset",
+                "size": 42
+            })
+        );
+    }
 }

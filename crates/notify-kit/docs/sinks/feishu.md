@@ -3,7 +3,7 @@
 `FeishuWebhookSink` 通过飞书群机器人 webhook 发送消息（可选签名），支持：
 
 - 默认 `text` 消息
-- 对 `Event.body` 中的 Markdown 自动转 `post` 富文本
+- 对 `Event::body()` 中的 Markdown 自动转 `post` 富文本
 - Markdown 图片（`![alt](...)`）可选自动上传为飞书图片并内嵌显示
 
 ## 构造
@@ -115,6 +115,12 @@ let sink = FeishuWebhookSink::new(cfg)?;
 - 如显式指定端口，仅允许 `443`
 - 禁用重定向（redirect）
 - `Debug` 输出默认脱敏（不会泄露完整 webhook URL）
+
+本地图片额外约束：
+
+- 只有显式 `with_local_image_files(true)` 后才允许读取本地文件
+- 必须配置绝对路径 `local_image_root(s)` allow-list
+- 相对路径不会再隐式相对进程 `cwd` 解析；如果要允许相对路径，必须显式设置 `with_local_image_base_dir(...)`
 
 ## 输出格式
 

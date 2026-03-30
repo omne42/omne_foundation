@@ -124,7 +124,7 @@ impl ServerChanSink {
     }
 
     fn build_payload(event: &Event, max_chars: usize) -> serde_json::Value {
-        let title = truncate_chars(&event.title, 256);
+        let title = truncate_chars(event.title().as_ref(), 256);
         let desp = format_event_body_and_tags_limited(event, TextLimits::new(max_chars));
         serde_json::json!({ "title": title, "desp": desp })
     }

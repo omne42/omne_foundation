@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use self::media::{
-    AccessTokenCache, FeishuAppCredentials, normalize_app_credentials, normalize_local_image_roots,
-    normalize_secret,
+    AccessTokenCache, FeishuAppCredentials, normalize_app_credentials,
+    normalize_local_image_base_dir, normalize_local_image_roots, normalize_secret,
 };
 use crate::Event;
 use crate::SecretString;
@@ -33,6 +33,7 @@ pub struct FeishuWebhookConfig {
     pub allow_remote_image_urls: bool,
     pub allow_local_image_files: bool,
     pub local_image_roots: Vec<PathBuf>,
+    pub local_image_base_dir: Option<PathBuf>,
     pub image_upload_max_bytes: usize,
     pub app_id: Option<String>,
     pub app_secret: Option<SecretString>,
@@ -49,6 +50,7 @@ impl std::fmt::Debug for FeishuWebhookConfig {
             .field("allow_remote_image_urls", &self.allow_remote_image_urls)
             .field("allow_local_image_files", &self.allow_local_image_files)
             .field("local_image_roots", &self.local_image_roots)
+            .field("local_image_base_dir", &self.local_image_base_dir)
             .field("image_upload_max_bytes", &self.image_upload_max_bytes)
             .field("app_id", &self.app_id.as_ref().map(|_| "<redacted>"))
             .field(
@@ -70,6 +72,7 @@ impl FeishuWebhookConfig {
             allow_remote_image_urls: false,
             allow_local_image_files: false,
             local_image_roots: Vec::new(),
+            local_image_base_dir: None,
             image_upload_max_bytes: FEISHU_DEFAULT_IMAGE_UPLOAD_MAX_BYTES,
             app_id: None,
             app_secret: None,
@@ -129,6 +132,12 @@ impl FeishuWebhookConfig {
     }
 
     #[must_use]
+    pub fn with_local_image_base_dir(mut self, base_dir: impl Into<PathBuf>) -> Self {
+        self.local_image_base_dir = Some(base_dir.into());
+        self
+    }
+
+    #[must_use]
     pub fn with_image_upload_max_bytes(mut self, max_bytes: usize) -> Self {
         self.image_upload_max_bytes = max_bytes;
         self
@@ -156,6 +165,7 @@ pub struct FeishuWebhookSink {
     allow_remote_image_urls: bool,
     allow_local_image_files: bool,
     local_image_roots: Vec<PathBuf>,
+    local_image_base_dir: Option<PathBuf>,
     image_upload_max_bytes: usize,
     app_credentials: Option<FeishuAppCredentials>,
     tenant_access_token: Arc<tokio::sync::Mutex<TenantAccessTokenState>>,
@@ -179,6 +189,7 @@ impl std::fmt::Debug for FeishuWebhookSink {
             .field("allow_remote_image_urls", &self.allow_remote_image_urls)
             .field("allow_local_image_files", &self.allow_local_image_files)
             .field("local_image_roots", &self.local_image_roots)
+            .field("local_image_base_dir", &self.local_image_base_dir)
             .field("image_upload_max_bytes", &self.image_upload_max_bytes)
             .field(
                 "app_credentials",
@@ -238,6 +249,7 @@ impl FeishuWebhookSink {
         let app_credentials = normalize_app_credentials(config.app_id, config.app_secret)?;
         let local_image_roots =
             normalize_local_image_roots(config.allow_local_image_files, config.local_image_roots)?;
+        let local_image_base_dir = normalize_local_image_base_dir(config.local_image_base_dir)?;
         let webhook_url = parse_and_validate_https_url(
             &config.webhook_url,
             &["open.feishu.cn", "open.larksuite.com"],
@@ -267,6 +279,7 @@ impl FeishuWebhookSink {
             allow_remote_image_urls: config.allow_remote_image_urls,
             allow_local_image_files: config.allow_local_image_files,
             local_image_roots,
+            local_image_base_dir,
             image_upload_max_bytes: config.image_upload_max_bytes,
             app_credentials,
             tenant_access_token: Arc::new(tokio::sync::Mutex::new(TenantAccessTokenState::Empty)),
@@ -286,6 +299,7 @@ impl FeishuWebhookSink {
         let app_credentials = normalize_app_credentials(config.app_id, config.app_secret)?;
         let local_image_roots =
             normalize_local_image_roots(config.allow_local_image_files, config.local_image_roots)?;
+        let local_image_base_dir = normalize_local_image_base_dir(config.local_image_base_dir)?;
         let webhook_url = parse_and_validate_https_url(
             &config.webhook_url,
             &["open.feishu.cn", "open.larksuite.com"],
@@ -309,6 +323,7 @@ impl FeishuWebhookSink {
             allow_remote_image_urls: config.allow_remote_image_urls,
             allow_local_image_files: config.allow_local_image_files,
             local_image_roots,
+            local_image_base_dir,
             image_upload_max_bytes: config.image_upload_max_bytes,
             app_credentials,
             tenant_access_token: Arc::new(tokio::sync::Mutex::new(TenantAccessTokenState::Empty)),
@@ -451,6 +466,7 @@ mod tests {
             .with_app_credentials("app_id", "app_secret")
             .with_local_image_files(true)
             .with_local_image_root(root)
+            .with_local_image_base_dir(local_image_test_root())
     }
 
     #[test]
@@ -714,6 +730,76 @@ mod tests {
             assert_eq!(loaded.content_type, "image/png");
 
             let _ = std::fs::remove_file(path);
+        });
+    }
+
+    #[test]
+    fn relative_local_image_paths_require_explicit_base_dir() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            let root = local_image_test_root().join(unique_local_image_test_name("relative-root"));
+            let nested = root.join("nested");
+            let path = nested.join("image.png");
+            std::fs::create_dir_all(&nested).expect("create nested dir");
+            std::fs::write(&path, b"png").expect("write local image");
+
+            let sink = FeishuWebhookSink::new(
+                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+                    .with_app_credentials("app_id", "app_secret")
+                    .with_local_image_files(true)
+                    .with_local_image_root(root.clone()),
+            )
+            .expect("build sink");
+
+            let err = sink
+                .load_image("nested/image.png")
+                .await
+                .expect_err("relative path without base dir should fail closed");
+            assert!(
+                err.to_string()
+                    .contains("relative local image paths require explicit base dir"),
+                "{err:#}"
+            );
+
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_dir_all(root);
+        });
+    }
+
+    #[test]
+    fn relative_local_image_paths_use_explicit_base_dir() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            let base = local_image_test_root().join(unique_local_image_test_name("relative-base"));
+            let root = base.join("images");
+            let path = root.join("nested/image.png");
+            std::fs::create_dir_all(path.parent().expect("parent dir")).expect("create nested dir");
+            std::fs::write(&path, b"png").expect("write local image");
+
+            let sink = FeishuWebhookSink::new(
+                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+                    .with_app_credentials("app_id", "app_secret")
+                    .with_local_image_files(true)
+                    .with_local_image_root(root.clone())
+                    .with_local_image_base_dir(base.clone()),
+            )
+            .expect("build sink");
+
+            let loaded = sink
+                .load_image("images/nested/image.png")
+                .await
+                .expect("relative path should resolve from explicit base dir");
+            assert_eq!(loaded.bytes, b"png");
+            assert_eq!(loaded.content_type, "image/png");
+
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_dir_all(base);
         });
     }
 

@@ -40,7 +40,7 @@ use streamable_http_validation::validate_streamable_http_url_untrusted;
 use streamable_http_validation::validate_streamable_http_url_untrusted_dns;
 
 pub(crate) use connect::{ConnectContext, connect_transport};
-pub(crate) use handlers::is_in_manager_handler_scope;
+pub(crate) use handlers::{is_in_manager_handler_scope, scope_manager_handler_call};
 pub(crate) use streamable_http_validation::should_disconnect_after_jsonrpc_error;
 
 static NEXT_MANAGER_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
@@ -530,7 +530,6 @@ impl Default for Manager {
 }
 
 impl Manager {
-    #[cfg(test)]
     pub(crate) fn active_handler_scopes(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.active_handler_scopes)
     }

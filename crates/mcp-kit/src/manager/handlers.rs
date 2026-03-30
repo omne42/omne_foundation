@@ -24,7 +24,7 @@ pub(crate) fn is_in_manager_handler_scope(manager_instance_id: u64) -> bool {
         .unwrap_or(false)
 }
 
-async fn scope_manager_handler_call<T>(
+pub(crate) async fn scope_manager_handler_call<T>(
     manager_instance_id: u64,
     active_handler_scopes: Arc<AtomicU64>,
     fut: impl Future<Output = T>,

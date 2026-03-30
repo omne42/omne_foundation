@@ -1218,6 +1218,9 @@ async fn streamable_http_request_timeout_surfaces_wait_timeout() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn streamable_http_request_timeout_does_not_abort_long_lived_post_sse_response() {
+    const REQUEST_TIMEOUT: Duration = Duration::from_millis(150);
+    const KEEP_ALIVE_INTERVAL: Duration = Duration::from_millis(60);
+
     let Some(listener) = bind_loopback_listener_or_skip().await else {
         return;
     };
@@ -1262,8 +1265,8 @@ async fn streamable_http_request_timeout_does_not_abort_long_lived_post_sse_resp
                             .await;
                         let _ = socket.flush().await;
 
-                        for _ in 0..3 {
-                            tokio::time::sleep(Duration::from_millis(40)).await;
+                        for _ in 0..4 {
+                            tokio::time::sleep(KEEP_ALIVE_INTERVAL).await;
                             let _ = socket.write_all(b": keep-alive\n\n").await;
                             let _ = socket.flush().await;
                         }
@@ -1292,7 +1295,7 @@ async fn streamable_http_request_timeout_does_not_abort_long_lived_post_sse_resp
     let client = mcp_jsonrpc::Client::connect_streamable_http_with_options(
         &url,
         mcp_jsonrpc::StreamableHttpOptions {
-            request_timeout: Some(Duration::from_millis(50)),
+            request_timeout: Some(REQUEST_TIMEOUT),
             ..Default::default()
         },
         mcp_jsonrpc::SpawnOptions::default(),

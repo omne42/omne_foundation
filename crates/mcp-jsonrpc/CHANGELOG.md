@@ -17,6 +17,9 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `mcp-jsonrpc`：`streamable_http` 现在会在初始 SSE 已建立后遇到新的 `mcp-session-id` 时主动切断旧 SSE 并按新 session 重连，避免 response/notification 继续挂在过期 session 上。
 - `mcp-jsonrpc`：修复 active-SSE rollover 实现里的关闭回归，`Client::close()` abort transport tasks 时会同步终止当前 SSE pump，不再留下悬挂 SSE 连接阻塞关闭路径。
 - `mcp-jsonrpc`：`streamable_http` 现在会在把同一个 SSE event 的多行 `data:` 写回内部 JSON-RPC 行流前先压平成单行 JSON，避免 pretty/multiline 响应被拆成半截消息。
+- `mcp-jsonrpc`：无 Tokio runtime 的 detached fallback 不再依赖单线程串行 `block_on` 队列；后台补偿任务现在通过可并发的内部 runtime 执行，并在初始化失败时 fail-closed 而不是 panic。
+- `mcp-jsonrpc`：所有通用出站写路径现在都会执行 `Limits.max_message_bytes` 限制，超大 request/response/batch 会在写入前以 `InvalidInput` 拒绝，避免不同 transport 对消息上限执行不一致。
+- 提高了 `streamable_http` 长寿命 POST SSE timeout 回归测试的时间预算，保持“总时长超过 timeout 但持续有活动时不应失败”的语义，同时消除本地门禁的调度彩票。
 - Locked the multiline SSE normalization path behind crate-local regression coverage so future refactors do not reintroduce line-delimited JSON-RPC framing splits.
 - Exposed `mcp-jsonrpc::Error` as a stable `error-kit::ErrorRecord` mapping with machine-readable error codes, categories, and retry advice.
 - Added a regression test that keeps `streamable_http` long-lived POST SSE responses green when they outlive `request_timeout` but continue producing events.

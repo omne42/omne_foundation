@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, mpsc as std_mpsc};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use error_kit::{ErrorCategory, ErrorCode, ErrorRecord, ErrorRetryAdvice};
@@ -44,6 +44,7 @@ use stdout_log::LogState;
 pub type StdoutLogRedactor = Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
 
 const DEFAULT_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+const DETACHED_TASK_TIMEOUT: Duration = Duration::from_secs(5);
 const REUSABLE_LINE_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 const READ_LINE_INITIAL_CAP_BYTES: usize = 4 * 1024;
 const TOKIO_TIME_DRIVER_ERROR: &str =
@@ -613,6 +614,7 @@ impl DiagnosticsState {
 #[derive(Clone)]
 pub struct ClientHandle {
     write: Arc<tokio::sync::Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
+    max_message_bytes: usize,
     next_id: Arc<AtomicI64>,
     pending: PendingRequests,
     max_pending_requests: usize,
@@ -675,6 +677,19 @@ fn serialize_json_line(value: &impl Serialize) -> Result<Vec<u8>, Error> {
     Ok(line)
 }
 
+fn enforce_outbound_message_limit(line: &[u8], max_message_bytes: usize) -> Result<(), Error> {
+    let payload_len = line.strip_suffix(b"\n").unwrap_or(line).len();
+    if payload_len > max_message_bytes {
+        return Err(Error::protocol(
+            ProtocolErrorKind::InvalidInput,
+            format!(
+                "jsonrpc message too large: {payload_len} bytes exceeds limit {max_message_bytes}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn serialize_json_value(value: &impl Serialize) -> Result<Value, Error> {
     Ok(serde_json::to_value(value)?)
 }
@@ -721,12 +736,25 @@ struct BatchResponseWriter {
 }
 
 struct DetachedRuntime {
-    tx: std_mpsc::Sender<DetachedTask>,
+    runtime: tokio::runtime::Runtime,
 }
 
 impl DetachedRuntime {
-    fn spawn(&self, task: DetachedTask) {
-        let _ = self.tx.send(task);
+    fn new() -> Result<Self, std::io::Error> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("mcp-jsonrpc-detached")
+            .build()?;
+        Ok(Self { runtime })
+    }
+
+    fn spawn(&self, task_name: &str, task: DetachedTask) {
+        let task_name = task_name.to_string();
+        drop(self.runtime.spawn(async move {
+            let _ = tokio::time::timeout(DETACHED_TASK_TIMEOUT, task).await;
+            let _ = task_name;
+        }));
     }
 }
 
@@ -736,32 +764,26 @@ fn spawn_detached(task_name: &str, task: impl Future<Output = ()> + Send + 'stat
         return;
     }
 
-    detached_runtime(task_name).spawn(Box::pin(task));
+    if let Some(runtime) = detached_runtime(task_name) {
+        runtime.spawn(task_name, Box::pin(task));
+    }
 }
 
-fn detached_runtime(task_name: &str) -> &'static DetachedRuntime {
+fn detached_runtime(task_name: &str) -> Option<&'static DetachedRuntime> {
     static DETACHED_RUNTIME: OnceLock<DetachedRuntime> = OnceLock::new();
-    DETACHED_RUNTIME.get_or_init(|| {
-        let (tx, rx) = std_mpsc::channel::<DetachedTask>();
-        std::thread::Builder::new()
-            .name("mcp-jsonrpc-detached".to_string())
-            .spawn(move || {
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(runtime) => runtime,
-                    Err(_) => return,
-                };
-                while let Ok(task) = rx.recv() {
-                    runtime.block_on(task);
-                }
-            })
-            .unwrap_or_else(|err| {
-                panic!("spawn detached mcp-jsonrpc runtime ({task_name}): {err}")
-            });
-        DetachedRuntime { tx }
-    })
+    if let Some(runtime) = DETACHED_RUNTIME.get() {
+        return Some(runtime);
+    }
+
+    let runtime = match DetachedRuntime::new() {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!("mcp-jsonrpc: failed to initialize detached runtime for {task_name}: {err}");
+            return None;
+        }
+    };
+
+    Some(DETACHED_RUNTIME.get_or_init(|| runtime))
 }
 
 impl std::fmt::Debug for BatchResponseWriter {
@@ -942,6 +964,12 @@ impl RequestResponder {
 }
 
 impl ClientHandle {
+    fn serialize_outbound_json_line(&self, value: &impl Serialize) -> Result<Vec<u8>, Error> {
+        let line = serialize_json_line(value)?;
+        enforce_outbound_message_limit(&line, self.max_message_bytes)?;
+        Ok(line)
+    }
+
     pub fn stats(&self) -> ClientStats {
         self.stats.snapshot()
     }
@@ -1045,7 +1073,7 @@ impl ClientHandle {
             method,
             params: params.as_ref(),
         };
-        let line = serialize_json_line(&msg)?;
+        let line = self.serialize_outbound_json_line(&msg)?;
         self.write_line(&line).await?;
         Ok(())
     }
@@ -1115,7 +1143,7 @@ impl ClientHandle {
             method,
             params: params.as_ref(),
         };
-        let line = serialize_json_line(&req)?;
+        let line = self.serialize_outbound_json_line(&req)?;
         let recv_result = match timeout {
             Some(timeout) => {
                 let deadline = tokio::time::Instant::now() + timeout;
@@ -1221,7 +1249,7 @@ impl ClientHandle {
     }
 
     async fn write_json_line(&self, value: &impl Serialize) -> Result<(), Error> {
-        let line = serialize_json_line(value)?;
+        let line = self.serialize_outbound_json_line(value)?;
         self.write_line(&line).await
     }
 
@@ -1374,6 +1402,7 @@ impl Client {
         let notify_cap = limits.notifications_capacity.max(1);
         let request_cap = limits.requests_capacity.max(1);
         let max_pending_requests = limits.max_pending_requests.max(1);
+        let max_message_bytes = normalize_max_message_bytes(limits.max_message_bytes);
         let (notify_tx, notify_rx) = mpsc::channel::<Notification>(notify_cap);
         let (request_tx, request_rx) = mpsc::channel::<IncomingRequest>(request_cap);
         let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
@@ -1384,6 +1413,7 @@ impl Client {
         let diagnostics_state = DiagnosticsState::new(&diagnostics);
         let handle = ClientHandle {
             write,
+            max_message_bytes,
             next_id: Arc::new(AtomicI64::new(1)),
             pending: pending.clone(),
             max_pending_requests,
@@ -1411,7 +1441,10 @@ impl Client {
                 stdout_log,
                 stdout_log_redactor,
                 diagnostics_state,
-                limits,
+                limits: Limits {
+                    max_message_bytes,
+                    ..limits
+                },
             },
         );
 
@@ -3106,6 +3139,29 @@ mod stats_tests {
     }
 
     #[test]
+    fn spawn_detached_does_not_block_independent_tasks_behind_a_stuck_task() {
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let (blocked_done_tx, blocked_done_rx) = std::sync::mpsc::channel();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+
+        spawn_detached("test detached blocked task", async move {
+            let _ = release_rx.await;
+            blocked_done_tx.send(()).unwrap();
+        });
+        spawn_detached("test detached ready task", async move {
+            ready_tx.send(()).unwrap();
+        });
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("independent detached task should not wait for a blocked sibling");
+        release_tx.send(()).unwrap();
+        blocked_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("blocked task should finish after release");
+    }
+
+    #[test]
     fn invalid_json_samples_keep_latest_lines_when_buffer_is_full() {
         let diagnostics = DiagnosticsState::new(&DiagnosticsOptions {
             invalid_json_sample_lines: 2,
@@ -3120,6 +3176,87 @@ mod stats_tests {
         assert_eq!(
             diagnostics.invalid_json_samples(),
             vec!["invalid-2".to_string(), "invalid-3".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn outbound_request_rejects_messages_over_limit_before_write() {
+        let (client_stream, server_stream) = tokio::io::duplex(4096);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, _server_write) = tokio::io::split(server_stream);
+
+        let mut options = SpawnOptions::default();
+        options.limits.max_message_bytes = 64;
+        let client = Client::connect_io_with_options(client_read, client_write, options)
+            .await
+            .unwrap();
+
+        let err = client
+            .request(
+                "demo/oversized",
+                serde_json::json!({ "payload": "x".repeat(256) }),
+            )
+            .await
+            .expect_err("oversized request should fail before write");
+        assert!(matches!(
+            err,
+            Error::Protocol(ProtocolError {
+                kind: ProtocolErrorKind::InvalidInput,
+                ..
+            })
+        ));
+
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), lines.next_line())
+                .await
+                .is_err(),
+            "oversized request should not write a partial frame"
+        );
+    }
+
+    #[tokio::test]
+    async fn outbound_response_rejects_messages_over_limit_before_write() {
+        let (client_stream, server_stream) = tokio::io::duplex(4096);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let mut options = SpawnOptions::default();
+        options.limits.max_message_bytes = 64;
+        let mut client = Client::connect_io_with_options(client_read, client_write, options)
+            .await
+            .unwrap();
+        let mut requests = client.take_requests().unwrap();
+
+        server_write
+            .write_all(br#"{"jsonrpc":"2.0","id":1,"method":"demo/oversized"}"#)
+            .await
+            .unwrap();
+        server_write.write_all(b"\n").await.unwrap();
+        server_write.flush().await.unwrap();
+
+        let request = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .expect("request timeout")
+            .expect("request");
+        let err = request
+            .respond_ok(serde_json::json!({ "payload": "x".repeat(256) }))
+            .await
+            .expect_err("oversized response should fail before write");
+        assert!(matches!(
+            err,
+            Error::Protocol(ProtocolError {
+                kind: ProtocolErrorKind::InvalidInput,
+                ..
+            })
+        ));
+
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), lines.next_line())
+                .await
+                .is_err(),
+            "oversized response should not write a partial frame"
         );
     }
 
@@ -3309,6 +3446,7 @@ mod background_close_tests {
             write: Arc::new(tokio::sync::Mutex::new(
                 Box::new(tokio::io::sink()) as Box<dyn AsyncWrite + Send + Unpin>
             )),
+            max_message_bytes: Limits::default().max_message_bytes,
             next_id: Arc::new(AtomicI64::new(1)),
             pending: pending.clone(),
             max_pending_requests: 1,

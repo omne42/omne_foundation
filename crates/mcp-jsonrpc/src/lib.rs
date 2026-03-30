@@ -964,6 +964,14 @@ impl RequestResponder {
 }
 
 impl ClientHandle {
+    fn begin_close(&self, reason: String) -> bool {
+        if self.close_reason.set(reason).is_err() {
+            return false;
+        }
+        self.closed.store(true, Ordering::Release);
+        true
+    }
+
     fn serialize_outbound_json_line(&self, value: &impl Serialize) -> Result<Vec<u8>, Error> {
         let line = serialize_json_line(value)?;
         enforce_outbound_message_limit(&line, self.max_message_bytes)?;
@@ -982,7 +990,7 @@ impl ClientHandle {
     }
 
     pub fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Relaxed)
+        self.closed.load(Ordering::Acquire) || self.close_reason.get().is_some()
     }
 
     pub fn close_reason(&self) -> Option<String> {
@@ -1006,14 +1014,9 @@ impl ClientHandle {
     }
 
     fn schedule_close_once(&self, reason: String) {
-        if self
-            .closed
-            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err()
-        {
+        if !self.begin_close(reason.clone()) {
             return;
         }
-        let _ = self.close_reason.set(reason.clone()); // pre-commit: allow-let-underscore
         let handle = self.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             drop(runtime.spawn(async move {
@@ -1031,15 +1034,16 @@ impl ClientHandle {
     }
 
     fn check_closed(&self) -> Result<(), Error> {
-        if !self.closed.load(Ordering::Relaxed) {
+        if let Some(reason) = self.close_reason.get() {
+            return Err(Error::protocol(ProtocolErrorKind::Closed, reason.clone()));
+        }
+        if !self.closed.load(Ordering::Acquire) {
             return Ok(());
         }
-        let reason = self
-            .close_reason
-            .get()
-            .cloned()
-            .unwrap_or_else(|| "client closed".to_string());
-        Err(Error::protocol(ProtocolErrorKind::Closed, reason))
+        Err(Error::protocol(
+            ProtocolErrorKind::Closed,
+            "client closed".to_string(),
+        ))
     }
 
     pub(crate) async fn close_with_reason(&self, reason: impl Into<String>) {
@@ -1053,9 +1057,9 @@ impl ClientHandle {
 
     pub(crate) async fn close_with_error(&self, reason: impl Into<String>, err: Error) {
         let reason = reason.into();
-
-        self.closed.store(true, Ordering::Relaxed);
-        let _ = self.close_reason.set(reason);
+        if !self.begin_close(reason) {
+            return;
+        }
 
         drain_pending(&self.pending, &err);
         let mut write = self.write.lock().await;
@@ -1663,8 +1667,7 @@ impl Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
-        self.handle.closed.store(true, Ordering::Relaxed);
-        let _ = self.handle.close_reason.set("client closed".to_string());
+        let _ = self.handle.begin_close("client closed".to_string());
         self.task.abort();
         for task in self.transport_tasks.drain(..) {
             task.abort();
@@ -3436,6 +3439,24 @@ mod wait_timeout_tests {
 mod background_close_tests {
     use super::*;
 
+    fn test_handle(closed: bool) -> ClientHandle {
+        ClientHandle {
+            write: Arc::new(tokio::sync::Mutex::new(
+                Box::new(tokio::io::sink()) as Box<dyn AsyncWrite + Send + Unpin>
+            )),
+            max_message_bytes: Limits::default().max_message_bytes,
+            next_id: Arc::new(AtomicI64::new(1)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            max_pending_requests: 1,
+            cancelled_request_ids: Arc::new(Mutex::new(CancelledRequestIdsState::default())),
+            stats: Arc::new(ClientStatsInner::default()),
+            diagnostics: None,
+            closed: Arc::new(AtomicBool::new(closed)),
+            close_reason: Arc::new(OnceLock::new()),
+            stdout_log_write_error: Arc::new(OnceLock::new()),
+        }
+    }
+
     #[test]
     fn schedule_close_once_without_runtime_drains_pending_without_panic() {
         let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
@@ -3443,19 +3464,8 @@ mod background_close_tests {
         lock_pending(&pending).insert(Id::Integer(1), tx);
 
         let handle = ClientHandle {
-            write: Arc::new(tokio::sync::Mutex::new(
-                Box::new(tokio::io::sink()) as Box<dyn AsyncWrite + Send + Unpin>
-            )),
-            max_message_bytes: Limits::default().max_message_bytes,
-            next_id: Arc::new(AtomicI64::new(1)),
             pending: pending.clone(),
-            max_pending_requests: 1,
-            cancelled_request_ids: Arc::new(Mutex::new(CancelledRequestIdsState::default())),
-            stats: Arc::new(ClientStatsInner::default()),
-            diagnostics: None,
-            closed: Arc::new(AtomicBool::new(false)),
-            close_reason: Arc::new(OnceLock::new()),
-            stdout_log_write_error: Arc::new(OnceLock::new()),
+            ..test_handle(false)
         };
 
         handle.schedule_close_once("closed outside runtime".to_string());
@@ -3478,6 +3488,30 @@ mod background_close_tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn check_closed_uses_close_reason_during_close_publication() {
+        let handle = test_handle(false);
+        let _ = handle
+            .close_reason
+            .set("closing transport after notification failure".to_string());
+
+        assert!(handle.is_closed());
+        let err = handle
+            .check_closed()
+            .expect_err("visible close reason should already fail closed");
+        assert!(matches!(
+            err,
+            Error::Protocol(ProtocolError {
+                kind: ProtocolErrorKind::Closed,
+                ..
+            })
+        ));
+        assert!(
+            err.to_string()
+                .contains("closing transport after notification failure")
+        );
     }
 }
 

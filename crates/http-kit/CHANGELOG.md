@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Break `select_http_client_with_options(...)` by removing the unused `base_client` parameter, so the public API no longer pretends to preserve opaque `reqwest::Client` state that it must rebuild from `HttpClientOptions` anyway.
 - Remove the dead default pinned-client cache/expiry branch and keep only per-key build locking plus DNS re-resolution, so the public-IP pinned path now matches its actual always-rebuild behavior without carrying misleading cache state.
 - Replace process-global pinned-client cache/build-lock/DNS state with explicit per-`HttpClientProfile` shared state, and keep `select_http_client_with_options(...)` isolated so unrelated callers no longer contend through hidden process-wide HTTP state.
 - Rejoin `http-kit` to workspace dependency/lint governance via workspace-managed dependencies and `[lints] workspace = true`.

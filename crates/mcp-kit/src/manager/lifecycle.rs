@@ -362,7 +362,7 @@ impl Manager {
         let server_name = completed.completed.server_name.clone();
         self.commit_connection_install(completed.completed);
         self.record_connection_server_config(server_name.as_str(), &completed.server_config)?;
-        self.record_connection_cwd(server_name.as_str(), &completed.cwd)?;
+        self.record_resolved_connection_cwd(server_name, completed.cwd);
         Ok(())
     }
 

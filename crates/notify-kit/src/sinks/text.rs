@@ -209,6 +209,12 @@ pub(crate) fn format_event_text_limited(event: &Event, limits: TextLimits) -> St
     format_event_text_parts_limited(event, limits, true)
 }
 
+#[cfg(any(
+    not(feature = "selective-sinks"),
+    feature = "bark",
+    feature = "pushplus",
+    feature = "serverchan"
+))]
 pub(crate) fn format_event_body_and_tags_limited(event: &Event, limits: TextLimits) -> String {
     format_event_text_parts_limited(event, limits, false)
 }

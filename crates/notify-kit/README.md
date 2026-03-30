@@ -50,9 +50,7 @@
 - `src/hub.rs`
   - hub 配置、限制、并发发送与错误聚合
 - `src/sinks/mod.rs`
-  - sink trait 与各实现导出
-- `src/sinks/http/`
-  - webhook 类 sink 的共享 HTTP 逻辑
+  - sink trait、条件导出和 selective feature 入口
 - `src/env.rs`
   - convenience helper，不是核心协议边界
 - `bots/`
@@ -102,6 +100,37 @@ notify-kit = { path = "crates/notify-kit" }
 ```
 
 > 以上版本与路径仅为示例；请按你的项目实际情况调整。
+
+## Features
+
+默认兼容模式下，`notify-kit` 会继续像现在一样导出全部内置 sinks，不要求调用方显式打开每个 sink feature。
+
+如果你明确想把 crate 收紧成“只编译/导出所选 sinks”，可以显式进入 selective 模式：
+
+```toml
+[dependencies]
+notify-kit = { path = "crates/notify-kit", default-features = false, features = ["selective-sinks", "sound", "slack"] }
+```
+
+可选 sink features：
+
+- `bark`
+- `dingtalk`
+- `discord`
+- `feishu`
+- `generic-webhook`
+- `github`
+- `pushplus`
+- `serverchan`
+- `slack`
+- `sound`
+- `telegram`
+- `wecom`
+
+补充说明：
+
+- `sound-command` 现在依赖 `sound`，因为它只扩展 `SoundSink` 的外部命令能力。
+- selective 模式下，`notify_kit::env::build_hub_from_standard_env(...)` 如果遇到未启用的 sink 配置，会返回显式错误，而不是静默忽略配置。
 
 ## 文档
 

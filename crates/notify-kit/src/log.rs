@@ -41,6 +41,7 @@ pub(crate) fn warn_hub_notify_failed(kind: &str, error: &str) {
     record.emit_tracing();
 }
 
+#[cfg(any(not(feature = "selective-sinks"), feature = "feishu"))]
 pub(crate) fn warn_feishu_image_load_failed(image_src: &str, error: &str) {
     let mut record = warn_record(
         "notify.feishu.image_load_failed",
@@ -53,6 +54,7 @@ pub(crate) fn warn_feishu_image_load_failed(image_src: &str, error: &str) {
     record.emit_tracing();
 }
 
+#[cfg(any(not(feature = "selective-sinks"), feature = "feishu"))]
 pub(crate) fn warn_feishu_image_upload_failed(image_src: &str, error: &str) {
     let mut record = warn_record(
         "notify.feishu.image_upload_failed",
@@ -65,7 +67,10 @@ pub(crate) fn warn_feishu_image_upload_failed(image_src: &str, error: &str) {
     record.emit_tracing();
 }
 
-#[cfg(feature = "sound-command")]
+#[cfg(all(
+    feature = "sound-command",
+    any(not(feature = "selective-sinks"), feature = "sound")
+))]
 pub(crate) fn warn_sound_command_exited_non_zero(program: &str, status: &str) {
     let mut record = warn_record(
         "notify.sound.command_exited_non_zero",
@@ -78,7 +83,10 @@ pub(crate) fn warn_sound_command_exited_non_zero(program: &str, status: &str) {
     record.emit_tracing();
 }
 
-#[cfg(not(feature = "sound-command"))]
+#[cfg(all(
+    not(feature = "sound-command"),
+    any(not(feature = "selective-sinks"), feature = "sound")
+))]
 pub(crate) fn warn_sound_command_disabled_fallback() {
     let mut record = warn_record(
         "notify.sound.command_disabled_fallback",

@@ -134,7 +134,11 @@ impl FeishuWebhookSink {
             return Err(anyhow::anyhow!("local image files are disabled").into());
         }
 
-        let resolved_path = resolve_allowed_local_image_path(src, &self.local_image_roots)?;
+        let resolved_path = resolve_allowed_local_image_path(
+            src,
+            &self.local_image_roots,
+            self.local_image_base_dir.as_deref(),
+        )?;
         let bytes =
             read_local_image_file(resolved_path.clone(), self.image_upload_max_bytes).await?;
         if bytes.is_empty() {
@@ -426,6 +430,12 @@ pub(super) fn normalize_local_image_roots(
     Ok(normalized)
 }
 
+pub(super) fn normalize_local_image_base_dir(
+    base_dir: Option<PathBuf>,
+) -> crate::Result<Option<PathBuf>> {
+    base_dir.map(normalize_local_image_root).transpose()
+}
+
 fn normalize_local_image_root(root: PathBuf) -> crate::Result<PathBuf> {
     if !root.is_absolute() {
         return Err(anyhow::anyhow!(
@@ -454,7 +464,11 @@ fn normalize_local_image_root(root: PathBuf) -> crate::Result<PathBuf> {
     Ok(root)
 }
 
-fn resolve_allowed_local_image_path(src: &str, roots: &[PathBuf]) -> crate::Result<PathBuf> {
+fn resolve_allowed_local_image_path(
+    src: &str,
+    roots: &[PathBuf],
+    base_dir: Option<&Path>,
+) -> crate::Result<PathBuf> {
     if roots.is_empty() {
         return Err(anyhow::anyhow!(
             "local image files require at least one configured local image root"
@@ -462,7 +476,7 @@ fn resolve_allowed_local_image_path(src: &str, roots: &[PathBuf]) -> crate::Resu
         .into());
     }
 
-    let resolved = resolve_local_image_path(Path::new(src))?;
+    let resolved = resolve_local_image_path(Path::new(src), base_dir)?;
     if roots.iter().any(|root| resolved.starts_with(root)) {
         return Ok(resolved);
     }
@@ -474,10 +488,15 @@ fn resolve_allowed_local_image_path(src: &str, roots: &[PathBuf]) -> crate::Resu
     .into())
 }
 
-fn resolve_local_image_path(path: &Path) -> crate::Result<PathBuf> {
-    let base = std::env::current_dir()
-        .map_err(|err| crate::Error::from(anyhow::anyhow!("determine current directory: {err}")))?;
-    Ok(resolve_local_image_path_with_base(&base, path))
+fn resolve_local_image_path(path: &Path, base_dir: Option<&Path>) -> crate::Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(resolve_local_image_path_with_base(Path::new("/"), path));
+    }
+
+    let Some(base_dir) = base_dir else {
+        return Err(anyhow::anyhow!("relative local image paths require explicit base dir").into());
+    };
+    Ok(resolve_local_image_path_with_base(base_dir, path))
 }
 
 fn resolve_local_image_path_with_base(base: &Path, path: &Path) -> PathBuf {
@@ -700,9 +719,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        ensure_local_image_path_has_no_symlink_components, normalize_local_image_roots,
-        resolve_local_image_path_with_base, tenant_access_token_cache_ttl,
-        tenant_access_token_refresh_waiter,
+        ensure_local_image_path_has_no_symlink_components, normalize_local_image_base_dir,
+        normalize_local_image_roots, resolve_local_image_path, resolve_local_image_path_with_base,
+        tenant_access_token_cache_ttl, tenant_access_token_refresh_waiter,
     };
 
     #[tokio::test]
@@ -741,6 +760,24 @@ mod tests {
         let err = normalize_local_image_roots(true, vec![PathBuf::from("relative-root")])
             .expect_err("relative roots should be rejected");
         assert!(err.to_string().contains("absolute paths"), "{err:#}");
+    }
+
+    #[test]
+    fn normalize_local_image_base_dir_rejects_relative_paths() {
+        let err = normalize_local_image_base_dir(Some(PathBuf::from("relative-root")))
+            .expect_err("relative base dir should be rejected");
+        assert!(err.to_string().contains("absolute paths"), "{err:#}");
+    }
+
+    #[test]
+    fn resolve_local_image_path_requires_explicit_base_dir_for_relative_paths() {
+        let err = resolve_local_image_path(Path::new("image.png"), None)
+            .expect_err("relative path without base dir should fail closed");
+        assert!(
+            err.to_string()
+                .contains("relative local image paths require explicit base dir"),
+            "{err:#}"
+        );
     }
 
     #[cfg(unix)]

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use structured_text_kit::StructuredText;
@@ -14,26 +15,19 @@ pub enum Severity {
 pub struct Event {
     pub kind: String,
     pub severity: Severity,
-    pub title: String,
-    pub title_text: StructuredText,
-    pub body: Option<String>,
-    pub body_text: Option<StructuredText>,
-    pub tags: BTreeMap<String, String>,
-    pub tag_texts: BTreeMap<String, StructuredText>,
+    title: StructuredText,
+    body: Option<StructuredText>,
+    tags: BTreeMap<String, StructuredText>,
 }
 
 impl Event {
     pub fn new(kind: impl Into<String>, severity: Severity, title: impl Into<String>) -> Self {
-        let title = title.into();
         Self {
             kind: kind.into(),
             severity,
-            title_text: StructuredText::freeform(title.clone()),
-            title,
+            title: StructuredText::freeform(title.into()),
             body: None,
-            body_text: None,
             tags: BTreeMap::new(),
-            tag_texts: BTreeMap::new(),
         }
     }
 
@@ -45,53 +39,82 @@ impl Event {
         Self {
             kind: kind.into(),
             severity,
-            title: title_text.to_string(),
-            title_text,
+            title: title_text,
             body: None,
-            body_text: None,
             tags: BTreeMap::new(),
-            tag_texts: BTreeMap::new(),
         }
     }
 
     #[must_use]
     pub fn with_body(mut self, body: impl Into<String>) -> Self {
-        let body = body.into();
-        self.body_text = Some(StructuredText::freeform(body.clone()));
-        self.body = Some(body);
+        self.body = Some(StructuredText::freeform(body.into()));
         self
     }
 
     #[must_use]
     pub fn with_title_text(mut self, title_text: StructuredText) -> Self {
-        self.title = title_text.to_string();
-        self.title_text = title_text;
+        self.title = title_text;
         self
     }
 
     #[must_use]
     pub fn with_body_text(mut self, body_text: StructuredText) -> Self {
-        self.body = Some(body_text.to_string());
-        self.body_text = Some(body_text);
+        self.body = Some(body_text);
         self
     }
 
     #[must_use]
     pub fn with_tag(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        let key = key.into();
-        let value = value.into();
-        self.tag_texts
-            .insert(key.clone(), StructuredText::freeform(value.clone()));
-        self.tags.insert(key, value);
+        self.tags
+            .insert(key.into(), StructuredText::freeform(value.into()));
         self
     }
 
     #[must_use]
     pub fn with_tag_text(mut self, key: impl Into<String>, value: StructuredText) -> Self {
-        let key = key.into();
-        self.tags.insert(key.clone(), value.to_string());
-        self.tag_texts.insert(key, value);
+        self.tags.insert(key.into(), value);
         self
+    }
+
+    pub fn title(&self) -> Cow<'_, str> {
+        structured_text_to_cow(&self.title)
+    }
+
+    pub fn title_text(&self) -> &StructuredText {
+        &self.title
+    }
+
+    pub fn body(&self) -> Option<Cow<'_, str>> {
+        self.body.as_ref().map(structured_text_to_cow)
+    }
+
+    pub fn body_text(&self) -> Option<&StructuredText> {
+        self.body.as_ref()
+    }
+
+    pub fn tags(&self) -> impl Iterator<Item = (&str, Cow<'_, str>)> + '_ {
+        self.tags
+            .iter()
+            .map(|(key, value)| (key.as_str(), structured_text_to_cow(value)))
+    }
+
+    pub fn tag(&self, key: &str) -> Option<Cow<'_, str>> {
+        self.tags.get(key).map(structured_text_to_cow)
+    }
+
+    pub fn tag_text(&self, key: &str) -> Option<&StructuredText> {
+        self.tags.get(key)
+    }
+
+    pub fn tag_texts(&self) -> &BTreeMap<String, StructuredText> {
+        &self.tags
+    }
+}
+
+fn structured_text_to_cow(value: &StructuredText) -> Cow<'_, str> {
+    match value.freeform_text() {
+        Some(text) => Cow::Borrowed(text),
+        None => Cow::Owned(value.to_string()),
     }
 }
 
@@ -106,21 +129,20 @@ mod tests {
             .with_body("body")
             .with_tag("thread_id", "t1");
 
-        assert_eq!(event.title_text.freeform_text(), Some("title"));
+        assert_eq!(event.title_text().freeform_text(), Some("title"));
         assert_eq!(
-            event
-                .body_text
-                .as_ref()
-                .and_then(StructuredText::freeform_text),
+            event.body_text().and_then(StructuredText::freeform_text),
             Some("body")
         );
         assert_eq!(
             event
-                .tag_texts
-                .get("thread_id")
+                .tag_text("thread_id")
                 .and_then(StructuredText::freeform_text),
             Some("t1")
         );
+        assert_eq!(event.title().as_ref(), "title");
+        assert_eq!(event.body().as_deref(), Some("body"));
+        assert_eq!(event.tag("thread_id").as_deref(), Some("t1"));
     }
 
     #[test]
@@ -133,21 +155,14 @@ mod tests {
             .with_body_text(body.clone())
             .with_tag_text("thread_id", tag.clone());
 
-        assert_eq!(event.title_text, title);
-        assert_eq!(event.body_text, Some(body));
-        assert_eq!(event.tag_texts.get("thread_id"), Some(&tag));
-        assert_eq!(event.title, event.title_text.to_string());
+        assert_eq!(event.title_text(), &title);
+        assert_eq!(event.body_text(), Some(&body));
+        assert_eq!(event.tag_text("thread_id"), Some(&tag));
+        assert_eq!(event.title().into_owned(), title.to_string());
+        assert_eq!(event.body().map(Cow::into_owned), Some(body.to_string()));
         assert_eq!(
-            event.body.as_deref(),
-            event.body_text.as_ref().map(ToString::to_string).as_deref()
-        );
-        assert_eq!(
-            event.tags.get("thread_id"),
-            event
-                .tag_texts
-                .get("thread_id")
-                .map(ToString::to_string)
-                .as_ref()
+            event.tag("thread_id").map(Cow::into_owned),
+            Some(tag.to_string())
         );
     }
 }

@@ -49,6 +49,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `FeishuWebhookSink::new_strict` / `new_with_secret_strict`：在构造阶段额外做一次 DNS 公网 IP 校验。
 
 ### Changed
+- `Event` 现在收口为单一 `StructuredText` 真相，`title` / `body` / `tags` 不再作为可直接写坏的公开字段暴露；调用方改用 `title()` / `body()` / `tags()` 以及 `title_text()` / `body_text()` / `tag_texts()` 访问，避免字符串侧和结构化侧出现自相矛盾状态。
+- `FeishuWebhookConfig` 新增 `local_image_base_dir` / `with_local_image_base_dir(...)`；本地图片相对路径不再隐式依赖进程 `current_dir()`，只有显式配置 base dir 后才允许解析相对路径。
 - `notify-kit`：新增兼容优先的 sink 级 feature 切分。默认模式仍继续导出全部内置 sinks，避免现有调用方因为未声明 feature 而失效；只有显式启用 `selective-sinks` 时，crate 才会按 `sound` / `slack` / `github` 等单独 feature 收紧导出与编译面。`notify_kit::env::build_hub_from_standard_env(...)` 在 selective 模式下如果遇到未启用的 sink 配置，也会返回显式错误而不是静默忽略。
 - `notify-kit`：补齐 `selective-sinks` 子集下 `sinks/text` helper 的 feature gating，避免像 `selective-sinks + github`、`selective-sinks + bark` 这类只启用部分 sink 时触发 `dead_code` 并在 `-D warnings`/跨平台 CI 下失败。
 - `FeishuWebhookSink`：远程 Markdown 图片下载现在始终强制做 DNS 公网 IP 校验，不再跟随 webhook 主请求的 `with_public_ip_check(false)` 放宽，避免正文图片路径引入 SSRF 到内网 / special-use HTTPS 目标。

@@ -56,9 +56,9 @@ impl FeishuWebhookSink {
         }
 
         let Some(body) = event
-            .body
-            .as_deref()
-            .map(str::trim)
+            .body()
+            .map(|value| value.into_owned())
+            .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
         else {
             return Ok(Self::build_text_payload(
@@ -69,7 +69,7 @@ impl FeishuWebhookSink {
             ));
         };
 
-        let markdown_lines = parse_markdown_lines(body);
+        let markdown_lines = parse_markdown_lines(&body);
         if markdown_lines.is_empty() {
             return Ok(Self::build_text_payload(
                 event,
@@ -150,7 +150,7 @@ impl FeishuWebhookSink {
             }
         }
 
-        for (key, value) in &event.tags {
+        for (key, value) in event.tags() {
             if remaining == 0 {
                 break;
             }
@@ -176,7 +176,7 @@ impl FeishuWebhookSink {
             ));
         }
 
-        let title = truncate_chars(event.title.trim(), 256);
+        let title = truncate_chars(event.title().trim(), 256);
         let mut obj = Self::base_payload(timestamp, sign);
         obj.insert("msg_type".to_string(), serde_json::json!("post"));
         obj.insert(

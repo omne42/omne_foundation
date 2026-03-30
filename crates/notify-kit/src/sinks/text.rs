@@ -147,14 +147,15 @@ fn format_event_text_parts_limited(
     }
 
     if include_title {
-        let title = truncate_chars_cow(&event.title, limits.max_title_chars);
+        let rendered_title = event.title();
+        let title = truncate_chars_cow(rendered_title.as_ref(), limits.max_title_chars);
         out.push_str(title.as_ref());
         if out.is_full() {
             return out.finish();
         }
     }
 
-    if let Some(body) = event.body.as_deref() {
+    if let Some(body) = event.body() {
         let body = body.trim();
         if !body.is_empty() {
             if !out.is_empty() {
@@ -175,7 +176,7 @@ fn format_event_text_parts_limited(
         }
     }
 
-    for (idx, (k, v)) in event.tags.iter().enumerate() {
+    for (idx, (k, v)) in event.tags().enumerate() {
         if idx >= limits.max_tags || out.is_full() {
             break;
         }
@@ -198,7 +199,7 @@ fn format_event_text_parts_limited(
         if out.is_full() {
             break;
         }
-        let value = truncate_chars_cow(v, limits.max_tag_value_chars);
+        let value = truncate_chars_cow(v.as_ref(), limits.max_tag_value_chars);
         out.push_str(value.as_ref());
     }
 

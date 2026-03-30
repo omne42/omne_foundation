@@ -275,6 +275,16 @@ fn truncate_chars_cow(input: &str, max_chars: usize) -> Cow<'_, str> {
     Cow::Borrowed(&input[..end])
 }
 
+#[cfg(any(
+    test,
+    not(feature = "selective-sinks"),
+    feature = "bark",
+    feature = "feishu",
+    feature = "pushplus",
+    feature = "serverchan",
+    feature = "slack",
+    feature = "telegram"
+))]
 pub(crate) fn truncate_chars(input: &str, max_chars: usize) -> String {
     truncate_chars_cow(input, max_chars).into_owned()
 }

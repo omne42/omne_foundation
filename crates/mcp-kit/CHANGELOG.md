@@ -10,6 +10,8 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：`SharedManager` 的 config 驱动 `request` / `notify` 现在对已复用连接先走 per-server 读门禁，只把 cold-start / disconnect / reconnect 留在写门禁里；同 server 普通 RPC 在借到 handle 后可并发，而生命周期变更仍会等在读侧收尾后再继续。
+- `mcp-kit`：`shared_manager_request_allows_concurrent_same_server_reuse_after_connect` 回归测试不再假设并发请求的到达顺序固定，只继续验证“两次请求都会在首个响应前抵达 server”，避免把 Tokio 调度先后误判成连接复用回归。
 - `mcp-kit`：`SharedManager` 新增 `spawn_inheriting_handler_scope(...)`，把 handler 子任务回调 `SharedManager` 时的 reentrant fail-fast 语义从“依赖 Tokio task-local 是否碰巧继承”收口成显式入口；同时文档与测试明确了 bare `tokio::spawn(...)` 仍按外部调用处理，不会自动继承 handler scope。
 - `mcp-kit`：`SharedManager::{request_connected,notify_connected}` 现在和 `disconnect` / `disconnect_and_wait` 共用同一条 per-server lifecycle gate，并把 config 驱动 request/notify/connect 路径上的 `cwd` identity 解析挪到 `spawn_blocking` 后台线程，同时复用已解析路径避免重复 canonicalize，减少 async 热路径阻塞并修复 connected I/O 与断连竞态。
 - `mcp-kit`：`streamable_http` 的 URL 现在会在 `ServerConfig::{streamable_http,streamable_http_split}`、`ServerConfig::validate()` 和 `Config::load` 边界先做语法校验，提前拒绝非法 URL、非 `http/https` scheme 和缺失 host 的配置；trust policy 仍只负责后续 trusted/untrusted 出站约束。

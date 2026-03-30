@@ -294,18 +294,28 @@ impl SharedManager {
         cwd: &Path,
     ) -> anyhow::Result<(
         crate::manager::PreparedConnectedClient,
-        OwnedRwLockWriteGuard<()>,
+        OwnedRwLockReadGuard<()>,
     )> {
         let cwd = self
             .resolve_connection_cwd(operation, config.thread_root(), cwd)
             .await?;
-        let gate = self.lock_connect_gate_write(operation, server_name).await?;
+
+        let read_gate = self.lock_connect_gate_read(operation, server_name).await?;
+        if let Some(prepared) = self
+            .try_prepare_reusable_connected_client(operation, config, server_name, Some(&cwd))
+            .await?
+        {
+            return Ok((prepared, read_gate));
+        }
+        drop(read_gate);
+
+        let write_gate = self.lock_connect_gate_write(operation, server_name).await?;
 
         if let Some(prepared) = self
             .try_prepare_reusable_connected_client(operation, config, server_name, Some(&cwd))
             .await?
         {
-            return Ok((prepared, gate));
+            return Ok((prepared, OwnedRwLockWriteGuard::downgrade(write_gate)));
         }
 
         self.ensure_connected_while_gated(operation, config, server_name, &cwd)
@@ -320,7 +330,7 @@ impl SharedManager {
                     server_name.trim()
                 )
             })?;
-        Ok((prepared, gate))
+        Ok((prepared, OwnedRwLockWriteGuard::downgrade(write_gate)))
     }
 
     async fn prepare_existing_connected_client_with_gate(
@@ -2987,6 +2997,141 @@ mod tests {
             .await
             .expect("same thread-root-relative cwd should reuse connection");
         assert_eq!(result, serde_json::json!({ "ok": true }));
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shared_manager_request_allows_concurrent_same_server_reuse_after_connect() {
+        let (client_stream, server_stream) = tokio::io::duplex(4096);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let server_task = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            let init_id = init_value["id"].clone();
+
+            let init_response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": init_id,
+                "result": { "serverInfo": { "name": "demo" } },
+            });
+            let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+            init_response_line.push('\n');
+            server_write
+                .write_all(init_response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let initialized_line = lines.next_line().await.unwrap().unwrap();
+            let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+            assert_eq!(initialized_value["method"], "notifications/initialized");
+
+            let first_line = lines.next_line().await.unwrap().unwrap();
+            let first_request: Value = serde_json::from_str(&first_line).unwrap();
+            assert_eq!(first_request["method"], "ping");
+            let first_id = first_request["id"].clone();
+            let first_request_number = first_request["params"]["request"].as_u64().unwrap();
+
+            let second_line = tokio::time::timeout(Duration::from_millis(200), lines.next_line())
+                .await
+                .expect("second request should arrive before the first response is sent")
+                .unwrap()
+                .unwrap();
+            let second_request: Value = serde_json::from_str(&second_line).unwrap();
+            assert_eq!(second_request["method"], "ping");
+            let second_id = second_request["id"].clone();
+            let second_request_number = second_request["params"]["request"].as_u64().unwrap();
+
+            let mut request_numbers = [first_request_number, second_request_number];
+            request_numbers.sort_unstable();
+            assert_eq!(request_numbers, [1, 2]);
+
+            for (id, request) in [
+                (first_id, first_request_number),
+                (second_id, second_request_number),
+            ] {
+                let response = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "request": request },
+                });
+                let mut response_line = serde_json::to_string(&response).unwrap();
+                response_line.push('\n');
+                server_write
+                    .write_all(response_line.as_bytes())
+                    .await
+                    .unwrap();
+                server_write.flush().await.unwrap();
+            }
+        });
+
+        let cwd = std::env::current_dir().expect("current dir");
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            ServerName::parse("srv").unwrap(),
+            ServerConfig::stdio(vec!["mock-server".to_string()]).unwrap(),
+        );
+        let config = Config::new(ClientConfig::default(), servers);
+
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted);
+        manager
+            .connect_io("srv", client_read, client_write)
+            .await
+            .expect("connect in-memory client");
+        manager
+            .record_connection_cwd("srv", &cwd)
+            .expect("record cwd identity");
+        manager
+            .record_connection_server_config("srv", config.server("srv").expect("config server"))
+            .expect("record config identity");
+
+        let shared = manager.into_shared();
+        let first = {
+            let shared = shared.clone();
+            let config = config.clone();
+            let cwd = cwd.clone();
+            tokio::spawn(async move {
+                shared
+                    .request(
+                        &config,
+                        "srv",
+                        "ping",
+                        Some(serde_json::json!({ "request": 1 })),
+                        &cwd,
+                    )
+                    .await
+            })
+        };
+        let second = {
+            let shared = shared.clone();
+            let config = config.clone();
+            let cwd = cwd.clone();
+            tokio::spawn(async move {
+                shared
+                    .request(
+                        &config,
+                        "srv",
+                        "ping",
+                        Some(serde_json::json!({ "request": 2 })),
+                        &cwd,
+                    )
+                    .await
+            })
+        };
+
+        assert_eq!(
+            first.await.unwrap().unwrap(),
+            serde_json::json!({ "request": 1 })
+        );
+        assert_eq!(
+            second.await.unwrap().unwrap(),
+            serde_json::json!({ "request": 2 })
+        );
         server_task.await.unwrap();
     }
 

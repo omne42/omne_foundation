@@ -1,7 +1,8 @@
 mod catalog_error;
 mod global_catalog;
 mod i18n;
-mod lazy_catalog;
+#[doc(hidden)]
+pub mod lazy_catalog;
 mod locale_selection;
 
 pub use catalog_error::{CatalogInitError, CatalogLocaleError, CliLocaleError};
@@ -10,6 +11,10 @@ pub use i18n::{
     CatalogBootstrapCleanupError, ResourceCatalogError, bootstrap_i18n_catalog,
     load_i18n_catalog_from_directory, reload_i18n_catalog_from_directory,
 };
+#[deprecated(
+    since = "0.1.0",
+    note = "LazyCatalog blocks threads during first initialization; prefer load/bootstrap helpers plus GlobalCatalog for runtime-facing handles."
+)]
 pub use lazy_catalog::LazyCatalog;
 pub use locale_selection::{resolve_locale_from_argv, resolve_locale_from_cli_args};
 

@@ -6,7 +6,7 @@
 
 `i18n-runtime-kit` 负责 runtime i18n adapter 边界。
 
-它把目录/manifest 驱动的运行时文本资源接到 `i18n-kit` 的 catalog 语义上，并提供 lazy/global catalog 句柄供上层 runtime 使用。
+它把目录/manifest 驱动的运行时文本资源接到 `i18n-kit` 的 catalog 语义上，并提供可长期持有的 runtime catalog 句柄供上层使用。
 
 ## 边界
 
@@ -16,7 +16,8 @@
 - 基于 manifest bootstrap 并重建 i18n catalog
 - dynamic catalog reload
 - CLI / argv / env locale 输入解析
-- `LazyCatalog` / `GlobalCatalog`
+- `GlobalCatalog`
+- 兼容层 `LazyCatalog`
 - runtime 初始化错误与 locale 解析错误包装
 
 不负责：
@@ -35,8 +36,8 @@
 - `reload_i18n_catalog_from_directory(...)`
 - `resolve_locale_from_cli_args(...)`
 - `resolve_locale_from_argv(...)`
-- `LazyCatalog`
 - `GlobalCatalog`
+- 兼容层 `LazyCatalog`
 - `CatalogInitError`
 - `CliLocaleError`
 - `CatalogLocaleError`
@@ -51,9 +52,9 @@
 - `src/i18n.rs`
   - 目录型 catalog 加载、bootstrap、reload 与错误映射
 - `src/lazy_catalog.rs`
-  - 惰性初始化 catalog 句柄与初始化/locale 错误包装
+  - 仅保留给迁移路径的阻塞式 lazy catalog 兼容层
 - `src/global_catalog.rs`
-  - 可热替换的全局 catalog 句柄
+  - 可热替换、runtime-facing 的 canonical catalog 句柄
 - `src/locale_selection.rs`
   - CLI / argv locale 解析与 env fallback 选择
 - `src/catalog_error.rs`

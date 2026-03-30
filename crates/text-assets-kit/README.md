@@ -8,6 +8,8 @@
 
 它解决的问题不是“文本资源的业务语义是什么”，而是“文本资源如何在受控目录中被安全地 bootstrap、落盘、扫描、读取和回滚”。
 
+它内部仍保留共享的阻塞式 lazy-init 兼容原语，供更高层 crate 在迁移路径里复用；但这不是推荐直接暴露给 async runtime 边界的 canonical API。
+
 ## 边界
 
 负责：
@@ -43,7 +45,7 @@
 不覆盖：
 
 - i18n catalog 语义校验
-- prompt 目录的惰性初始化句柄
+- prompt 或 i18n 的 runtime 句柄策略
 - 二进制资源管理
 
 ## 结构设计
@@ -64,6 +66,8 @@
   - bootstrap、创建报告与失败回滚
 - `src/bootstrap_lock.rs`
   - bootstrap 并发串行化与跨进程协调
+- `src/lazy_value.rs`
+  - 仅供兼容层复用的阻塞式 lazy-init 原语，不作为 async runtime-facing canonical 边界
 
 ## bootstrap/rollback 语义
 

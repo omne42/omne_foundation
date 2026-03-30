@@ -155,6 +155,24 @@ fn is_reserved_streamable_http_env_header(header: &HeaderName) -> bool {
     is_reserved_streamable_http_header(header)
 }
 
+fn validate_streamable_http_url_syntax(url_field: &'static str, url: &str) -> crate::Result<()> {
+    let parsed = reqwest::Url::parse(url).map_err(|err| {
+        anyhow::anyhow!("mcp server transport=streamable_http: invalid {url_field}: {err}")
+    })?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        scheme => {
+            public_bail!(
+                "mcp server transport=streamable_http: {url_field} must use http or https, got {scheme}"
+            );
+        }
+    }
+    if parsed.host_str().is_none() {
+        public_bail!("mcp server transport=streamable_http: {url_field} must include a host");
+    }
+    Ok(())
+}
+
 impl ServerConfig {
     pub fn stdio(argv: Vec<String>) -> crate::Result<Self> {
         validate_argv(Transport::Stdio, &argv)?;
@@ -178,6 +196,7 @@ impl ServerConfig {
         if url.trim().is_empty() {
             public_bail!("mcp server transport=streamable_http: url must not be empty");
         }
+        validate_streamable_http_url_syntax("url", &url)?;
         Ok(Self::StreamableHttp(StreamableHttpServerConfig {
             urls: StreamableHttpUrls::Single { url },
             bearer_token_env_var: None,
@@ -198,6 +217,8 @@ impl ServerConfig {
         if http_url.trim().is_empty() {
             public_bail!("mcp server transport=streamable_http: http_url must not be empty");
         }
+        validate_streamable_http_url_syntax("sse_url", &sse_url)?;
+        validate_streamable_http_url_syntax("http_url", &http_url)?;
         Ok(Self::StreamableHttp(StreamableHttpServerConfig {
             urls: StreamableHttpUrls::Split { sse_url, http_url },
             bearer_token_env_var: None,
@@ -243,6 +264,7 @@ impl ServerConfig {
                                 "mcp server transport=streamable_http: url must not be empty"
                             );
                         }
+                        validate_streamable_http_url_syntax("url", url)?;
                     }
                     StreamableHttpUrls::Split { sse_url, http_url } => {
                         if sse_url.trim().is_empty() {
@@ -255,6 +277,8 @@ impl ServerConfig {
                                 "mcp server transport=streamable_http: http_url must not be empty"
                             );
                         }
+                        validate_streamable_http_url_syntax("sse_url", sse_url)?;
+                        validate_streamable_http_url_syntax("http_url", http_url)?;
                     }
                 }
 

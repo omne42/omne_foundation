@@ -10,8 +10,35 @@ workspace = true
 
 [features]
 default = []
+all-sinks = [
+    "bark",
+    "dingtalk",
+    "discord",
+    "feishu",
+    "generic-webhook",
+    "github",
+    "pushplus",
+    "serverchan",
+    "slack",
+    "sound",
+    "telegram",
+    "wecom",
+]
+bark = []
+dingtalk = []
+discord = []
+feishu = []
+generic-webhook = []
+github = []
+pushplus = []
+selective-sinks = []
+serverchan = []
+slack = []
+sound = []
 # Allow SoundSink to execute external commands (SoundConfig.command_argv).
-sound-command = []
+sound-command = ["sound"]
+telegram = []
+wecom = []
 
 [dependencies]
 anyhow = "1"

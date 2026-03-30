@@ -404,27 +404,22 @@ impl Client {
 
                     loop {
                         tokio::select! {
-                            result = &mut pump_fut => {
-                                match result {
-                                    Ok(()) => {
-                                        close_post_bridge(
-                                            &writer_sse,
-                                            &handle_sse,
-                                            "streamable http SSE connection closed".to_string(),
-                                        )
-                                        .await;
-                                    }
-                                    Err(err) => {
-                                        close_post_bridge(
-                                            &writer_sse,
-                                            &handle_sse,
-                                            format!("streamable http SSE connection failed: {err}"),
-                                        )
-                                        .await;
-                                    }
+                            result = &mut pump_fut => match result {
+                                Ok(()) => {
+                                    // Treat graceful SSE EOF as a recoverable read-side event:
+                                    // reconnect instead of tearing down the whole transport.
+                                    break true;
                                 }
-                                return;
-                            }
+                                Err(err) => {
+                                    close_post_bridge(
+                                        &writer_sse,
+                                        &handle_sse,
+                                        format!("streamable http SSE connection failed: {err}"),
+                                    )
+                                    .await;
+                                    return;
+                                }
+                            },
                             wake = wake_rx.recv() => {
                                 match wake {
                                     Some(SseWakeReason::SessionChanged) => {
@@ -1551,6 +1546,106 @@ mod tests {
         assert_eq!(rollover_stage, "rollover-sse-finished");
 
         client.close("test complete").await;
+        server.await.expect("server task should join");
+    }
+
+    #[tokio::test]
+    async fn streamable_http_reconnects_after_graceful_sse_eof() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let base_url = format!("http://{addr}");
+        let (stage_tx, mut stage_rx) = mpsc::unbounded_channel();
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut initial_sse, _) = listener.accept().await.expect("accept initial SSE");
+            let initial_request = read_http_request(&mut initial_sse).await.expect("read GET");
+            assert_eq!(initial_request.method, "GET");
+            assert_eq!(initial_request.path, "/sse");
+            assert_eq!(header(&initial_request, "mcp-session-id"), None);
+            write_chunked_response_headers(
+                &mut initial_sse,
+                "200 OK",
+                &[
+                    ("content-type", "text/event-stream"),
+                    ("mcp-session-id", "session-1"),
+                ],
+            )
+            .await
+            .expect("write initial SSE headers");
+            stage_tx.send("initial-sse-open").expect("send stage");
+            finish_chunked_response(&mut initial_sse)
+                .await
+                .expect("finish initial SSE response");
+            drop(initial_sse);
+
+            let (mut reconnected_sse, _) = listener.accept().await.expect("accept reconnect SSE");
+            let reconnect_request = read_http_request(&mut reconnected_sse)
+                .await
+                .expect("read reconnect GET");
+            assert_eq!(reconnect_request.method, "GET");
+            assert_eq!(reconnect_request.path, "/sse");
+            assert_eq!(
+                header(&reconnect_request, "mcp-session-id"),
+                Some("session-1".to_string())
+            );
+            write_chunked_response_headers(
+                &mut reconnected_sse,
+                "200 OK",
+                &[
+                    ("content-type", "text/event-stream"),
+                    ("mcp-session-id", "session-1"),
+                ],
+            )
+            .await
+            .expect("write reconnect SSE headers");
+            stage_tx.send("reconnected-sse-open").expect("send stage");
+            write_chunk(
+                &mut reconnected_sse,
+                b"data: {\"jsonrpc\":\"2.0\",\"method\":\"demo/notify\",\"params\":{\"session\":\"session-1\"}}\n\n",
+            )
+            .await
+            .expect("write reconnect SSE notification");
+            let _ = close_rx.await;
+            drop(reconnected_sse);
+        });
+
+        let mut client = Client::connect_streamable_http_split_with_options(
+            &format!("{base_url}/sse"),
+            &format!("{base_url}/post"),
+            StreamableHttpOptions::default(),
+            SpawnOptions::default(),
+        )
+        .await
+        .expect("connect streamable http");
+        let mut notifications = client
+            .take_notifications()
+            .expect("take notifications receiver");
+
+        let stage = tokio::time::timeout(Duration::from_secs(2), stage_rx.recv())
+            .await
+            .expect("initial SSE stage should arrive before timeout")
+            .expect("stage channel open");
+        assert_eq!(stage, "initial-sse-open");
+        let stage = tokio::time::timeout(Duration::from_secs(2), stage_rx.recv())
+            .await
+            .expect("reconnect SSE stage should arrive before timeout")
+            .expect("stage channel open");
+        assert_eq!(stage, "reconnected-sse-open");
+
+        let notification = tokio::time::timeout(Duration::from_secs(2), notifications.recv())
+            .await
+            .expect("notification should arrive before timeout")
+            .expect("notification stream open");
+        assert_eq!(notification.method, "demo/notify");
+        assert_eq!(
+            notification.params,
+            Some(serde_json::json!({ "session": "session-1" }))
+        );
+
+        client.close("test complete").await;
+        let _ = close_tx.send(());
         server.await.expect("server task should join");
     }
 

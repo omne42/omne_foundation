@@ -739,6 +739,31 @@ struct DetachedRuntime {
     runtime: tokio::runtime::Runtime,
 }
 
+#[derive(Debug, Clone)]
+struct DetachedSpawnError {
+    task_name: String,
+    detail: String,
+}
+
+impl DetachedSpawnError {
+    fn from_io(task_name: &str, err: &std::io::Error) -> Self {
+        Self {
+            task_name: task_name.to_string(),
+            detail: err.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for DetachedSpawnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "detached fallback unavailable for {}: {}",
+            self.task_name, self.detail
+        )
+    }
+}
+
 impl DetachedRuntime {
     fn new() -> Result<Self, std::io::Error> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -758,32 +783,62 @@ impl DetachedRuntime {
     }
 }
 
-fn spawn_detached(task_name: &str, task: impl Future<Output = ()> + Send + 'static) {
+fn spawn_detached(
+    task_name: &str,
+    task: impl Future<Output = ()> + Send + 'static,
+) -> Result<(), DetachedSpawnError> {
     if let Ok(runtime) = tokio::runtime::Handle::try_current() {
         drop(runtime.spawn(task));
-        return;
+        return Ok(());
     }
 
-    if let Some(runtime) = detached_runtime(task_name) {
-        runtime.spawn(task_name, Box::pin(task));
-    }
+    let runtime = detached_runtime(task_name)?;
+    runtime.spawn(task_name, Box::pin(task));
+    Ok(())
 }
 
-fn detached_runtime(task_name: &str) -> Option<&'static DetachedRuntime> {
+fn detached_runtime(task_name: &str) -> Result<&'static DetachedRuntime, DetachedSpawnError> {
     static DETACHED_RUNTIME: OnceLock<DetachedRuntime> = OnceLock::new();
-    if let Some(runtime) = DETACHED_RUNTIME.get() {
-        return Some(runtime);
+    #[cfg(test)]
+    {
+        if DETACHED_RUNTIME_FORCED_INIT_FAILURES
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                if remaining > 0 {
+                    Some(remaining - 1)
+                } else {
+                    None
+                }
+            })
+            .is_ok()
+        {
+            return Err(DetachedSpawnError {
+                task_name: task_name.to_string(),
+                detail: "forced detached runtime init failure".to_string(),
+            });
+        }
     }
 
-    let runtime = match DetachedRuntime::new() {
-        Ok(runtime) => runtime,
-        Err(err) => {
-            eprintln!("mcp-jsonrpc: failed to initialize detached runtime for {task_name}: {err}");
-            return None;
-        }
-    };
+    if let Some(runtime) = DETACHED_RUNTIME.get() {
+        return Ok(runtime);
+    }
 
-    Some(DETACHED_RUNTIME.get_or_init(|| runtime))
+    let runtime =
+        DetachedRuntime::new().map_err(|err| DetachedSpawnError::from_io(task_name, &err))?;
+    Ok(DETACHED_RUNTIME.get_or_init(|| runtime))
+}
+
+#[cfg(test)]
+static DETACHED_RUNTIME_FORCED_INIT_FAILURES: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+fn force_detached_runtime_init_failures(count: u64) {
+    DETACHED_RUNTIME_FORCED_INIT_FAILURES.store(count, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+fn detached_runtime_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    GUARD.get_or_init(|| Mutex::new(())).lock().unwrap()
 }
 
 impl std::fmt::Debug for BatchResponseWriter {
@@ -845,9 +900,11 @@ impl BatchResponseWriter {
 
     fn flush_if_ready_without_runtime(&self) {
         let batch = self.clone();
-        spawn_detached("batch flush without runtime", async move {
+        if let Err(err) = spawn_detached("batch flush without runtime", async move {
             let _ = batch.flush_if_ready().await;
-        });
+        }) {
+            self.state.handle.schedule_close_once(err.to_string());
+        }
     }
 
     async fn finish(&self) -> Result<(), Error> {
@@ -1768,16 +1825,25 @@ impl Drop for IncomingRequest {
         match &self.responder.target {
             RequestResponseTarget::Direct(handle) => {
                 let handle = handle.clone();
-                spawn_detached("direct dropped request response", async move {
+                let close_handle = handle.clone();
+                if let Err(err) = spawn_detached("direct dropped request response", async move {
                     drop(handle.write_json_line(&response).await);
-                });
+                }) {
+                    close_handle.schedule_close_once(err.to_string());
+                }
             }
             RequestResponseTarget::Batch(batch) => {
                 if tokio::runtime::Handle::try_current().is_ok() {
                     let batch = batch.clone();
-                    spawn_detached("batch dropped request response", async move {
+                    let close_batch = batch.clone();
+                    if let Err(err) = spawn_detached("batch dropped request response", async move {
                         drop(batch.push_reserved_response(response).await);
-                    });
+                    }) {
+                        close_batch
+                            .state
+                            .handle
+                            .schedule_close_once(err.to_string());
+                    }
                 } else {
                     batch.push_reserved_response_without_runtime(response);
                 }
@@ -2819,6 +2885,7 @@ mod incoming_value_tests {
 
     #[test]
     fn dropped_batch_request_without_runtime_still_flushes_remaining_batch_response() {
+        let _guard = detached_runtime_test_guard();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2900,6 +2967,7 @@ mod incoming_value_tests {
 
     #[test]
     fn dropped_direct_request_without_runtime_still_emits_internal_error() {
+        let _guard = detached_runtime_test_guard();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -3126,6 +3194,7 @@ mod stats_tests {
 
     #[test]
     fn spawn_detached_runs_tasks_without_tokio_runtime() {
+        let _guard = detached_runtime_test_guard();
         let counter = Arc::new(AtomicU64::new(0));
         let counter_for_task = Arc::clone(&counter);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -3133,7 +3202,8 @@ mod stats_tests {
         spawn_detached("test detached runtime", async move {
             counter_for_task.fetch_add(1, AtomicOrdering::Relaxed);
             done_tx.send(()).unwrap();
-        });
+        })
+        .expect("detached runtime should initialize");
 
         done_rx
             .recv_timeout(Duration::from_secs(1))
@@ -3143,6 +3213,7 @@ mod stats_tests {
 
     #[test]
     fn spawn_detached_does_not_block_independent_tasks_behind_a_stuck_task() {
+        let _guard = detached_runtime_test_guard();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
         let (blocked_done_tx, blocked_done_rx) = std::sync::mpsc::channel();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -3150,10 +3221,12 @@ mod stats_tests {
         spawn_detached("test detached blocked task", async move {
             let _ = release_rx.await;
             blocked_done_tx.send(()).unwrap();
-        });
+        })
+        .expect("detached runtime should initialize blocked task");
         spawn_detached("test detached ready task", async move {
             ready_tx.send(()).unwrap();
-        });
+        })
+        .expect("detached runtime should initialize ready task");
 
         ready_rx
             .recv_timeout(Duration::from_secs(1))
@@ -3162,6 +3235,21 @@ mod stats_tests {
         blocked_done_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("blocked task should finish after release");
+    }
+
+    #[test]
+    fn spawn_detached_reports_runtime_init_failure() {
+        let _guard = detached_runtime_test_guard();
+        force_detached_runtime_init_failures(1);
+
+        let err = spawn_detached("test detached runtime init failure", async {}).expect_err(
+            "detached runtime init failure should be surfaced instead of silently dropping the task",
+        );
+
+        assert!(
+            err.to_string()
+                .contains("detached fallback unavailable for test detached runtime init failure")
+        );
     }
 
     #[test]
@@ -3512,6 +3600,153 @@ mod background_close_tests {
             err.to_string()
                 .contains("closing transport after notification failure")
         );
+    }
+
+    #[test]
+    fn dropped_direct_request_without_runtime_closes_client_when_detached_runtime_init_fails() {
+        let _guard = detached_runtime_test_guard();
+        force_detached_runtime_init_failures(1);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build setup runtime");
+
+        let (request, server_read, handle, client) = runtime.block_on(async {
+            let (client_stream, server_stream) = tokio::io::duplex(2048);
+            let (client_read, client_write) = tokio::io::split(client_stream);
+            let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+            let mut client = Client::connect_io(client_read, client_write)
+                .await
+                .expect("connect client");
+            let mut requests = client.take_requests().expect("request receiver");
+            let handle = client.handle();
+
+            server_write
+                .write_all(br#"{"jsonrpc":"2.0","id":1,"method":"first"}"#)
+                .await
+                .expect("write request");
+            server_write.write_all(b"\n").await.expect("write newline");
+            server_write.flush().await.expect("flush request");
+
+            let request = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+                .await
+                .expect("request timeout")
+                .expect("request");
+
+            (request, server_read, handle, client)
+        });
+        drop(runtime);
+
+        drop(request);
+
+        assert!(handle.is_closed());
+        let reason = handle.close_reason();
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|detail| detail.contains("detached fallback unavailable")),
+            "{reason:?}"
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build read runtime");
+
+        runtime.block_on(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+            let eof = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+                .await
+                .expect("EOF timeout")
+                .expect("read result");
+            assert!(
+                eof.is_none(),
+                "transport should fail closed on detached fallback failure"
+            );
+
+            drop(client);
+        });
+    }
+
+    #[test]
+    fn dropped_batch_request_without_runtime_closes_client_when_detached_runtime_init_fails() {
+        let _guard = detached_runtime_test_guard();
+        force_detached_runtime_init_failures(1);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build setup runtime");
+
+        let (request, server_read, handle, client) = runtime.block_on(async {
+            let (client_stream, server_stream) = tokio::io::duplex(2048);
+            let (client_read, client_write) = tokio::io::split(client_stream);
+            let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+            let mut client = Client::connect_io(client_read, client_write)
+                .await
+                .expect("connect client");
+            let mut requests = client.take_requests().expect("request receiver");
+            let handle = client.handle();
+
+            server_write
+                .write_all(
+                    br#"[{"jsonrpc":"2.0","id":1,"method":"first"},{"jsonrpc":"2.0","id":2,"method":"second"}]"#,
+                )
+                .await
+                .expect("write batch");
+            server_write.write_all(b"\n").await.expect("write newline");
+            server_write.flush().await.expect("flush batch");
+
+            let first = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+                .await
+                .expect("first request timeout")
+                .expect("first request");
+            let second = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+                .await
+                .expect("second request timeout")
+                .expect("second request");
+
+            second
+                .respond_ok(serde_json::json!({"handled":"second"}))
+                .await
+                .expect("respond second");
+
+            (first, server_read, handle, client)
+        });
+        drop(runtime);
+
+        drop(request);
+
+        assert!(handle.is_closed());
+        let reason = handle.close_reason();
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|detail| detail.contains("detached fallback unavailable")),
+            "{reason:?}"
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build read runtime");
+
+        runtime.block_on(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+            let eof = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+                .await
+                .expect("EOF timeout")
+                .expect("read result");
+            assert!(
+                eof.is_none(),
+                "transport should fail closed on detached fallback failure"
+            );
+
+            drop(client);
+        });
     }
 }
 

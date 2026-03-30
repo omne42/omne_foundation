@@ -12,12 +12,13 @@ use omne_process_primitives::{
 use structured_text_kit::{CatalogText, StructuredText, StructuredTextScalarArg};
 use zeroize::Zeroize;
 
+use crate::runtime::SecretCommandRuntime;
 use crate::spec::SecretCommand;
 use crate::{
     DEFAULT_SECRET_COMMAND_TIMEOUT_SECS, MAX_SECRET_COMMAND_OUTPUT_BYTES,
     MAX_SECRET_COMMAND_TIMEOUT_SECS, Result, SECRET_COMMAND_TIMEOUT_MS_ENV,
-    SECRET_COMMAND_TIMEOUT_SECS_ENV, SecretBytes, SecretCommandRuntime, SecretError, SecretString,
-    read_limited, secret_string_from_bytes,
+    SECRET_COMMAND_TIMEOUT_SECS_ENV, SecretBytes, SecretError, SecretString, read_limited,
+    secret_string_from_bytes,
 };
 
 struct SecretCommandChild {

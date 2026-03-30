@@ -1,0 +1,24 @@
+[package]
+name = "omne-fs-primitives"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Low-level Omne filesystem primitives."
+
+[lints]
+workspace = true
+
+[dependencies]
+cap-fs-ext = "4.0.2"
+cap-std = "4.0.2"
+fs2 = "0.4"
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

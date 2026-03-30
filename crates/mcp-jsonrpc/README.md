@@ -45,11 +45,11 @@
 ## 结构设计
 
 - `src/lib.rs`
-  - client 主体
-  - transport 选项
-  - limits
-  - 错误类型
-  - 核心读写循环
+  - client 主体、消息收发循环和组合根
+- `src/transport.rs`
+  - transport 选项、limits、stdout log 配置
+- `src/error.rs`
+  - JSON-RPC transport 公开错误边界与稳定分类
 - `src/stdout_log.rs`
   - stdout 分段日志
 - `src/streamable_http.rs`

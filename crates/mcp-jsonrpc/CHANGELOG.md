@@ -9,6 +9,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ### Changed
 - `mcp-jsonrpc`：当无 Tokio runtime 的 detached fallback 自身初始化失败时，sync/no-runtime 的 dropped-request response 与 batch flush 现在会显式关闭 transport 并发布关闭原因，而不是把补偿任务静默吞掉留给对端无限等待。
 - `mcp-jsonrpc`：关闭状态现在先发布 `close_reason` 再对外暴露 closed，可避免其他线程在 `streamable_http` 通知失败等关闭路径里先看到 `is_closed()`、却暂时读不到关闭原因。
+- `mcp-jsonrpc`：把 transport 选项/limits 与公开错误边界分别下沉到 `transport.rs` 和 `error.rs`，`lib.rs` 只保留 client 主体与消息循环，减少单文件命名空间继续吞 transport/runtime 细节。
 - `mcp-jsonrpc`：`streamable_http` 的独立 SSE 读侧现在会在正常 EOF 后自动重连，而不是把整个 transport 直接关闭；会 idle-close/轮换 SSE 的服务端不会再把客户端无谓打死。
 - `mcp-jsonrpc`：`streamable_http` 的 SSE 唤醒信号改为无丢失传递，`SessionChanged` 不会再被排队中的 `Connect` 挤掉，活跃 SSE 在 session rollover 后会可靠切到新会话。
 - `mcp-jsonrpc`：入站 server notification 在本地通知队列过载或接收端已关闭时不再静默丢弃；transport 现在会记录 stats 并主动关闭连接，把数据丢失显式暴露给调用方。

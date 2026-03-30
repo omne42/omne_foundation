@@ -8,10 +8,8 @@ mod providers;
 use crate::command::run_secret_command;
 use crate::file::read_secret_file;
 use crate::json::extract_json_key_secret;
-use crate::{
-    DefaultPreparedSecret, PreparedSecretResolution, Result, SecretCommandRuntime,
-    SecretEnvironment, SecretError, SecretResolutionContext, SecretString,
-};
+use crate::runtime::{SecretCommandRuntime, SecretEnvironment, SecretResolutionContext};
+use crate::{DefaultPreparedSecret, PreparedSecretResolution, Result, SecretError, SecretString};
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum SecretSpec {

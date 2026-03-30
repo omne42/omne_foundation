@@ -14,6 +14,7 @@
 - `mcp-kit`：`shared_manager_request_allows_concurrent_same_server_reuse_after_connect` 回归测试不再假设并发请求的到达顺序固定，只继续验证“两次请求都会在首个响应前抵达 server”，避免把 Tokio 调度先后误判成连接复用回归。
 - `mcp-kit`：`SharedManager` 新增 `spawn_inheriting_handler_scope(...)`，把 handler 子任务回调 `SharedManager` 时的 reentrant fail-fast 语义从“依赖 Tokio task-local 是否碰巧继承”收口成显式入口；同时文档与测试明确了 bare `tokio::spawn(...)` 仍按外部调用处理，不会自动继承 handler scope。
 - `mcp-kit`：`SharedManager::{request_connected,notify_connected}` 现在和 `disconnect` / `disconnect_and_wait` 共用同一条 per-server lifecycle gate，并把 config 驱动 request/notify/connect 路径上的 `cwd` identity 解析挪到 `spawn_blocking` 后台线程，同时复用已解析路径避免重复 canonicalize，减少 async 热路径阻塞并修复 connected I/O 与断连竞态。
+- `mcp-kit`：`SharedManager` 不再作为 crate 根导出与 `Manager` 平级暴露；公开路径收口到 `mcp_kit::shared::SharedManager`，把它明确降级为共享并发策略层而不是协议核心入口。
 - `mcp-kit`：`streamable_http` 的 URL 现在会在 `ServerConfig::{streamable_http,streamable_http_split}`、`ServerConfig::validate()` 和 `Config::load` 边界先做语法校验，提前拒绝非法 URL、非 `http/https` scheme 和缺失 host 的配置；trust policy 仍只负责后续 trusted/untrusted 出站约束。
 - `mcp-kit`：config 驱动的连接复用现在不再只按 server 名短路；`Manager`/`SharedManager` 会记录首次连接的有效 `ServerConfig`，后续复用若缺少配置元数据或配置内容已变化，会 fail-closed 要求先断开重连，避免 `mcp.json` 的 transport/URL/header/argv/env 变更静默失效。
 - `mcp-kit`：typed MCP request/notification 的参数序列化与结果反序列化 helper 现在集中收口到 `mcp.rs`，`Manager` / `SharedManager` / `Session` 复用同一套逻辑，减少协议方法扩展时的重复样板和漂移面。

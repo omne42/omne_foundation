@@ -8,6 +8,13 @@
 
 它把 secret 输入统一到 `secret://` 语法下，并在读取、命令执行、JSON 提取和内存持有阶段尽量减少泄露面。
 
+根命名空间只保留 `SecretString` / `SecretError` / `Result` 这类值对象；解析规范和运行时契约要求显式从子模块导入：
+
+- `secret_kit::spec`
+- `secret_kit::runtime`
+- `secret_kit::types`
+- `secret_kit::value`
+
 ## 边界
 
 负责：
@@ -51,10 +58,13 @@
 ## 结构设计
 
 - `src/lib.rs`
-  - `SecretString`
-  - `SecretError`
-  - 运行时 trait
-  - 默认 resolver 主体
+  - crate 级地图与 resolver 组合根
+- `src/runtime.rs`
+  - `SecretEnvironment` / `SecretCommandRuntime` / `SecretResolutionContext`
+- `src/types.rs`
+  - `SecretError` / `Result`
+- `src/value.rs`
+  - `SecretString` 和受限明文持有
 - `src/spec.rs`
   - `secret://` 解析、provider 分派、命令构建
 - `src/file.rs`

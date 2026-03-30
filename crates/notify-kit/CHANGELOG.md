@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Added
+- `notify_kit::core` 与 `notify_kit::builtin` 命名空间：把 Hub/Event/Error/Sink trait 这条核心通知边界，与内置 provider sinks 的适配集合显式分层；根级 re-export 继续保留以维持兼容。
 - `Event::new_structured` / `with_title_text` / `with_body_text` / `with_tag_text`，并在 `Event` 上新增 `title_text` / `body_text` / `tag_texts`，让通知边界可以保留 `structured-text-kit` 语义而不必提前压平成裸字符串。
 - `log-kit` 集成：关键 warning 路径开始以稳定 `log_code` + 结构化字段形式发射到 `tracing`。
 - `Hub::try_notify`：当缺少 Tokio runtime 时返回错误（避免静默丢通知）。

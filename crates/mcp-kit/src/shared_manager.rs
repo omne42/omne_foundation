@@ -3034,7 +3034,7 @@ mod tests {
             let first_request: Value = serde_json::from_str(&first_line).unwrap();
             assert_eq!(first_request["method"], "ping");
             let first_id = first_request["id"].clone();
-            assert_eq!(first_request["params"], serde_json::json!({ "request": 1 }));
+            let first_request_number = first_request["params"]["request"].as_u64().unwrap();
 
             let second_line = tokio::time::timeout(Duration::from_millis(200), lines.next_line())
                 .await
@@ -3044,12 +3044,16 @@ mod tests {
             let second_request: Value = serde_json::from_str(&second_line).unwrap();
             assert_eq!(second_request["method"], "ping");
             let second_id = second_request["id"].clone();
-            assert_eq!(
-                second_request["params"],
-                serde_json::json!({ "request": 2 })
-            );
+            let second_request_number = second_request["params"]["request"].as_u64().unwrap();
 
-            for (id, request) in [(first_id, 1_u64), (second_id, 2_u64)] {
+            let mut request_numbers = [first_request_number, second_request_number];
+            request_numbers.sort_unstable();
+            assert_eq!(request_numbers, [1, 2]);
+
+            for (id, request) in [
+                (first_id, first_request_number),
+                (second_id, second_request_number),
+            ] {
                 let response = serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": id,

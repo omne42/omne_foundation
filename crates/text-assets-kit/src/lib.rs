@@ -1,6 +1,7 @@
 mod bootstrap_lock;
 mod data_root;
-mod lazy_value;
+#[doc(hidden)]
+pub mod lazy_value;
 mod managed_bootstrap;
 mod resource_bootstrap;
 mod resource_path;
@@ -11,6 +12,10 @@ mod text_tree_scan;
 
 pub use bootstrap_lock::{BootstrapTransactionGuard, lock_bootstrap_transaction};
 pub use data_root::{DataRootOptions, DataRootScope, ensure_data_root, resolve_data_root};
+#[deprecated(
+    since = "0.1.0",
+    note = "LazyValue is a blocking, thread-oriented compatibility primitive. Prefer eager snapshots or runtime-owned handles at crate boundaries."
+)]
 pub use lazy_value::{LazyInitError, LazyValue};
 pub use managed_bootstrap::{BootstrapLoadError, bootstrap_text_resources_then_load};
 pub use resource_bootstrap::{

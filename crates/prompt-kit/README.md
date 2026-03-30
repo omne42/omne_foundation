@@ -6,7 +6,7 @@
 
 `prompt-kit` 当前只负责 prompt 目录的 runtime adapter 边界。
 
-它解决的问题不是“prompt 文本应该长什么样”，也不是“prompt 如何版本化、指纹化或缓存”，而是“一组 prompt 文本资源如何安全 bootstrap、加载，并通过惰性句柄对外提供稳定访问”。
+它解决的问题不是“prompt 文本应该长什么样”，也不是“prompt 如何版本化、指纹化或缓存”，而是“一组 prompt 文本资源如何安全 bootstrap、加载，并通过窄 runtime 句柄对外提供稳定访问”。
 
 这一层是窄适配，不是当前 cross-repo canonical 的 prompt foundation。更高层的 prompt 领域判断见 [`../../docs/定义/prompt领域定位.md`](../../docs/定义/prompt领域定位.md)。
 
@@ -16,7 +16,8 @@
 
 - prompt 目录 bootstrap
 - prompt 目录快照加载
-- `LazyPromptDirectory`
+- `PromptDirectoryHandle`
+- 兼容层 `LazyPromptDirectory`
 - prompt 初始化错误与回滚错误包装
 
 不负责：
@@ -33,7 +34,8 @@
 覆盖：
 
 - `bootstrap_prompt_directory(...)`
-- `LazyPromptDirectory`
+- `PromptDirectoryHandle`
+- 兼容层 `LazyPromptDirectory`
 - `PromptDirectoryError`
 - `PromptBootstrapCleanupError`
 
@@ -45,13 +47,14 @@
 ## 结构设计
 
 - `src/prompts.rs`
-  - prompt bootstrap、惰性目录句柄与错误包装
+  - prompt bootstrap、runtime 目录句柄与错误包装
 - 共享懒初始化并发控制与 best-effort bootstrap/rollback 流程
-  - 由 [`text-assets-kit`](../text-assets-kit/README.md) 提供通用原语，`prompt-kit` 只保留 prompt 域错误映射
+  - 由 [`text-assets-kit`](../text-assets-kit/README.md) 提供通用原语，`prompt-kit` 只保留 prompt 域错误映射与 runtime 句柄
 
 ## 当前定位
 
 - 代码上它本质是建立在 [`text-assets-kit`](../text-assets-kit/README.md) 之上的薄封装。
+- `PromptDirectoryHandle` 是当前推荐的 runtime-facing 共享句柄；`LazyPromptDirectory` 仅保留为阻塞式兼容层。
 - 当前跨仓库已证明的 prompt 复用面，并不主要是“prompt 目录加载”。
 - 因此当前不应该继续往 `prompt-kit` 塞入模板 DSL、版本管理、schema 绑定、fingerprint 或 cache-key 语义。
 

@@ -1,10 +1,10 @@
 use std::io;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use text_assets_kit::{
-    BootstrapLoadError, LazyInitError, LazyValue, ResourceManifest, TextDirectory,
-    bootstrap_text_resources_then_load,
+    BootstrapLoadError, ResourceManifest, TextDirectory, bootstrap_text_resources_then_load,
+    lazy_value::{LazyInitError, LazyValue},
 };
 
 #[derive(Debug)]
@@ -83,12 +83,56 @@ fn prompt_bootstrap_cleanup_error(load: io::Error, rollback: io::Error) -> io::E
     )
 }
 
-/// Lazily initializes a shared prompt directory.
+/// Runtime-owned prompt directory handle.
+///
+/// Callers install already-loaded `TextDirectory` snapshots and then serve
+/// reads without blocking on first-use initialization. Replacements swap the
+/// visible snapshot atomically and keep prior readers on their cloned `Arc`.
+pub struct PromptDirectoryHandle {
+    inner: RwLock<Option<Arc<TextDirectory>>>,
+}
+
+impl PromptDirectoryHandle {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            inner: RwLock::new(None),
+        }
+    }
+
+    pub fn replace(&self, directory: TextDirectory) {
+        self.replace_shared(Arc::new(directory));
+    }
+
+    pub fn replace_shared(&self, directory: Arc<TextDirectory>) {
+        *write_unpoisoned(&self.inner) = Some(directory);
+    }
+
+    #[must_use]
+    pub fn current_directory(&self) -> Option<Arc<TextDirectory>> {
+        read_unpoisoned(&self.inner).as_ref().map(Arc::clone)
+    }
+
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<Arc<str>> {
+        self.current_directory()
+            .and_then(|directory| directory.get_shared(key))
+    }
+}
+
+impl Default for PromptDirectoryHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Legacy blocking prompt directory shim.
 ///
 /// Concurrent access while initialization is in flight waits for the
-/// initializer to finish and then observes the settled result. Initializers
-/// must not block on other threads or tasks that might re-enter the same
-/// prompt directory; cross-thread cycles are a caller bug and may deadlock.
+/// initializer to finish and then observes the settled result. Because this
+/// path uses a blocking `Condvar`-based primitive, it is best kept out of
+/// async runtime-facing boundaries; prefer `PromptDirectoryHandle` plus eager
+/// load/bootstrap when the directory must be shared at runtime.
 pub struct LazyPromptDirectory {
     inner: LazyValue<TextDirectory, io::Error>,
     initializer: Box<dyn Fn() -> Result<TextDirectory, io::Error> + Send + Sync>,
@@ -154,6 +198,14 @@ fn shared_prompt_error(error: LazyInitError<io::Error>) -> PromptDirectoryError 
     PromptDirectoryError::new(shared_prompt_error_detail(error))
 }
 
+fn read_unpoisoned<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|poison| poison.into_inner())
+}
+
+fn write_unpoisoned<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(|poison| poison.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +241,15 @@ mod tests {
         Err(io::Error::from_raw_os_error(2))
     }
 
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    fn single_file_directory(contents: &str) -> TextDirectory {
+        let temp = TempDir::new().expect("temp dir");
+        let path = temp.path().join("default.md");
+        fs::write(&path, contents).expect("write prompt");
+        TextDirectory::load(temp.path()).expect("load prompt directory")
+    }
+
     static REENTRANT_PROMPTS: LazyLock<LazyPromptDirectory> =
         LazyLock::new(|| LazyPromptDirectory::new(reentrant_initializer));
 
@@ -206,6 +267,35 @@ mod tests {
         let err = catalog.get("default.md").expect_err("init error");
         assert_eq!(err.kind(), io::ErrorKind::Other);
         assert_eq!(err.to_string(), "prompt init failed");
+    }
+
+    #[test]
+    fn prompt_directory_handle_uses_installed_snapshot() {
+        assert_send_sync::<PromptDirectoryHandle>();
+
+        let handle = PromptDirectoryHandle::new();
+        assert_eq!(handle.get("default.md"), None);
+
+        handle.replace(single_file_directory("hello"));
+
+        assert_eq!(handle.get("default.md"), Some(Arc::<str>::from("hello")));
+    }
+
+    #[test]
+    fn prompt_directory_handle_keeps_existing_snapshot_alive_across_replace() {
+        let handle = PromptDirectoryHandle::new();
+
+        handle.replace(single_file_directory("first"));
+
+        let snapshot = handle.current_directory().expect("snapshot should exist");
+
+        handle.replace(single_file_directory("second"));
+
+        assert_eq!(
+            snapshot.get_shared("default.md"),
+            Some(Arc::<str>::from("first"))
+        );
+        assert_eq!(handle.get("default.md"), Some(Arc::<str>::from("second")));
     }
 
     #[test]

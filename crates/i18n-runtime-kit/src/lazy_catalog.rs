@@ -3,18 +3,19 @@ use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 
 use i18n_kit::{Catalog, Locale, TemplateArg};
-use text_assets_kit::{LazyInitError, LazyValue};
+use text_assets_kit::lazy_value::{LazyInitError, LazyValue};
 
 use crate::catalog_error::{CatalogInitError, CatalogLocaleError};
 use crate::{resolve_locale_from_argv, resolve_locale_from_cli_args};
 
-/// Lazily initializes a shared catalog.
+/// Legacy blocking catalog shim.
 ///
 /// Concurrent access while the initializer is already running waits for the
 /// initializer to finish and then observes the settled result. Recursive
 /// initialization from the same thread is still rejected. Initializers must
-/// not block on other threads or tasks that might re-enter the same catalog;
-/// cross-thread cycles are a caller bug and may deadlock.
+/// not block on other threads or tasks that might re-enter the same catalog.
+/// Because this path uses a blocking `Condvar`-based primitive, async runtime
+/// boundaries should prefer eager load/bootstrap plus `GlobalCatalog`.
 pub struct LazyCatalog {
     inner: LazyValue<dyn Catalog, CatalogInitError>,
     initializer: Box<dyn Fn() -> Result<Arc<dyn Catalog>, CatalogInitError> + Send + Sync>,

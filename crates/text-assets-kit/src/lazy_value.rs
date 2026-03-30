@@ -1,6 +1,11 @@
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::ThreadId;
 
+/// Blocking lazy initialization primitive for narrow compatibility shims.
+///
+/// This type is thread-oriented and uses `Condvar`, so it is not a good
+/// runtime-facing boundary for async-heavy code. Prefer eager snapshots or a
+/// crate-specific handle that swaps already-loaded `Arc` state.
 enum LazyState<T: ?Sized, E> {
     Uninitialized,
     Initializing {

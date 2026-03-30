@@ -256,6 +256,32 @@ fn client_config_validate_rejects_empty_protocol_version() {
 }
 
 #[test]
+fn server_config_constructor_rejects_streamable_http_url_without_http_scheme() {
+    let err = ServerConfig::streamable_http("ws://example.com/mcp").unwrap_err();
+    assert!(
+        err.to_string().contains("must use http or https"),
+        "err={err:#}"
+    );
+}
+
+#[test]
+fn server_config_constructor_rejects_streamable_http_url_without_host() {
+    let err = ServerConfig::streamable_http("http://:80/mcp").unwrap_err();
+    assert!(err.to_string().contains("invalid url"), "err={err:#}");
+}
+
+#[test]
+fn server_config_constructor_rejects_split_streamable_http_url_without_http_scheme() {
+    let err =
+        ServerConfig::streamable_http_split("https://example.com/sse", "ftp://example.com/mcp")
+            .unwrap_err();
+    assert!(
+        err.to_string().contains("http_url must use http or https"),
+        "err={err:#}"
+    );
+}
+
+#[test]
 fn client_config_validate_rejects_non_object_capabilities() {
     let cfg = ClientConfig {
         capabilities: Some(serde_json::json!(1)),
@@ -569,6 +595,50 @@ async fn load_parses_streamable_http_transport_with_split_urls() {
     assert_eq!(server.http_url(), Some("https://example.com/mcp"));
 }
 
+#[tokio::test]
+async fn load_denies_streamable_http_with_invalid_url_syntax() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "url": "https://exa mple.com/mcp" } } }"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(err.to_string().contains("invalid url"), "err={err:#}");
+}
+
+#[tokio::test]
+async fn load_denies_streamable_http_with_non_http_scheme() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "url": "ws://example.com/mcp" } } }"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(
+        err.to_string().contains("must use http or https"),
+        "err={err:#}"
+    );
+}
+
+#[tokio::test]
+async fn load_denies_streamable_http_split_url_without_host() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "sse_url": "https://example.com/sse", "http_url": "https://user@:443/mcp" } } }"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(err.to_string().contains("invalid http_url"), "err={err:#}");
+}
 #[tokio::test]
 async fn load_denies_streamable_http_with_url_and_split_urls() {
     let dir = tempfile::tempdir().unwrap();

@@ -89,6 +89,17 @@ pub(crate) fn resolve_connection_cwd_with_base(
     Ok(stable_connection_cwd_identity(&resolved))
 }
 
+pub(crate) async fn resolve_connection_cwd_with_base_async(
+    base: Option<&Path>,
+    cwd: &Path,
+) -> anyhow::Result<PathBuf> {
+    let base = base.map(Path::to_path_buf);
+    let cwd = cwd.to_path_buf();
+    tokio::task::spawn_blocking(move || resolve_connection_cwd_with_base(base.as_deref(), &cwd))
+        .await
+        .map_err(|err| anyhow::anyhow!("join connection cwd resolution task: {err}"))?
+}
+
 fn stable_connection_cwd_identity(path: &Path) -> PathBuf {
     let normalized = normalize_connection_path(path);
     let mut existing = normalized.as_path();
@@ -231,7 +242,7 @@ pub struct Manager {
     instance_id: u64,
     active_handler_scopes: Arc<AtomicU64>,
     conns: HashMap<ServerName, Connection>,
-    connection_cwds: HashMap<ServerName, PathBuf>,
+    connection_cwds: HashMap<ServerName, ConnectionCwdIdentity>,
     connection_server_configs: HashMap<ServerName, ServerConfig>,
     init_results: HashMap<ServerName, Value>,
     client_name: String,
@@ -257,6 +268,11 @@ pub struct Connection {
     child: Option<Child>,
     client: mcp_jsonrpc::Client,
     handler_tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConnectionCwdIdentity {
+    stable_identity: PathBuf,
 }
 
 pub(crate) struct PreparedConnectedClient {
@@ -754,6 +770,7 @@ impl Manager {
         self.initialize_result(server_name.as_str())
     }
 
+    #[cfg(test)]
     pub(crate) fn record_connection_cwd(
         &mut self,
         server_name: &str,
@@ -762,6 +779,7 @@ impl Manager {
         self.record_connection_cwd_with_base(server_name, cwd, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn record_connection_cwd_with_base(
         &mut self,
         server_name: &str,
@@ -769,9 +787,20 @@ impl Manager {
         base: Option<&Path>,
     ) -> anyhow::Result<()> {
         let server_name = parse_server_name_anyhow(server_name)?;
-        self.connection_cwds
-            .insert(server_name, resolve_connection_cwd_with_base(base, cwd)?);
+        self.record_resolved_connection_cwd(
+            server_name,
+            resolve_connection_cwd_with_base(base, cwd)?,
+        );
         Ok(())
+    }
+
+    fn record_resolved_connection_cwd(&mut self, server_name: ServerName, cwd: PathBuf) {
+        self.connection_cwds.insert(
+            server_name,
+            ConnectionCwdIdentity {
+                stable_identity: cwd,
+            },
+        );
     }
 
     pub(crate) fn clear_connection_cwd(&mut self, server_name: &str) {
@@ -813,23 +842,21 @@ impl Manager {
         );
     }
 
-    fn ensure_connection_cwd_matches(
+    fn ensure_resolved_connection_cwd_matches(
         &self,
         server_name: &str,
-        cwd: &Path,
-        base: Option<&Path>,
+        requested_cwd: &Path,
     ) -> anyhow::Result<()> {
         let Some(connected_cwd) = self.connection_cwds.get(server_name) else {
             return Ok(());
         };
-        let requested_cwd = resolve_connection_cwd_with_base(base, cwd)?;
-        if *connected_cwd == requested_cwd {
+        if connected_cwd.stable_identity == requested_cwd {
             return Ok(());
         }
 
         anyhow::bail!(
             "mcp server {server_name} is already connected under cwd={} and cannot be reused for cwd={} (disconnect first)",
-            connected_cwd.display(),
+            connected_cwd.stable_identity.display(),
             requested_cwd.display()
         );
     }
@@ -839,13 +866,24 @@ impl Manager {
         server_name: &str,
         cwd: Option<&Path>,
     ) -> anyhow::Result<Option<PreparedConnectedClient>> {
+        let resolved_cwd = cwd
+            .map(|cwd| resolve_connection_cwd_with_base(None, cwd))
+            .transpose()?;
+        self.try_prepare_connected_client_resolved(server_name, resolved_cwd.as_deref())
+    }
+
+    pub(crate) fn try_prepare_connected_client_resolved(
+        &mut self,
+        server_name: &str,
+        resolved_cwd: Option<&Path>,
+    ) -> anyhow::Result<Option<PreparedConnectedClient>> {
         let server_name = normalize_server_name_lookup(server_name);
         if !self.is_connected_and_alive(server_name) {
             self.clear_connection_cwd(server_name);
             return Ok(None);
         }
-        if let Some(cwd) = cwd {
-            self.ensure_connection_cwd_matches(server_name, cwd, None)?;
+        if let Some(cwd) = resolved_cwd {
+            self.ensure_resolved_connection_cwd_matches(server_name, cwd)?;
         }
 
         let conn = self
@@ -860,13 +898,13 @@ impl Manager {
         }))
     }
 
-    pub(crate) fn try_prepare_reusable_connected_client(
+    pub(crate) fn try_prepare_reusable_connected_client_resolved(
         &mut self,
         server_name: &str,
         server_cfg: &ServerConfig,
-        cwd: Option<&Path>,
+        resolved_cwd: Option<&Path>,
     ) -> anyhow::Result<Option<PreparedConnectedClient>> {
-        let prepared = self.try_prepare_connected_client(server_name, cwd)?;
+        let prepared = self.try_prepare_connected_client_resolved(server_name, resolved_cwd)?;
         let Some(prepared) = prepared else {
             return Ok(None);
         };
@@ -874,19 +912,29 @@ impl Manager {
         Ok(Some(prepared))
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_transport_connect(
         &mut self,
         config: &Config,
         server_name: &str,
         cwd: &Path,
     ) -> anyhow::Result<Option<PreparedTransportConnect>> {
+        let resolved_cwd = resolve_connection_cwd_with_base(config.thread_root(), cwd)?;
+        self.prepare_transport_connect_resolved(config, server_name, resolved_cwd)
+    }
+
+    pub(crate) fn prepare_transport_connect_resolved(
+        &mut self,
+        config: &Config,
+        server_name: &str,
+        cwd: PathBuf,
+    ) -> anyhow::Result<Option<PreparedTransportConnect>> {
         let server_cfg = config
             .server(server_name)
             .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
         let server_name_key = parse_server_name_anyhow(server_name)?;
-        let config_root = config.thread_root();
         if self.is_connected_and_alive(server_name_key.as_str()) {
-            self.ensure_connection_cwd_matches(server_name_key.as_str(), cwd, config_root)?;
+            self.ensure_resolved_connection_cwd_matches(server_name_key.as_str(), &cwd)?;
             self.ensure_connection_server_config_matches(server_name_key.as_str(), server_cfg)?;
             return Ok(None);
         }
@@ -895,7 +943,6 @@ impl Manager {
         server_cfg
             .validate()
             .with_context(|| format!("invalid mcp server config (server={server_name_key})"))?;
-        let cwd = resolve_connection_cwd_with_base(config_root, cwd)?;
 
         Ok(Some(PreparedTransportConnect {
             server_name: server_name.to_string(),
@@ -966,10 +1013,10 @@ impl Manager {
     where
         F: FnOnce() -> anyhow::Result<ServerName>,
     {
-        let cwd = resolve_connection_cwd_with_base(cwd_base, cwd)?;
+        let cwd = resolve_connection_cwd_with_base_async(cwd_base, cwd).await?;
         let server_name_key = build_server_name()?;
         if self.is_connected_and_alive(server_name_key.as_str()) {
-            self.ensure_connection_cwd_matches(server_name_key.as_str(), &cwd, None)?;
+            self.ensure_resolved_connection_cwd_matches(server_name_key.as_str(), &cwd)?;
             self.ensure_connection_server_config_matches(server_name_key.as_str(), server_cfg)?;
             return Ok(());
         }

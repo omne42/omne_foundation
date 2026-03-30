@@ -205,6 +205,18 @@ fn format_event_text_parts_limited(
     out.finish()
 }
 
+#[cfg(any(
+    test,
+    not(feature = "selective-sinks"),
+    feature = "dingtalk",
+    feature = "discord",
+    feature = "feishu",
+    feature = "generic-webhook",
+    feature = "github",
+    feature = "slack",
+    feature = "telegram",
+    feature = "wecom"
+))]
 pub(crate) fn format_event_text_limited(event: &Event, limits: TextLimits) -> String {
     format_event_text_parts_limited(event, limits, true)
 }

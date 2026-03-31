@@ -35,6 +35,7 @@
 - stdout 日志旋转落盘
 - streamable HTTP 的 SSE + POST 桥接
 - transport 级公开错误的稳定语义映射
+- 明确的 fail-closed 关闭语义；无 Tokio runtime 的异常收尾不会偷偷拉后台 runtime
 
 不覆盖：
 

@@ -7,6 +7,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：所有通用出站写路径现在会在拿到 writer 锁后再次检查关闭状态，避免 close/drop 已发布后、排队中的 request/notify/response 仍继续写到底层 transport。
+- `mcp-jsonrpc`：补充了 client drop 场景下 queued writer 的回归测试，确保 fail-closed 语义不只覆盖显式 close，也覆盖 `Client::drop` 的关闭发布路径。
 - `mcp-jsonrpc`：当无 Tokio runtime 的 detached fallback 自身初始化失败时，sync/no-runtime 的 dropped-request response 与 batch flush 现在会显式关闭 transport 并发布关闭原因，而不是把补偿任务静默吞掉留给对端无限等待。
 - `mcp-jsonrpc`：关闭状态现在先发布 `close_reason` 再对外暴露 closed，可避免其他线程在 `streamable_http` 通知失败等关闭路径里先看到 `is_closed()`、却暂时读不到关闭原因。
 - `mcp-jsonrpc`：把 transport 选项/limits 与公开错误边界分别下沉到 `transport.rs` 和 `error.rs`，`lib.rs` 只保留 client 主体与消息循环，减少单文件命名空间继续吞 transport/runtime 细节。

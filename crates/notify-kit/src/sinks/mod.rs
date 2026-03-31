@@ -39,6 +39,15 @@ mod telegram;
     feature = "wecom"
 ))]
 mod text;
+#[cfg(any(
+    feature = "all-sinks",
+    feature = "dingtalk",
+    feature = "discord",
+    feature = "generic-webhook",
+    feature = "slack",
+    feature = "wecom"
+))]
+mod webhook_common;
 #[cfg(any(feature = "all-sinks", feature = "wecom"))]
 mod wecom;
 

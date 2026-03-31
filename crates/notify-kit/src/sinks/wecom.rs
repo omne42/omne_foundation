@@ -2,12 +2,9 @@ use std::time::Duration;
 
 use crate::Event;
 use crate::sinks::text::{TextLimits, format_event_text_limited};
+use crate::sinks::webhook_common::JsonWebhookEndpoint;
 use crate::sinks::{BoxFuture, Sink};
-use http_kit::{
-    HttpClientOptions, HttpClientProfile, build_http_client_profile, parse_and_validate_https_url,
-    read_json_body_after_http_success, redact_url, redact_url_str, send_reqwest,
-    validate_url_path_prefix,
-};
+use http_kit::{read_json_body_after_http_success, redact_url, redact_url_str};
 
 const WECOM_ALLOWED_HOSTS: [&str; 1] = ["qyapi.weixin.qq.com"];
 
@@ -61,16 +58,14 @@ impl WeComWebhookConfig {
 }
 
 pub struct WeComWebhookSink {
-    webhook_url: reqwest::Url,
-    http: HttpClientProfile,
+    endpoint: JsonWebhookEndpoint,
     max_chars: usize,
-    enforce_public_ip: bool,
 }
 
 impl std::fmt::Debug for WeComWebhookSink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WeComWebhookSink")
-            .field("webhook_url", &redact_url(&self.webhook_url))
+            .field("webhook_url", &redact_url(self.endpoint.url()))
             .field("max_chars", &self.max_chars)
             .finish_non_exhaustive()
     }
@@ -78,17 +73,16 @@ impl std::fmt::Debug for WeComWebhookSink {
 
 impl WeComWebhookSink {
     pub fn new(config: WeComWebhookConfig) -> crate::Result<Self> {
-        let webhook_url = parse_and_validate_https_url(&config.webhook_url, &WECOM_ALLOWED_HOSTS)?;
-        validate_url_path_prefix(&webhook_url, "/cgi-bin/webhook/send")?;
-        let http = build_http_client_profile(&HttpClientOptions {
-            timeout: Some(config.timeout),
-            ..Default::default()
-        })?;
+        let endpoint = JsonWebhookEndpoint::new_validated_https(
+            &config.webhook_url,
+            &WECOM_ALLOWED_HOSTS,
+            "/cgi-bin/webhook/send",
+            config.timeout,
+            config.enforce_public_ip,
+        )?;
         Ok(Self {
-            webhook_url,
-            http,
+            endpoint,
             max_chars: config.max_chars,
-            enforce_public_ip: config.enforce_public_ip,
         })
     }
 
@@ -108,17 +102,8 @@ impl Sink for WeComWebhookSink {
 
     fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
-            let client = self
-                .http
-                .select_for_url(&self.webhook_url, self.enforce_public_ip)
-                .await?;
             let payload = Self::build_payload(event, self.max_chars);
-
-            let resp = send_reqwest(
-                client.post(self.webhook_url.as_str()).json(&payload),
-                "wecom webhook",
-            )
-            .await?;
+            let resp = self.endpoint.post_json(&payload, "wecom webhook").await?;
 
             let body = read_json_body_after_http_success(resp, "wecom webhook").await?;
             let errcode = body["errcode"].as_i64().unwrap_or(-1);

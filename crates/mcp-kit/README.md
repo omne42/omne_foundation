@@ -26,7 +26,12 @@
 
 - MCP server 实现
 - 审批、sandbox、工具策略或业务工作流
-- 自动重连、daemon 化和上层编排
+- 后台保活、重试退避、daemon 化和上层编排
+
+补充说明：
+
+- `Manager` / `SharedManager` 的 config 驱动入口会在“同名连接已自然关闭”后按需重新建连，这属于当前实例内部的连接复用语义。
+- crate 不负责后台自动重连循环、keepalive、守护进程或跨实例重连策略。
 
 ## 结构地图
 

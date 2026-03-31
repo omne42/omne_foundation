@@ -104,7 +104,8 @@ case "${1:-}" in
 esac
 
 tmp="$(mktemp)"
-cleanup() { rm -f "$tmp"; }
+summary_index="$(mktemp)"
+cleanup() { rm -f "$tmp" "$summary_index"; }
 trap cleanup EXIT
 
 {
@@ -117,6 +118,8 @@ trap cleanup EXIT
 } >"$tmp"
 
 # Format: <title>\t<file>
+sed -n 's/.*\[\(.*\)\](\(.*\.md\)).*/\1\t\2/p' "$summary" >"$summary_index"
+
 while IFS=$'\t' read -r title file; do
   [[ -z "${file}" ]] && continue
   [[ "${file}" == "llms.md" ]] && continue
@@ -131,7 +134,7 @@ while IFS=$'\t' read -r title file; do
     echo
     cat "$path"
   } >>"$tmp"
-done < <(sed -n 's/.*\[\(.*\)\](\(.*\.md\)).*/\1\t\2/p' "$summary")
+done <"$summary_index"
 
 if [[ "$mode" == "check" ]]; then
   if [[ ! -f "$out_docs" || ! -f "$out_root" ]]; then

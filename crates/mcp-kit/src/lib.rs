@@ -44,11 +44,15 @@
 //! relative `cwd` values are resolved against the loaded `mcp.json` thread root when available,
 //! not against the ambient process directory.
 //!
+//! Config-driven helpers may reopen a cached server name after the old transport has already
+//! closed, but this is only an on-demand reconnect inside the current `Manager`/`SharedManager`.
+//! `mcp-kit` still does not provide background keepalive, daemonization, or retry policy.
+//!
 //! ## Non-goals
 //!
 //! - Implementing an MCP server
 //! - High-level policies (approvals/sandbox/tool execution strategy)
-//! - Automatic reconnect/daemonization
+//! - Background reconnect policy/daemonization
 
 mod config;
 mod error;

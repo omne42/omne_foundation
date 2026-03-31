@@ -122,9 +122,12 @@ impl SharedManager {
             return Ok(None);
         }
 
-        try_acquire()
-            .map(Some)
-            .map_err(|_| anyhow::anyhow!("{REENTRANT_HANDLER_ERROR}: {operation}"))
+        try_acquire().map(Some).map_err(|_| {
+            crate::error::tagged_message(
+                crate::error::ErrorKind::ManagerState,
+                format!("{REENTRANT_HANDLER_ERROR}: {operation}"),
+            )
+        })
     }
 
     fn connect_gate_for(&self, server_name: &str) -> Arc<RwLock<()>> {
@@ -219,9 +222,12 @@ impl SharedManager {
         server_name: &str,
         cwd: Option<&Path>,
     ) -> anyhow::Result<Option<crate::manager::PreparedConnectedClient>> {
-        let server_cfg = config
-            .server(server_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
+        let server_cfg = config.server(server_name).ok_or_else(|| {
+            crate::error::tagged_message(
+                crate::error::ErrorKind::Config,
+                format!("unknown mcp server: {server_name}"),
+            )
+        })?;
         let resolved_cwd = match cwd {
             Some(cwd) => Some(
                 self.resolve_connection_cwd(operation, config.thread_root(), cwd)
@@ -341,9 +347,12 @@ impl SharedManager {
             .try_prepare_connected_client(operation, server_name, Some(&cwd))
             .await?
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "mcp server became unavailable before {operation}: {}",
-                    server_name.trim()
+                crate::error::tagged_message(
+                    crate::error::ErrorKind::ManagerState,
+                    format!(
+                        "mcp server became unavailable before {operation}: {}",
+                        server_name.trim()
+                    ),
                 )
             })?;
         Ok(PreparedSharedClient {
@@ -361,7 +370,12 @@ impl SharedManager {
         let prepared = self
             .try_prepare_connected_client(operation, server_name, None)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {}", server_name.trim()))?;
+            .ok_or_else(|| {
+                crate::error::tagged_message(
+                    crate::error::ErrorKind::ManagerState,
+                    format!("mcp server not connected: {}", server_name.trim()),
+                )
+            })?;
         drop(gate);
         Ok(PreparedSharedClient {
             prepared,

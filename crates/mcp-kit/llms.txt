@@ -1753,7 +1753,7 @@ MCP/JSON-RPC 允许 server 主动发消息给 client：
 
 - MCP server 实现（仅 client/runner）。
 - 高层语义（如 approvals、sandbox、工具执行策略等），由上层决定。
-- 自动重连/守护进程（需要时由上层 drop/重建连接）。
+- 后台自动重连/守护进程（需要时由上层实现重试与保活策略）。
 
 约束：
 
@@ -1765,7 +1765,7 @@ MCP/JSON-RPC 允许 server 主动发消息给 client：
 
 - **日志**：由上层选择是否将 server stdout 旋转落盘（`mcp_jsonrpc::SpawnOptions`，支持 `max_parts` 保留上限）。
 - **超时**：`Manager` 级别的 per-request timeout（默认 30s）。
-- **重连**：v1 不做自动重连；上层可通过 drop/重建连接实现。
+- **重连**：v1 只支持当前 `Manager`/`SharedManager` 内部的按需重建连接；不提供后台重连循环、keepalive 或退避策略。
 - **并发**：同一连接串行；不同 server 可由上层并发使用多个 `Manager` 或拆分任务。
 
 ---
@@ -1950,7 +1950,11 @@ manager = manager.with_server_request_handler(handler);
 
 ## Q：是否支持自动重连/守护进程？
 
-v1 不做。上层可以通过 drop/重建 `Manager` 或 `Session` 实现重连策略。
+`mcp-kit` 不提供后台自动重连/守护进程。
+
+但如果你走的是 `Manager::request` / `get_or_connect` / `SharedManager::request` 这类 config 驱动入口，同名连接在当前实例里已经关闭后，crate 会按需重新建连。
+
+需要 keepalive、退避、长期守护或跨实例重连时，仍然应该由上层实现。
 
 ## Q：如何把连接交给其他库持有？
 

@@ -10,6 +10,8 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：公开 `ErrorKind` 分类不再退化成英文字符串匹配；config / manager-state 路径改为带类型标记的边界错误，`Error::context` / `with_context` 也会保留原始分类。
+- `mcp-kit`：README、crate docs 和 FAQ 现在明确区分“当前实例内按需重建已关闭连接”和“后台自动重连/daemon 化”，避免文档与实现语义漂移。
 - `mcp-kit`（BREAKING）：`Config::with_path`、`Manager::with_protocol_version` 和 `Manager::with_capabilities` 现在会在构造期做 fail-fast 校验并返回 `Result<Self>`；相对 config path、空 `protocol_version` 和非 object `capabilities` 不再拖到后续 `current_dir()` 解析或 `initialize` 握手时才炸。
 - `mcp-kit`：`SharedManager` 对已复用连接的 `request` / `notify` / `request_connected` / `notify_connected` 现在会在借到 `ClientHandle` 后立即释放 same-server lifecycle gate，不再把 gate 错误持有到整段 JSON-RPC I/O 结束；只有 cold-start config 驱动首次请求仍会把 gate 保留到首个操作完成。
 - `mcp-kit`：`SharedManager` 的 config 驱动 `request` / `notify` 现在对已复用连接先走 per-server 读门禁，只把 cold-start / disconnect / reconnect 留在写门禁里；同 server 普通 RPC 在借到 handle 后可并发，而生命周期变更仍会等在读侧收尾后再继续。

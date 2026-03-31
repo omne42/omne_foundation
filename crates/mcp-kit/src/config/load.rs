@@ -463,10 +463,13 @@ impl Config {
     ) -> crate::Result<Self> {
         let cfg = Self::load_with_policy(thread_root, override_path, policy).await?;
         if cfg.path().is_none() {
-            return Err(anyhow::anyhow!(
-                "mcp config not found under root {} (tried: {})",
-                thread_root.display(),
-                DEFAULT_CONFIG_CANDIDATES.join(", ")
+            return Err(crate::error::tagged_message(
+                crate::error::ErrorKind::Config,
+                format!(
+                    "mcp config not found under root {} (tried: {})",
+                    thread_root.display(),
+                    DEFAULT_CONFIG_CANDIDATES.join(", ")
+                ),
             )
             .into());
         }
@@ -487,8 +490,14 @@ impl Config {
         override_path: Option<PathBuf>,
         policy: ConfigLoadPolicy,
     ) -> crate::Result<Self> {
-        let Some((path, json)) =
-            load_initial_path_and_value(thread_root, override_path, policy).await?
+        let Some((path, json)) = load_initial_path_and_value(thread_root, override_path, policy)
+            .await
+            .map_err(|err| {
+                crate::Error::from(crate::error::tag_anyhow(
+                    crate::error::ErrorKind::Config,
+                    err,
+                ))
+            })?
         else {
             return Ok(Self {
                 path: None,
@@ -496,7 +505,17 @@ impl Config {
                 servers: BTreeMap::new(),
             });
         };
-        let cfg = parse_config_file(Some(path.as_path()), json)?;
-        Ok(build_v1_config(thread_root, Some(path), cfg)?)
+        let cfg = parse_config_file(Some(path.as_path()), json).map_err(|err| {
+            crate::Error::from(crate::error::tag_anyhow(
+                crate::error::ErrorKind::Config,
+                err,
+            ))
+        })?;
+        build_v1_config(thread_root, Some(path), cfg).map_err(|err| {
+            crate::Error::from(crate::error::tag_anyhow(
+                crate::error::ErrorKind::Config,
+                err,
+            ))
+        })
     }
 }

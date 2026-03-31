@@ -138,70 +138,6 @@ impl InitializeSnapshot {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use serde_json::json;
-
-    use super::{InitializeSnapshot, ProtocolVersionCheck};
-    use crate::{ErrorKind, ServerName};
-
-    async fn test_client() -> mcp_jsonrpc::Client {
-        let (client_stream, _server_stream) = tokio::io::duplex(64);
-        let (client_read, client_write) = tokio::io::split(client_stream);
-        mcp_jsonrpc::Client::connect_io(client_read, client_write)
-            .await
-            .expect("construct test client")
-    }
-
-    #[tokio::test]
-    async fn invalid_initialize_protocol_version_is_classified_as_config() {
-        let client = test_client().await;
-        let snapshot = InitializeSnapshot {
-            client_name: "test-client".to_string(),
-            client_version: "0.0.0".to_string(),
-            protocol_version: "   ".to_string(),
-            protocol_version_check: ProtocolVersionCheck::Strict,
-            capabilities: json!({}),
-            request_timeout: Duration::from_secs(1),
-        };
-
-        let err = match snapshot
-            .run(&ServerName::parse("demo").expect("server name"), &client)
-            .await
-        {
-            Ok(_) => panic!("empty protocol version should fail"),
-            Err(err) => err,
-        };
-
-        assert_eq!(crate::Error::from(err).kind(), ErrorKind::Config);
-    }
-
-    #[tokio::test]
-    async fn invalid_initialize_capabilities_are_classified_as_config() {
-        let client = test_client().await;
-        let snapshot = InitializeSnapshot {
-            client_name: "test-client".to_string(),
-            client_version: "0.0.0".to_string(),
-            protocol_version: "2025-06-18".to_string(),
-            protocol_version_check: ProtocolVersionCheck::Strict,
-            capabilities: json!(1),
-            request_timeout: Duration::from_secs(1),
-        };
-
-        let err = match snapshot
-            .run(&ServerName::parse("demo").expect("server name"), &client)
-            .await
-        {
-            Ok(_) => panic!("non-object capabilities should fail"),
-            Err(err) => err,
-        };
-
-        assert_eq!(crate::Error::from(err).kind(), ErrorKind::Config);
-    }
-}
-
 impl PreparedConnectionInstall {
     pub(crate) async fn run(
         self,
@@ -564,5 +500,69 @@ impl Manager {
         self.prepare_disconnect_for_wait(server_name)
             .wait_for_jsonrpc_error_cleanup()
             .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use serde_json::json;
+
+    use super::{InitializeSnapshot, ProtocolVersionCheck};
+    use crate::{ErrorKind, ServerName};
+
+    async fn test_client() -> mcp_jsonrpc::Client {
+        let (client_stream, _server_stream) = tokio::io::duplex(64);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        mcp_jsonrpc::Client::connect_io(client_read, client_write)
+            .await
+            .expect("construct test client")
+    }
+
+    #[tokio::test]
+    async fn invalid_initialize_protocol_version_is_classified_as_config() {
+        let client = test_client().await;
+        let snapshot = InitializeSnapshot {
+            client_name: "test-client".to_string(),
+            client_version: "0.0.0".to_string(),
+            protocol_version: "   ".to_string(),
+            protocol_version_check: ProtocolVersionCheck::Strict,
+            capabilities: json!({}),
+            request_timeout: Duration::from_secs(1),
+        };
+
+        let err = match snapshot
+            .run(&ServerName::parse("demo").expect("server name"), &client)
+            .await
+        {
+            Ok(_) => panic!("empty protocol version should fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(crate::Error::from(err).kind(), ErrorKind::Config);
+    }
+
+    #[tokio::test]
+    async fn invalid_initialize_capabilities_are_classified_as_config() {
+        let client = test_client().await;
+        let snapshot = InitializeSnapshot {
+            client_name: "test-client".to_string(),
+            client_version: "0.0.0".to_string(),
+            protocol_version: "2025-06-18".to_string(),
+            protocol_version_check: ProtocolVersionCheck::Strict,
+            capabilities: json!(1),
+            request_timeout: Duration::from_secs(1),
+        };
+
+        let err = match snapshot
+            .run(&ServerName::parse("demo").expect("server name"), &client)
+            .await
+        {
+            Ok(_) => panic!("non-object capabilities should fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(crate::Error::from(err).kind(), ErrorKind::Config);
     }
 }

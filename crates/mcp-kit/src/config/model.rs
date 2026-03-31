@@ -562,9 +562,15 @@ impl Config {
         }
     }
 
-    pub fn with_path(mut self, path: PathBuf) -> Self {
+    pub fn with_path(mut self, path: PathBuf) -> crate::Result<Self> {
+        if !path.is_absolute() {
+            public_bail!(
+                "mcp config path must be absolute when constructing Config manually: {}",
+                path.display()
+            );
+        }
         self.path = Some(path);
-        self
+        Ok(self)
     }
 
     pub fn path(&self) -> Option<&Path> {

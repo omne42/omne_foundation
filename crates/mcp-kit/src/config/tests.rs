@@ -1,6 +1,20 @@
 use super::*;
 use std::path::PathBuf;
 
+#[test]
+fn with_path_rejects_relative_paths() {
+    let cfg = Config::new(ClientConfig::default(), std::collections::BTreeMap::new());
+    let err = cfg
+        .with_path(PathBuf::from("relative/mcp.json"))
+        .expect_err("relative manual config path should fail fast");
+
+    assert!(
+        err.to_string()
+            .contains("mcp config path must be absolute when constructing Config manually"),
+        "{err:#}"
+    );
+}
+
 #[tokio::test]
 async fn load_rejects_mcpservers_wrapper() {
     let dir = tempfile::tempdir().unwrap();

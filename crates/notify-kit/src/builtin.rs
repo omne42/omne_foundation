@@ -3,6 +3,10 @@
 //! This namespace groups provider-specific adapters so callers that only need the
 //! core notification boundary can stay on [`crate::core`].
 
+pub mod env {
+    pub use crate::env::{EnvHubError, StandardEnvHubOptions, build_hub_from_standard_env};
+}
+
 #[cfg(any(feature = "all-sinks", feature = "bark"))]
 pub use crate::sinks::{BarkConfig, BarkSink};
 #[cfg(any(feature = "all-sinks", feature = "dingtalk"))]

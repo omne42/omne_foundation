@@ -172,38 +172,11 @@ impl Hub {
 
     /// Fire-and-forget notification.
     ///
-    /// - Requires a Tokio runtime with the time driver enabled; otherwise the notification is
-    ///   dropped and a warning is logged.
-    /// - Concurrency is bounded; if overloaded, notifications are dropped (with a warning).
-    pub fn notify(&self, event: Event) {
-        if self.inner.sinks.is_empty() {
-            return;
-        }
-        if !self.is_kind_enabled(event.kind.as_str()) {
-            return;
-        }
-
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            warn_hub_notify_dropped(event.kind.as_str(), "no_tokio_runtime");
-            return;
-        };
-        if !has_tokio_time_driver() {
-            warn_hub_notify_dropped(event.kind.as_str(), "no_tokio_time_driver");
-            return;
-        }
-
-        if let Err(event) = self.try_notify_spawn(handle, event) {
-            warn_hub_notify_dropped(event.kind.as_str(), "overloaded");
-        }
-    }
-
-    /// Attempt to enqueue a fire-and-forget notification.
-    ///
     /// Returns:
     /// - `Err(TryNotifyError::NoTokioRuntime)` if called outside a Tokio runtime or without the
     ///   Tokio time driver enabled.
     /// - `Err(TryNotifyError::Overloaded)` when Hub inflight capacity is full.
-    pub fn try_notify(&self, event: Event) -> Result<(), TryNotifyError> {
+    pub fn notify(&self, event: Event) -> Result<(), TryNotifyError> {
         if self.inner.sinks.is_empty() {
             return Ok(());
         }
@@ -222,6 +195,26 @@ impl Hub {
             Ok(()) => Ok(()),
             Err(_) => Err(TryNotifyError::Overloaded),
         }
+    }
+
+    /// Lossy fire-and-forget notification.
+    ///
+    /// This preserves the historical "best effort + warning log" behavior when callers explicitly
+    /// prefer dropping notifications over handling enqueue failures programmatically.
+    pub fn notify_lossy(&self, event: Event) {
+        let kind = event.kind.clone();
+        if let Err(err) = self.notify(event) {
+            let reason = match err {
+                TryNotifyError::NoTokioRuntime => "no_tokio_runtime",
+                TryNotifyError::Overloaded => "overloaded",
+            };
+            warn_hub_notify_dropped(kind.as_str(), reason);
+        }
+    }
+
+    /// Alias retained for callers that still prefer the explicit "try_*" naming.
+    pub fn try_notify(&self, event: Event) -> Result<(), TryNotifyError> {
+        self.notify(event)
     }
 
     pub async fn send(&self, event: Event) -> crate::Result<()> {
@@ -433,7 +426,18 @@ mod tests {
     }
 
     #[test]
-    fn try_notify_errors_without_tokio_runtime() {
+    fn notify_errors_without_tokio_runtime() {
+        let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
+            name: "ok",
+            behavior: TestSinkBehavior::Ok,
+        })];
+        let hub = Hub::new(HubConfig::default(), sinks);
+        let event = Event::new("kind", Severity::Info, "title");
+        assert_eq!(hub.notify(event), Err(TryNotifyError::NoTokioRuntime));
+    }
+
+    #[test]
+    fn try_notify_alias_matches_notify() {
         let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
             name: "ok",
             behavior: TestSinkBehavior::Ok,

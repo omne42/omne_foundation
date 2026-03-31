@@ -7,7 +7,7 @@ edition = "2024"
 workspace = true
 
 [dependencies]
-structured-text-kit = { path = "../structured-text-kit" }
+structured-text-kit = { version = "0.1.0", path = "../structured-text-kit" }
 serde = "1"
 serde_json = { version = "1", features = ["raw_value"] }
 

@@ -25,19 +25,21 @@ pub struct StandardEnvHubOptions {
     pub require_sink: bool,
 }
 
-fn parse_bool_env_value(raw: &str) -> Option<bool> {
+fn parse_bool_env_value(raw: &str) -> anyhow::Result<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => anyhow::bail!("expected one of: 1/0, true/false, yes/no, on/off"),
     }
 }
 
-fn env_bool<F>(key: &str, get: &F) -> Option<bool>
+fn env_bool<F>(key: &str, get: &F) -> anyhow::Result<Option<bool>>
 where
     F: Fn(&str) -> Option<String>,
 {
-    get(key).and_then(|value| parse_bool_env_value(&value))
+    get(key)
+        .map(|value| parse_bool_env_value(&value).with_context(|| format!("{key}={value:?}")))
+        .transpose()
 }
 
 fn env_nonempty<F>(key: &str, get: &F) -> Option<String>
@@ -90,7 +92,9 @@ where
     const NOTIFY_TIMEOUT_MS_ENV: &str = "NOTIFY_TIMEOUT_MS";
     const NOTIFY_EVENTS_ENV: &str = "NOTIFY_EVENTS";
 
-    let sound_enabled = env_bool(NOTIFY_SOUND_ENV, get).unwrap_or(options.default_sound_enabled);
+    let sound_enabled = env_bool(NOTIFY_SOUND_ENV, get)
+        .with_context(|| format!("invalid {NOTIFY_SOUND_ENV}"))?
+        .unwrap_or(options.default_sound_enabled);
     let timeout = parse_timeout_ms_env(NOTIFY_TIMEOUT_MS_ENV, get)
         .with_context(|| format!("invalid {NOTIFY_TIMEOUT_MS_ENV}"))?;
 
@@ -270,5 +274,20 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("no notification sinks configured"));
+    }
+
+    #[test]
+    fn build_hub_from_standard_env_rejects_invalid_bool() {
+        let env = HashMap::from([(String::from("NOTIFY_SOUND"), String::from("maybe"))]);
+
+        let err = match build_hub_from_env(StandardEnvHubOptions::default(), &|key| {
+            env.get(key).cloned()
+        }) {
+            Ok(_) => panic!("invalid bool should fail"),
+            Err(err) => err,
+        };
+        let msg = format!("{err:#}");
+        assert!(msg.contains("invalid NOTIFY_SOUND"), "{msg}");
+        assert!(msg.contains("expected one of"), "{msg}");
     }
 }

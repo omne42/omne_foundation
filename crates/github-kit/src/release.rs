@@ -1,10 +1,13 @@
 use http_kit::{
-    HttpClientProfile, UntrustedOutboundPolicy, read_json_body_after_http_success_limited,
-    redact_url_for_error, redact_url_str, send_reqwest, validate_untrusted_outbound_url,
+    HttpClientProfile, read_json_body_after_http_success_limited, redact_url_for_error,
+    redact_url_str, send_reqwest,
 };
 use serde::Deserialize;
 
-use crate::client::{GitHubApiRequestOptions, apply_github_api_headers, build_github_api_url};
+use crate::client::{
+    GitHubApiRequestOptions, apply_github_api_headers, build_github_api_url,
+    validate_github_api_request_url,
+};
 use crate::error::{GitHubApiError, Result};
 
 const GITHUB_LATEST_RELEASE_MAX_JSON_BYTES: usize = 512 * 1024;
@@ -49,8 +52,8 @@ pub async fn fetch_latest_release<S: AsRef<str>>(
             }
         };
         let redacted_url = redact_url_for_error(&url);
-        if let Err(reason) = validate_api_url_for_bearer_token(&url, options) {
-            errors.push(format!("{redacted_url} -> {reason}"));
+        if let Err(err) = validate_github_api_request_url(&url, options) {
+            errors.push(format!("{redacted_url} -> {err}"));
             continue;
         }
 
@@ -126,25 +129,6 @@ fn normalize_repository(repo: &str) -> Result<(&str, &str)> {
         });
     }
     Ok((owner, name))
-}
-
-fn validate_api_url_for_bearer_token(
-    url: &reqwest::Url,
-    options: GitHubApiRequestOptions<'_>,
-) -> std::result::Result<(), String> {
-    if !options.has_bearer_token() {
-        return Ok(());
-    }
-
-    if url.scheme() != "https" {
-        return Err("bearer token requires an https github api base".to_string());
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err("bearer token requires a github api base without credentials".to_string());
-    }
-
-    validate_untrusted_outbound_url(&UntrustedOutboundPolicy::default(), url)
-        .map_err(|err| format!("bearer token requires a public github api base: {err}"))
 }
 
 #[cfg(test)]
@@ -329,8 +313,26 @@ mod tests {
         .expect_err("local base should fail");
 
         let message = err.to_string();
-        assert!(message.contains("public github api base"), "{message}");
+        assert!(message.contains("canonical GitHub API base"), "{message}");
         assert!(message.contains("127.0.0.1"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_release_rejects_noncanonical_public_api_base_when_bearer_token_present() {
+        let profile = test_profile();
+
+        let err = fetch_latest_release(
+            &profile,
+            &["https://github.example.com/api/v3"],
+            "cli/cli",
+            GitHubApiRequestOptions::new().with_bearer_token(Some("secret-token")),
+        )
+        .await
+        .expect_err("custom public base should fail without explicit trust");
+
+        let message = err.to_string();
+        assert!(message.contains("canonical GitHub API base"), "{message}");
+        assert!(message.contains("github.example.com"), "{message}");
     }
 
     #[tokio::test]

@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `GitHubCommentSink` 现在对 token-bearing 自定义 GitHub API base 默认 fail closed；只有显式 `with_allow_custom_api_base_with_token(true)` 后，才会把 bearer token 发送到非 `api.github.com` 的 HTTPS API base。
 - `notify-kit` 的公开 sink config/builder 不再直接暴露 `secret-kit::SecretString`；新增 crate 本地的 `NotifySecret` 作为公开边界，内部实现仍可继续复用 `secret-kit` 存放长期凭证，避免通知域 API 把下层 secret 持有模型固定进契约里。
 - `notify-kit::Error` 在多 sink 聚合失败时恢复标准 `Error::source()` 链：聚合错误现在把首个 `SinkFailure` 作为 source，而 `SinkFailure` 继续指向对应的底层错误；需要完整多错误信息时仍使用 `sink_failures()`。
 - `Hub::notify(...)` 现在会在缺少 Tokio runtime/time driver 或 inflight 容量耗尽时返回 `TryNotifyError`，不再把入队失败静默降级为 warning-only；保留显式的 `Hub::notify_lossy(...)` 供调用方选择旧的尽力而为语义。

@@ -11,6 +11,7 @@
 
 ### Changed
 - `mcp-kit`：读取或修改进程级 `current_dir()` 的测试现在统一走同一把 cwd guard，并把“恢复原 cwd”收口到单一 RAII helper，避免 `cargo test` 并跑时把不相关用例炸掉。
+- `mcp-kit`：cwd-sensitive manager 测试里的 `current_dir_for_test()` 现在补齐 Windows 条件编译实现，避免跨平台测试矩阵因为 helper 缺失而在 Windows 上编译失败。
 - `mcp-kit`：`Config::server(&str)` 现在和 `ServerName::parse(...)` 共享同一套 trim/校验归一化，`" remote "` 这类输入在 config 驱动冷启动路径上不再误报 `unknown mcp server`，与已连接热路径保持一致。
 - `mcp-kit`：`SharedManager` 的公共 async facade 现在补齐了 `ServerName` 值对象入口，`is_connected` / `disconnect` / `request` / `notify` 及其 connected/typed 变体都新增对应的 `*_named` 重载，避免共享并发层继续把已校验 server key 退化回 `&str`。
 - `mcp-kit`：连接复用用到的 cwd identity 不再先做词法 `..` 折叠再 canonicalize；现在会按原始路径查找现存前缀并做 symlink-aware identity 解析，避免不同真实目录在 symlink 场景下被误判成同一个连接上下文。同时，相对 cwd base 现在要求调用方显式提供绝对路径，不再偷偷借 ambient `current_dir()` 扩展边界。

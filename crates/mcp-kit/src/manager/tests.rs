@@ -92,6 +92,11 @@ fn current_dir_for_test() -> PathBuf {
     std::env::current_dir().expect("current dir")
 }
 
+#[cfg(windows)]
+fn current_dir_for_test() -> PathBuf {
+    std::env::current_dir().expect("current dir")
+}
+
 #[test]
 fn roots_capability_is_inserted() {
     let mut capabilities = serde_json::json!({});

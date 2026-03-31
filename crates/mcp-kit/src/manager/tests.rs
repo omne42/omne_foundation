@@ -293,6 +293,13 @@ fn resolve_connection_cwd_with_base_reports_non_not_found_prefix_errors() {
     }));
 }
 
+#[test]
+fn resolve_connection_cwd_with_base_rejects_relative_base() {
+    let err = resolve_connection_cwd_with_base(Some(Path::new("workspace")), Path::new("demo"))
+        .expect_err("relative base should fail closed");
+    assert!(err.to_string().contains("base must be absolute"), "{err:#}");
+}
+
 #[cfg(not(windows))]
 #[test]
 fn resolve_connection_cwd_errors_when_current_dir_is_unavailable() {
@@ -576,6 +583,49 @@ async fn try_prepare_connected_client_reuses_same_cwd_identity() {
         .try_prepare_connected_client("srv", Some(&same_cwd_different_spelling))
         .unwrap()
         .expect("stable cwd identity should allow reuse");
+    assert_eq!(prepared.server_name, "srv");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn try_prepare_connected_client_reuses_symlink_aware_cwd_identity() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let outside_parent = tempdir.path().join("outside-parent");
+    let outside_child = outside_parent.join("child");
+    let outside_server = outside_parent.join("server");
+    let symlink = tempdir.path().join("link");
+    std::fs::create_dir_all(&outside_child).unwrap();
+    std::os::unix::fs::symlink(&outside_child, &symlink).unwrap();
+
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let _server_stream = server_stream;
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .unwrap();
+
+    let connected_cwd = symlink.join("..").join("server");
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    let server_name = ServerName::parse("srv").unwrap();
+    manager.conns.insert(
+        server_name,
+        Connection {
+            id: 1,
+            child: None,
+            client,
+            handler_tasks: Vec::new(),
+        },
+    );
+    manager
+        .record_connection_cwd("srv", &connected_cwd)
+        .unwrap();
+
+    let prepared = manager
+        .try_prepare_connected_client("srv", Some(&outside_server))
+        .unwrap()
+        .expect("symlink-aware cwd identity should allow reuse");
     assert_eq!(prepared.server_name, "srv");
 }
 

@@ -1,2 +1,3 @@
 [env]
+# Keep Cargo temp files inside the repo so local/CI runs share the same bounded path.
 TMPDIR = { value = ".tmp", relative = true, force = true }

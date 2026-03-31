@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：把 detached fallback runtime 与其失败注入测试钩子下沉到独立 `detached.rs`，让 `lib.rs` 更聚焦在 client/JSON-RPC 主流程，减少无 runtime 补偿调度细节继续堆进主模块。
 - `mcp-jsonrpc`：所有通用出站写路径现在会在拿到 writer 锁后再次检查关闭状态，避免 close/drop 已发布后、排队中的 request/notify/response 仍继续写到底层 transport。
 - `mcp-jsonrpc`：补充了 client drop 场景下 queued writer 的回归测试，确保 fail-closed 语义不只覆盖显式 close，也覆盖 `Client::drop` 的关闭发布路径。
 - `mcp-jsonrpc`：当无 Tokio runtime 的 detached fallback 自身初始化失败时，sync/no-runtime 的 dropped-request response 与 batch flush 现在会显式关闭 transport 并发布关闭原因，而不是把补偿任务静默吞掉留给对端无限等待。

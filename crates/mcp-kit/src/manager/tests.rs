@@ -1321,6 +1321,102 @@ async fn server_request_handler_async_panic_disables_future_dispatch() {
 }
 
 #[tokio::test]
+async fn server_notification_handler_panic_stops_future_dispatch() {
+    let (client_stream, server_stream) = tokio::io::duplex(2048);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["jsonrpc"], "2.0");
+        assert_eq!(init_value["method"], "initialize");
+        let id = init_value["id"].clone();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "hello": "world" },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["jsonrpc"], "2.0");
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        for notification in [
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "demo/boom",
+                "params": { "x": 1 },
+            }),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "demo/ok",
+                "params": { "x": 2 },
+            }),
+        ] {
+            let mut line = serde_json::to_string(&notification).unwrap();
+            line.push('\n');
+            server_write.write_all(line.as_bytes()).await.unwrap();
+            server_write.flush().await.unwrap();
+        }
+    });
+
+    let notification_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (ok_seen_tx, mut ok_seen_rx) = tokio::sync::mpsc::unbounded_channel();
+    let handler_calls = std::sync::Arc::clone(&notification_calls);
+    let handler: ServerNotificationHandler = Arc::new(move |ctx| {
+        let handler_calls = std::sync::Arc::clone(&handler_calls);
+        let ok_seen_tx = ok_seen_tx.clone();
+        Box::pin(async move {
+            handler_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match ctx.method.as_str() {
+                "demo/boom" => panic!("boom"),
+                "demo/ok" => {
+                    ok_seen_tx
+                        .send(())
+                        .expect("ok notification should only send while receiver is alive");
+                }
+                _ => {}
+            }
+        })
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .with_server_notification_handler(handler);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+
+    server_task.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert_eq!(
+        notification_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), ok_seen_rx.recv())
+            .await
+            .is_err(),
+        "notification handler should be disabled after panic"
+    );
+    assert!(manager.take_connection("srv").is_some());
+}
+
+#[tokio::test]
 async fn request_connected_disconnects_after_protocol_error() {
     let (client_stream, server_stream) = tokio::io::duplex(1024);
     let (client_read, client_write) = tokio::io::split(client_stream);

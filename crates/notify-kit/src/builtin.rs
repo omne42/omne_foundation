@@ -10,7 +10,7 @@ pub use crate::sinks::{DingTalkWebhookConfig, DingTalkWebhookSink};
 #[cfg(any(feature = "all-sinks", feature = "discord"))]
 pub use crate::sinks::{DiscordWebhookConfig, DiscordWebhookSink};
 #[cfg(any(feature = "all-sinks", feature = "feishu"))]
-pub use crate::sinks::{FeishuWebhookConfig, FeishuWebhookSink};
+pub use crate::sinks::{FeishuWebhookConfig, FeishuWebhookMediaConfig, FeishuWebhookSink};
 #[cfg(any(feature = "all-sinks", feature = "generic-webhook"))]
 pub use crate::sinks::{GenericWebhookConfig, GenericWebhookSink};
 #[cfg(any(feature = "all-sinks", feature = "github"))]

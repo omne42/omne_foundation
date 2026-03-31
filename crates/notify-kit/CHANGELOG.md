@@ -9,6 +9,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ### Changed
 - `Hub::notify(...)` 现在会在缺少 Tokio runtime/time driver 或 inflight 容量耗尽时返回 `TryNotifyError`，不再把入队失败静默降级为 warning-only；保留显式的 `Hub::notify_lossy(...)` 供调用方选择旧的尽力而为语义。
 - `notify_kit::env::build_hub_from_standard_env(...)` 现在对布尔型 env（例如 `NOTIFY_SOUND`）采用 fail-closed 解析：非法值会直接报错，而不是偷偷回退默认值。
+- `FeishuWebhookSink` 现在把远程/本地图片、tenant token 缓存和媒体上传能力收口到显式的 `FeishuWebhookMediaConfig` / internal media support 边界；基础 webhook 配置继续可用，但更宽的图片/上传语义不再和 webhook 主状态平铺混在一起。
 - workspace 内部 crate 的 path 依赖现在补齐版本声明，允许 `config-kit` / `secret-kit` / `text-assets-kit` 等核心 foundation crate 正常通过 `cargo package --no-verify` 做跨仓发布校验。
 
 ### Added
@@ -55,6 +56,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `FeishuWebhookSink::new_strict` / `new_with_secret_strict`：在构造阶段额外做一次 DNS 公网 IP 校验。
 
 ### Changed
+- `notify-kit`：`FeishuWebhookSink` 现在把远程/本地图片、tenant token 和 app credentials 收口到显式的 `FeishuWebhookMediaConfig` / optional media support 边界；基础 webhook 语义继续留在主 config/sink，富文本图片上传不再作为散落在主边界上的隐式子系统。
 - `Event` 现在收口为单一 `StructuredText` 真相，`title` / `body` / `tags` 不再作为可直接写坏的公开字段暴露；调用方改用 `title()` / `body()` / `tags()` 以及 `title_text()` / `body_text()` / `tag_texts()` 访问，避免字符串侧和结构化侧出现自相矛盾状态。
 - `FeishuWebhookConfig` 新增 `local_image_base_dir` / `with_local_image_base_dir(...)`；本地图片相对路径不再隐式依赖进程 `current_dir()`，只有显式配置 base dir 后才允许解析相对路径。
 - `notify-kit`：默认“全部内置 sinks”模式现在改为显式依赖默认特性 `all-sinks`，而不是靠 `not(selective-sinks)` 的隐式编译分支；因此 `default-features = false` 时不仅会收紧导出面，也会真正裁掉未选 sink 的依赖图。`selective-sinks` 继续保留为兼容 alias，但不再是收紧依赖图所必需。

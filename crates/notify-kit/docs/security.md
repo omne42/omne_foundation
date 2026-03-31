@@ -15,7 +15,7 @@ Webhook URL 属于敏感信息：
 - 不要写入日志/错误信息/Debug 输出
 - 使用配置系统安全存储（例如 secrets manager / 环境变量注入）
 - 本库对 URL 做了 scheme/host/port/credentials 限制以降低 SSRF 风险
-- Feishu Markdown 图片上传默认不会抓取正文里的远程图片 URL；只有显式 `with_remote_image_urls(true)` 后才允许远程下载上传
+- Feishu Markdown 图片上传默认不会抓取正文里的远程图片 URL；建议通过显式的 `FeishuWebhookMediaConfig` 打开远程/本地图片能力
 - Feishu 本地图片读取需要显式 `with_local_image_files(true)`，并且在无法安全 no-follow 打开的平台上会直接拒绝
 
 目前内置的 webhook sinks 允许的 host（精确匹配）：

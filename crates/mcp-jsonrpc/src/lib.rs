@@ -609,16 +609,16 @@ impl ClientHandle {
         if !self.begin_close(reason.clone()) {
             return;
         }
+        let err = Error::protocol(ProtocolErrorKind::Closed, reason.clone());
         let handle = self.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             drop(runtime.spawn(async move {
-                handle.close_with_reason(reason).await;
+                handle.finish_close(err).await;
             }));
             return;
         }
 
         // No runtime available (e.g. sync context): avoid panicking and perform best-effort close.
-        let err = Error::protocol(ProtocolErrorKind::Closed, reason);
         drain_pending(&handle.pending, &err);
         if let Ok(mut write) = handle.write.try_lock() {
             drop(std::mem::replace(&mut *write, Box::new(tokio::io::sink())));
@@ -653,6 +653,10 @@ impl ClientHandle {
             return;
         }
 
+        self.finish_close(err).await;
+    }
+
+    async fn finish_close(&self, err: Error) {
         drain_pending(&self.pending, &err);
         let mut write = self.write.lock().await;
         let _ = write.shutdown().await;
@@ -852,6 +856,7 @@ impl ClientHandle {
     async fn write_line(&self, line: &[u8]) -> Result<(), Error> {
         self.check_closed()?;
         let mut write = self.write.lock().await;
+        self.check_closed()?;
         write.write_all(line).await?;
         write.flush().await?;
         drop(write);
@@ -1259,17 +1264,27 @@ impl Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
-        let _ = self.handle.begin_close("client closed".to_string());
+        let close_published = self.handle.begin_close("client closed".to_string());
         self.task.abort();
         for task in self.transport_tasks.drain(..) {
             task.abort();
+        }
+        let err = Error::protocol(ProtocolErrorKind::Closed, "client closed");
+        drain_pending(&self.handle.pending, &err);
+        if !close_published {
+            return;
+        }
+        let handle = self.handle.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            drop(runtime.spawn(async move {
+                handle.finish_close(err).await;
+            }));
+            return;
         }
         // Best-effort: eagerly drop the underlying writer even if cloned handles remain.
         if let Ok(mut write) = self.handle.write.try_lock() {
             drop(std::mem::replace(&mut *write, Box::new(tokio::io::sink())));
         }
-        let err = Error::protocol(ProtocolErrorKind::Closed, "client closed");
-        drain_pending(&self.handle.pending, &err);
     }
 }
 
@@ -3060,6 +3075,8 @@ mod wait_timeout_tests {
 
 #[cfg(test)]
 mod background_close_tests {
+    use tokio::io::AsyncBufReadExt;
+
     use super::*;
 
     fn test_handle(closed: bool) -> ClientHandle {
@@ -3135,6 +3152,103 @@ mod background_close_tests {
             err.to_string()
                 .contains("closing transport after notification failure")
         );
+    }
+
+    #[tokio::test]
+    async fn queued_write_fails_closed_before_touching_transport() {
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let (_client_read, client_write) = tokio::io::split(client_stream);
+        let handle = ClientHandle {
+            write: Arc::new(tokio::sync::Mutex::new(
+                Box::new(client_write) as Box<dyn AsyncWrite + Send + Unpin>
+            )),
+            ..test_handle(false)
+        };
+
+        let write_guard = handle.write.lock().await;
+        let queued_write = {
+            let handle = handle.clone();
+            tokio::spawn(async move { handle.notify("queued", None).await })
+        };
+        tokio::task::yield_now().await;
+
+        let closing_handle = handle.clone();
+        let close_task = tokio::spawn(async move {
+            closing_handle
+                .close_with_reason("closed while write queued".to_string())
+                .await;
+        });
+        tokio::task::yield_now().await;
+        drop(write_guard);
+
+        let err = queued_write
+            .await
+            .expect("queued write task should join")
+            .expect_err("queued write should fail once close is published");
+        assert!(matches!(
+            err,
+            Error::Protocol(ProtocolError {
+                kind: ProtocolErrorKind::Closed,
+                ..
+            })
+        ));
+        assert!(err.to_string().contains("closed while write queued"));
+        close_task.await.expect("close task should join");
+
+        let mut lines = tokio::io::BufReader::new(server_stream).lines();
+        match tokio::time::timeout(Duration::from_millis(100), lines.next_line()).await {
+            Ok(Ok(Some(line))) => {
+                panic!("queued write must not reach the underlying transport after close: {line}")
+            }
+            Ok(Ok(None)) | Err(_) => {}
+            Ok(Err(err)) => panic!("read result: {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_write_fails_closed_when_client_is_dropped() {
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let client = Client::connect_io(client_read, client_write)
+            .await
+            .expect("connect client");
+        let handle = client.handle();
+
+        let write_guard = handle.write.lock().await;
+        let queued_write = {
+            let handle = handle.clone();
+            tokio::spawn(async move { handle.notify("queued", None).await })
+        };
+        tokio::task::yield_now().await;
+
+        drop(client);
+        assert!(
+            handle.is_closed(),
+            "client drop should publish closed state"
+        );
+        drop(write_guard);
+
+        let err = queued_write
+            .await
+            .expect("queued write task should join")
+            .expect_err("queued write should fail once client drop publishes close");
+        assert!(matches!(
+            err,
+            Error::Protocol(ProtocolError {
+                kind: ProtocolErrorKind::Closed,
+                ..
+            })
+        ));
+        assert!(err.to_string().contains("client closed"));
+
+        let mut lines = tokio::io::BufReader::new(server_stream).lines();
+        match tokio::time::timeout(Duration::from_millis(100), lines.next_line()).await {
+            Ok(Ok(Some(line))) => panic!(
+                "queued write must not reach the underlying transport after client drop: {line}"
+            ),
+            Ok(Ok(None)) | Err(_) => {}
+            Ok(Err(err)) => panic!("read result: {err}"),
+        }
     }
 
     #[test]

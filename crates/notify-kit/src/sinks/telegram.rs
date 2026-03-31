@@ -1,20 +1,21 @@
 use std::time::Duration;
 
 use crate::Event;
-use crate::SecretString;
+use crate::NotifySecret;
 use crate::sinks::text::{TextLimits, format_event_text_limited, truncate_chars};
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
     HttpClientOptions, HttpClientProfile, build_http_client_profile,
     read_json_body_after_http_success, redact_url, send_reqwest,
 };
+use secret_kit::SecretString;
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 
 #[non_exhaustive]
 #[derive(Clone)]
 pub struct TelegramBotConfig {
-    pub bot_token: SecretString,
+    pub bot_token: NotifySecret,
     pub chat_id: String,
     pub timeout: Duration,
     pub max_chars: usize,
@@ -34,7 +35,7 @@ impl std::fmt::Debug for TelegramBotConfig {
 }
 
 impl TelegramBotConfig {
-    pub fn new(bot_token: impl Into<SecretString>, chat_id: impl Into<String>) -> Self {
+    pub fn new(bot_token: impl Into<NotifySecret>, chat_id: impl Into<String>) -> Self {
         Self {
             bot_token: bot_token.into(),
             chat_id: chat_id.into(),
@@ -182,7 +183,7 @@ impl Sink for TelegramBotSink {
     }
 }
 
-fn normalize_secret(secret: SecretString, field: &str) -> crate::Result<SecretString> {
+fn normalize_secret(secret: NotifySecret, field: &str) -> crate::Result<SecretString> {
     let secret = secret.expose_secret().trim();
     if secret.is_empty() {
         return Err(anyhow::anyhow!("telegram {field} must not be empty").into());

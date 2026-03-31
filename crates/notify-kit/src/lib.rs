@@ -7,6 +7,7 @@ mod error;
 mod event;
 mod hub;
 mod log;
+mod secret;
 mod sinks;
 
 #[cfg(any(feature = "all-sinks", feature = "bark"))]
@@ -35,14 +36,4 @@ pub use crate::builtin::{TelegramBotConfig, TelegramBotSink};
 pub use crate::builtin::{WeComWebhookConfig, WeComWebhookSink};
 pub use crate::core::{Error, ErrorKind, Event, Hub, HubConfig, HubLimits, Result, Severity};
 pub use crate::core::{Sink, SinkFailure, TryNotifyError};
-#[cfg(any(
-    feature = "all-sinks",
-    feature = "bark",
-    feature = "dingtalk",
-    feature = "feishu",
-    feature = "github",
-    feature = "pushplus",
-    feature = "serverchan",
-    feature = "telegram"
-))]
-pub use secret_kit::SecretString;
+pub use crate::secret::NotifySecret;

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::Event;
-use crate::SecretString;
+use crate::NotifySecret;
 use crate::sinks::text::{TextLimits, format_event_text_limited};
 use crate::sinks::{BoxFuture, Sink};
 use github_kit::{
@@ -12,6 +12,7 @@ use http_kit::{
     HttpClientOptions, HttpClientProfile, build_http_client_profile, ensure_http_success,
     redact_url, send_reqwest,
 };
+use secret_kit::SecretString;
 
 #[non_exhaustive]
 #[derive(Clone)]
@@ -20,7 +21,7 @@ pub struct GitHubCommentConfig {
     pub owner: String,
     pub repo: String,
     pub issue_number: u64,
-    pub token: SecretString,
+    pub token: NotifySecret,
     pub timeout: Duration,
     pub max_chars: usize,
     pub enforce_public_ip: bool,
@@ -46,7 +47,7 @@ impl GitHubCommentConfig {
         owner: impl Into<String>,
         repo: impl Into<String>,
         issue_number: u64,
-        token: impl Into<SecretString>,
+        token: impl Into<NotifySecret>,
     ) -> Self {
         Self {
             api_base: DEFAULT_GITHUB_API_BASE.to_string(),
@@ -206,7 +207,7 @@ impl Sink for GitHubCommentSink {
     }
 }
 
-fn normalize_secret(secret: SecretString, field: &str) -> crate::Result<SecretString> {
+fn normalize_secret(secret: NotifySecret, field: &str) -> crate::Result<SecretString> {
     let secret = secret.expose_secret().trim();
     if secret.is_empty() {
         return Err(anyhow::anyhow!("github {field} must not be empty").into());

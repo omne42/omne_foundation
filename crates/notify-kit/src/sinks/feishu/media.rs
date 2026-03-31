@@ -4,13 +4,14 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 
-use crate::SecretString;
+use crate::NotifySecret;
 use crate::log::{warn_feishu_image_load_failed, warn_feishu_image_upload_failed};
 use crate::sinks::BoxFuture;
 use http_kit::{
     DEFAULT_MAX_RESPONSE_BODY_BYTES, http_status_text_error, parse_and_validate_https_url_basic,
     read_json_body_limited, read_text_body_limited, response_body_read_error, send_reqwest,
 };
+use secret_kit::SecretString;
 
 use super::FeishuWebhookSink;
 
@@ -673,7 +674,7 @@ pub(super) fn guess_image_mime(ext: Option<&str>) -> String {
     .to_string()
 }
 
-pub(super) fn normalize_secret(secret: impl Into<SecretString>) -> crate::Result<SecretString> {
+pub(super) fn normalize_secret(secret: impl Into<NotifySecret>) -> crate::Result<SecretString> {
     let secret = secret.into();
     let secret = secret.expose_secret().trim();
     if secret.is_empty() {
@@ -684,7 +685,7 @@ pub(super) fn normalize_secret(secret: impl Into<SecretString>) -> crate::Result
 
 pub(super) fn normalize_app_credentials(
     app_id: Option<String>,
-    app_secret: Option<SecretString>,
+    app_secret: Option<NotifySecret>,
 ) -> crate::Result<Option<FeishuAppCredentials>> {
     let app_id = normalize_optional_trimmed(app_id, "app_id")?;
     let app_secret = normalize_optional_secret(app_secret, "app_secret")?;
@@ -713,7 +714,7 @@ fn normalize_optional_trimmed(value: Option<String>, field: &str) -> crate::Resu
 }
 
 fn normalize_optional_secret(
-    value: Option<SecretString>,
+    value: Option<NotifySecret>,
     field: &str,
 ) -> crate::Result<Option<SecretString>> {
     match value {

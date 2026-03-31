@@ -1,20 +1,21 @@
 use std::time::Duration;
 
 use crate::Event;
-use crate::SecretString;
+use crate::NotifySecret;
 use crate::sinks::text::{TextLimits, format_event_body_and_tags_limited, truncate_chars};
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
     HttpClientOptions, HttpClientProfile, build_http_client_profile, parse_and_validate_https_url,
     read_json_body_after_http_success, redact_url, send_reqwest, validate_url_path_prefix,
 };
+use secret_kit::SecretString;
 
 const PUSHPLUS_ALLOWED_HOSTS: [&str; 1] = ["www.pushplus.plus"];
 
 #[non_exhaustive]
 #[derive(Clone)]
 pub struct PushPlusConfig {
-    pub token: SecretString,
+    pub token: NotifySecret,
     pub channel: Option<String>,
     pub template: Option<String>,
     pub topic: Option<String>,
@@ -38,7 +39,7 @@ impl std::fmt::Debug for PushPlusConfig {
 }
 
 impl PushPlusConfig {
-    pub fn new(token: impl Into<SecretString>) -> Self {
+    pub fn new(token: impl Into<NotifySecret>) -> Self {
         Self {
             token: token.into(),
             channel: None,
@@ -232,7 +233,7 @@ impl Sink for PushPlusSink {
     }
 }
 
-fn normalize_secret(secret: SecretString, field: &str) -> crate::Result<SecretString> {
+fn normalize_secret(secret: NotifySecret, field: &str) -> crate::Result<SecretString> {
     let secret = secret.expose_secret().trim();
     if secret.is_empty() {
         return Err(anyhow::anyhow!("pushplus {field} must not be empty").into());

@@ -1,6 +1,6 @@
 use http_kit::{
-    UntrustedOutboundPolicy, read_json_body_after_http_success_limited, redact_url_for_error,
-    redact_url_str, send_reqwest, validate_untrusted_outbound_url,
+    HttpClientProfile, UntrustedOutboundPolicy, read_json_body_after_http_success_limited,
+    redact_url_for_error, redact_url_str, send_reqwest, validate_untrusted_outbound_url,
 };
 use serde::Deserialize;
 
@@ -23,7 +23,7 @@ pub struct GitHubReleaseAsset {
 }
 
 pub async fn fetch_latest_release<S: AsRef<str>>(
-    client: &reqwest::Client,
+    profile: &HttpClientProfile,
     api_bases: &[S],
     repo: &str,
     options: GitHubApiRequestOptions<'_>,
@@ -53,6 +53,17 @@ pub async fn fetch_latest_release<S: AsRef<str>>(
             errors.push(format!("{redacted_url} -> {reason}"));
             continue;
         }
+
+        let client = match profile
+            .select_for_url(&url, options.has_bearer_token())
+            .await
+        {
+            Ok(client) => client,
+            Err(err) => {
+                errors.push(format!("{redacted_url} -> {err}"));
+                continue;
+            }
+        };
 
         let response = match send_reqwest(
             apply_github_api_headers(client.get(url.clone()), options),
@@ -142,7 +153,13 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
 
+    use http_kit::{HttpClientOptions, build_http_client_profile};
+
     use super::*;
+
+    fn test_profile() -> HttpClientProfile {
+        build_http_client_profile(&HttpClientOptions::default()).expect("build http client profile")
+    }
 
     #[test]
     fn reject_invalid_repository_identifier() {
@@ -189,10 +206,10 @@ mod tests {
             },
         ];
         let (base, handle) = spawn_mock_server(responses);
-        let client = reqwest::Client::new();
+        let profile = test_profile();
 
         let release = fetch_latest_release(
-            &client,
+            &profile,
             &[format!("{base}/api-fail"), format!("{base}/api-ok")],
             "cli/cli",
             GitHubApiRequestOptions::new().with_user_agent("toolchain-installer"),
@@ -234,10 +251,10 @@ mod tests {
             body,
         }];
         let (base, handle) = spawn_mock_server(responses);
-        let client = reqwest::Client::new();
+        let profile = test_profile();
 
         let release = fetch_latest_release(
-            &client,
+            &profile,
             &[format!("{base}/api-ok")],
             "cli/cli",
             GitHubApiRequestOptions::new().with_user_agent("toolchain-installer"),
@@ -266,10 +283,10 @@ mod tests {
             body: r#"{"tag_name":"v2.0.0","assets":[]}"#.to_string(),
         }];
         let (base, handle) = spawn_mock_server(responses);
-        let client = reqwest::Client::new();
+        let profile = test_profile();
 
         let release = fetch_latest_release(
-            &client,
+            &profile,
             &[format!("{base}/api-ok")],
             "cli/cli",
             GitHubApiRequestOptions::new().with_user_agent("toolchain-installer"),
@@ -283,10 +300,10 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_latest_release_rejects_insecure_api_base_when_bearer_token_present() {
-        let client = reqwest::Client::new();
+        let profile = test_profile();
 
         let err = fetch_latest_release(
-            &client,
+            &profile,
             &["http://api.github.example.invalid/v3"],
             "cli/cli",
             GitHubApiRequestOptions::new().with_bearer_token(Some("secret-token")),
@@ -300,10 +317,10 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_latest_release_rejects_local_api_base_when_bearer_token_present() {
-        let client = reqwest::Client::new();
+        let profile = test_profile();
 
         let err = fetch_latest_release(
-            &client,
+            &profile,
             &["https://127.0.0.1/api"],
             "cli/cli",
             GitHubApiRequestOptions::new().with_bearer_token(Some("secret-token")),
@@ -318,10 +335,10 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_latest_release_redacts_sensitive_api_base_details_in_errors() {
-        let client = reqwest::Client::new();
+        let profile = test_profile();
 
         let err = fetch_latest_release(
-            &client,
+            &profile,
             &["http://user:topsecret@127.0.0.1:9/api?token=top"],
             "cli/cli",
             GitHubApiRequestOptions::new(),
@@ -339,10 +356,10 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_latest_release_redacts_invalid_api_base_before_request() {
-        let client = reqwest::Client::new();
+        let profile = test_profile();
 
         let err = fetch_latest_release(
-            &client,
+            &profile,
             &["http://user:topsecret@[::1]:99999/api?token=top"],
             "cli/cli",
             GitHubApiRequestOptions::new(),

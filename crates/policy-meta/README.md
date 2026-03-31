@@ -52,9 +52,9 @@
   - canonical enum / struct 定义
   - JSON Schema 生成
   - TypeScript declarations 导出
-  - checked-in artifact drift 检查
+  - checked-in artifact drift 检查与 stale artifact 清理
 - `src/bin/export-artifacts.rs`
-  - 同时导出并校验 `schema/` 与 `bindings/`
+  - 同时导出并校验 `schema/`、`bindings/`、`profiles/`
 - `src/bin/export-schemas.rs`
   - 只处理 `schema/`
 - `src/bin/export-types.rs`
@@ -86,6 +86,7 @@
 - Baseline profiles: `profiles/*.yaml`
 
 checked-in schema 和 TypeScript bindings 由 Rust 类型定义导出，并通过 `export-artifacts` 做同步校验。
+`profiles/` 也纳入同一个 drift check；目录里如果残留额外的旧 artifact，`--check` 会直接失败，默认导出会把这些陈旧文件清掉。
 
 `schema/` 和 `bindings/` 被视为精确的 generated artifact 目录：
 

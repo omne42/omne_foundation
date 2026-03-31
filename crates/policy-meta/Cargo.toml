@@ -13,8 +13,5 @@ workspace = true
 schemars = "0.8"
 serde.workspace = true
 serde_json.workspace = true
-ts-rs = { version = "11", features = ["serde-json-impl", "no-serde-warnings"] }
-
-[dev-dependencies]
 serde_yaml = "0.9"
-tempfile = "3"
+ts-rs = { version = "11", features = ["serde-json-impl", "no-serde-warnings"] }

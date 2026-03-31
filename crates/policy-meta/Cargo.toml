@@ -14,4 +14,5 @@ schemars = "0.8"
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
+thiserror.workspace = true
 ts-rs = { version = "11", features = ["serde-json-impl", "no-serde-warnings"] }

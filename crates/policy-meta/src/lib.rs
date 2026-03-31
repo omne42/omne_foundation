@@ -253,6 +253,149 @@ impl std::error::Error for ArtifactError {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExportArtifactsCommand {
+    pub check: bool,
+    pub schema_dir: PathBuf,
+    pub bindings_dir: PathBuf,
+    pub profiles_dir: PathBuf,
+}
+
+impl ExportArtifactsCommand {
+    #[must_use]
+    pub fn defaults() -> Self {
+        Self {
+            check: false,
+            schema_dir: default_schema_dir(),
+            bindings_dir: default_bindings_dir(),
+            profiles_dir: default_profiles_dir(),
+        }
+    }
+
+    pub fn parse_args<I, S>(args: I) -> Result<Self, ExportArtifactsCommandError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut command = Self::defaults();
+        let mut args = args.into_iter().map(Into::into);
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--check" => command.check = true,
+                "--schema-dir" => {
+                    let Some(path) = args.next() else {
+                        return Err(ExportArtifactsCommandError::MissingValue {
+                            flag: "--schema-dir",
+                        });
+                    };
+                    command.schema_dir = PathBuf::from(path);
+                }
+                "--bindings-dir" => {
+                    let Some(path) = args.next() else {
+                        return Err(ExportArtifactsCommandError::MissingValue {
+                            flag: "--bindings-dir",
+                        });
+                    };
+                    command.bindings_dir = PathBuf::from(path);
+                }
+                "--profiles-dir" => {
+                    let Some(path) = args.next() else {
+                        return Err(ExportArtifactsCommandError::MissingValue {
+                            flag: "--profiles-dir",
+                        });
+                    };
+                    command.profiles_dir = PathBuf::from(path);
+                }
+                other => {
+                    return Err(ExportArtifactsCommandError::UnknownArgument {
+                        arg: other.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(command)
+    }
+
+    pub fn run(&self) -> Result<ExportArtifactsOutcome, ExportArtifactsCommandError> {
+        if self.check {
+            check_schema_dir(&self.schema_dir)?;
+            check_typescript_bindings(&self.bindings_dir)?;
+            check_profiles_dir(&self.profiles_dir)?;
+            Ok(ExportArtifactsOutcome::Checked)
+        } else {
+            write_schema_dir(&self.schema_dir)?;
+            write_typescript_bindings(&self.bindings_dir)?;
+            write_profiles_dir(&self.profiles_dir)?;
+            Ok(ExportArtifactsOutcome::Written {
+                schema_dir: self.schema_dir.clone(),
+                bindings_dir: self.bindings_dir.clone(),
+                profiles_dir: self.profiles_dir.clone(),
+            })
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExportArtifactsOutcome {
+    Checked,
+    Written {
+        schema_dir: PathBuf,
+        bindings_dir: PathBuf,
+        profiles_dir: PathBuf,
+    },
+}
+
+impl ExportArtifactsOutcome {
+    #[must_use]
+    pub fn success_message(&self) -> String {
+        match self {
+            Self::Checked => "all checked-in artifacts are in sync".to_string(),
+            Self::Written {
+                schema_dir,
+                bindings_dir,
+                profiles_dir,
+            } => format!(
+                "wrote checked-in artifacts to {}, {} and {}",
+                schema_dir.display(),
+                bindings_dir.display(),
+                profiles_dir.display()
+            ),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ExportArtifactsCommandError {
+    MissingValue { flag: &'static str },
+    UnknownArgument { arg: String },
+    Artifact(ArtifactError),
+}
+
+impl fmt::Display for ExportArtifactsCommandError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingValue { flag } => write!(f, "missing path after {flag}"),
+            Self::UnknownArgument { arg } => write!(f, "unknown argument: {arg}"),
+            Self::Artifact(source) => source.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ExportArtifactsCommandError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Artifact(source) => Some(source),
+            Self::MissingValue { .. } | Self::UnknownArgument { .. } => None,
+        }
+    }
+}
+
+impl From<ArtifactError> for ExportArtifactsCommandError {
+    fn from(source: ArtifactError) -> Self {
+        Self::Artifact(source)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash, TS)]
 #[ts(type = "1")]
 pub struct SpecVersion;
@@ -677,6 +820,18 @@ fn render_profile(profile: &PolicyProfileV1) -> Result<String, ArtifactError> {
         .to_string())
 }
 
+fn default_schema_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schema")
+}
+
+fn default_bindings_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bindings")
+}
+
+fn default_profiles_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("profiles")
+}
+
 fn prune_unexpected_artifacts<'a>(
     output_dir: &Path,
     expected_files: impl IntoIterator<Item = &'a str>,
@@ -1044,6 +1199,48 @@ mod tests {
             err,
             ArtifactError::Drift { kind: ArtifactKind::TypescriptBinding, ref files }
             if files == &vec![POLICY_META_TYPES_FILE.to_string()]
+        ));
+    }
+
+    #[test]
+    fn export_artifacts_command_rejects_missing_flag_value_structurally() {
+        let err = ExportArtifactsCommand::parse_args(["--schema-dir"])
+            .expect_err("missing value should fail");
+        assert!(matches!(
+            err,
+            ExportArtifactsCommandError::MissingValue {
+                flag: "--schema-dir"
+            }
+        ));
+    }
+
+    #[test]
+    fn export_artifacts_command_rejects_unknown_argument_structurally() {
+        let err = ExportArtifactsCommand::parse_args(["--wat"])
+            .expect_err("unknown argument should fail");
+        assert!(matches!(
+            err,
+            ExportArtifactsCommandError::UnknownArgument { ref arg } if arg == "--wat"
+        ));
+    }
+
+    #[test]
+    fn export_artifacts_command_surfaces_artifact_errors_without_erasure() {
+        let tempdir = unique_tempdir("policy-meta-missing-root");
+        let missing_root = tempdir.path().join("does-not-exist");
+        let command = ExportArtifactsCommand {
+            check: true,
+            schema_dir: missing_root.clone(),
+            bindings_dir: missing_root.clone(),
+            profiles_dir: missing_root,
+        };
+
+        let err = command
+            .run()
+            .expect_err("missing artifact directory should fail");
+        assert!(matches!(
+            err,
+            ExportArtifactsCommandError::Artifact(ArtifactError::ReadDir { .. })
         ));
     }
 

@@ -98,9 +98,10 @@ enum WorkspaceRootState {
 ///
 /// Explicit overrides must be absolute paths. Scope-specific defaults only
 /// apply after the explicit overrides above.
-/// Within the `Auto` default, `<cwd>/<dir_name>` wins when it already exists.
-/// A missing workspace root falls back to `<home>/<dir_name>`, but an existing
-/// invalid path is reported as an error instead of silently switching scopes.
+/// Within the `Auto` default, `<cwd>/<dir_name>` stays workspace-local even
+/// when the directory does not exist yet.
+/// An existing invalid workspace root is reported as an error instead of
+/// silently switching scopes.
 pub fn resolve_data_root(options: &DataRootOptions) -> io::Result<PathBuf> {
     resolve_data_root_with(
         options,
@@ -141,14 +142,13 @@ where
         DataRootScope::Auto => {
             let workspace_root = current_dir()?.join(options.dir_name);
             match workspace_root_state(&workspace_root)? {
-                WorkspaceRootState::Missing => {}
-                WorkspaceRootState::Directory => return normalize_root(&workspace_root),
+                WorkspaceRootState::Missing | WorkspaceRootState::Directory => {
+                    return normalize_root(&workspace_root);
+                }
                 WorkspaceRootState::Invalid => {
                     return Err(invalid_workspace_root(&workspace_root));
                 }
             }
-
-            normalize_root(&resolve_home_dir_with(env_lookup)?.join(options.dir_name))
         }
     }
 }
@@ -390,7 +390,6 @@ mod tests {
             &DataRootOptions::default(),
             &|key| match key {
                 "TEXT_ASSETS_DIR" => Some(OsString::new()),
-                "HOME" => Some(OsString::from("/home/test")),
                 _ => None,
             },
             &|| Ok(PathBuf::from("/workspace")),
@@ -398,7 +397,7 @@ mod tests {
             &passthrough_root,
         )
         .expect("resolve root");
-        assert_eq!(root, PathBuf::from("/home/test/.text_assets"));
+        assert_eq!(root, PathBuf::from("/workspace/.text_assets"));
     }
 
     #[test]
@@ -645,19 +644,16 @@ mod tests {
     }
 
     #[test]
-    fn auto_scope_falls_back_to_global_when_workspace_root_missing() {
+    fn auto_scope_keeps_workspace_local_root_when_missing() {
         let root = resolve_data_root_with(
             &DataRootOptions::default(),
-            &|key| match key {
-                "HOME" => Some(OsString::from("/home/test")),
-                _ => None,
-            },
+            &|_| None,
             &|| Ok(PathBuf::from("/workspace")),
             &|_| Ok(WorkspaceRootState::Missing),
             &passthrough_root,
         )
         .expect("auto root");
-        assert_eq!(root, PathBuf::from("/home/test/.text_assets"));
+        assert_eq!(root, PathBuf::from("/workspace/.text_assets"));
     }
 
     #[test]

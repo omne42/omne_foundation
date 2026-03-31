@@ -98,9 +98,9 @@ pub(crate) fn resolve_connection_cwd_with_base(
     } else {
         let base = match base {
             Some(base) if base.is_absolute() => base.to_path_buf(),
-            Some(base) => std::env::current_dir()
-                .context("determine current working directory for relative MCP cwd base")?
-                .join(base),
+            Some(base) => {
+                anyhow::bail!("relative MCP cwd base must be absolute: {}", base.display())
+            }
             None => std::env::current_dir()
                 .context("determine current working directory for relative MCP cwd")?,
         };
@@ -121,8 +121,8 @@ pub(crate) async fn resolve_connection_cwd_with_base_async(
 }
 
 fn stable_connection_cwd_identity(path: &Path) -> anyhow::Result<PathBuf> {
-    let normalized = normalize_connection_path(path);
-    let mut existing = normalized.as_path();
+    let fallback = normalize_connection_path(path);
+    let mut existing = path;
     let mut missing_components = Vec::new();
 
     loop {
@@ -130,11 +130,11 @@ fn stable_connection_cwd_identity(path: &Path) -> anyhow::Result<PathBuf> {
             Ok(_) => break,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 let Some(component) = existing.file_name() else {
-                    return Ok(normalized);
+                    return Ok(fallback);
                 };
                 missing_components.push(component.to_os_string());
                 let Some(parent) = existing.parent() else {
-                    return Ok(normalized);
+                    return Ok(fallback);
                 };
                 existing = parent;
             }
@@ -142,7 +142,7 @@ fn stable_connection_cwd_identity(path: &Path) -> anyhow::Result<PathBuf> {
                 return Err(err).with_context(|| {
                     format!(
                         "inspect existing path prefix for MCP cwd identity: {}",
-                        normalized.display()
+                        path.display()
                     )
                 });
             }

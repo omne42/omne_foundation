@@ -40,6 +40,9 @@
 //! `shared::SharedManager::spawn_inheriting_handler_scope(...)`; bare `tokio::spawn(...)` does
 //! not inherit the handler task-local reentrancy scope automatically.
 //!
+//! Direct manager connection APIs (`Manager::connect`, `connect_named`, transport helpers, etc.)
+//! require an absolute `cwd`. They no longer fall back to the ambient process working directory.
+//!
 //! When you use config-driven connection helpers (`Manager::request`, `get_or_connect`, etc.),
 //! relative `cwd` values are resolved against the loaded `mcp.json` thread root when available,
 //! not against the ambient process directory.

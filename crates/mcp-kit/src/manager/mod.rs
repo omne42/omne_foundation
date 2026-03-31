@@ -86,7 +86,13 @@ fn normalize_server_name_lookup(server_name: &str) -> &str {
 }
 
 pub(crate) fn resolve_connection_cwd(cwd: &Path) -> anyhow::Result<PathBuf> {
-    resolve_connection_cwd_with_base(None, cwd)
+    if !cwd.is_absolute() {
+        anyhow::bail!(
+            "relative MCP cwd requires an explicit absolute base: {}",
+            cwd.display()
+        );
+    }
+    stable_connection_cwd_identity(cwd)
 }
 
 pub(crate) fn resolve_connection_cwd_with_base(
@@ -101,8 +107,10 @@ pub(crate) fn resolve_connection_cwd_with_base(
             Some(base) => {
                 anyhow::bail!("relative MCP cwd base must be absolute: {}", base.display())
             }
-            None => std::env::current_dir()
-                .context("determine current working directory for relative MCP cwd")?,
+            None => anyhow::bail!(
+                "relative MCP cwd requires an explicit absolute base: {}",
+                cwd.display()
+            ),
         };
         base.join(cwd)
     };

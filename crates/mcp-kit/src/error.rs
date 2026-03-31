@@ -1,3 +1,5 @@
+use std::fmt;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     Other,
@@ -9,35 +11,25 @@ pub enum ErrorKind {
 }
 
 #[derive(Debug)]
-pub(crate) struct TaggedError {
+struct KindTaggedError {
     kind: ErrorKind,
     source: anyhow::Error,
 }
 
-impl TaggedError {
-    fn new(kind: ErrorKind, source: anyhow::Error) -> Self {
-        Self { kind, source }
-    }
-
-    fn kind(&self) -> ErrorKind {
-        self.kind
+impl fmt::Display for KindTaggedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.source.fmt(f)
     }
 }
 
-impl std::fmt::Display for TaggedError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.source)
-    }
-}
-
-impl std::error::Error for TaggedError {
+impl std::error::Error for KindTaggedError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(self.source.as_ref())
     }
 }
 
 pub(crate) fn tag_anyhow(kind: ErrorKind, err: anyhow::Error) -> anyhow::Error {
-    anyhow::Error::new(TaggedError::new(kind, err))
+    anyhow::Error::new(KindTaggedError { kind, source: err })
 }
 
 pub(crate) fn tagged_message(kind: ErrorKind, message: impl Into<String>) -> anyhow::Error {
@@ -93,11 +85,12 @@ impl Error {
     }
 
     fn classify(err: &anyhow::Error) -> ErrorKind {
-        if let Some(tag) = err
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<TaggedError>())
-        {
-            return tag.kind();
+        if let Some(kind) = err.chain().find_map(|cause| {
+            cause
+                .downcast_ref::<KindTaggedError>()
+                .map(|tagged| tagged.kind)
+        }) {
+            return kind;
         }
 
         if err.chain().any(|cause| {
@@ -253,5 +246,14 @@ mod tests {
         .context("outer context")
         .with_context(|| "lazy context");
         assert_eq!(err.kind(), ErrorKind::Config);
+    }
+
+    #[test]
+    fn tagged_message_classifies_explicit_kind() {
+        let err = Error::from(tagged_message(
+            ErrorKind::ManagerState,
+            "mcp server not connected: demo",
+        ));
+        assert_eq!(err.kind(), ErrorKind::ManagerState);
     }
 }

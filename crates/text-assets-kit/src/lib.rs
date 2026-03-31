@@ -1,6 +1,7 @@
 #[doc(hidden)]
 pub mod bootstrap_lock;
 mod data_root;
+#[doc(hidden)]
 mod lazy_value;
 mod managed_bootstrap;
 mod resource_bootstrap;

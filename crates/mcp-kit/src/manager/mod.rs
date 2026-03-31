@@ -52,6 +52,26 @@ macro_rules! public_bail {
     };
 }
 
+macro_rules! public_config_bail {
+    ($($arg:tt)*) => {
+        return Err(crate::error::tagged_message(
+            crate::error::ErrorKind::Config,
+            format!($($arg)*),
+        )
+        .into())
+    };
+}
+
+macro_rules! public_manager_state_bail {
+    ($($arg:tt)*) => {
+        return Err(crate::error::tagged_message(
+            crate::error::ErrorKind::ManagerState,
+            format!($($arg)*),
+        )
+        .into())
+    };
+}
+
 fn next_connection_id() -> u64 {
     NEXT_CONNECTION_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
 }
@@ -846,17 +866,23 @@ impl Manager {
         requested: &ServerConfig,
     ) -> anyhow::Result<()> {
         let Some(connected) = self.connection_server_configs.get(server_name) else {
-            anyhow::bail!(
-                "mcp server {server_name} is already connected without reusable config metadata and cannot be reused from config (disconnect first)"
-            );
+            return Err(crate::error::tagged_message(
+                crate::error::ErrorKind::ManagerState,
+                format!(
+                    "mcp server {server_name} is already connected without reusable config metadata and cannot be reused from config (disconnect first)"
+                ),
+            ));
         };
         if connected == requested {
             return Ok(());
         }
 
-        anyhow::bail!(
-            "mcp server {server_name} is already connected with a different effective config and cannot be reused (disconnect first)"
-        );
+        Err(crate::error::tagged_message(
+            crate::error::ErrorKind::ManagerState,
+            format!(
+                "mcp server {server_name} is already connected with a different effective config and cannot be reused (disconnect first)"
+            ),
+        ))
     }
 
     fn ensure_resolved_connection_cwd_matches(
@@ -871,11 +897,14 @@ impl Manager {
             return Ok(());
         }
 
-        anyhow::bail!(
-            "mcp server {server_name} is already connected under cwd={} and cannot be reused for cwd={} (disconnect first)",
-            connected_cwd.stable_identity.display(),
-            requested_cwd.display()
-        );
+        Err(crate::error::tagged_message(
+            crate::error::ErrorKind::ManagerState,
+            format!(
+                "mcp server {server_name} is already connected under cwd={} and cannot be reused for cwd={} (disconnect first)",
+                connected_cwd.stable_identity.display(),
+                requested_cwd.display()
+            ),
+        ))
     }
 
     pub(crate) fn try_prepare_connected_client(
@@ -946,9 +975,12 @@ impl Manager {
         server_name: &str,
         cwd: PathBuf,
     ) -> anyhow::Result<Option<PreparedTransportConnect>> {
-        let server_cfg = config
-            .server(server_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
+        let server_cfg = config.server(server_name).ok_or_else(|| {
+            crate::error::tagged_message(
+                crate::error::ErrorKind::Config,
+                format!("unknown mcp server: {server_name}"),
+            )
+        })?;
         let server_name_key = parse_server_name_anyhow(server_name)?;
         if self.is_connected_and_alive(server_name_key.as_str()) {
             self.ensure_resolved_connection_cwd_matches(server_name_key.as_str(), &cwd)?;
@@ -1073,7 +1105,7 @@ impl Manager {
         client: mcp_jsonrpc::Client,
     ) -> crate::Result<()> {
         if self.trust_mode == TrustMode::Untrusted {
-            public_bail!(
+            public_config_bail!(
                 "refusing to attach custom JSON-RPC client in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) or use Manager::connect_jsonrpc_unchecked)"
             );
         }
@@ -1136,7 +1168,7 @@ impl Manager {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         if self.trust_mode == TrustMode::Untrusted {
-            public_bail!(
+            public_config_bail!(
                 "refusing to attach custom JSON-RPC IO in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) or use Manager::connect_io_unchecked)"
             );
         }
@@ -1178,9 +1210,12 @@ impl Manager {
         server_name: &str,
         cwd: &Path,
     ) -> crate::Result<()> {
-        let server_cfg = config
-            .server(server_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
+        let server_cfg = config.server(server_name).ok_or_else(|| {
+            crate::error::tagged_message(
+                crate::error::ErrorKind::Config,
+                format!("unknown mcp server: {server_name}"),
+            )
+        })?;
         Ok(self
             .connect_with_builder(server_name, server_cfg, cwd, config.thread_root(), || {
                 parse_server_name_anyhow(server_name)
@@ -1194,9 +1229,12 @@ impl Manager {
         server_name: &ServerName,
         cwd: &Path,
     ) -> crate::Result<()> {
-        let server_cfg = config
-            .server_named(server_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
+        let server_cfg = config.server_named(server_name).ok_or_else(|| {
+            crate::error::tagged_message(
+                crate::error::ErrorKind::Config,
+                format!("unknown mcp server: {server_name}"),
+            )
+        })?;
         let server_name_key = server_name.clone();
         Ok(self
             .connect_with_builder(
@@ -1216,9 +1254,12 @@ impl Manager {
         cwd: &Path,
     ) -> crate::Result<Session> {
         self.get_or_connect(config, server_name, cwd).await?;
-        Ok(self
-            .take_session(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session(server_name).ok_or_else(|| {
+            crate::error::tagged_message(
+                crate::error::ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?)
     }
 
     pub async fn get_or_connect_session_named(
@@ -1228,9 +1269,12 @@ impl Manager {
         cwd: &Path,
     ) -> crate::Result<Session> {
         self.get_or_connect_named(config, server_name, cwd).await?;
-        Ok(self
-            .take_session_named(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session_named(server_name).ok_or_else(|| {
+            crate::error::tagged_message(
+                crate::error::ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?)
     }
 
     pub async fn connect_named(
@@ -1368,9 +1412,12 @@ impl Manager {
         cwd: &Path,
     ) -> crate::Result<Session> {
         self.connect(server_name, server_cfg, cwd).await?;
-        Ok(self
-            .take_session(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session(server_name).ok_or_else(|| {
+            crate::error::tagged_message(
+                crate::error::ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?)
     }
 
     pub async fn connect_session_named(
@@ -1380,9 +1427,12 @@ impl Manager {
         cwd: &Path,
     ) -> crate::Result<Session> {
         self.connect_named(server_name, server_cfg, cwd).await?;
-        Ok(self
-            .take_session_named(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session_named(server_name).ok_or_else(|| {
+            crate::error::tagged_message(
+                crate::error::ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?)
     }
 
     pub async fn connect_jsonrpc_session(
@@ -1391,9 +1441,12 @@ impl Manager {
         client: mcp_jsonrpc::Client,
     ) -> crate::Result<Session> {
         self.connect_jsonrpc(server_name, client).await?;
-        Ok(self
-            .take_session(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session(server_name).ok_or_else(|| {
+            crate::error::tagged_message(
+                crate::error::ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?)
     }
 
     pub async fn connect_jsonrpc_session_named(
@@ -1402,9 +1455,12 @@ impl Manager {
         client: mcp_jsonrpc::Client,
     ) -> crate::Result<Session> {
         self.connect_jsonrpc(server_name.as_str(), client).await?;
-        Ok(self
-            .take_session_named(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session_named(server_name).ok_or_else(|| {
+            crate::error::tagged_message(
+                crate::error::ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?)
     }
 
     pub async fn connect_io_session<R, W>(
@@ -1418,9 +1474,12 @@ impl Manager {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         self.connect_io(server_name, read, write).await?;
-        Ok(self
-            .take_session(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session(server_name).ok_or_else(|| {
+            crate::error::tagged_message(
+                crate::error::ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?)
     }
 
     pub async fn connect_io_session_named<R, W>(
@@ -1434,9 +1493,12 @@ impl Manager {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         self.connect_io(server_name.as_str(), read, write).await?;
-        Ok(self
-            .take_session_named(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session_named(server_name).ok_or_else(|| {
+            crate::error::tagged_message(
+                crate::error::ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?)
     }
 
     pub async fn request(
@@ -1802,7 +1864,7 @@ impl Manager {
     ) -> crate::Result<Value> {
         let Some(prepared) = self.try_prepare_connected_client(server_name, None)? else {
             let server_name = normalize_server_name_lookup(server_name);
-            public_bail!("mcp server not connected: {server_name}");
+            public_manager_state_bail!("mcp server not connected: {server_name}");
         };
         let server_name = prepared.server_name;
         let result = Self::request_raw_handle(
@@ -1842,7 +1904,7 @@ impl Manager {
     ) -> crate::Result<()> {
         let Some(prepared) = self.try_prepare_connected_client(server_name, None)? else {
             let server_name = normalize_server_name_lookup(server_name);
-            public_bail!("mcp server not connected: {server_name}");
+            public_manager_state_bail!("mcp server not connected: {server_name}");
         };
         let server_name = prepared.server_name;
         let result = Self::notify_raw_handle(

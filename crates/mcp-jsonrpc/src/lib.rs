@@ -20,9 +20,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{OsStr, OsString};
-use std::future::Future;
 use std::path::Path;
-use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -34,11 +32,13 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
 
+mod detached;
 pub mod error;
 mod stdout_log;
 mod streamable_http;
 pub mod transport;
 
+use detached::spawn_detached;
 pub(crate) use error::ensure_tokio_time_driver;
 pub use error::{Error, ProtocolError, ProtocolErrorKind};
 use stdout_log::LogState;
@@ -47,10 +47,11 @@ pub use transport::{
     DiagnosticsOptions, Limits, SpawnOptions, StdoutLog, StdoutLogRedactor, StreamableHttpOptions,
 };
 
-const DETACHED_TASK_TIMEOUT: Duration = Duration::from_secs(5);
 const REUSABLE_LINE_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 const READ_LINE_INITIAL_CAP_BYTES: usize = 4 * 1024;
-type DetachedTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+#[cfg(test)]
+use detached::{detached_runtime_test_guard, force_detached_runtime_init_failures};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -268,112 +269,6 @@ struct BatchResponseState {
 #[derive(Clone)]
 struct BatchResponseWriter {
     state: Arc<BatchResponseState>,
-}
-
-struct DetachedRuntime {
-    runtime: tokio::runtime::Runtime,
-}
-
-#[derive(Debug, Clone)]
-struct DetachedSpawnError {
-    task_name: String,
-    detail: String,
-}
-
-impl DetachedSpawnError {
-    fn from_io(task_name: &str, err: &std::io::Error) -> Self {
-        Self {
-            task_name: task_name.to_string(),
-            detail: err.to_string(),
-        }
-    }
-}
-
-impl std::fmt::Display for DetachedSpawnError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "detached fallback unavailable for {}: {}",
-            self.task_name, self.detail
-        )
-    }
-}
-
-impl DetachedRuntime {
-    fn new() -> Result<Self, std::io::Error> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .thread_name("mcp-jsonrpc-detached")
-            .build()?;
-        Ok(Self { runtime })
-    }
-
-    fn spawn(&self, task_name: &str, task: DetachedTask) {
-        let task_name = task_name.to_string();
-        drop(self.runtime.spawn(async move {
-            let _ = tokio::time::timeout(DETACHED_TASK_TIMEOUT, task).await;
-            let _ = task_name;
-        }));
-    }
-}
-
-fn spawn_detached(
-    task_name: &str,
-    task: impl Future<Output = ()> + Send + 'static,
-) -> Result<(), DetachedSpawnError> {
-    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-        drop(runtime.spawn(task));
-        return Ok(());
-    }
-
-    let runtime = detached_runtime(task_name)?;
-    runtime.spawn(task_name, Box::pin(task));
-    Ok(())
-}
-
-fn detached_runtime(task_name: &str) -> Result<&'static DetachedRuntime, DetachedSpawnError> {
-    static DETACHED_RUNTIME: OnceLock<DetachedRuntime> = OnceLock::new();
-    #[cfg(test)]
-    {
-        if DETACHED_RUNTIME_FORCED_INIT_FAILURES
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
-                if remaining > 0 {
-                    Some(remaining - 1)
-                } else {
-                    None
-                }
-            })
-            .is_ok()
-        {
-            return Err(DetachedSpawnError {
-                task_name: task_name.to_string(),
-                detail: "forced detached runtime init failure".to_string(),
-            });
-        }
-    }
-
-    if let Some(runtime) = DETACHED_RUNTIME.get() {
-        return Ok(runtime);
-    }
-
-    let runtime =
-        DetachedRuntime::new().map_err(|err| DetachedSpawnError::from_io(task_name, &err))?;
-    Ok(DETACHED_RUNTIME.get_or_init(|| runtime))
-}
-
-#[cfg(test)]
-static DETACHED_RUNTIME_FORCED_INIT_FAILURES: AtomicU64 = AtomicU64::new(0);
-
-#[cfg(test)]
-fn force_detached_runtime_init_failures(count: u64) {
-    DETACHED_RUNTIME_FORCED_INIT_FAILURES.store(count, Ordering::Relaxed);
-}
-
-#[cfg(test)]
-fn detached_runtime_test_guard() -> std::sync::MutexGuard<'static, ()> {
-    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-    GUARD.get_or_init(|| Mutex::new(())).lock().unwrap()
 }
 
 impl std::fmt::Debug for BatchResponseWriter {

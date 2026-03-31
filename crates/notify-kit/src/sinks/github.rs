@@ -149,7 +149,7 @@ impl GitHubCommentSink {
                 .with_bearer_token(Some(token.expose_secret()))
                 .with_allow_custom_bearer_api_base(config.allow_custom_api_base_with_token),
         )
-        .map_err(|err| anyhow::Error::new(err))?;
+        .map_err(anyhow::Error::new)?;
         let http = build_http_client_profile(&HttpClientOptions {
             timeout: Some(config.timeout),
             ..Default::default()

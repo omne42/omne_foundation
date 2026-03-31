@@ -1,4 +1,4 @@
-use std::{borrow::Cow, error::Error, fs, path::Path};
+use std::{borrow::Cow, collections::BTreeSet, error::Error, fs, path::Path};
 
 use schemars::{
     JsonSchema,
@@ -345,6 +345,13 @@ pub fn policy_meta_typescript_bindings() -> String {
 
 pub fn write_schema_dir(output_dir: &Path) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(output_dir)?;
+    converge_generated_dir(
+        output_dir,
+        schema_documents()
+            .into_iter()
+            .map(|(file_name, _)| file_name),
+        "schema",
+    )?;
     for (file_name, schema) in schema_documents() {
         let path = output_dir.join(file_name);
         fs::write(path, render_schema(&schema)?)?;
@@ -354,6 +361,14 @@ pub fn write_schema_dir(output_dir: &Path) -> Result<(), Box<dyn Error>> {
 
 pub fn check_schema_dir(output_dir: &Path) -> Result<(), Box<dyn Error>> {
     let mut drift = Vec::<String>::new();
+    record_unexpected_entries(
+        output_dir,
+        schema_documents()
+            .into_iter()
+            .map(|(file_name, _)| file_name),
+        "schema",
+        &mut drift,
+    )?;
 
     for (file_name, expected) in schema_documents() {
         let path = output_dir.join(file_name);
@@ -381,6 +396,11 @@ pub fn check_schema_dir(output_dir: &Path) -> Result<(), Box<dyn Error>> {
 
 pub fn write_typescript_bindings(output_dir: &Path) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(output_dir)?;
+    converge_generated_dir(
+        output_dir,
+        std::iter::once(POLICY_META_TYPES_FILE),
+        "typescript bindings",
+    )?;
     fs::write(
         output_dir.join(POLICY_META_TYPES_FILE),
         policy_meta_typescript_bindings(),
@@ -389,20 +409,105 @@ pub fn write_typescript_bindings(output_dir: &Path) -> Result<(), Box<dyn Error>
 }
 
 pub fn check_typescript_bindings(output_dir: &Path) -> Result<(), Box<dyn Error>> {
+    let mut drift = Vec::<String>::new();
+    record_unexpected_entries(
+        output_dir,
+        std::iter::once(POLICY_META_TYPES_FILE),
+        "typescript bindings",
+        &mut drift,
+    )?;
+
     let path = output_dir.join(POLICY_META_TYPES_FILE);
     let actual = fs::read_to_string(&path)
         .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
     let expected = policy_meta_typescript_bindings();
 
-    if actual == expected {
+    if actual != expected {
+        drift.push(path.display().to_string());
+    }
+
+    if drift.is_empty() {
         Ok(())
     } else {
         Err(format!(
             "typescript bindings out of sync: {}. Run `cargo run -p policy-meta --bin export-artifacts`.",
-            path.display()
+            drift.join(", ")
         )
         .into())
     }
+}
+
+fn converge_generated_dir<'a>(
+    output_dir: &Path,
+    expected_files: impl IntoIterator<Item = &'a str>,
+    artifact_kind: &str,
+) -> Result<(), Box<dyn Error>> {
+    let expected = expected_file_names(expected_files);
+    for entry in fs::read_dir(output_dir)
+        .map_err(|err| format!("failed to read {}: {err}", output_dir.display()))?
+    {
+        let entry =
+            entry.map_err(|err| format!("failed to inspect {}: {err}", output_dir.display()))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if expected.contains(name) {
+            continue;
+        }
+
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|err| format!("failed to inspect {}: {err}", path.display()))?;
+        if file_type.is_dir() {
+            fs::remove_dir_all(&path).map_err(|err| {
+                format!(
+                    "failed to remove stale {artifact_kind} directory {}: {err}",
+                    path.display()
+                )
+            })?;
+        } else {
+            fs::remove_file(&path).map_err(|err| {
+                format!(
+                    "failed to remove stale {artifact_kind} file {}: {err}",
+                    path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn record_unexpected_entries<'a>(
+    output_dir: &Path,
+    expected_files: impl IntoIterator<Item = &'a str>,
+    artifact_kind: &str,
+    drift: &mut Vec<String>,
+) -> Result<(), Box<dyn Error>> {
+    let expected = expected_file_names(expected_files);
+    for entry in fs::read_dir(output_dir)
+        .map_err(|err| format!("failed to read {}: {err}", output_dir.display()))?
+    {
+        let entry =
+            entry.map_err(|err| format!("failed to inspect {}: {err}", output_dir.display()))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if expected.contains(name) {
+            continue;
+        }
+        drift.push(format!(
+            "unexpected stale {artifact_kind} entry {}",
+            entry.path().display()
+        ));
+    }
+    Ok(())
+}
+
+fn expected_file_names<'a>(files: impl IntoIterator<Item = &'a str>) -> BTreeSet<&'a str> {
+    files.into_iter().collect()
 }
 
 fn render_schema(schema: &serde_json::Value) -> Result<String, serde_json::Error> {
@@ -458,6 +563,7 @@ fn export_schema_document<T: JsonSchema>(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use tempfile::tempdir;
 
     use serde_json::{Value, json};
 
@@ -656,6 +762,76 @@ mod tests {
         for (file_name, expected) in cases {
             assert_eq!(checked_in_profile(file_name), expected, "{file_name}");
         }
+    }
+
+    #[test]
+    fn write_schema_dir_removes_stale_entries() {
+        let dir = tempdir().expect("tempdir");
+        let stale_file = dir.path().join("stale-schema.json");
+        let stale_dir = dir.path().join("legacy");
+        std::fs::write(&stale_file, "{}\n").expect("write stale file");
+        std::fs::create_dir(&stale_dir).expect("create stale dir");
+
+        write_schema_dir(dir.path()).expect("write schema dir");
+
+        assert!(!stale_file.exists(), "stale schema file should be removed");
+        assert!(!stale_dir.exists(), "stale schema dir should be removed");
+        for (file_name, expected) in schema_documents() {
+            let path = dir.path().join(file_name);
+            let actual: Value =
+                serde_json::from_str(&std::fs::read_to_string(path).expect("read schema file"))
+                    .expect("parse schema file");
+            assert_eq!(actual, expected, "{file_name}");
+        }
+    }
+
+    #[test]
+    fn check_schema_dir_rejects_stale_entries() {
+        let dir = tempdir().expect("tempdir");
+        write_schema_dir(dir.path()).expect("write schema dir");
+        let stale_file = dir.path().join("stale-schema.json");
+        std::fs::write(&stale_file, "{}\n").expect("write stale file");
+
+        let err = check_schema_dir(dir.path()).expect_err("stale schema entry should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("unexpected stale schema entry"), "{msg}");
+        assert!(msg.contains("stale-schema.json"), "{msg}");
+    }
+
+    #[test]
+    fn write_typescript_bindings_removes_stale_entries() {
+        let dir = tempdir().expect("tempdir");
+        let stale_file = dir.path().join("policy-meta.old.d.ts");
+        let stale_dir = dir.path().join("legacy");
+        std::fs::write(&stale_file, "export type Old = never;\n").expect("write stale file");
+        std::fs::create_dir(&stale_dir).expect("create stale dir");
+
+        write_typescript_bindings(dir.path()).expect("write types dir");
+
+        assert!(!stale_file.exists(), "stale binding file should be removed");
+        assert!(!stale_dir.exists(), "stale binding dir should be removed");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(POLICY_META_TYPES_FILE))
+                .expect("read bindings"),
+            policy_meta_typescript_bindings()
+        );
+    }
+
+    #[test]
+    fn check_typescript_bindings_rejects_stale_entries() {
+        let dir = tempdir().expect("tempdir");
+        write_typescript_bindings(dir.path()).expect("write types dir");
+        let stale_file = dir.path().join("policy-meta.old.d.ts");
+        std::fs::write(&stale_file, "export type Old = never;\n").expect("write stale file");
+
+        let err =
+            check_typescript_bindings(dir.path()).expect_err("stale bindings entry should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unexpected stale typescript bindings entry"),
+            "{msg}"
+        );
+        assert!(msg.contains("policy-meta.old.d.ts"), "{msg}");
     }
 
     fn checked_in_schema(file_name: &str) -> Value {

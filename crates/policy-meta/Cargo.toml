@@ -17,3 +17,4 @@ ts-rs = { version = "11", features = ["serde-json-impl", "no-serde-warnings"] }
 
 [dev-dependencies]
 serde_yaml = "0.9"
+tempfile = "3"

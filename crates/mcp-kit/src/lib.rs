@@ -42,15 +42,14 @@
 //! relative `cwd` values are resolved against the loaded `mcp.json` thread root when available,
 //! not against the ambient process directory.
 //!
-//! When you use config-driven connection helpers (`Manager::request`, `get_or_connect`, etc.),
-//! relative `cwd` values are resolved against the loaded `mcp.json` thread root when available,
-//! not against the ambient process directory.
+//! Config-driven helpers also reconnect on demand when a cached connection has already died, but
+//! this crate still does not run background reconnect loops or daemonize transports for you.
 //!
 //! ## Non-goals
 //!
 //! - Implementing an MCP server
 //! - High-level policies (approvals/sandbox/tool execution strategy)
-//! - Automatic reconnect/daemonization
+//! - Background automatic reconnect/daemonization
 
 mod config;
 mod error;

@@ -31,6 +31,8 @@
 - `mcp-kit`：`streamable_http` 的 `env_http_headers` 现在同时禁止覆盖 `Authorization` 与 `MCP-Protocol-Version`；`bearer_token_env_var` 继续独占 `Authorization` 的 transport 装配路径，并补充回归测试锁住这个边界。
 - `mcp-kit`：`SharedManager` 的 config 驱动 `request` / `notify` / `ensure_connected` 现在和 `Manager` 一样，会把相对 `cwd` 锚定到 `config.thread_root()`；避免同一条基于 `mcp.json` 的连接在 shared 入口下退回 ambient `current_dir()` 语义，并补充 thread-root 相对 `cwd` 复用回归测试。
 - `mcp-kit`：`Manager::try_from_config` 现在会对完整 `Config` 做 fail-fast 校验，而不再只检查 `client`；手动构造的无效 server 配置会在构造期直接失败，不再拖到首次连接时才暴露。
+- `mcp-kit`：公开 `ErrorKind` 的主路径分类现在优先依赖显式 kind 标记，`Error::context(...)` / `with_context(...)` 也会保留原有 kind；补充上下文不再把 `Config` / `ManagerState` 静默漂成 `Other`。
+- `mcp-kit`：README 和 crate 级文档现在明确区分“按需 connect/reconnect”与“后台自动重连”；`Manager` / `SharedManager` 会在 config 驱动入口里按需重建失效连接，但 crate 仍不负责守护式重连循环。
 - `mcp-kit`：config 驱动的连接路径现在会把相对 `cwd` 锚定到 `mcp.json` 所在的 thread root，并把 `cwd` 复用判断收口到稳定目录身份；同一物理目录的 `.`/`..` 等不同词法写法不再误判成不同连接上下文。
 - `mcp-kit`：`streamable_http` 现在会在配置校验阶段拒绝 `http_headers` / `env_http_headers` 里试图声明 transport 保留头（例如 `MCP-Protocol-Version`），避免用户配置重新覆盖握手边界。
 - `mcp-kit`：`SharedManager::disconnect_and_wait` 现在会把同 server 的 lifecycle gate 一直持有到 wait 结束，避免旧连接 teardown 仍在进行时，同名 server 的冷启动重连先一步穿透进来。

@@ -1,3 +1,5 @@
+use std::fmt;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     Other,
@@ -12,6 +14,24 @@ pub enum ErrorKind {
 pub struct Error {
     kind: ErrorKind,
     inner: anyhow::Error,
+}
+
+#[derive(Debug)]
+struct KindTaggedError {
+    kind: ErrorKind,
+    source: anyhow::Error,
+}
+
+impl fmt::Display for KindTaggedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.source.fmt(f)
+    }
+}
+
+impl std::error::Error for KindTaggedError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -36,9 +56,35 @@ impl Error {
         self.inner.chain()
     }
 
+    fn tagged(kind: ErrorKind, err: anyhow::Error) -> Self {
+        Self {
+            kind,
+            inner: anyhow::Error::new(KindTaggedError { kind, source: err }),
+        }
+    }
+
+    pub(crate) fn config(err: anyhow::Error) -> Self {
+        Self::tagged(ErrorKind::Config, err)
+    }
+
+    pub(crate) fn manager_state(err: anyhow::Error) -> Self {
+        Self::tagged(ErrorKind::ManagerState, err)
+    }
+
+    pub(crate) fn config_anyhow(err: anyhow::Error) -> anyhow::Error {
+        Self::config(err).into_anyhow()
+    }
+
+    pub(crate) fn manager_state_anyhow(err: anyhow::Error) -> anyhow::Error {
+        Self::manager_state(err).into_anyhow()
+    }
+
     #[must_use]
     pub fn context(self, context: impl std::fmt::Display + Send + Sync + 'static) -> Self {
-        Self::from(self.inner.context(context))
+        Self {
+            kind: self.kind,
+            inner: self.inner.context(context),
+        }
     }
 
     #[must_use]
@@ -47,10 +93,21 @@ impl Error {
         C: std::fmt::Display + Send + Sync + 'static,
         F: FnOnce() -> C,
     {
-        Self::from(self.inner.context(f()))
+        Self {
+            kind: self.kind,
+            inner: self.inner.context(f()),
+        }
     }
 
     fn classify(err: &anyhow::Error) -> ErrorKind {
+        if let Some(kind) = err.chain().find_map(|cause| {
+            cause
+                .downcast_ref::<KindTaggedError>()
+                .map(|tagged| tagged.kind)
+        }) {
+            return kind;
+        }
+
         if err.chain().any(|cause| {
             cause
                 .downcast_ref::<mcp_jsonrpc::Error>()
@@ -185,7 +242,7 @@ mod tests {
 
     #[test]
     fn classifies_config_errors() {
-        let err = Error::from(anyhow!("mcp config not found under root /tmp"));
+        let err = Error::config(anyhow!("mcp config not found under root /tmp"));
         assert_eq!(err.kind(), ErrorKind::Config);
     }
 
@@ -218,7 +275,13 @@ mod tests {
 
     #[test]
     fn classifies_manager_state_errors() {
-        let err = Error::from(anyhow!("mcp server not connected: demo"));
+        let err = Error::manager_state(anyhow!("mcp server not connected: demo"));
         assert_eq!(err.kind(), ErrorKind::ManagerState);
+    }
+
+    #[test]
+    fn context_preserves_explicit_kind() {
+        let err = Error::config(anyhow!("mcp config not found")).context("load demo config");
+        assert_eq!(err.kind(), ErrorKind::Config);
     }
 }

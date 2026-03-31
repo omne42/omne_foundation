@@ -903,10 +903,11 @@ impl Manager {
             self.ensure_resolved_connection_cwd_matches(server_name, cwd)?;
         }
 
-        let conn = self
-            .conns
-            .get(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?;
+        let conn = self.conns.get(server_name).ok_or_else(|| {
+            crate::Error::manager_state_anyhow(anyhow::anyhow!(
+                "mcp server not connected: {server_name}"
+            ))
+        })?;
         Ok(Some(PreparedConnectedClient {
             server_name: server_name.to_string(),
             connection_id: conn.id(),
@@ -946,9 +947,9 @@ impl Manager {
         server_name: &str,
         cwd: PathBuf,
     ) -> anyhow::Result<Option<PreparedTransportConnect>> {
-        let server_cfg = config
-            .server(server_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
+        let server_cfg = config.server(server_name).ok_or_else(|| {
+            crate::Error::config_anyhow(anyhow::anyhow!("unknown mcp server: {server_name}"))
+        })?;
         let server_name_key = parse_server_name_anyhow(server_name)?;
         if self.is_connected_and_alive(server_name_key.as_str()) {
             self.ensure_resolved_connection_cwd_matches(server_name_key.as_str(), &cwd)?;
@@ -1178,9 +1179,9 @@ impl Manager {
         server_name: &str,
         cwd: &Path,
     ) -> crate::Result<()> {
-        let server_cfg = config
-            .server(server_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
+        let server_cfg = config.server(server_name).ok_or_else(|| {
+            crate::Error::config_anyhow(anyhow::anyhow!("unknown mcp server: {server_name}"))
+        })?;
         Ok(self
             .connect_with_builder(server_name, server_cfg, cwd, config.thread_root(), || {
                 parse_server_name_anyhow(server_name)
@@ -1194,9 +1195,9 @@ impl Manager {
         server_name: &ServerName,
         cwd: &Path,
     ) -> crate::Result<()> {
-        let server_cfg = config
-            .server_named(server_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
+        let server_cfg = config.server_named(server_name).ok_or_else(|| {
+            crate::Error::config_anyhow(anyhow::anyhow!("unknown mcp server: {server_name}"))
+        })?;
         let server_name_key = server_name.clone();
         Ok(self
             .connect_with_builder(
@@ -1216,9 +1217,11 @@ impl Manager {
         cwd: &Path,
     ) -> crate::Result<Session> {
         self.get_or_connect(config, server_name, cwd).await?;
-        Ok(self
-            .take_session(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session(server_name).ok_or_else(|| {
+            crate::Error::manager_state_anyhow(anyhow::anyhow!(
+                "mcp server not connected: {server_name}"
+            ))
+        })?)
     }
 
     pub async fn get_or_connect_session_named(
@@ -1228,9 +1231,11 @@ impl Manager {
         cwd: &Path,
     ) -> crate::Result<Session> {
         self.get_or_connect_named(config, server_name, cwd).await?;
-        Ok(self
-            .take_session_named(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session_named(server_name).ok_or_else(|| {
+            crate::Error::manager_state_anyhow(anyhow::anyhow!(
+                "mcp server not connected: {server_name}"
+            ))
+        })?)
     }
 
     pub async fn connect_named(
@@ -1368,9 +1373,11 @@ impl Manager {
         cwd: &Path,
     ) -> crate::Result<Session> {
         self.connect(server_name, server_cfg, cwd).await?;
-        Ok(self
-            .take_session(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session(server_name).ok_or_else(|| {
+            crate::Error::manager_state_anyhow(anyhow::anyhow!(
+                "mcp server not connected: {server_name}"
+            ))
+        })?)
     }
 
     pub async fn connect_session_named(
@@ -1380,9 +1387,11 @@ impl Manager {
         cwd: &Path,
     ) -> crate::Result<Session> {
         self.connect_named(server_name, server_cfg, cwd).await?;
-        Ok(self
-            .take_session_named(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session_named(server_name).ok_or_else(|| {
+            crate::Error::manager_state_anyhow(anyhow::anyhow!(
+                "mcp server not connected: {server_name}"
+            ))
+        })?)
     }
 
     pub async fn connect_jsonrpc_session(
@@ -1391,9 +1400,11 @@ impl Manager {
         client: mcp_jsonrpc::Client,
     ) -> crate::Result<Session> {
         self.connect_jsonrpc(server_name, client).await?;
-        Ok(self
-            .take_session(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session(server_name).ok_or_else(|| {
+            crate::Error::manager_state_anyhow(anyhow::anyhow!(
+                "mcp server not connected: {server_name}"
+            ))
+        })?)
     }
 
     pub async fn connect_jsonrpc_session_named(
@@ -1402,9 +1413,11 @@ impl Manager {
         client: mcp_jsonrpc::Client,
     ) -> crate::Result<Session> {
         self.connect_jsonrpc(server_name.as_str(), client).await?;
-        Ok(self
-            .take_session_named(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session_named(server_name).ok_or_else(|| {
+            crate::Error::manager_state_anyhow(anyhow::anyhow!(
+                "mcp server not connected: {server_name}"
+            ))
+        })?)
     }
 
     pub async fn connect_io_session<R, W>(
@@ -1418,9 +1431,11 @@ impl Manager {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         self.connect_io(server_name, read, write).await?;
-        Ok(self
-            .take_session(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session(server_name).ok_or_else(|| {
+            crate::Error::manager_state_anyhow(anyhow::anyhow!(
+                "mcp server not connected: {server_name}"
+            ))
+        })?)
     }
 
     pub async fn connect_io_session_named<R, W>(
@@ -1434,9 +1449,11 @@ impl Manager {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         self.connect_io(server_name.as_str(), read, write).await?;
-        Ok(self
-            .take_session_named(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session_named(server_name).ok_or_else(|| {
+            crate::Error::manager_state_anyhow(anyhow::anyhow!(
+                "mcp server not connected: {server_name}"
+            ))
+        })?)
     }
 
     pub async fn request(

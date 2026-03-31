@@ -26,7 +26,12 @@
 
 - MCP server 实现
 - 审批、sandbox、工具策略或业务工作流
-- 自动重连、daemon 化和上层编排
+- 后台自动重连循环、daemon 化和上层编排
+
+补充边界：
+
+- `Manager` / `shared::SharedManager` 会在 `request` / `notify` / `get_or_connect*` 这类配置驱动入口里按需 `connect + initialize`，并在已断开的缓存连接失效后重新建立连接。
+- 这不等于后台自动重连；crate 不会自己常驻守护某个连接并在链路抖动时持续重试。
 
 ## 结构地图
 
@@ -40,7 +45,7 @@
   - 面向共享调用方的 single-flight 生命周期包装，通过 `mcp_kit::shared::SharedManager` 暴露
   - 同时提供 handler 子任务的显式 scope 继承入口
 - [`src/error.rs`](./src/error.rs)
-  - crate 级公开错误边界，暴露 `ErrorKind` / `Result`
+  - crate 级公开错误边界，暴露稳定的 `ErrorKind` / `Result`
 - [`src/mcp.rs`](./src/mcp.rs)
   - 常用 MCP method 的轻量 typed wrapper
 - [`src/security.rs`](./src/security.rs)

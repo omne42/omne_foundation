@@ -2,7 +2,6 @@
 name = "omne-process-primitives"
 version = "0.1.0"
 edition = "2024"
-publish = false
 description = "Low-level Omne process primitives."
 
 [lints]

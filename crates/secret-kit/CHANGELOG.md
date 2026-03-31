@@ -6,6 +6,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ## [Unreleased]
 
+- `secret-kit`：对 `omne-fs-primitives` / `omne-process-primitives` 的内部依赖现在显式声明版本与 path，避免 package 阶段继续依赖 workspace 继承语义。
+
 ### Changed
 - `secret-kit`：根命名空间现在只保留 `SecretString` / `SecretError` / `Result` 这类值对象；`secret://` 规范与运行时契约收口到显式的 `secret_kit::spec` / `secret_kit::runtime` 子模块，避免把解析规范、运行时边界和值对象继续混成一个平面 API。
 - `secret-kit`：Linux cleanup dispatcher 在内部 mutex poisoned 时改为恢复内部状态并继续 best-effort cleanup；process-tree cleanup 不再通过 `expect(...)` 把清理退化问题升级成 panic，并补了 poisoned-state 回归测试。

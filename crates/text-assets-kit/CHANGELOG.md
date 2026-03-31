@@ -6,6 +6,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ## [Unreleased]
 
+- `text-assets-kit`：对 `omne-fs-primitives` 的内部依赖现在显式声明版本与 path，允许 crate 单独打包时保持完整依赖清单。
+
 ### Added
 - Added shared `LazyValue` / `LazyInitError` primitives plus `bootstrap_text_resources_then_load(...)`, so domain runtime adapters can reuse the same lazy-init and bootstrap+rollback orchestration without reimplementing it per crate.
 

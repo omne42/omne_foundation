@@ -10,7 +10,11 @@ use crate::protocol::{AUTHORIZATION_HEADER, MCP_PROTOCOL_VERSION_HEADER};
 
 macro_rules! public_bail {
     ($($arg:tt)*) => {
-        return Err(crate::Error::config(anyhow::anyhow!($($arg)*)))
+        return Err(crate::error::tagged_message(
+            crate::error::ErrorKind::Config,
+            format!($($arg)*),
+        )
+        .into())
     };
 }
 

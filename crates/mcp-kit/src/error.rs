@@ -1,5 +1,3 @@
-use std::fmt;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     Other,
@@ -11,27 +9,45 @@ pub enum ErrorKind {
 }
 
 #[derive(Debug)]
-pub struct Error {
-    kind: ErrorKind,
-    inner: anyhow::Error,
-}
-
-#[derive(Debug)]
-struct KindTaggedError {
+pub(crate) struct TaggedError {
     kind: ErrorKind,
     source: anyhow::Error,
 }
 
-impl fmt::Display for KindTaggedError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.source.fmt(f)
+impl TaggedError {
+    fn new(kind: ErrorKind, source: anyhow::Error) -> Self {
+        Self { kind, source }
+    }
+
+    fn kind(&self) -> ErrorKind {
+        self.kind
     }
 }
 
-impl std::error::Error for KindTaggedError {
+impl std::fmt::Display for TaggedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.source)
+    }
+}
+
+impl std::error::Error for TaggedError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(self.source.as_ref())
     }
+}
+
+pub(crate) fn tag_anyhow(kind: ErrorKind, err: anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(TaggedError::new(kind, err))
+}
+
+pub(crate) fn tagged_message(kind: ErrorKind, message: impl Into<String>) -> anyhow::Error {
+    tag_anyhow(kind, anyhow::anyhow!(message.into()))
+}
+
+#[derive(Debug)]
+pub struct Error {
+    kind: ErrorKind,
+    inner: anyhow::Error,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -56,29 +72,6 @@ impl Error {
         self.inner.chain()
     }
 
-    fn tagged(kind: ErrorKind, err: anyhow::Error) -> Self {
-        Self {
-            kind,
-            inner: anyhow::Error::new(KindTaggedError { kind, source: err }),
-        }
-    }
-
-    pub(crate) fn config(err: anyhow::Error) -> Self {
-        Self::tagged(ErrorKind::Config, err)
-    }
-
-    pub(crate) fn manager_state(err: anyhow::Error) -> Self {
-        Self::tagged(ErrorKind::ManagerState, err)
-    }
-
-    pub(crate) fn config_anyhow(err: anyhow::Error) -> anyhow::Error {
-        Self::config(err).into_anyhow()
-    }
-
-    pub(crate) fn manager_state_anyhow(err: anyhow::Error) -> anyhow::Error {
-        Self::manager_state(err).into_anyhow()
-    }
-
     #[must_use]
     pub fn context(self, context: impl std::fmt::Display + Send + Sync + 'static) -> Self {
         Self {
@@ -100,12 +93,11 @@ impl Error {
     }
 
     fn classify(err: &anyhow::Error) -> ErrorKind {
-        if let Some(kind) = err.chain().find_map(|cause| {
-            cause
-                .downcast_ref::<KindTaggedError>()
-                .map(|tagged| tagged.kind)
-        }) {
-            return kind;
+        if let Some(tag) = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<TaggedError>())
+        {
+            return tag.kind();
         }
 
         if err.chain().any(|cause| {
@@ -134,39 +126,6 @@ impl Error {
         if err
             .chain()
             .any(|cause| cause.downcast_ref::<crate::ServerNameError>().is_some())
-        {
-            return ErrorKind::Config;
-        }
-
-        let mut chain_text = String::new();
-        for cause in err.chain() {
-            if !chain_text.is_empty() {
-                chain_text.push_str(" | ");
-            }
-            chain_text.push_str(&cause.to_string());
-        }
-        let chain_text = chain_text.to_ascii_lowercase();
-
-        if chain_text.contains("not connected")
-            || chain_text.contains("cannot be reused for cwd")
-            || chain_text.contains("reentrantly")
-            || chain_text.contains("became unavailable before")
-        {
-            return ErrorKind::ManagerState;
-        }
-
-        if chain_text.contains("mcp config")
-            || chain_text.contains("invalid mcp server config")
-            || chain_text.contains("unknown mcp server")
-            || chain_text.contains("override config path")
-            || chain_text.contains("transport=")
-            || chain_text.contains("stdout_log")
-            || chain_text.contains("client.protocol_version")
-            || chain_text.contains("client.capabilities")
-            || chain_text.contains("client.roots")
-            || chain_text.contains("bearer_token_env_var")
-            || chain_text.contains("unix_path")
-            || chain_text.contains("untrusted mode")
         {
             return ErrorKind::Config;
         }
@@ -238,11 +197,14 @@ impl From<crate::ServerNameError> for Error {
 mod tests {
     use anyhow::anyhow;
 
-    use super::{Error, ErrorKind};
+    use super::{Error, ErrorKind, tag_anyhow, tagged_message};
 
     #[test]
     fn classifies_config_errors() {
-        let err = Error::config(anyhow!("mcp config not found under root /tmp"));
+        let err = Error::from(tagged_message(
+            ErrorKind::Config,
+            "mcp config not found under root /tmp",
+        ));
         assert_eq!(err.kind(), ErrorKind::Config);
     }
 
@@ -275,13 +237,21 @@ mod tests {
 
     #[test]
     fn classifies_manager_state_errors() {
-        let err = Error::manager_state(anyhow!("mcp server not connected: demo"));
+        let err = Error::from(tagged_message(
+            ErrorKind::ManagerState,
+            "mcp server not connected: demo",
+        ));
         assert_eq!(err.kind(), ErrorKind::ManagerState);
     }
 
     #[test]
-    fn context_preserves_explicit_kind() {
-        let err = Error::config(anyhow!("mcp config not found")).context("load demo config");
+    fn preserves_kind_across_context_layers() {
+        let err = Error::from(tag_anyhow(
+            ErrorKind::Config,
+            anyhow!("base config failure"),
+        ))
+        .context("outer context")
+        .with_context(|| "lazy context");
         assert_eq!(err.kind(), ErrorKind::Config);
     }
 }

@@ -845,6 +845,12 @@ mod tests {
         type Params = NamedNotificationParams;
     }
 
+    fn explicit_named_cwd_for_shared_manager_test(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir()
+            .join("mcp-kit-shared-manager")
+            .join(label)
+    }
+
     #[cfg(not(windows))]
     async fn cwd_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
         static GUARD: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -1656,8 +1662,10 @@ mod tests {
             .connect_io("srv", client_read, client_write)
             .await
             .unwrap();
+        let connected_cwd = explicit_named_cwd_for_shared_manager_test("workspace-a");
+        let requested_cwd = explicit_named_cwd_for_shared_manager_test("workspace-b");
         manager
-            .record_connection_cwd("srv", Path::new("/workspace/a"))
+            .record_connection_cwd("srv", &connected_cwd)
             .unwrap();
 
         let mut servers = BTreeMap::new();
@@ -1668,7 +1676,7 @@ mod tests {
         let shared = manager.into_shared();
         let config = Config::new(ClientConfig::default(), servers);
         let err = shared
-            .request(&config, "srv", "ping", None, Path::new("/workspace/b"))
+            .request(&config, "srv", "ping", None, &requested_cwd)
             .await
             .expect_err("different cwd should be rejected");
         assert!(

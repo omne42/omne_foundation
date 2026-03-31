@@ -62,6 +62,12 @@ fn explicit_cwd_for_direct_connect_test() -> PathBuf {
     std::env::temp_dir()
 }
 
+fn explicit_named_cwd_for_direct_connect_test(label: &str) -> PathBuf {
+    explicit_cwd_for_direct_connect_test()
+        .join("mcp-kit-direct-connect")
+        .join(label)
+}
+
 #[test]
 fn roots_capability_is_inserted() {
     let mut capabilities = serde_json::json!({});
@@ -624,7 +630,10 @@ async fn prepare_transport_connect_rejects_different_cwd_context() {
         },
     );
     manager
-        .record_connection_cwd("srv", Path::new("/workspace/a"))
+        .record_connection_cwd(
+            "srv",
+            &explicit_named_cwd_for_direct_connect_test("workspace-a"),
+        )
         .unwrap();
 
     let mut servers = std::collections::BTreeMap::new();
@@ -634,7 +643,11 @@ async fn prepare_transport_connect_rejects_different_cwd_context() {
     );
     let config = Config::new(crate::ClientConfig::default(), servers);
 
-    let err = match manager.prepare_transport_connect(&config, "srv", Path::new("/workspace/b")) {
+    let err = match manager.prepare_transport_connect(
+        &config,
+        "srv",
+        &explicit_named_cwd_for_direct_connect_test("workspace-b"),
+    ) {
         Ok(_) => panic!("different cwd should be rejected"),
         Err(err) => err,
     };
@@ -666,7 +679,10 @@ async fn prepare_transport_connect_rejects_reuse_without_config_metadata() {
         },
     );
     manager
-        .record_connection_cwd("srv", Path::new("/workspace/a"))
+        .record_connection_cwd(
+            "srv",
+            &explicit_named_cwd_for_direct_connect_test("workspace-a"),
+        )
         .unwrap();
 
     let mut servers = std::collections::BTreeMap::new();
@@ -676,7 +692,11 @@ async fn prepare_transport_connect_rejects_reuse_without_config_metadata() {
     );
     let config = Config::new(crate::ClientConfig::default(), servers);
 
-    let err = match manager.prepare_transport_connect(&config, "srv", Path::new("/workspace/a")) {
+    let err = match manager.prepare_transport_connect(
+        &config,
+        "srv",
+        &explicit_named_cwd_for_direct_connect_test("workspace-a"),
+    ) {
         Ok(_) => panic!("config-driven reuse without metadata should fail closed"),
         Err(err) => err,
     };
@@ -708,7 +728,10 @@ async fn prepare_transport_connect_rejects_different_effective_config() {
         },
     );
     manager
-        .record_connection_cwd("srv", Path::new("/workspace/a"))
+        .record_connection_cwd(
+            "srv",
+            &explicit_named_cwd_for_direct_connect_test("workspace-a"),
+        )
         .unwrap();
     manager
         .record_connection_server_config(
@@ -724,7 +747,11 @@ async fn prepare_transport_connect_rejects_different_effective_config() {
     );
     let config = Config::new(crate::ClientConfig::default(), servers);
 
-    let err = match manager.prepare_transport_connect(&config, "srv", Path::new("/workspace/a")) {
+    let err = match manager.prepare_transport_connect(
+        &config,
+        "srv",
+        &explicit_named_cwd_for_direct_connect_test("workspace-a"),
+    ) {
         Ok(_) => panic!("different effective config should not be silently reused"),
         Err(err) => err,
     };

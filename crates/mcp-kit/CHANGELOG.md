@@ -14,6 +14,7 @@
 - `mcp-kit`：补充 notification handler panic 后停止后续 dispatch 的回归测试，锁住 request/notification 两条 handler 路径都 fail-closed 的语义。
 - `mcp-kit`：读取或修改进程级 `current_dir()` 的测试现在统一走同一把 cwd guard，并把“恢复原 cwd”收口到单一 RAII helper，避免 `cargo test` 并跑时把不相关用例炸掉。
 - `mcp-kit`：cwd-sensitive manager 测试里的 `current_dir_for_test()` 现在补齐 Windows 条件编译实现，避免跨平台测试矩阵因为 helper 缺失而在 Windows 上编译失败。
+- `mcp-kit`：direct/shared-manager 的显式 `cwd` 复用回归测试现在统一用平台真实绝对路径夹具，不再把 Unix 风格 `"/workspace/..."` 误当成 Windows 上的绝对 base，避免跨平台 CI 因测试夹具失真而假失败。
 - `mcp-kit`：direct `Manager` 连接入口的相对 `cwd` 现在会直接 fail-closed，要求调用方显式传入绝对路径；只有 config/thread-root 驱动路径还会解析相对 `cwd`。相关回归测试同步从 ambient `current_dir()` helper 改成显式边界断言。
 - `mcp-kit`：`Config::server(&str)` 现在和 `ServerName::parse(...)` 共享同一套 trim/校验归一化，`" remote "` 这类输入在 config 驱动冷启动路径上不再误报 `unknown mcp server`，与已连接热路径保持一致。
 - `mcp-kit`：`SharedManager` 的公共 async facade 现在补齐了 `ServerName` 值对象入口，`is_connected` / `disconnect` / `request` / `notify` 及其 connected/typed 变体都新增对应的 `*_named` 重载，避免共享并发层继续把已校验 server key 退化回 `&str`。

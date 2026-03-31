@@ -11,8 +11,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `notify-kit` 的公开 sink config/builder 不再直接暴露 `secret-kit::SecretString`；新增 crate 本地的 `NotifySecret` 作为公开边界，内部实现仍可继续复用 `secret-kit` 存放长期凭证，避免通知域 API 把下层 secret 持有模型固定进契约里。
 - `notify-kit::Error` 在多 sink 聚合失败时恢复标准 `Error::source()` 链：聚合错误现在把首个 `SinkFailure` 作为 source，而 `SinkFailure` 继续指向对应的底层错误；需要完整多错误信息时仍使用 `sink_failures()`。
 - `Hub::notify(...)` 现在会在缺少 Tokio runtime/time driver 或 inflight 容量耗尽时返回 `TryNotifyError`，不再把入队失败静默降级为 warning-only；保留显式的 `Hub::notify_lossy(...)` 供调用方选择旧的尽力而为语义。
-- `notify_kit::env::build_hub_from_standard_env(...)` 现在对布尔型 env（例如 `NOTIFY_SOUND`）采用 fail-closed 解析：非法值会直接报错，而不是偷偷回退默认值。
-- `notify_kit::builtin::env::build_hub_from_standard_env(...)` 现在返回模块内的 `EnvHubError`，不再把 `anyhow::Result` 暴露成公开 helper 契约；文档 canonical 路径也收口到 `notify_kit::builtin::env::...`，而 `notify_kit::env::...` 仅作为兼容出口保留。
+- `notify_kit::builtin::env::build_hub_from_standard_env(...)` 现在对布尔型 env（例如 `NOTIFY_SOUND`）采用 fail-closed 解析：非法值会直接报错，而不是偷偷回退默认值。
+- `notify_kit::builtin::env::build_hub_from_standard_env(...)` 现在返回 `notify-kit` 自己的 `Result`/`Error` 边界，不再把 `anyhow::Result` 暴露成公开 helper 契约；文档 canonical 路径也收口到 `notify_kit::builtin::env::...`，而 `notify_kit::env::...` 仅作为兼容出口保留。
 - `FeishuWebhookSink` 现在把远程/本地图片、tenant token 缓存和媒体上传能力收口到显式的 `FeishuWebhookMediaConfig` / internal media support 边界；基础 webhook 配置继续可用，但更宽的图片/上传语义不再和 webhook 主状态平铺混在一起。
 - `FeishuWebhookSink` 的本地图片配置现在按开关正交处理：当 `with_local_image_files(false)` 时，会忽略 `local_image_root(s)` 和 `local_image_base_dir`，不再因为未启用路径上的附带配置提前报错。
 - workspace 内部 crate 的 path 依赖现在补齐版本声明，允许 `config-kit` / `secret-kit` / `text-assets-kit` 等核心 foundation crate 正常通过 `cargo package --no-verify` 做跨仓发布校验。

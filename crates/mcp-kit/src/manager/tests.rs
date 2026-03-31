@@ -62,26 +62,34 @@ fn cwd_test_guard() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[cfg(not(windows))]
-struct CurrentDirRestoreGuard {
+struct CurrentDirTestGuard {
+    _guard: std::sync::MutexGuard<'static, ()>,
     original_cwd: Option<PathBuf>,
 }
 
 #[cfg(not(windows))]
-impl CurrentDirRestoreGuard {
-    fn capture() -> Self {
+impl CurrentDirTestGuard {
+    fn acquire() -> Self {
         Self {
+            _guard: cwd_test_guard(),
             original_cwd: Some(std::env::current_dir().expect("original cwd")),
         }
     }
 }
 
 #[cfg(not(windows))]
-impl Drop for CurrentDirRestoreGuard {
+impl Drop for CurrentDirTestGuard {
     fn drop(&mut self) {
         if let Some(path) = self.original_cwd.take() {
             let _ = std::env::set_current_dir(path);
         }
     }
+}
+
+#[cfg(not(windows))]
+fn current_dir_for_test() -> PathBuf {
+    let _guard = cwd_test_guard();
+    std::env::current_dir().expect("current dir")
 }
 
 #[test]
@@ -503,14 +511,9 @@ async fn try_prepare_connected_client_rejects_different_cwd_context() {
         .await
         .unwrap();
 
-    let connected_cwd = std::env::current_dir()
-        .expect("current dir")
-        .join("workspace")
-        .join("a");
-    let other_cwd = std::env::current_dir()
-        .expect("current dir")
-        .join("workspace")
-        .join("b");
+    let current_dir = current_dir_for_test();
+    let connected_cwd = current_dir.join("workspace").join("a");
+    let other_cwd = current_dir.join("workspace").join("b");
 
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
         .with_trust_mode(TrustMode::Trusted);
@@ -553,10 +556,7 @@ async fn try_prepare_connected_client_reuses_same_cwd_identity() {
         .await
         .unwrap();
 
-    let connected_cwd = std::env::current_dir()
-        .expect("current dir")
-        .join("workspace")
-        .join("demo");
+    let connected_cwd = current_dir_for_test().join("workspace").join("demo");
     let same_cwd_different_spelling = connected_cwd
         .parent()
         .expect("parent")
@@ -769,8 +769,7 @@ fn prepare_transport_connect_resolves_relative_cwd_from_config_thread_root() {
     let expected_cwd = tempdir.path().join("workspace").join("demo");
     let outside = tempfile::tempdir().unwrap();
 
-    let _guard = cwd_test_guard();
-    let _cwd_restore = CurrentDirRestoreGuard::capture();
+    let _cwd_guard = CurrentDirTestGuard::acquire();
     std::env::set_current_dir(outside.path()).expect("enter outside dir");
 
     let mut servers = std::collections::BTreeMap::new();

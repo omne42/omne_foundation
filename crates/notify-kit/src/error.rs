@@ -47,6 +47,12 @@ impl std::fmt::Display for SinkFailure {
     }
 }
 
+impl std::error::Error for SinkFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
+
 #[derive(Debug)]
 enum ErrorRepr {
     Other(anyhow::Error),
@@ -108,7 +114,9 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match &self.repr {
             ErrorRepr::Other(err) => err.source(),
-            ErrorRepr::SinkFailures(_) => None,
+            ErrorRepr::SinkFailures(failures) => failures
+                .first()
+                .map(|failure| failure as &(dyn std::error::Error + 'static)),
         }
     }
 }
@@ -151,5 +159,29 @@ impl From<http_kit::Error> for Error {
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
         Self::from(anyhow::Error::from(err))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+
+    use super::{Error, ErrorKind, SinkFailure};
+
+    #[test]
+    fn sink_failures_preserve_standard_error_source_chain() {
+        let io_error = std::io::Error::other("disk full");
+        let sink_error = Error::from(io_error);
+        let aggregate = Error::from_sink_failures(vec![SinkFailure::new(0, "feishu", sink_error)]);
+
+        assert_eq!(aggregate.kind(), ErrorKind::SinkFailures);
+
+        let first = aggregate.source().expect("aggregate source should exist");
+        assert_eq!(first.to_string(), "- feishu: disk full");
+
+        let root = first
+            .source()
+            .expect("sink failure should expose inner error");
+        assert_eq!(root.to_string(), "disk full");
     }
 }

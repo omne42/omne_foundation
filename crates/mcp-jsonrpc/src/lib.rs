@@ -52,6 +52,48 @@ fn no_runtime_close_reason(action: &str) -> String {
     format!("cannot {action} without a Tokio runtime; transport closed fail-closed")
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum CloseReasonPriority {
+    Fallback,
+    Primary,
+}
+
+#[derive(Debug, Default)]
+struct CloseReasonState {
+    inner: Mutex<Option<(CloseReasonPriority, String)>>,
+}
+
+impl CloseReasonState {
+    fn publish(&self, priority: CloseReasonPriority, reason: String) -> bool {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let first_close = guard.is_none();
+        let should_replace = match guard.as_ref() {
+            None => true,
+            Some((current_priority, _)) => priority > *current_priority,
+        };
+        if should_replace {
+            *guard = Some((priority, reason));
+        }
+        first_close
+    }
+
+    fn get(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|(_, reason)| reason.clone())
+    }
+
+    #[cfg(test)]
+    fn set_for_test(&self, priority: CloseReasonPriority, reason: impl Into<String>) {
+        let _ = self.publish(priority, reason.into());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum Id {
@@ -157,7 +199,7 @@ pub struct ClientHandle {
     stats: Arc<ClientStatsInner>,
     diagnostics: Option<Arc<DiagnosticsState>>,
     closed: Arc<AtomicBool>,
-    close_reason: Arc<OnceLock<String>>,
+    close_reason: Arc<CloseReasonState>,
     stdout_log_write_error: Arc<OnceLock<String>>,
 }
 
@@ -462,12 +504,12 @@ impl RequestResponder {
 }
 
 impl ClientHandle {
-    fn begin_close(&self, reason: String) -> bool {
-        if self.close_reason.set(reason).is_err() {
-            return false;
+    fn begin_close(&self, reason: String, priority: CloseReasonPriority) -> bool {
+        let first_close = self.close_reason.publish(priority, reason);
+        if first_close {
+            self.closed.store(true, Ordering::Release);
         }
-        self.closed.store(true, Ordering::Release);
-        true
+        first_close
     }
 
     fn serialize_outbound_json_line(&self, value: &impl Serialize) -> Result<Vec<u8>, Error> {
@@ -492,7 +534,7 @@ impl ClientHandle {
     }
 
     pub fn close_reason(&self) -> Option<String> {
-        self.close_reason.get().cloned()
+        self.close_reason.get()
     }
 
     /// Returns the last stdout log write error, if any.
@@ -512,7 +554,7 @@ impl ClientHandle {
     }
 
     fn schedule_close_once(&self, reason: String) {
-        if !self.begin_close(reason.clone()) {
+        if !self.begin_close(reason.clone(), CloseReasonPriority::Primary) {
             return;
         }
         let err = Error::protocol(ProtocolErrorKind::Closed, reason.clone());
@@ -533,7 +575,7 @@ impl ClientHandle {
 
     fn check_closed(&self) -> Result<(), Error> {
         if let Some(reason) = self.close_reason.get() {
-            return Err(Error::protocol(ProtocolErrorKind::Closed, reason.clone()));
+            return Err(Error::protocol(ProtocolErrorKind::Closed, reason));
         }
         if !self.closed.load(Ordering::Acquire) {
             return Ok(());
@@ -545,17 +587,42 @@ impl ClientHandle {
     }
 
     pub(crate) async fn close_with_reason(&self, reason: impl Into<String>) {
+        self.close_with_reason_priority(reason, CloseReasonPriority::Primary)
+            .await;
+    }
+
+    pub(crate) async fn close_with_fallback_reason(&self, reason: impl Into<String>) {
+        self.close_with_reason_priority(reason, CloseReasonPriority::Fallback)
+            .await;
+    }
+
+    async fn close_with_reason_priority(
+        &self,
+        reason: impl Into<String>,
+        priority: CloseReasonPriority,
+    ) {
         let reason = reason.into();
-        self.close_with_error(
+        self.close_with_error_priority(
             reason.clone(),
             Error::protocol(ProtocolErrorKind::Closed, reason),
+            priority,
         )
         .await;
     }
 
     pub(crate) async fn close_with_error(&self, reason: impl Into<String>, err: Error) {
+        self.close_with_error_priority(reason, err, CloseReasonPriority::Primary)
+            .await;
+    }
+
+    async fn close_with_error_priority(
+        &self,
+        reason: impl Into<String>,
+        err: Error,
+        priority: CloseReasonPriority,
+    ) {
         let reason = reason.into();
-        if !self.begin_close(reason) {
+        if !self.begin_close(reason, priority) {
             return;
         }
 
@@ -928,7 +995,7 @@ impl Client {
             stats: stats.clone(),
             diagnostics: diagnostics_state.clone(),
             closed: Arc::new(AtomicBool::new(false)),
-            close_reason: Arc::new(OnceLock::new()),
+            close_reason: Arc::new(CloseReasonState::default()),
             stdout_log_write_error: Arc::new(OnceLock::new()),
         };
 
@@ -1170,7 +1237,9 @@ impl Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
-        let close_published = self.handle.begin_close("client closed".to_string());
+        let close_published = self
+            .handle
+            .begin_close("client closed".to_string(), CloseReasonPriority::Fallback);
         self.task.abort();
         for task in self.transport_tasks.drain(..) {
             task.abort();
@@ -1394,7 +1463,7 @@ where
                 }
                 Ok(false) => {
                     responder
-                        .close_with_reason("server closed connection")
+                        .close_with_fallback_reason("server closed connection")
                         .await;
                     return;
                 }
@@ -2921,7 +2990,7 @@ mod background_close_tests {
             stats: Arc::new(ClientStatsInner::default()),
             diagnostics: None,
             closed: Arc::new(AtomicBool::new(closed)),
-            close_reason: Arc::new(OnceLock::new()),
+            close_reason: Arc::new(CloseReasonState::default()),
             stdout_log_write_error: Arc::new(OnceLock::new()),
         }
     }
@@ -2962,9 +3031,10 @@ mod background_close_tests {
     #[test]
     fn check_closed_uses_close_reason_during_close_publication() {
         let handle = test_handle(false);
-        let _ = handle
-            .close_reason
-            .set("closing transport after notification failure".to_string());
+        handle.close_reason.set_for_test(
+            CloseReasonPriority::Primary,
+            "closing transport after notification failure",
+        );
 
         assert!(handle.is_closed());
         let err = handle
@@ -2980,6 +3050,24 @@ mod background_close_tests {
         assert!(
             err.to_string()
                 .contains("closing transport after notification failure")
+        );
+    }
+
+    #[test]
+    fn primary_close_reason_overrides_fallback_reason() {
+        let handle = test_handle(false);
+        handle
+            .close_reason
+            .set_for_test(CloseReasonPriority::Fallback, "server closed connection");
+
+        handle.close_reason.set_for_test(
+            CloseReasonPriority::Primary,
+            "streamable http notification failed: http error: 500",
+        );
+
+        assert_eq!(
+            handle.close_reason(),
+            Some("streamable http notification failed: http error: 500".to_string())
         );
     }
 

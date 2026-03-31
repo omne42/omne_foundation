@@ -32,6 +32,7 @@
 
 - `Manager` / `SharedManager` 的 config 驱动入口会在“同名连接已自然关闭”后按需重新建连，这属于当前实例内部的连接复用语义。
 - crate 不负责后台自动重连循环、keepalive、守护进程或跨实例重连策略。
+- server handler 的 panic 会被隔离成 fail-closed 边界：当前条消息会收到结构化错误或直接停止 notification dispatch，后续消息不会继续复用同一个 handler 实例。
 
 ## 结构地图
 

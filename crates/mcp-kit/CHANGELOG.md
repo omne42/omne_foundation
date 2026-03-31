@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：server request/notification handler 的 panic 隔离边界现在改为 fail-closed。单次 panic 仍会被收口成结构化错误，但对应的 handler dispatch loop 会立即停用，后续消息不再继续复用一个可能已半更新状态的 handler。
 - `mcp-kit`：读取或修改进程级 `current_dir()` 的测试现在统一走同一把 cwd guard，并把“恢复原 cwd”收口到单一 RAII helper，避免 `cargo test` 并跑时把不相关用例炸掉。
 - `mcp-kit`：cwd-sensitive manager 测试里的 `current_dir_for_test()` 现在补齐 Windows 条件编译实现，避免跨平台测试矩阵因为 helper 缺失而在 Windows 上编译失败。
 - `mcp-kit`：`Config::server(&str)` 现在和 `ServerName::parse(...)` 共享同一套 trim/校验归一化，`" remote "` 这类输入在 config 驱动冷启动路径上不再误报 `unknown mcp server`，与已连接热路径保持一致。

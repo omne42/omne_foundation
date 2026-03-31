@@ -104,7 +104,7 @@ let tools = session.list_tools().await?;
 
 如果你的 MCP server 会“反向调用”一些 client 侧能力（server→client request），通常需要两件事：
 
-1. 在 initialize 里声明你支持的 client capabilities（`Manager::with_capabilities(...)`）
+1. 在 initialize 里声明你支持的 client capabilities（`Manager::with_capabilities(...)`，会先做 fail-fast 校验）
 2. 实现对应的 request handler（`with_server_request_handler(...)`）
 
 例如（声明 capability + 处理对应的 server→client request；类似一些实现会用到的 `codex/sandbox-state/update`）：
@@ -119,7 +119,7 @@ manager = manager.with_capabilities(json!({
     "experimental": {
         "codex/sandbox-state": { "version": "1.0.0" }
     }
-}));
+}))?;
 
 manager = manager.with_server_request_handler(Arc::new(|ctx: ServerRequestContext| {
     Box::pin(async move {

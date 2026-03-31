@@ -565,10 +565,14 @@ impl Manager {
         );
         let mut manager = Self::new(client_name, client_version, timeout);
         if let Some(protocol_version) = config.client().protocol_version.clone() {
-            manager = manager.with_protocol_version(protocol_version);
+            manager = manager
+                .with_protocol_version(protocol_version)
+                .expect("validated config.client().protocol_version");
         }
         if let Some(capabilities) = config.client().capabilities.clone() {
-            manager = manager.with_capabilities(capabilities);
+            manager = manager
+                .with_capabilities(capabilities)
+                .expect("validated config.client().capabilities");
         }
         if let Some(roots) = config.client().roots.clone() {
             manager = manager.with_roots(roots);
@@ -639,9 +643,18 @@ impl Manager {
         self
     }
 
-    pub fn with_protocol_version(mut self, protocol_version: impl Into<String>) -> Self {
-        self.protocol_version = protocol_version.into();
-        self
+    pub fn with_protocol_version(
+        mut self,
+        protocol_version: impl Into<String>,
+    ) -> crate::Result<Self> {
+        let protocol_version = protocol_version.into();
+        crate::ClientConfig {
+            protocol_version: Some(protocol_version.clone()),
+            ..Default::default()
+        }
+        .validate()?;
+        self.protocol_version = protocol_version;
+        Ok(self)
     }
 
     pub fn with_protocol_version_check(mut self, check: ProtocolVersionCheck) -> Self {
@@ -690,12 +703,17 @@ impl Manager {
         self.server_handler_timeout_counts.take_and_reset()
     }
 
-    pub fn with_capabilities(mut self, capabilities: Value) -> Self {
+    pub fn with_capabilities(mut self, capabilities: Value) -> crate::Result<Self> {
+        crate::ClientConfig {
+            capabilities: Some(capabilities.clone()),
+            ..Default::default()
+        }
+        .validate()?;
         self.capabilities = capabilities;
         if self.roots.is_some() {
             ensure_roots_capability(&mut self.capabilities);
         }
-        self
+        Ok(self)
     }
 
     pub fn with_roots(mut self, roots: Vec<Root>) -> Self {

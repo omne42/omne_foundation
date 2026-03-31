@@ -2967,7 +2967,9 @@ mod tests {
             ServerName::parse("srv").unwrap(),
             ServerConfig::unix(PathBuf::from("/tmp/mock.sock")).unwrap(),
         );
-        let config = Config::new(ClientConfig::default(), servers).with_path(config_path);
+        let config = Config::new(ClientConfig::default(), servers)
+            .with_path(config_path)
+            .unwrap();
 
         let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
             .with_trust_mode(TrustMode::Trusted);

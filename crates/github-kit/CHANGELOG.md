@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- require explicit opt-in before bearer-token GitHub requests can target custom HTTPS API bases; default fail-closed target remains `https://api.github.com`
 - route bearer-token release fetches through `http-kit::HttpClientProfile` public-IP pinning so GitHub API requests no longer rely on a one-time static base-url check before sending secrets
 - refuse to send GitHub bearer tokens to non-HTTPS, localhost, single-label, or private-IP API bases while still allowing tokenless local/mock API bases in tests and controlled callers
 - add `github-kit` for pure GitHub release API client access

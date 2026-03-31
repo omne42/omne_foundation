@@ -18,10 +18,18 @@ use crate::{SlackWebhookConfig, SlackWebhookSink};
 #[cfg(any(feature = "all-sinks", feature = "sound"))]
 use crate::{SoundConfig, SoundSink};
 
+const DEFAULT_TIMEOUT_MS: u64 = 5000;
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StandardEnvHubOptions {
     pub default_sound_enabled: bool,
     pub require_sink: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EnvTimeoutConfig {
+    sink_timeout: Duration,
+    hub_timeout: Duration,
 }
 
 #[derive(Debug)]
@@ -113,17 +121,57 @@ where
         .filter(|value| !value.is_empty())
 }
 
-fn parse_timeout_ms_env<F>(key: &'static str, get: &F) -> Result<Duration, EnvHubError>
+fn parse_timeout_ms_env_optional<F>(
+    key: &'static str,
+    get: &F,
+) -> Result<Option<Duration>, EnvHubError>
 where
     F: Fn(&str) -> Option<String>,
 {
-    let timeout = match env_nonempty(key, get) {
-        Some(value) => value
-            .parse::<u64>()
-            .map_err(|source| EnvHubError::InvalidTimeoutMs { key, value, source })?,
-        None => 5000,
+    let Some(value) = env_nonempty(key, get) else {
+        return Ok(None);
     };
-    Ok(Duration::from_millis(timeout.max(1)))
+    let timeout = value
+        .parse::<u64>()
+        .map_err(|source| EnvHubError::InvalidTimeoutMs { key, value, source })?;
+    Ok(Some(Duration::from_millis(timeout.max(1))))
+}
+
+fn resolve_timeout_ms_env<F>(
+    primary_key: &'static str,
+    fallback_key: &'static str,
+    get: &F,
+) -> Result<Duration, EnvHubError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if let Some(timeout) = parse_timeout_ms_env_optional(primary_key, get)? {
+        return Ok(timeout);
+    }
+    if let Some(timeout) = parse_timeout_ms_env_optional(fallback_key, get)? {
+        return Ok(timeout);
+    }
+    Ok(Duration::from_millis(DEFAULT_TIMEOUT_MS))
+}
+
+fn parse_timeout_config<F>(get: &F) -> Result<EnvTimeoutConfig, EnvHubError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    const NOTIFY_TIMEOUT_MS_ENV: &str = "NOTIFY_TIMEOUT_MS";
+    const NOTIFY_SINK_TIMEOUT_MS_ENV: &str = "NOTIFY_SINK_TIMEOUT_MS";
+    const NOTIFY_HUB_TIMEOUT_MS_ENV: &str = "NOTIFY_HUB_TIMEOUT_MS";
+
+    // Keep the legacy shared timeout as a compatibility fallback, but prefer
+    // the split control plane when callers opt into it.
+    Ok(EnvTimeoutConfig {
+        sink_timeout: resolve_timeout_ms_env(
+            NOTIFY_SINK_TIMEOUT_MS_ENV,
+            NOTIFY_TIMEOUT_MS_ENV,
+            get,
+        )?,
+        hub_timeout: resolve_timeout_ms_env(NOTIFY_HUB_TIMEOUT_MS_ENV, NOTIFY_TIMEOUT_MS_ENV, get)?,
+    })
 }
 
 #[cfg(not(all(
@@ -156,7 +204,6 @@ where
     const NOTIFY_WEBHOOK_FIELD_ENV: &str = "NOTIFY_WEBHOOK_FIELD";
     const NOTIFY_FEISHU_WEBHOOK_URL_ENV: &str = "NOTIFY_FEISHU_WEBHOOK_URL";
     const NOTIFY_SLACK_WEBHOOK_URL_ENV: &str = "NOTIFY_SLACK_WEBHOOK_URL";
-    const NOTIFY_TIMEOUT_MS_ENV: &str = "NOTIFY_TIMEOUT_MS";
     const NOTIFY_EVENTS_ENV: &str = "NOTIFY_EVENTS";
     const NOTIFY_REQUIRED_ENV_VARS: &[&str] = &[
         NOTIFY_SOUND_ENV,
@@ -166,7 +213,7 @@ where
     ];
 
     let sound_enabled = env_bool(NOTIFY_SOUND_ENV, get)?.unwrap_or(options.default_sound_enabled);
-    let timeout = parse_timeout_ms_env(NOTIFY_TIMEOUT_MS_ENV, get)?;
+    let timeouts = parse_timeout_config(get)?;
 
     #[cfg(any(
         feature = "all-sinks",
@@ -195,7 +242,7 @@ where
 
     #[cfg(any(feature = "all-sinks", feature = "generic-webhook"))]
     if let Some(url) = env_nonempty(NOTIFY_WEBHOOK_URL_ENV, get) {
-        let mut cfg = GenericWebhookConfig::new(url).with_timeout(timeout);
+        let mut cfg = GenericWebhookConfig::new(url).with_timeout(timeouts.sink_timeout);
         if let Some(field) = env_nonempty(NOTIFY_WEBHOOK_FIELD_ENV, get) {
             cfg = cfg.with_payload_field(field);
         }
@@ -216,7 +263,7 @@ where
 
     #[cfg(any(feature = "all-sinks", feature = "feishu"))]
     if let Some(url) = env_nonempty(NOTIFY_FEISHU_WEBHOOK_URL_ENV, get) {
-        let cfg = FeishuWebhookConfig::new(url).with_timeout(timeout);
+        let cfg = FeishuWebhookConfig::new(url).with_timeout(timeouts.sink_timeout);
         sinks.push(Arc::new(FeishuWebhookSink::new(cfg).map_err(|source| {
             EnvHubError::SinkBuild {
                 sink: "feishu",
@@ -234,7 +281,7 @@ where
 
     #[cfg(any(feature = "all-sinks", feature = "slack"))]
     if let Some(url) = env_nonempty(NOTIFY_SLACK_WEBHOOK_URL_ENV, get) {
-        let cfg = SlackWebhookConfig::new(url).with_timeout(timeout);
+        let cfg = SlackWebhookConfig::new(url).with_timeout(timeouts.sink_timeout);
         sinks.push(Arc::new(SlackWebhookSink::new(cfg).map_err(|source| {
             EnvHubError::SinkBuild {
                 sink: "slack",
@@ -272,7 +319,7 @@ where
     Ok(Some(Hub::new_with_limits(
         HubConfig {
             enabled_kinds,
-            per_sink_timeout: timeout,
+            per_sink_timeout: timeouts.hub_timeout,
         },
         sinks,
         HubLimits::default(),
@@ -368,5 +415,86 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("invalid NOTIFY_SOUND"), "{msg}");
         assert!(msg.contains("expected one of"), "{msg}");
+    }
+
+    #[test]
+    fn parse_timeout_config_uses_legacy_timeout_as_shared_fallback() {
+        let env = HashMap::from([(String::from("NOTIFY_TIMEOUT_MS"), String::from("1200"))]);
+
+        let config = parse_timeout_config(&|key| env.get(key).cloned()).expect("parse timeout");
+
+        assert_eq!(
+            config,
+            EnvTimeoutConfig {
+                sink_timeout: Duration::from_millis(1200),
+                hub_timeout: Duration::from_millis(1200),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_timeout_config_supports_separate_sink_and_hub_timeouts() {
+        let env = HashMap::from([
+            (String::from("NOTIFY_SINK_TIMEOUT_MS"), String::from("1200")),
+            (String::from("NOTIFY_HUB_TIMEOUT_MS"), String::from("3400")),
+        ]);
+
+        let config = parse_timeout_config(&|key| env.get(key).cloned()).expect("parse timeout");
+
+        assert_eq!(
+            config,
+            EnvTimeoutConfig {
+                sink_timeout: Duration::from_millis(1200),
+                hub_timeout: Duration::from_millis(3400),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_timeout_config_prefers_explicit_timeouts_over_legacy_fallback() {
+        let env = HashMap::from([
+            (String::from("NOTIFY_TIMEOUT_MS"), String::from("4700")),
+            (String::from("NOTIFY_SINK_TIMEOUT_MS"), String::from("1200")),
+            (String::from("NOTIFY_HUB_TIMEOUT_MS"), String::from("3400")),
+        ]);
+
+        let config = parse_timeout_config(&|key| env.get(key).cloned()).expect("parse timeout");
+
+        assert_eq!(
+            config,
+            EnvTimeoutConfig {
+                sink_timeout: Duration::from_millis(1200),
+                hub_timeout: Duration::from_millis(3400),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_timeout_config_ignores_invalid_legacy_timeout_when_explicit_values_exist() {
+        let env = HashMap::from([
+            (String::from("NOTIFY_TIMEOUT_MS"), String::from("oops")),
+            (String::from("NOTIFY_SINK_TIMEOUT_MS"), String::from("1200")),
+            (String::from("NOTIFY_HUB_TIMEOUT_MS"), String::from("3400")),
+        ]);
+
+        let config = parse_timeout_config(&|key| env.get(key).cloned()).expect("parse timeout");
+
+        assert_eq!(
+            config,
+            EnvTimeoutConfig {
+                sink_timeout: Duration::from_millis(1200),
+                hub_timeout: Duration::from_millis(3400),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_timeout_config_reports_invalid_explicit_timeout_key() {
+        let env = HashMap::from([(String::from("NOTIFY_HUB_TIMEOUT_MS"), String::from("oops"))]);
+
+        let err = parse_timeout_config(&|key| env.get(key).cloned()).expect_err("invalid timeout");
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("invalid NOTIFY_HUB_TIMEOUT_MS"), "{msg}");
     }
 }

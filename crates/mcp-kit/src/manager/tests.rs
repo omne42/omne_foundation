@@ -1087,7 +1087,7 @@ async fn connect_io_performs_initialize_and_exposes_result() {
 }
 
 #[tokio::test]
-async fn server_request_handler_panic_is_bridged_to_error_response() {
+async fn server_request_handler_sync_panic_disables_future_dispatch() {
     let (client_stream, server_stream) = tokio::io::duplex(2048);
     let (client_read, client_write) = tokio::io::split(client_stream);
     let (server_read, mut server_write) = tokio::io::split(server_stream);
@@ -1147,45 +1147,131 @@ async fn server_request_handler_panic_is_bridged_to_error_response() {
             sync_panic_resp_value["error"]["message"]
                 .as_str()
                 .unwrap_or("")
-                .contains("panicked"),
+                .contains("panicked and was disabled"),
             "{sync_panic_resp_value}"
-        );
-
-        let async_panic_request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 43,
-            "method": "demo/boom",
-            "params": { "x": 2 },
-        });
-        let mut async_panic_request_line = serde_json::to_string(&async_panic_request).unwrap();
-        async_panic_request_line.push('\n');
-        server_write
-            .write_all(async_panic_request_line.as_bytes())
-            .await
-            .unwrap();
-        server_write.flush().await.unwrap();
-
-        let async_panic_resp_line = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let async_panic_resp_value: Value = serde_json::from_str(&async_panic_resp_line).unwrap();
-
-        assert_eq!(async_panic_resp_value["jsonrpc"], "2.0");
-        assert_eq!(async_panic_resp_value["id"], 43);
-        assert_eq!(async_panic_resp_value["error"]["code"], -32000);
-        assert!(
-            async_panic_resp_value["error"]["message"]
-                .as_str()
-                .unwrap_or("")
-                .contains("panicked"),
-            "{async_panic_resp_value}"
         );
 
         let ok_request = serde_json::json!({
             "jsonrpc": "2.0",
+            "id": 43,
+            "method": "demo/ok",
+            "params": { "x": 3 },
+        });
+        let mut ok_request_line = serde_json::to_string(&ok_request).unwrap();
+        ok_request_line.push('\n');
+        server_write
+            .write_all(ok_request_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let ok_resp_line = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let ok_resp_value: Value = serde_json::from_str(&ok_resp_line).unwrap();
+
+        assert_eq!(ok_resp_value["jsonrpc"], "2.0");
+        assert_eq!(ok_resp_value["id"], 43);
+        assert_eq!(ok_resp_value["error"]["code"], -32601);
+        assert_eq!(
+            ok_resp_value["error"]["message"],
+            "no request handler installed"
+        );
+    });
+
+    let handler: ServerRequestHandler = Arc::new(|ctx| {
+        if ctx.method == "demo/boom_sync" {
+            panic!("boom sync");
+        }
+        Box::pin(async move {
+            match ctx.method.as_str() {
+                "demo/ok" => ServerRequestOutcome::Ok(serde_json::json!({ "ok": true })),
+                _ => ServerRequestOutcome::MethodNotFound,
+            }
+        })
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .with_server_request_handler(handler);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+
+    server_task.await.unwrap();
+    assert!(manager.take_connection("srv").is_some());
+}
+
+#[tokio::test]
+async fn server_request_handler_async_panic_disables_future_dispatch() {
+    let (client_stream, server_stream) = tokio::io::duplex(2048);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["jsonrpc"], "2.0");
+        assert_eq!(init_value["method"], "initialize");
+        let id = init_value["id"].clone();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "hello": "world" },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let note_line = lines.next_line().await.unwrap().unwrap();
+        let note_value: Value = serde_json::from_str(&note_line).unwrap();
+        assert_eq!(note_value["jsonrpc"], "2.0");
+        assert_eq!(note_value["method"], "notifications/initialized");
+
+        let panic_request = serde_json::json!({
+            "jsonrpc": "2.0",
             "id": 44,
+            "method": "demo/boom",
+            "params": { "x": 2 },
+        });
+        let mut panic_request_line = serde_json::to_string(&panic_request).unwrap();
+        panic_request_line.push('\n');
+        server_write
+            .write_all(panic_request_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let panic_resp_line = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let panic_resp_value: Value = serde_json::from_str(&panic_resp_line).unwrap();
+        assert_eq!(panic_resp_value["jsonrpc"], "2.0");
+        assert_eq!(panic_resp_value["id"], 44);
+        assert_eq!(panic_resp_value["error"]["code"], -32000);
+        assert!(
+            panic_resp_value["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("panicked and was disabled"),
+            "{panic_resp_value}"
+        );
+
+        let ok_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 45,
             "method": "demo/ok",
             "params": { "x": 3 },
         });
@@ -1204,14 +1290,15 @@ async fn server_request_handler_panic_is_bridged_to_error_response() {
             .unwrap();
         let ok_resp_value: Value = serde_json::from_str(&ok_resp_line).unwrap();
         assert_eq!(ok_resp_value["jsonrpc"], "2.0");
-        assert_eq!(ok_resp_value["id"], 44);
-        assert_eq!(ok_resp_value["result"], serde_json::json!({ "ok": true }));
+        assert_eq!(ok_resp_value["id"], 45);
+        assert_eq!(ok_resp_value["error"]["code"], -32601);
+        assert_eq!(
+            ok_resp_value["error"]["message"],
+            "no request handler installed"
+        );
     });
 
     let handler: ServerRequestHandler = Arc::new(|ctx| {
-        if ctx.method == "demo/boom_sync" {
-            panic!("boom sync");
-        }
         Box::pin(async move {
             match ctx.method.as_str() {
                 "demo/boom" => panic!("boom"),
@@ -2865,6 +2952,110 @@ async fn server_notification_handler_timeout_is_counted() {
 
     session.wait().await.unwrap();
     server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn server_notification_handler_panic_disables_future_dispatch() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+    let handler_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let handler_calls_for_server = Arc::clone(&handler_calls);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["jsonrpc"], "2.0");
+        assert_eq!(init_value["method"], "initialize");
+        let id = init_value["id"].clone();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "protocolVersion": MCP_PROTOCOL_VERSION },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let note_line = lines.next_line().await.unwrap().unwrap();
+        let note_value: Value = serde_json::from_str(&note_line).unwrap();
+        assert_eq!(note_value["jsonrpc"], "2.0");
+        assert_eq!(note_value["method"], "notifications/initialized");
+
+        let first_note = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "demo/notify",
+            "params": { "seq": 1 },
+        });
+        let mut first_note_line = serde_json::to_string(&first_note).unwrap();
+        first_note_line.push('\n');
+        server_write
+            .write_all(first_note_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while handler_calls_for_server.load(std::sync::atomic::Ordering::Relaxed) < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let second_note = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "demo/notify",
+            "params": { "seq": 2 },
+        });
+        let mut second_note_line = serde_json::to_string(&second_note).unwrap();
+        second_note_line.push('\n');
+        server_write
+            .write_all(second_note_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let eof = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            eof.is_none(),
+            "expected EOF after notification handler panic"
+        );
+    });
+
+    let calls_for_handler = Arc::clone(&handler_calls);
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .with_server_notification_handler(Arc::new(move |_ctx| {
+            let calls_for_handler = Arc::clone(&calls_for_handler);
+            Box::pin(async move {
+                calls_for_handler.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                panic!("boom notify");
+            })
+        }));
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+
+    server_task.await.unwrap();
+    assert_eq!(handler_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+    let conn = manager
+        .take_connection("srv")
+        .expect("connection should remain owned");
+    let status = conn.wait().await.unwrap();
+    assert!(status.is_none());
 }
 
 #[tokio::test]

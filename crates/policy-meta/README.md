@@ -87,6 +87,11 @@
 
 checked-in schema 和 TypeScript bindings 由 Rust 类型定义导出，并通过 `export-artifacts` 做同步校验。
 
+`schema/` 和 `bindings/` 被视为精确的 generated artifact 目录：
+
+- `--check` 不只校验期望文件内容，也会拒绝目录里的陈旧文件或目录
+- 写入导出时会清理不再属于当前契约的旧 artifact，避免 drift 检查漏报
+
 ## Local Validation
 
 下面命令默认从 `omne_foundation` 仓库根目录执行：

@@ -402,6 +402,8 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     #[cfg(not(windows))]
+    use std::path::PathBuf;
+    #[cfg(not(windows))]
     use std::process::Command;
 
     #[cfg(not(windows))]
@@ -416,11 +418,36 @@ mod tests {
         "resolve_cli_root_errors_when_current_dir_is_unavailable";
 
     #[cfg(not(windows))]
+    struct CurrentDirRestoreGuard {
+        original_cwd: Option<PathBuf>,
+    }
+
+    #[cfg(not(windows))]
+    impl CurrentDirRestoreGuard {
+        fn capture() -> Self {
+            Self {
+                original_cwd: Some(std::env::current_dir().expect("original cwd")),
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    impl Drop for CurrentDirRestoreGuard {
+        fn drop(&mut self) {
+            if let Some(path) = self.original_cwd.take() {
+                let _ = std::env::set_current_dir(path);
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
     fn maybe_run_cwd_unavailable_helper() -> bool {
         if std::env::var_os(CWD_UNAVAILABLE_HELPER_ENV).is_none() {
             return false;
         }
 
+        let original_cwd = std::env::current_dir().expect("original cwd");
+        let restore_guard = CurrentDirRestoreGuard::capture();
         let tempdir = tempfile::tempdir().expect("tempdir");
         std::env::set_current_dir(tempdir.path()).expect("enter tempdir");
         std::fs::remove_dir(tempdir.path()).expect("remove tempdir");
@@ -430,6 +457,8 @@ mod tests {
             err.to_string()
                 .contains("determine current working directory for --root")
         );
+        drop(restore_guard);
+        assert_eq!(original_cwd, std::env::current_dir().expect("restored cwd"));
         true
     }
 

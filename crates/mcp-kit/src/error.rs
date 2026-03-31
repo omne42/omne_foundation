@@ -92,6 +92,20 @@ impl Error {
         }
     }
 
+    fn classify_mcp_jsonrpc_error(err: &mcp_jsonrpc::Error) -> ErrorKind {
+        match err {
+            mcp_jsonrpc::Error::Io(_) => ErrorKind::Connection,
+            mcp_jsonrpc::Error::Protocol(protocol)
+                if protocol.kind == mcp_jsonrpc::ProtocolErrorKind::WaitTimeout =>
+            {
+                ErrorKind::Timeout
+            }
+            mcp_jsonrpc::Error::Json(_)
+            | mcp_jsonrpc::Error::Rpc { .. }
+            | mcp_jsonrpc::Error::Protocol(_) => ErrorKind::Protocol,
+        }
+    }
+
     fn classify(err: &anyhow::Error) -> ErrorKind {
         if let Some(tag) = err
             .chain()
@@ -108,11 +122,12 @@ impl Error {
             return ErrorKind::Timeout;
         }
 
-        if err
+        if let Some(kind) = err
             .chain()
-            .any(|cause| cause.downcast_ref::<mcp_jsonrpc::Error>().is_some())
+            .find_map(|cause| cause.downcast_ref::<mcp_jsonrpc::Error>())
+            .map(Self::classify_mcp_jsonrpc_error)
         {
-            return ErrorKind::Protocol;
+            return kind;
         }
 
         if err.chain().any(|cause| {
@@ -213,6 +228,15 @@ mod tests {
         let err = Error::from(anyhow::Error::new(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
             "dial failed",
+        )));
+        assert_eq!(err.kind(), ErrorKind::Connection);
+    }
+
+    #[test]
+    fn classifies_wrapped_jsonrpc_io_errors_as_connection_errors() {
+        let err = Error::from(mcp_jsonrpc::Error::from(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "transport closed",
         )));
         assert_eq!(err.kind(), ErrorKind::Connection);
     }

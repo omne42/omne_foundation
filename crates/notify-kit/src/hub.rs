@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures_util::FutureExt;
@@ -122,6 +123,32 @@ struct HubInner {
 struct HubSink {
     sink: Arc<dyn Sink>,
     name: Option<&'static str>,
+    poisoned: AtomicBool,
+}
+
+impl HubSink {
+    fn new(sink: Arc<dyn Sink>) -> Self {
+        match std::panic::catch_unwind(AssertUnwindSafe(|| sink.name())) {
+            Ok(name) => Self {
+                sink,
+                name: Some(name),
+                poisoned: AtomicBool::new(false),
+            },
+            Err(_) => Self {
+                sink,
+                name: None,
+                poisoned: AtomicBool::new(true),
+            },
+        }
+    }
+
+    fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
+    }
+
+    fn poison(&self) {
+        self.poisoned.store(true, Ordering::Release);
+    }
 }
 
 impl Hub {
@@ -149,13 +176,7 @@ impl Hub {
         let limits = HubLimits::default()
             .with_max_inflight_events(limits.max_inflight_events)
             .with_max_sink_sends_in_parallel(limits.max_sink_sends_in_parallel);
-        let sinks = sinks
-            .into_iter()
-            .map(|sink| HubSink {
-                name: std::panic::catch_unwind(AssertUnwindSafe(|| sink.name())).ok(),
-                sink,
-            })
-            .collect();
+        let sinks = sinks.into_iter().map(HubSink::new).collect();
         let inner = HubInner {
             enabled_kinds: config
                 .enabled_kinds
@@ -284,17 +305,31 @@ impl HubInner {
             return (
                 idx,
                 UNKNOWN_SINK_NAME,
-                Err(anyhow::anyhow!("sink panicked").into()),
+                Err(anyhow::anyhow!("sink panicked and was disabled").into()),
             );
         };
+        if sink.is_poisoned() {
+            return (
+                idx,
+                name,
+                Err(anyhow::anyhow!("sink previously panicked and was disabled").into()),
+            );
+        }
+
         let result = AssertUnwindSafe(async move {
             tokio::time::timeout(timeout, sink.sink.send(event))
                 .await
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("timeout after {timeout:?}").into()))
         })
         .catch_unwind()
-        .await
-        .unwrap_or_else(|_| Err(anyhow::anyhow!("sink panicked").into()));
+        .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(_) => {
+                sink.poison();
+                Err(anyhow::anyhow!("sink panicked and was disabled").into())
+            }
+        };
         (idx, name, result)
     }
 
@@ -390,6 +425,7 @@ mod tests {
     struct TestSink {
         name: &'static str,
         behavior: TestSinkBehavior,
+        send_count: AtomicUsize,
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -399,6 +435,7 @@ mod tests {
         Sleep(Duration),
         PanicName,
         Panic,
+        PanicOnce,
     }
 
     impl Sink for TestSink {
@@ -411,6 +448,7 @@ mod tests {
 
         fn send<'a>(&'a self, _event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
             Box::pin(async move {
+                self.send_count.fetch_add(1, Ordering::SeqCst);
                 match self.behavior {
                     TestSinkBehavior::Ok => Ok(()),
                     TestSinkBehavior::Err => Err(anyhow::anyhow!("boom").into()),
@@ -420,6 +458,12 @@ mod tests {
                     }
                     TestSinkBehavior::PanicName => Ok(()),
                     TestSinkBehavior::Panic => panic!("boom"),
+                    TestSinkBehavior::PanicOnce => {
+                        if self.send_count.load(Ordering::SeqCst) == 1 {
+                            panic!("boom");
+                        }
+                        Ok(())
+                    }
                 }
             })
         }
@@ -430,6 +474,7 @@ mod tests {
         let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
             name: "ok",
             behavior: TestSinkBehavior::Ok,
+            send_count: AtomicUsize::new(0),
         })];
         let hub = Hub::new(HubConfig::default(), sinks);
         let event = Event::new("kind", Severity::Info, "title");
@@ -441,6 +486,7 @@ mod tests {
         let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
             name: "ok",
             behavior: TestSinkBehavior::Ok,
+            send_count: AtomicUsize::new(0),
         })];
         let hub = Hub::new(HubConfig::default(), sinks);
         let event = Event::new("kind", Severity::Info, "title");
@@ -495,10 +541,12 @@ mod tests {
                 Arc::new(TestSink {
                     name: "ok",
                     behavior: TestSinkBehavior::Ok,
+                    send_count: AtomicUsize::new(0),
                 }),
                 Arc::new(TestSink {
                     name: "bad",
                     behavior: TestSinkBehavior::Err,
+                    send_count: AtomicUsize::new(0),
                 }),
             ];
 
@@ -535,6 +583,7 @@ mod tests {
             let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
                 name: "slow",
                 behavior: TestSinkBehavior::Sleep(Duration::from_millis(50)),
+                send_count: AtomicUsize::new(0),
             })];
 
             let hub = Hub::new(
@@ -619,6 +668,7 @@ mod tests {
             let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
                 name: "panic",
                 behavior: TestSinkBehavior::Panic,
+                send_count: AtomicUsize::new(0),
             })];
 
             let hub = Hub::new(
@@ -634,6 +684,47 @@ mod tests {
             assert_eq!(err.kind(), crate::ErrorKind::SinkFailures);
             let msg = err.to_string();
             assert!(msg.contains("- panic:"), "{msg}");
+            assert!(msg.contains("sink panicked and was disabled"), "{msg}");
+        });
+    }
+
+    #[test]
+    fn send_disables_sink_after_panic() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let sink = Arc::new(TestSink {
+                name: "panic-once",
+                behavior: TestSinkBehavior::PanicOnce,
+                send_count: AtomicUsize::new(0),
+            });
+            let hub = Hub::new(
+                HubConfig {
+                    enabled_kinds: None,
+                    per_sink_timeout: Duration::from_secs(1),
+                },
+                vec![sink.clone()],
+            );
+
+            let first = hub
+                .send(Event::new("kind", Severity::Info, "title"))
+                .await
+                .expect_err("first send should record the panic");
+            let second = hub
+                .send(Event::new("kind", Severity::Info, "title"))
+                .await
+                .expect_err("second send should fail closed");
+
+            assert_eq!(sink.send_count.load(Ordering::SeqCst), 1);
+            assert!(first.to_string().contains("sink panicked and was disabled"));
+            assert!(
+                second
+                    .to_string()
+                    .contains("sink previously panicked and was disabled")
+            );
         });
     }
 
@@ -648,6 +739,7 @@ mod tests {
             let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
                 name: "ignored",
                 behavior: TestSinkBehavior::PanicName,
+                send_count: AtomicUsize::new(0),
             })];
 
             let hub = Hub::new(
@@ -662,7 +754,10 @@ mod tests {
             let err = hub.send(event).await.expect_err("expected panic failure");
             assert_eq!(err.kind(), crate::ErrorKind::SinkFailures);
             let msg = err.to_string();
-            assert!(msg.contains("- <unknown>: sink panicked"), "{msg}");
+            assert!(
+                msg.contains("- <unknown>: sink panicked and was disabled"),
+                "{msg}"
+            );
         });
     }
 
@@ -792,6 +887,7 @@ mod tests {
             let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
                 name: "ok",
                 behavior: TestSinkBehavior::Ok,
+                send_count: AtomicUsize::new(0),
             })];
             let hub = Hub::new(HubConfig::default(), sinks);
 
@@ -815,6 +911,7 @@ mod tests {
             let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
                 name: "ok",
                 behavior: TestSinkBehavior::Ok,
+                send_count: AtomicUsize::new(0),
             })];
             let hub = Hub::new(HubConfig::default(), sinks);
 

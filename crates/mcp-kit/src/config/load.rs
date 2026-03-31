@@ -542,8 +542,10 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(windows))]
     use std::path::PathBuf;
 
+    #[cfg(not(windows))]
     use super::{ConfigLoadPolicy, canonicalize_existing_ancestor, resolve_override_path};
 
     #[cfg(not(windows))]

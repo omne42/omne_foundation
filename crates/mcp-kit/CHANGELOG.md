@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：`config::load` 里仅在非 Windows 编译的边界回归测试现在也把相关导入放到同一条件编译下，避免 Windows 测试矩阵因为 unused imports 假失败。
 - `mcp-kit`：公开 `ErrorKind` 分类不再退化成英文字符串匹配；config / manager-state 路径改为带类型标记的边界错误，`Error::context` / `with_context` 也会保留原始分类。
 - `mcp-kit`：initialize 握手前的空 `protocol_version` / 非 object `capabilities` 兜底校验现在也会保留 `ErrorKind::Config`，不会再静默退化成 `Other`。
 - `mcp-kit`：`manager::lifecycle` 的 initialize 分类回归测试现在保持在文件尾部，避免 `clippy::items_after_test_module` 让跨平台 CI 假阴性失败。

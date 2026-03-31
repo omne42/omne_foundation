@@ -13,6 +13,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `Hub::notify(...)` 现在会在缺少 Tokio runtime/time driver 或 inflight 容量耗尽时返回 `TryNotifyError`，不再把入队失败静默降级为 warning-only；保留显式的 `Hub::notify_lossy(...)` 供调用方选择旧的尽力而为语义。
 - `notify_kit::env::build_hub_from_standard_env(...)` 现在对布尔型 env（例如 `NOTIFY_SOUND`）采用 fail-closed 解析：非法值会直接报错，而不是偷偷回退默认值。
 - `FeishuWebhookSink` 现在把远程/本地图片、tenant token 缓存和媒体上传能力收口到显式的 `FeishuWebhookMediaConfig` / internal media support 边界；基础 webhook 配置继续可用，但更宽的图片/上传语义不再和 webhook 主状态平铺混在一起。
+- `FeishuWebhookSink` 的本地图片配置现在按开关正交处理：当 `with_local_image_files(false)` 时，会忽略 `local_image_root(s)` 和 `local_image_base_dir`，不再因为未启用路径上的附带配置提前报错。
 - workspace 内部 crate 的 path 依赖现在补齐版本声明，允许 `config-kit` / `secret-kit` / `text-assets-kit` 等核心 foundation crate 正常通过 `cargo package --no-verify` 做跨仓发布校验。
 - `SlackWebhookSink` / `DiscordWebhookSink` / `WeComWebhookSink` / `DingTalkWebhookSink` / `GenericWebhookSink` 现在复用统一的内部 webhook endpoint helper，收口重复的 HTTPS URL 校验、HTTP profile 构建和 JSON POST 骨架，减少后续出站策略调整时的散弹式修改；外部 API 与行为保持不变。
 

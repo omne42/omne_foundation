@@ -434,11 +434,15 @@ pub(super) fn normalize_local_image_roots(
     allow_local_image_files: bool,
     roots: Vec<PathBuf>,
 ) -> crate::Result<Vec<PathBuf>> {
+    if !allow_local_image_files {
+        return Ok(Vec::new());
+    }
+
     let normalized = roots
         .into_iter()
         .map(normalize_local_image_root)
         .collect::<crate::Result<Vec<_>>>()?;
-    if allow_local_image_files && normalized.is_empty() {
+    if normalized.is_empty() {
         return Err(anyhow::anyhow!(
             "local image files require at least one configured local image root"
         )
@@ -448,8 +452,13 @@ pub(super) fn normalize_local_image_roots(
 }
 
 pub(super) fn normalize_local_image_base_dir(
+    allow_local_image_files: bool,
     base_dir: Option<PathBuf>,
 ) -> crate::Result<Option<PathBuf>> {
+    if !allow_local_image_files {
+        return Ok(None);
+    }
+
     base_dir.map(normalize_local_image_root).transpose()
 }
 
@@ -781,9 +790,23 @@ mod tests {
 
     #[test]
     fn normalize_local_image_base_dir_rejects_relative_paths() {
-        let err = normalize_local_image_base_dir(Some(PathBuf::from("relative-root")))
+        let err = normalize_local_image_base_dir(true, Some(PathBuf::from("relative-root")))
             .expect_err("relative base dir should be rejected");
         assert!(err.to_string().contains("absolute paths"), "{err:#}");
+    }
+
+    #[test]
+    fn normalize_local_image_roots_ignores_roots_when_local_files_are_disabled() {
+        let roots = normalize_local_image_roots(false, vec![PathBuf::from("relative-root")])
+            .expect("disabled local files should ignore configured roots");
+        assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn normalize_local_image_base_dir_ignores_base_dir_when_local_files_are_disabled() {
+        let base_dir = normalize_local_image_base_dir(false, Some(PathBuf::from("relative-root")))
+            .expect("disabled local files should ignore configured base dir");
+        assert!(base_dir.is_none());
     }
 
     #[test]

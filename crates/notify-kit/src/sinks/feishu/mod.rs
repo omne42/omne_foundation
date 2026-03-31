@@ -291,11 +291,12 @@ fn normalize_media_support(
     let app_credentials = normalize_app_credentials(config.app_id, config.app_secret)?;
     let local_image_roots =
         normalize_local_image_roots(config.allow_local_image_files, config.local_image_roots)?;
-    let local_image_base_dir = normalize_local_image_base_dir(config.local_image_base_dir)?;
+    let local_image_base_dir = normalize_local_image_base_dir(
+        config.allow_local_image_files,
+        config.local_image_base_dir,
+    )?;
     let enabled = config.allow_remote_image_urls
         || config.allow_local_image_files
-        || !local_image_roots.is_empty()
-        || local_image_base_dir.is_some()
         || app_credentials.is_some()
         || config.image_upload_max_bytes != FEISHU_DEFAULT_IMAGE_UPLOAD_MAX_BYTES;
     if !enabled {

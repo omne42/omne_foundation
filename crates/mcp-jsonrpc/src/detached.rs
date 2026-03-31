@@ -5,9 +5,6 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
-
-const DETACHED_TASK_TIMEOUT: Duration = Duration::from_secs(5);
 type DetachedTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 struct DetachedRuntime {
@@ -49,12 +46,8 @@ impl DetachedRuntime {
         Ok(Self { runtime })
     }
 
-    fn spawn(&self, task_name: &str, task: DetachedTask) {
-        let task_name = task_name.to_string();
-        drop(self.runtime.spawn(async move {
-            let _ = tokio::time::timeout(DETACHED_TASK_TIMEOUT, task).await;
-            let _ = task_name;
-        }));
+    fn spawn(&self, task: DetachedTask) {
+        drop(self.runtime.spawn(task));
     }
 }
 
@@ -68,7 +61,7 @@ pub(crate) fn spawn_detached(
     }
 
     let runtime = detached_runtime(task_name)?;
-    runtime.spawn(task_name, Box::pin(task));
+    runtime.spawn(Box::pin(task));
     Ok(())
 }
 

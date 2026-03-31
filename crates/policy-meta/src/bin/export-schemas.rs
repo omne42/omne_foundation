@@ -1,8 +1,12 @@
-use std::{error::Error, path::PathBuf};
+#[path = "shared/cli.rs"]
+mod cli;
 
+use std::path::PathBuf;
+
+use cli::{CliError, next_path_arg};
 use policy_meta::{check_schema_dir, write_schema_dir};
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), CliError> {
     let mut check = false;
     let mut output_dir = default_output_dir();
 
@@ -11,13 +15,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         match arg.as_str() {
             "--check" => check = true,
             "--output-dir" => {
-                let Some(path) = args.next() else {
-                    return Err("missing path after --output-dir".into());
-                };
-                output_dir = PathBuf::from(path);
+                output_dir = next_path_arg("--output-dir", args.next())?;
             }
             other => {
-                return Err(format!("unknown argument: {other}").into());
+                return Err(CliError::UnknownArgument {
+                    arg: other.to_string(),
+                });
             }
         }
     }

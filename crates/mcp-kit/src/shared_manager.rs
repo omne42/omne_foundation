@@ -793,6 +793,7 @@ impl SharedManager {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    #[cfg(not(windows))]
     use std::path::Path;
     #[cfg(not(windows))]
     use std::path::PathBuf;

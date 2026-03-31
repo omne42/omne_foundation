@@ -2,14 +2,16 @@
 
 ## 为什么 `notify()` 没有任何效果？
 
-最常见原因：当前线程不在 Tokio runtime 中。
+最常见原因有两个：
 
-- `Hub::notify` 在无 runtime 时会丢弃通知并 `tracing::warn!`
-- 如果你想显式检测，请使用 `Hub::try_notify`
+- 当前线程不在 Tokio runtime 中，此时 `Hub::notify` 会返回 `TryNotifyError::NoTokioRuntime`
+- Hub inflight 容量已满，此时 `Hub::notify` 会返回 `TryNotifyError::Overloaded`
+
+如果你明确接受“失败时记录 warning 并丢弃”，请使用 `Hub::notify_lossy(...)`。
 
 ## 为什么 `try_notify()` 返回了 `NoTokioRuntime`？
 
-`try_notify()` 内部会调用 `tokio::runtime::Handle::try_current()`：
+`try_notify()` 和 `notify()` 都会调用 `tokio::runtime::Handle::try_current()`：
 
 - 若当前线程不在 Tokio runtime 内，会返回 `NoTokioRuntime`
 - 这是有意为之：通知是附加能力，不应让调用方被迫引入 runtime 或 panic
@@ -42,4 +44,4 @@
 - `notify-kit` 侧：使用 `SoundSink`（默认就是 bell）。
 - 终端/系统侧：需要你在终端设置里启用 Visual Bell / Dock/任务栏提示（不同终端选项不同，见 [SoundSink](sinks/sound.md)）。
 
-本仓库不包含具体 TUI 应用；你需要在你的 TUI 项目里在“reply completed / turn completed”处调用 `hub.notify(...)`。
+本仓库不包含具体 TUI 应用；你需要在你的 TUI 项目里在“reply completed / turn completed”处调用 `hub.notify(...)`，并决定失败时是重试、降级还是显式改用 `hub.notify_lossy(...)`。

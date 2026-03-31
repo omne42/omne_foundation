@@ -7,7 +7,7 @@ edition = "2024"
 workspace = true
 
 [dependencies]
-text-assets-kit = { path = "../text-assets-kit" }
+text-assets-kit = { version = "0.1.0", path = "../text-assets-kit" }
 
 [dev-dependencies]
 tempfile = "3"

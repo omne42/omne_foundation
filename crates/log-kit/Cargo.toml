@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-structured-text-kit = { path = "../structured-text-kit" }
+structured-text-kit = { version = "0.1.0", path = "../structured-text-kit" }
 thiserror.workspace = true
 tracing = "0.1"
 

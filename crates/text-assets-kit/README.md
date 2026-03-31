@@ -34,6 +34,7 @@
 覆盖：
 
 - 中性默认 data root（`./.text_assets`、`TEXT_ASSETS_DIR`）以及调用方显式覆写后的 data root
+- 显式 base 驱动的 root/data-root 解析（`materialize_resource_root_with_base(...)`、`resolve_data_root_with_base(...)`、`ensure_data_root_with_base(...)`）
 - 文本文件大小和目录总大小限制
 - 目录遍历、symlink、越界路径约束
 - 通用文本资源 manifest bootstrap
@@ -51,9 +52,9 @@
 ## 结构设计
 
 - `src/data_root.rs`
-  - data root scope、路径优先级和根目录决议
+  - data root scope、路径优先级和根目录决议；优先提供显式 base variants，保留 ambient `current_dir()` 兼容入口
 - `src/resource_path.rs`
-  - 资源相对路径规范化、identity 规则与 resource root 规范化
+  - 资源相对路径规范化、identity 规则与 resource root 规范化；包含显式 base 与 ambient compatibility 两套入口
 - `src/secure_fs.rs`
   - 安全文件系统访问收口与目录扫描
 - `src/text_resource.rs`
@@ -80,4 +81,5 @@
 - 当前不依赖 `omne_foundation` 内其他 crate
 - 被 [`i18n-runtime-kit`](../i18n-runtime-kit/README.md) 和 [`prompt-kit`](../prompt-kit/README.md) 作为更高层 runtime adapter 复用
 - 由它统一承载通用文本资源 root 规范化与目录扫描，不再让上层 runtime adapter 直接下钻 `omne-fs-primitives`
+- 当调用方已经持有 workspace/root 事实时，应优先使用 `*_with_base(...)` 入口，而不是让 relative root 隐式依赖进程 `current_dir()`
 - 刻意不反向承载 i18n 或 prompt 语义，避免把通用文本资源边界重新做宽

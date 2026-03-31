@@ -2,12 +2,23 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 /// Normalizes a resource root into a stable ambient filesystem path.
+///
+/// This compatibility entry point still resolves relative roots against the
+/// process `current_dir()`. Callers that already own a stable workspace root
+/// should prefer [`materialize_resource_root_with_base`] so the base remains an
+/// explicit input instead of ambient process state.
 pub fn materialize_resource_root(root: &Path) -> io::Result<PathBuf> {
-    let root = normalize_resource_root(root)?;
+    let root = normalize_resource_root(root, None)?;
     validate_existing_resource_ancestors(&root)
 }
 
-fn normalize_resource_root(root: &Path) -> io::Result<PathBuf> {
+/// Normalizes a resource root relative to an explicit absolute base path.
+pub fn materialize_resource_root_with_base(base: &Path, root: &Path) -> io::Result<PathBuf> {
+    let root = normalize_resource_root(root, Some(base))?;
+    validate_existing_resource_ancestors(&root)
+}
+
+fn normalize_resource_root(root: &Path, base: Option<&Path>) -> io::Result<PathBuf> {
     if root.as_os_str().is_empty() {
         return Err(invalid_resource_root(root));
     }
@@ -15,7 +26,20 @@ fn normalize_resource_root(root: &Path) -> io::Result<PathBuf> {
     let absolute = if root.is_absolute() {
         root.to_path_buf()
     } else {
-        std::env::current_dir()?.join(root)
+        let base = match base {
+            Some(base) if base.is_absolute() => base,
+            Some(base) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "resource root base must be an absolute path: {}",
+                        base.display()
+                    ),
+                ));
+            }
+            None => &std::env::current_dir()?,
+        };
+        base.join(root)
     };
 
     let mut normalized = PathBuf::new();
@@ -366,5 +390,28 @@ mod tests {
             resource_identity_key("nested/Prompt.md", false).expect("identity"),
             resource_identity_key("NESTED/prompt.md", false).expect("identity")
         );
+    }
+
+    #[test]
+    fn materialize_resource_root_with_base_resolves_relative_roots_explicitly() {
+        let root = materialize_resource_root_with_base(
+            Path::new("/workspace/project"),
+            Path::new("assets/prompts"),
+        )
+        .expect("materialize with explicit base");
+
+        assert_eq!(root, PathBuf::from("/workspace/project/assets/prompts"));
+    }
+
+    #[test]
+    fn materialize_resource_root_with_base_rejects_relative_bases() {
+        let error = materialize_resource_root_with_base(
+            Path::new("workspace/project"),
+            Path::new("assets/prompts"),
+        )
+        .expect_err("relative base should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("base must be an absolute path"));
     }
 }

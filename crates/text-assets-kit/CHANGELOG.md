@@ -8,6 +8,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ### Added
 - Added shared `LazyValue` / `LazyInitError` primitives plus `bootstrap_text_resources_then_load(...)`, so domain runtime adapters can reuse the same lazy-init and bootstrap+rollback orchestration without reimplementing it per crate.
+- Added explicit-base variants for path/data-root resolution: `materialize_resource_root_with_base(...)`, `resolve_data_root_with_base(...)`, and `ensure_data_root_with_base(...)`. Callers that already know their workspace root no longer need to rely on ambient `current_dir()` to resolve relative text-assets paths.
 
 ### Fixed
 - `lock_bootstrap_transaction(...)` now fails closed when inspecting or canonicalizing the bootstrap root prefix fails, instead of silently deriving an unstable lock key from partial path information.
@@ -22,3 +23,4 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Kept the shared text-manifest bootstrap path public so downstream domain adapters can reuse it without reaching into private modules.
 - Clarified that bootstrap/rollback only serializes same-root attempts and performs best-effort cleanup for the current attempt; it does not promise crash-safe or power-loss-recovery transactions.
 - Demoted the root `LazyValue` / `LazyInitError` exports to deprecated compatibility re-exports and documented the underlying lazy module as a blocking shim instead of an async runtime-facing foundation API.
+- Documented the ambient `current_dir()` resolution helpers as compatibility entry points; explicit-base APIs are now the canonical boundary whenever the caller already owns a stable workspace root.

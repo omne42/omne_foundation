@@ -112,6 +112,31 @@ pub fn resolve_data_root(options: &DataRootOptions) -> io::Result<PathBuf> {
     )
 }
 
+/// Resolves the runtime data root relative to an explicit absolute workspace
+/// directory instead of ambient `current_dir()`.
+pub fn resolve_data_root_with_base(
+    options: &DataRootOptions,
+    workspace_cwd: &Path,
+) -> io::Result<PathBuf> {
+    if !workspace_cwd.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "cannot resolve data root: workspace_cwd must be an absolute path: {}",
+                workspace_cwd.display()
+            ),
+        ));
+    }
+
+    resolve_data_root_with(
+        options,
+        &|key| std::env::var_os(key),
+        &|| Ok(workspace_cwd.to_path_buf()),
+        &workspace_root_state,
+        &materialize_data_root,
+    )
+}
+
 fn resolve_data_root_with<F, C, E, N>(
     options: &DataRootOptions,
     env_lookup: &F,
@@ -153,6 +178,16 @@ where
 
 pub fn ensure_data_root(options: &DataRootOptions) -> io::Result<PathBuf> {
     let root = resolve_data_root(options)?;
+    let _root = SecureRoot::open(&root, MissingRootPolicy::Create)?
+        .ok_or_else(|| io::Error::other("resource data root could not be created"))?;
+    Ok(root)
+}
+
+pub fn ensure_data_root_with_base(
+    options: &DataRootOptions,
+    workspace_cwd: &Path,
+) -> io::Result<PathBuf> {
+    let root = resolve_data_root_with_base(options, workspace_cwd)?;
     let _root = SecureRoot::open(&root, MissingRootPolicy::Create)?
         .ok_or_else(|| io::Error::other("resource data root could not be created"))?;
     Ok(root)
@@ -761,6 +796,52 @@ mod tests {
             ..DataRootOptions::default()
         })
         .expect_err("symlinked root should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn resolve_data_root_with_base_anchors_workspace_scope_to_explicit_base() {
+        let root = resolve_data_root_with_base(
+            &DataRootOptions::default(),
+            Path::new("/workspace/project"),
+        )
+        .expect("resolve root with base");
+
+        assert_eq!(root, PathBuf::from("/workspace/project/.text_assets"));
+    }
+
+    #[test]
+    fn resolve_data_root_with_base_rejects_relative_workspace_base() {
+        let error = resolve_data_root_with_base(
+            &DataRootOptions::default(),
+            Path::new("workspace/project"),
+        )
+        .expect_err("relative workspace base should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains("workspace_cwd must be an absolute path")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_data_root_with_base_rejects_symlinked_workspace_root() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("temp dir");
+        let workspace = temp.path().join("workspace");
+        let outside = temp.path().join("outside");
+        let linked_root = workspace.join(".text_assets");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+        std::fs::create_dir_all(&outside).expect("mkdir outside");
+        symlink(&outside, &linked_root).expect("symlink root");
+
+        let error = ensure_data_root_with_base(&DataRootOptions::default(), &workspace)
+            .expect_err("symlinked workspace root should fail");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }

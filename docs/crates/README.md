@@ -10,6 +10,8 @@
 - [`structured-text-protocol`](../../crates/structured-text-protocol/README.md)
 - [`error-kit`](../../crates/error-kit/README.md)
 - [`error-protocol`](../../crates/error-protocol/README.md)
+- [`omne-fs-primitives`](../../crates/omne-fs-primitives/README.md)
+- [`omne-process-primitives`](../../crates/omne-process-primitives/README.md)
 - [`github-kit`](../../crates/github-kit/README.md)
 - [`log-kit`](../../crates/log-kit/README.md)
 - [`i18n-kit`](../../crates/i18n-kit/README.md)

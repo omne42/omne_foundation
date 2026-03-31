@@ -2,7 +2,13 @@
 
 //! # 秘密管理抽象
 //!
-//! 本文件定义秘密解析的 trait 和接口，支持多种秘密源。
+//! 本 crate 负责 secret 域模型、解析器和受限运行时接线。
+//!
+//! 根命名空间只保留最常用的值类型；更具体的边界请显式从子模块导入：
+//!
+//! - `secret_kit::spec`：`secret://` 规范与默认解析入口
+//! - `secret_kit::runtime`：环境与命令运行时契约
+//! - `secret_kit::types` / `secret_kit::value`：错误和值对象
 //!
 //! ## 核心概念
 //!
@@ -56,7 +62,9 @@
 //! ### 场景 1：从环境变量读取
 //!
 //! ```ignore
-//! # use secret_kit::{resolve_secret, Result, SecretCommandRuntime, SecretEnvironment};
+//! # use secret_kit::Result;
+//! # use secret_kit::runtime::{SecretCommandRuntime, SecretEnvironment};
+//! # use secret_kit::spec::resolve_secret;
 //! # async fn example(env: &(impl SecretEnvironment + SecretCommandRuntime)) -> Result<()> {
 //! let api_key = resolve_secret("secret://env/OPENAI_API_KEY", env).await?;
 //! # let _ = api_key;
@@ -67,7 +75,9 @@
 //! ### 场景 2：从文件读取
 //!
 //! ```ignore
-//! # use secret_kit::{resolve_secret, Result, SecretCommandRuntime, SecretEnvironment};
+//! # use secret_kit::Result;
+//! # use secret_kit::runtime::{SecretCommandRuntime, SecretEnvironment};
+//! # use secret_kit::spec::resolve_secret;
 //! # async fn example(env: &(impl SecretEnvironment + SecretCommandRuntime)) -> Result<()> {
 //! let api_key = resolve_secret(
 //!     "secret://file?path=/etc/secrets/openai_key",
@@ -81,7 +91,9 @@
 //! ### 场景 3：从 AWS Secrets Manager 读取
 //!
 //! ```ignore
-//! # use secret_kit::{resolve_secret, Result, SecretCommandRuntime, SecretEnvironment};
+//! # use secret_kit::Result;
+//! # use secret_kit::runtime::{SecretCommandRuntime, SecretEnvironment};
+//! # use secret_kit::spec::resolve_secret;
 //! # async fn example(env: &(impl SecretEnvironment + SecretCommandRuntime)) -> Result<()> {
 //! let api_key = resolve_secret(
 //!     "secret://aws-sm/openai-api-key?region=us-east-1",
@@ -95,7 +107,9 @@
 //! ### 场景 4：从 JSON 秘密中提取字段
 //!
 //! ```ignore
-//! # use secret_kit::{resolve_secret, Result, SecretCommandRuntime, SecretEnvironment};
+//! # use secret_kit::Result;
+//! # use secret_kit::runtime::{SecretCommandRuntime, SecretEnvironment};
+//! # use secret_kit::spec::resolve_secret;
 //! # async fn example(env: &(impl SecretEnvironment + SecretCommandRuntime)) -> Result<()> {
 //! // AWS Secrets Manager 中存储的 JSON：{"api_key": "sk-...", "org_id": "org-..."}
 //! let api_key = resolve_secret(
@@ -140,9 +154,9 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
 
-pub use runtime::{
-    AmbientSecretCommandRuntime, SecretCommandRuntime, SecretEnvironment, SecretResolutionContext,
-};
+use crate::runtime::SecretResolutionContext;
+use crate::spec::SecretSpec;
+
 pub use types::{Result, SecretError};
 pub use value::SecretString;
 use value::{SecretBytes, read_limited, secret_string_from_bytes};
@@ -641,16 +655,14 @@ impl SecretCacheState {
 mod command;
 mod file;
 mod json;
-mod runtime;
-mod spec;
-mod types;
-mod value;
+pub mod runtime;
+pub mod spec;
+pub mod types;
+pub mod value;
 
 use spec::{
     prepare_default_secret_resolution, resolve_prepared_default_secret, resolve_secret_in_context,
 };
-
-pub use spec::{SecretSpec, resolve_secret, resolve_secret_with_runtime};
 
 impl SecretCacheKey {
     fn for_context(

@@ -5,8 +5,9 @@
 //! It provides:
 //! - `Config`: loads and validates `mcp.json` (v1) from a workspace root.
 //! - `Manager`: connection cache + MCP initialize + convenience `request` helpers.
-//! - `SharedManager`: cloneable single-flight wrapper for serialized async access to `Manager`.
 //! - `Session`: a single initialized MCP connection that can be handed to other libraries.
+//! - `shared::SharedManager`: cloneable single-flight wrapper for serialized async access to
+//!   `Manager`.
 //! - `mcp`: minimal typed wrappers for common MCP methods (subset of schema).
 //!
 //! ## Remote-first, safe-by-default
@@ -25,16 +26,17 @@
 //! If you want to keep the default "untrusted" stance but relax/tighten remote egress checks,
 //! configure `Manager::with_untrusted_streamable_http_policy(UntrustedStreamableHttpPolicy)`.
 //!
-//! `SharedManager` is intentionally a single-flight wrapper around `Manager`, not an actor. It
-//! serializes manager state mutations across clones and also uses same-server lifecycle gates so
-//! cold-start connect/disconnect/`disconnect_and_wait` paths cannot overlap. Connected
-//! request/notify operations release the manager lock before awaiting JSON-RPC I/O, while
-//! operations that still require the shared lock or lifecycle gate fail fast when they are called
-//! reentrantly from manager-owned handlers and would otherwise deadlock. Prefer plain `Manager`
-//! when you need fine-grained lifecycle control or handler callbacks that may need to call back
-//! into connection setup/teardown paths. If a handler must spawn a child task that calls back
-//! into `SharedManager`, use `SharedManager::spawn_inheriting_handler_scope(...)`; bare
-//! `tokio::spawn(...)` does not inherit the handler task-local reentrancy scope automatically.
+//! `shared::SharedManager` is intentionally a single-flight wrapper around `Manager`, not an
+//! actor. It serializes manager state mutations across clones and also uses same-server
+//! lifecycle gates so cold-start connect/disconnect/`disconnect_and_wait` paths cannot overlap.
+//! Connected request/notify operations release the manager lock before awaiting JSON-RPC I/O,
+//! while operations that still require the shared lock or lifecycle gate fail fast when they are
+//! called reentrantly from manager-owned handlers and would otherwise deadlock. Prefer plain
+//! `Manager` when you need fine-grained lifecycle control or handler callbacks that may need to
+//! call back into connection setup/teardown paths. If a handler must spawn a child task that
+//! calls back into `shared::SharedManager`, use
+//! `shared::SharedManager::spawn_inheriting_handler_scope(...)`; bare `tokio::spawn(...)` does
+//! not inherit the handler task-local reentrancy scope automatically.
 //!
 //! When you use config-driven connection helpers (`Manager::request`, `get_or_connect`, etc.),
 //! relative `cwd` values are resolved against the loaded `mcp.json` thread root when available,
@@ -59,6 +61,9 @@ mod security;
 mod server_name;
 mod session;
 mod shared_manager;
+pub mod shared {
+    pub use crate::shared_manager::SharedManager;
+}
 
 pub use config::{
     ClientConfig, Config, ConfigLoadPolicy, Root, ServerConfig, StdoutLogConfig, Transport,
@@ -72,4 +77,3 @@ pub use protocol::{MCP_PROTOCOL_VERSION, McpNotification, McpRequest};
 pub use security::{TrustMode, UntrustedStreamableHttpPolicy};
 pub use server_name::{ServerName, ServerNameError};
 pub use session::Session;
-pub use shared_manager::SharedManager;

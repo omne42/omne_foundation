@@ -681,9 +681,10 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     use tokio::sync::oneshot;
 
+    use crate::shared::SharedManager;
     use crate::{
         ClientConfig, Config, Manager, McpRequest, ProtocolVersionCheck, ServerConfig, ServerName,
-        ServerRequestHandler, ServerRequestOutcome, SharedManager, TrustMode,
+        ServerRequestHandler, ServerRequestOutcome, TrustMode,
     };
 
     struct NestedRequest;

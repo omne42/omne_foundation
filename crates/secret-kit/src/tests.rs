@@ -12,9 +12,10 @@ use crate::command::{
     secret_command_timeout_from_env,
 };
 use crate::json::extract_json_key;
+use crate::runtime::{SecretCommandRuntime, SecretEnvironment, SecretResolutionContext};
 use crate::spec::{
-    SecretCommand, build_secret_command, prepare_default_secret_resolution,
-    resolve_prepared_default_secret,
+    SecretCommand, SecretSpec, build_secret_command, prepare_default_secret_resolution,
+    resolve_prepared_default_secret, resolve_secret,
 };
 use error_kit::{ErrorCategory, ErrorRetryAdvice};
 use structured_text_kit::{CatalogTextRef, StructuredText, structured_text};

@@ -18,7 +18,7 @@
 负责：
 
 - `stdio`、`unix`、`streamable_http` 三类 transport 的 MCP client 侧接线
-- `Manager`、`SharedManager`、`Session` 和常用 typed wrapper
+- `Manager`、`Session`、`shared::SharedManager` 和常用 typed wrapper
 - server -> client handler 与 roots 支撑
 - MCP 配置加载、安全校验和连接缓存
 
@@ -37,7 +37,8 @@
 - [`src/session.rs`](./src/session.rs)
   - 单个已初始化会话
 - [`src/shared_manager.rs`](./src/shared_manager.rs)
-  - 面向共享调用方的 single-flight 生命周期包装，以及 handler 子任务的显式 scope 继承入口
+  - 面向共享调用方的 single-flight 生命周期包装，通过 `mcp_kit::shared::SharedManager` 暴露
+  - 同时提供 handler 子任务的显式 scope 继承入口
 - [`src/error.rs`](./src/error.rs)
   - crate 级公开错误边界，暴露 `ErrorKind` / `Result`
 - [`src/mcp.rs`](./src/mcp.rs)

@@ -17,6 +17,8 @@
 - latest release endpoint URL 构造
 - latest release metadata DTO 与获取
 - 多个 GitHub API base 的顺序回退
+- 基于 `http-kit::HttpClientProfile` 的显式 HTTP 边界复用
+- bearer token 请求走 public-IP pinned client，而不是依赖不透明 `reqwest::Client`
 
 不负责：
 
@@ -48,6 +50,7 @@
   - GitHub API 请求头默认值与 request options
 - `src/release.rs`
   - latest release DTO、repository/base URL 归一化与获取
+  - bearer token 场景下的 public-IP pinned HTTP client 选择
 - `src/error.rs`
   - 稳定错误类型
 

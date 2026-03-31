@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- route bearer-token release fetches through `http-kit::HttpClientProfile` public-IP pinning so GitHub API requests no longer rely on a one-time static base-url check before sending secrets
 - refuse to send GitHub bearer tokens to non-HTTPS, localhost, single-label, or private-IP API bases while still allowing tokenless local/mock API bases in tests and controlled callers
 - add `github-kit` for pure GitHub release API client access
 - export shared GitHub API base/url/header helpers so other foundation crates can reuse the canonical request contract instead of rebuilding it locally

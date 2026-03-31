@@ -38,9 +38,9 @@ fn default_output_dir() -> PathBuf {
 }
 
 fn write_bindings_dir(output_dir: &std::path::Path) -> Result<(), Box<dyn Error>> {
-    write_typescript_bindings(output_dir)
+    Ok(write_typescript_bindings(output_dir)?)
 }
 
 fn check_bindings_dir(output_dir: &std::path::Path) -> Result<(), Box<dyn Error>> {
-    check_typescript_bindings(output_dir)
+    Ok(check_typescript_bindings(output_dir)?)
 }

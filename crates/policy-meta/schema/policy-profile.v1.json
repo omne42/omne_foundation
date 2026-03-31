@@ -1,6 +1,6 @@
 {
   "$id": "https://omne42.dev/schema/policy-profile.v1.json",
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$schema": "https://json-schema.org/draft/2019-09/schema",
   "additionalProperties": false,
   "description": "Versioned preset profile built on top of the canonical policy metadata fragment.",
   "properties": {

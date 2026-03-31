@@ -42,6 +42,10 @@ impl Default for SpawnOptions {
 
 #[derive(Debug, Clone)]
 pub struct StreamableHttpOptions {
+    /// Extra HTTP headers to include on requests.
+    ///
+    /// `streamable_http` transport-owned headers such as `Accept`, `Content-Type`, and
+    /// `mcp-session-id` are reserved and rejected at connect time.
     pub headers: HashMap<String, String>,
     pub enforce_public_ip: bool,
     pub connect_timeout: Option<Duration>,

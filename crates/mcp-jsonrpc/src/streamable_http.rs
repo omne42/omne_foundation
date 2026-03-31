@@ -18,10 +18,18 @@ use tokio_util::io::StreamReader;
 
 use crate::{Client, ClientHandle, Error, ProtocolErrorKind, SpawnOptions, StreamableHttpOptions};
 
+const MCP_SESSION_ID_HEADER: &str = "mcp-session-id";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SseWakeReason {
     Connect,
     SessionChanged,
+}
+
+fn is_reserved_streamable_http_header(name: &reqwest::header::HeaderName) -> bool {
+    name == reqwest::header::ACCEPT
+        || name == reqwest::header::CONTENT_TYPE
+        || name.as_str().eq_ignore_ascii_case(MCP_SESSION_ID_HEADER)
 }
 
 fn ends_with_ignore_ascii_case(haystack: &str, suffix: &str) -> bool {
@@ -256,6 +264,15 @@ impl Client {
                     format!("invalid http header name: {key}"),
                 )
             })?;
+            if is_reserved_streamable_http_header(&name) {
+                return Err(Error::protocol(
+                    ProtocolErrorKind::InvalidInput,
+                    format!(
+                        "http header is reserved by streamable_http transport: {}",
+                        name.as_str()
+                    ),
+                ));
+            }
             let value = reqwest::header::HeaderValue::from_str(&value).map_err(|_| {
                 Error::protocol(
                     ProtocolErrorKind::InvalidInput,
@@ -1234,6 +1251,40 @@ mod tests {
 
         let missing = jsonrpc_response_id_from_line(br#"{"method":"ping"}"#).expect("valid json");
         assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn connect_streamable_http_rejects_transport_reserved_headers() {
+        for header in ["accept", "content-type", "mcp-session-id"] {
+            let mut options = StreamableHttpOptions::default();
+            options
+                .headers
+                .insert(header.to_string(), "override".to_string());
+
+            let err = match Client::connect_streamable_http_with_options(
+                "https://example.com/mcp",
+                options,
+                SpawnOptions::default(),
+            )
+            .await
+            {
+                Ok(_) => panic!("reserved transport header should be rejected"),
+                Err(err) => err,
+            };
+
+            assert!(matches!(
+                err,
+                Error::Protocol(crate::ProtocolError {
+                    kind: ProtocolErrorKind::InvalidInput,
+                    ..
+                })
+            ));
+            assert!(
+                err.to_string()
+                    .contains("http header is reserved by streamable_http transport"),
+                "{err}"
+            );
+        }
     }
 
     #[test]

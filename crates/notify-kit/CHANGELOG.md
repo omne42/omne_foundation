@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `notify-kit::Error` 在多 sink 聚合失败时恢复标准 `Error::source()` 链：聚合错误现在把首个 `SinkFailure` 作为 source，而 `SinkFailure` 继续指向对应的底层错误；需要完整多错误信息时仍使用 `sink_failures()`。
 - `Hub::notify(...)` 现在会在缺少 Tokio runtime/time driver 或 inflight 容量耗尽时返回 `TryNotifyError`，不再把入队失败静默降级为 warning-only；保留显式的 `Hub::notify_lossy(...)` 供调用方选择旧的尽力而为语义。
 - `notify_kit::env::build_hub_from_standard_env(...)` 现在对布尔型 env（例如 `NOTIFY_SOUND`）采用 fail-closed 解析：非法值会直接报错，而不是偷偷回退默认值。
 - `FeishuWebhookSink` 现在把远程/本地图片、tenant token 缓存和媒体上传能力收口到显式的 `FeishuWebhookMediaConfig` / internal media support 边界；基础 webhook 配置继续可用，但更宽的图片/上传语义不再和 webhook 主状态平铺混在一起。

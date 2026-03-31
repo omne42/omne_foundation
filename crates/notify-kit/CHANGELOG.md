@@ -12,10 +12,12 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `notify-kit::Error` 在多 sink 聚合失败时恢复标准 `Error::source()` 链：聚合错误现在把首个 `SinkFailure` 作为 source，而 `SinkFailure` 继续指向对应的底层错误；需要完整多错误信息时仍使用 `sink_failures()`。
 - `Hub::notify(...)` 现在会在缺少 Tokio runtime/time driver 或 inflight 容量耗尽时返回 `TryNotifyError`，不再把入队失败静默降级为 warning-only；保留显式的 `Hub::notify_lossy(...)` 供调用方选择旧的尽力而为语义。
 - `notify_kit::env::build_hub_from_standard_env(...)` 现在对布尔型 env（例如 `NOTIFY_SOUND`）采用 fail-closed 解析：非法值会直接报错，而不是偷偷回退默认值。
+- `notify_kit::builtin::env::build_hub_from_standard_env(...)` 现在返回模块内的 `EnvHubError`，不再把 `anyhow::Result` 暴露成公开 helper 契约；文档 canonical 路径也收口到 `notify_kit::builtin::env::...`，而 `notify_kit::env::...` 仅作为兼容出口保留。
 - `FeishuWebhookSink` 现在把远程/本地图片、tenant token 缓存和媒体上传能力收口到显式的 `FeishuWebhookMediaConfig` / internal media support 边界；基础 webhook 配置继续可用，但更宽的图片/上传语义不再和 webhook 主状态平铺混在一起。
 - `FeishuWebhookSink` 的本地图片配置现在按开关正交处理：当 `with_local_image_files(false)` 时，会忽略 `local_image_root(s)` 和 `local_image_base_dir`，不再因为未启用路径上的附带配置提前报错。
 - workspace 内部 crate 的 path 依赖现在补齐版本声明，允许 `config-kit` / `secret-kit` / `text-assets-kit` 等核心 foundation crate 正常通过 `cargo package --no-verify` 做跨仓发布校验。
 - `SlackWebhookSink` / `DiscordWebhookSink` / `WeComWebhookSink` / `DingTalkWebhookSink` / `GenericWebhookSink` 现在复用统一的内部 webhook endpoint helper，收口重复的 HTTPS URL 校验、HTTP profile 构建和 JSON POST 骨架，减少后续出站策略调整时的散弹式修改；外部 API 与行为保持不变。
+- `GenericWebhookConfig::with_public_ip_check(false)` 不再在所有构造路径上被提前判成非法；只要 host allowlist 和 path scope 已经成立，sink 现在会在发送期按配置选择 unpinned/pinned HTTP client，而不是把公开配置开关做成无效契约。
 
 ### Added
 - `notify_kit::core` 与 `notify_kit::builtin` 命名空间：把 Hub/Event/Error/Sink trait 这条核心通知边界，与内置 provider sinks 的适配集合显式分层；根级 re-export 继续保留以维持兼容。

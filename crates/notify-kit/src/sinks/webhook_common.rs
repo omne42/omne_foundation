@@ -44,12 +44,10 @@ impl JsonWebhookEndpoint {
         &self.url
     }
 
+    #[cfg(any(feature = "all-sinks", feature = "dingtalk"))]
+    #[allow(dead_code)]
     pub(super) fn url_mut(&mut self) -> &mut reqwest::Url {
         &mut self.url
-    }
-
-    pub(super) fn enforce_public_ip(&self) -> bool {
-        self.enforce_public_ip
     }
 
     pub(super) async fn post_json(

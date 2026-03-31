@@ -2,10 +2,10 @@ use std::time::Duration;
 
 use crate::Event;
 use crate::sinks::text::{TextLimits, format_event_text_limited};
-use crate::sinks::webhook_common::JsonWebhookEndpoint;
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
-    ensure_http_success, parse_and_validate_https_url_basic, redact_url, redact_url_str,
+    HttpClientOptions, HttpClientProfile, build_http_client_profile, ensure_http_success,
+    parse_and_validate_https_url_basic, redact_url, redact_url_str, send_reqwest,
     validate_url_path_prefix,
 };
 
@@ -102,9 +102,11 @@ impl GenericWebhookConfig {
 }
 
 pub struct GenericWebhookSink {
-    endpoint: JsonWebhookEndpoint,
+    url: reqwest::Url,
     payload_field: String,
+    http: HttpClientProfile,
     max_chars: usize,
+    enforce_public_ip: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,10 +126,10 @@ struct NormalizedGenericWebhookConfig {
 impl std::fmt::Debug for GenericWebhookSink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GenericWebhookSink")
-            .field("url", &redact_url(self.endpoint.url()))
+            .field("url", &redact_url(&self.url))
             .field("payload_field", &self.payload_field)
             .field("max_chars", &self.max_chars)
-            .field("enforce_public_ip", &self.endpoint.enforce_public_ip())
+            .field("enforce_public_ip", &self.enforce_public_ip)
             .finish_non_exhaustive()
     }
 }
@@ -146,15 +148,16 @@ impl GenericWebhookSink {
         mode: GenericWebhookValidationMode,
     ) -> crate::Result<Self> {
         let normalized = normalize_config(config, mode)?;
-        let endpoint = JsonWebhookEndpoint::from_url(
-            normalized.url,
-            normalized.timeout,
-            normalized.enforce_public_ip,
-        )?;
+        let http = build_http_client_profile(&HttpClientOptions {
+            timeout: Some(normalized.timeout),
+            ..Default::default()
+        })?;
         Ok(Self {
-            endpoint,
+            url: normalized.url,
             payload_field: normalized.payload_field,
+            http,
             max_chars: normalized.max_chars,
+            enforce_public_ip: normalized.enforce_public_ip,
         })
     }
 
@@ -271,20 +274,15 @@ fn validate_security_requirements(
     mode: GenericWebhookValidationMode,
 ) -> crate::Result<()> {
     if !enforce_public_ip {
-        if mode == GenericWebhookValidationMode::Strict {
-            return Err(
-                anyhow::anyhow!("generic webhook strict mode requires public ip check").into(),
-            );
-        }
-        if mode == GenericWebhookValidationMode::StrictByDefault {
-            return Err(anyhow::anyhow!(
-                "generic webhook default constructor requires public ip check"
-            )
-            .into());
-        }
         if allowed_hosts.is_empty() {
             return Err(anyhow::anyhow!(
                 "generic webhook disabling public ip check requires allowed_hosts"
+            )
+            .into());
+        }
+        if path_prefix.is_none() {
+            return Err(anyhow::anyhow!(
+                "generic webhook disabling public ip check requires path_prefix"
             )
             .into());
         }
@@ -350,8 +348,16 @@ impl Sink for GenericWebhookSink {
 
     fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
+            let client = self
+                .http
+                .select_for_url(&self.url, self.enforce_public_ip)
+                .await?;
             let payload = Self::build_payload(event, &self.payload_field, self.max_chars);
-            let resp = self.endpoint.post_json(&payload, "generic webhook").await?;
+            let resp = send_reqwest(
+                client.post(self.url.as_str()).json(&payload),
+                "generic webhook",
+            )
+            .await?;
             Ok(ensure_http_success(resp, "generic webhook").await?)
         })
     }
@@ -398,19 +404,21 @@ mod tests {
     }
 
     #[test]
-    fn disabling_public_ip_check_requires_allowed_hosts() {
+    fn disabling_public_ip_check_keeps_default_host_and_path_guards() {
         let cfg =
             GenericWebhookConfig::new("https://example.com/webhook").with_public_ip_check(false);
-        let err = GenericWebhookSink::new(cfg).expect_err("expected invalid config");
-        assert!(err.to_string().contains("public ip"), "{err:#}");
+        let sink = GenericWebhookSink::new(cfg).expect("default guards should still apply");
+        assert_eq!(sink.url.host_str().unwrap_or(""), "example.com");
+        assert_eq!(sink.url.path(), "/webhook");
+        assert!(!sink.enforce_public_ip);
     }
 
     #[test]
     fn default_constructor_derives_host_and_path_guards_from_url() {
         let cfg = GenericWebhookConfig::new("https://example.com/hooks/notify");
         let sink = GenericWebhookSink::new(cfg).expect("build sink");
-        assert_eq!(sink.endpoint.url().host_str().unwrap_or(""), "example.com");
-        assert!(sink.endpoint.url().path().starts_with("/hooks/"));
+        assert_eq!(sink.url.host_str().unwrap_or(""), "example.com");
+        assert!(sink.url.path().starts_with("/hooks/"));
     }
 
     #[test]
@@ -426,15 +434,16 @@ mod tests {
     }
 
     #[test]
-    fn strict_rejects_disabled_public_ip_check() {
+    fn strict_accepts_disabled_public_ip_check_when_scope_is_explicit() {
         let cfg = GenericWebhookConfig::new_strict(
             "https://example.com/hooks/notify",
             "/hooks/",
             vec!["example.com".to_string()],
         )
         .with_public_ip_check(false);
-        let err = GenericWebhookSink::new_strict(cfg).expect_err("expected strict validation");
-        assert!(err.to_string().contains("public ip"), "{err:#}");
+        let sink = GenericWebhookSink::new_strict(cfg).expect("strict scope should still apply");
+        assert_eq!(sink.url.host_str().unwrap_or(""), "example.com");
+        assert!(!sink.enforce_public_ip);
     }
 
     #[test]
@@ -446,8 +455,8 @@ mod tests {
         )
         .with_payload_field("content");
         let sink = GenericWebhookSink::new_strict(cfg).expect("build strict sink");
-        assert_eq!(sink.endpoint.url().host_str().unwrap_or(""), "example.com");
-        assert!(sink.endpoint.url().path().starts_with("/hooks/"));
+        assert_eq!(sink.url.host_str().unwrap_or(""), "example.com");
+        assert!(sink.url.path().starts_with("/hooks/"));
     }
 
     #[test]
@@ -480,7 +489,7 @@ mod tests {
             .with_path_prefix(" /hooks/ ");
         let sink = GenericWebhookSink::new(cfg).expect("build sink");
         assert_eq!(sink.payload_field, "text");
-        assert_eq!(sink.endpoint.url().host_str().unwrap_or(""), "example.com");
-        assert!(sink.endpoint.url().path().starts_with("/hooks/"));
+        assert_eq!(sink.url.host_str().unwrap_or(""), "example.com");
+        assert!(sink.url.path().starts_with("/hooks/"));
     }
 }

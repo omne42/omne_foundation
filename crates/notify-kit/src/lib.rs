@@ -2,6 +2,7 @@
 
 pub mod builtin;
 pub mod core;
+#[doc(hidden)]
 pub mod env;
 mod error;
 mod event;

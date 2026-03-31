@@ -49,6 +49,8 @@
   - canonical 的窄通知边界；包含 `Hub`、`Event`、`Error` 和 `Sink`
 - `notify_kit::builtin`
   - 内置 provider sinks 的适配层；crate root 继续保留 re-export 仅为兼容
+- `notify_kit::builtin::env`
+  - 标准 `NOTIFY_*` bootstrap helper 的 canonical 入口；`notify_kit::env` 仅保留为兼容别名
 - `src/event.rs`
   - 统一事件模型
 - `src/hub.rs`
@@ -56,7 +58,7 @@
 - `src/sinks/mod.rs`
   - sink trait、条件导出和 selective feature 入口
 - `src/env.rs`
-  - convenience helper，不是核心协议边界
+  - convenience helper 的兼容 shim；不属于核心协议边界
 - `bots/`
   - 上层集成示例，不是核心 Rust API
 
@@ -136,7 +138,7 @@ notify-kit = { path = "crates/notify-kit", default-features = false, features = 
 
 - `sound-command` 现在依赖 `sound`，因为它只扩展 `SoundSink` 的外部命令能力。
 - `selective-sinks` 仍保留为兼容 alias，但 `default-features = false` 已足以收紧编译与依赖图；不用再额外打开它。
-- 当 `all-sinks` 关闭且 `notify_kit::env::build_hub_from_standard_env(...)` 遇到未启用的 sink 配置时，会返回显式错误，而不是静默忽略配置。
+- 当 `all-sinks` 关闭且 `notify_kit::builtin::env::build_hub_from_standard_env(...)` 遇到未启用的 sink 配置时，会返回显式错误，而不是静默忽略配置。
 - secret-backed 内置 sink 现在统一通过 `notify_kit::NotifySecret` 暴露公开配置边界；`notify-kit` 不再把 `secret-kit::SecretString` 的持有模型直接作为自己的 public API。
 
 ## 文档
@@ -193,13 +195,14 @@ hub.notify(Event::new("turn_completed", Severity::Success, "done"))
 
 如果你需要库自带的快捷接线方式，推荐使用：
 
-- `notify_kit::env::build_hub_from_standard_env(...)`
-- `notify_kit::env::StandardEnvHubOptions`
+- `notify_kit::builtin::env::build_hub_from_standard_env(...)`
+- `notify_kit::builtin::env::StandardEnvHubOptions`
+- `notify_kit::builtin::env::EnvHubError`
 
 它们只是 convenience helper，适合快速接线或共享一套简单约定；不是强制协议，也不是核心架构边界。
 这套 helper 自带的中性约定是 `NOTIFY_*`，例如 `NOTIFY_SOUND`、`NOTIFY_WEBHOOK_URL`、`NOTIFY_TIMEOUT_MS`、`NOTIFY_EVENTS`。
-布尔型 env（如 `NOTIFY_SOUND`）采用 fail-closed 解析：非法值会直接返回错误，而不是偷偷回退默认值。
-公开入口就是 `notify_kit::env::...`；不要在 crate root 上再叠一层快捷别名。
+布尔型 env（如 `NOTIFY_SOUND`）采用 fail-closed 解析：非法值会直接返回 `EnvHubError`，而不是偷偷回退默认值。
+公开文档入口是 `notify_kit::builtin::env::...`；旧的 `notify_kit::env::...` 仅为兼容保留，并且返回 `notify-kit` 自己的 helper 错误边界。
 
 ## 标准 helper 示例
 

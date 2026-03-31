@@ -27,6 +27,7 @@ Canonical values are case-sensitive snake_case tokens.
 ## Contract Shape
 
 - `schema/policy-meta.v1.json` defines the canonical metadata fragment.
+- The checked-in JSON Schema artifacts target the JSON Schema 2019-09 dialect.
 - The fragment keeps canonical policy fields reusable and does not force every field to be present.
 - `version` is optional in the fragment so the same metadata shape can be embedded into larger contracts, but allowed for persisted artifacts.
 - `schema/policy-profile.v1.json` defines a versioned preset/profile object and requires:

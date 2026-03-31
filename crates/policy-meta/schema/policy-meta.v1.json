@@ -1,6 +1,6 @@
 {
   "$id": "https://omne42.dev/schema/policy-meta.v1.json",
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$schema": "https://json-schema.org/draft/2019-09/schema",
   "additionalProperties": false,
   "description": "Canonical policy metadata fragment. Canonical fields are reusable across repositories; field presence requirements are defined by embedding contracts. Optional version metadata may be included by persisted artifacts and preset files.",
   "properties": {

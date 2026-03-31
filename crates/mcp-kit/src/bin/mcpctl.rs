@@ -140,15 +140,25 @@ enum Command {
     },
 }
 
-async fn canonicalize_existing_ancestor(path: &Path) -> Option<PathBuf> {
+async fn canonicalize_existing_ancestor(path: &Path) -> anyhow::Result<Option<PathBuf>> {
     let mut cursor = Some(path);
     while let Some(candidate) = cursor {
-        if let Ok(canonical) = tokio::fs::canonicalize(candidate).await {
-            return Some(canonical);
+        match tokio::fs::canonicalize(candidate).await {
+            Ok(canonical) => return Ok(Some(canonical)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                cursor = candidate.parent();
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "canonicalize existing ancestor for --config boundary check: {}",
+                        path.display()
+                    )
+                });
+            }
         }
-        cursor = candidate.parent();
     }
-    None
+    Ok(None)
 }
 
 fn resolve_cli_root(root: Option<PathBuf>) -> anyhow::Result<PathBuf> {
@@ -170,10 +180,19 @@ async fn main() -> anyhow::Result<()> {
             root.join(path)
         };
 
-        let canonical_root = tokio::fs::canonicalize(&root)
-            .await
-            .unwrap_or_else(|_| root.clone());
-        if let Some(canonical_config_or_parent) = canonicalize_existing_ancestor(&resolved).await {
+        let canonical_root = match tokio::fs::canonicalize(&root).await {
+            Ok(canonical_root) => canonical_root,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => root.clone(),
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "canonicalize --root for --config boundary check: {}",
+                        root.display()
+                    )
+                });
+            }
+        };
+        if let Some(canonical_config_or_parent) = canonicalize_existing_ancestor(&resolved).await? {
             if !canonical_config_or_parent.starts_with(&canonical_root) {
                 if !cli.allow_config_outside_root {
                     anyhow::bail!(
@@ -407,6 +426,8 @@ mod tests {
     use std::process::Command;
 
     #[cfg(not(windows))]
+    use super::canonicalize_existing_ancestor;
+    #[cfg(not(windows))]
     use super::resolve_cli_root;
     #[cfg(not(windows))]
     use anyhow::Result;
@@ -476,6 +497,24 @@ mod tests {
             .env("RUST_TEST_THREADS", "1")
             .status()?;
         assert!(status.success(), "helper process should exit cleanly");
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(not(windows))]
+    async fn canonicalize_existing_ancestor_reports_non_not_found_errors() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let blocked = tempdir.path().join("blocked");
+        std::fs::write(&blocked, b"not a directory")?;
+
+        let err = canonicalize_existing_ancestor(&blocked.join("mcp.json"))
+            .await
+            .expect_err("non-directory ancestor should not be treated as missing");
+        assert!(err.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotADirectory)
+        }));
         Ok(())
     }
 }

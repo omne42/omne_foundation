@@ -124,19 +124,19 @@ fn built_in_roots_list_returns_expected_shape() {
 #[test]
 fn stdout_log_path_within_root_accepts_relative_path() {
     let root = std::env::temp_dir().join("workspace");
-    assert!(stdout_log_path_within_root(
-        Path::new("logs/server.stdout.log"),
-        &root
-    ));
+    assert!(
+        stdout_log_path_within_root(Path::new("logs/server.stdout.log"), &root)
+            .expect("path check should succeed")
+    );
 }
 
 #[test]
 fn stdout_log_path_within_root_rejects_relative_parent_escape() {
     let root = std::env::temp_dir().join("workspace");
-    assert!(!stdout_log_path_within_root(
-        Path::new("../outside.log"),
-        &root
-    ));
+    assert!(
+        !stdout_log_path_within_root(Path::new("../outside.log"), &root)
+            .expect("path check should succeed")
+    );
 }
 
 #[test]
@@ -144,7 +144,7 @@ fn stdout_log_path_within_root_accepts_absolute_path_after_root_absolutize() {
     let base = std::env::temp_dir();
     let root = absolutize_with_base(Path::new("workspace"), &base);
     let log_path = root.join("logs/server.stdout.log");
-    assert!(stdout_log_path_within_root(&log_path, &root));
+    assert!(stdout_log_path_within_root(&log_path, &root).expect("path check should succeed"));
 }
 
 #[cfg(unix)]
@@ -157,10 +157,10 @@ fn stdout_log_path_within_root_rejects_symlink_escape() {
     std::fs::create_dir_all(&outside).unwrap();
     std::os::unix::fs::symlink(&outside, root.join("logs")).unwrap();
 
-    assert!(!stdout_log_path_within_root(
-        Path::new("logs/server.stdout.log"),
-        &root
-    ));
+    assert!(
+        !stdout_log_path_within_root(Path::new("logs/server.stdout.log"), &root)
+            .expect("path check should succeed")
+    );
 }
 
 #[cfg(unix)]
@@ -172,10 +172,10 @@ fn stdout_log_path_within_root_accepts_symlink_that_stays_within_root() {
     std::fs::create_dir_all(&real_logs).unwrap();
     std::os::unix::fs::symlink(&real_logs, root.join("logs")).unwrap();
 
-    assert!(stdout_log_path_within_root(
-        Path::new("logs/server.stdout.log"),
-        &root
-    ));
+    assert!(
+        stdout_log_path_within_root(Path::new("logs/server.stdout.log"), &root)
+            .expect("path check should succeed")
+    );
 }
 
 #[test]
@@ -245,7 +245,7 @@ fn session_notify_returns_error_without_tokio_time_driver() {
 fn stdout_log_path_within_root_rejects_outside_absolute_path() {
     let root = std::env::temp_dir().join("workspace");
     let log_path = std::env::temp_dir().join("other/server.stdout.log");
-    assert!(!stdout_log_path_within_root(&log_path, &root));
+    assert!(!stdout_log_path_within_root(&log_path, &root).expect("path check should succeed"));
 }
 
 #[test]
@@ -253,7 +253,44 @@ fn stdout_log_path_within_root_accepts_equivalent_root_with_parent_segments() {
     let root = std::env::temp_dir().join("workspace");
     let root_with_parent = root.join("nested").join("..");
     let log_path = root.join("logs/server.stdout.log");
-    assert!(stdout_log_path_within_root(&log_path, &root_with_parent));
+    assert!(
+        stdout_log_path_within_root(&log_path, &root_with_parent)
+            .expect("path check should succeed")
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn stdout_log_path_within_root_reports_non_not_found_prefix_errors() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let root = tempdir.path().join("workspace");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("logs"), b"not a directory").unwrap();
+
+    let err = stdout_log_path_within_root(Path::new("logs/server.stdout.log"), &root)
+        .expect_err("non-directory prefix should not be treated as missing");
+    assert!(err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotADirectory)
+    }));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn resolve_connection_cwd_with_base_reports_non_not_found_prefix_errors() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let root = tempdir.path().join("workspace");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("blocked"), b"not a directory").unwrap();
+
+    let err = resolve_connection_cwd_with_base(Some(&root), Path::new("blocked/server"))
+        .expect_err("non-directory cwd prefix should not be treated as missing");
+    assert!(err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotADirectory)
+    }));
 }
 
 #[cfg(not(windows))]

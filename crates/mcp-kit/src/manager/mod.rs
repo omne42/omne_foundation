@@ -106,7 +106,7 @@ pub(crate) fn resolve_connection_cwd_with_base(
         };
         base.join(cwd)
     };
-    Ok(stable_connection_cwd_identity(&resolved))
+    stable_connection_cwd_identity(&resolved)
 }
 
 pub(crate) async fn resolve_connection_cwd_with_base_async(
@@ -120,27 +120,45 @@ pub(crate) async fn resolve_connection_cwd_with_base_async(
         .map_err(|err| anyhow::anyhow!("join connection cwd resolution task: {err}"))?
 }
 
-fn stable_connection_cwd_identity(path: &Path) -> PathBuf {
+fn stable_connection_cwd_identity(path: &Path) -> anyhow::Result<PathBuf> {
     let normalized = normalize_connection_path(path);
     let mut existing = normalized.as_path();
     let mut missing_components = Vec::new();
 
-    while std::fs::symlink_metadata(existing).is_err() {
-        let Some(component) = existing.file_name() else {
-            return normalized;
-        };
-        missing_components.push(component.to_os_string());
-        let Some(parent) = existing.parent() else {
-            return normalized;
-        };
-        existing = parent;
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let Some(component) = existing.file_name() else {
+                    return Ok(normalized);
+                };
+                missing_components.push(component.to_os_string());
+                let Some(parent) = existing.parent() else {
+                    return Ok(normalized);
+                };
+                existing = parent;
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "inspect existing path prefix for MCP cwd identity: {}",
+                        normalized.display()
+                    )
+                });
+            }
+        }
     }
 
-    let mut canonical = std::fs::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
+    let mut canonical = std::fs::canonicalize(existing).with_context(|| {
+        format!(
+            "canonicalize existing path prefix for MCP cwd identity: {}",
+            existing.display()
+        )
+    })?;
     for component in missing_components.iter().rev() {
         canonical.push(component);
     }
-    canonical
+    Ok(canonical)
 }
 
 fn normalize_connection_path(path: &Path) -> PathBuf {

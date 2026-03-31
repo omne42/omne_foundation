@@ -39,6 +39,8 @@
 - `mcp-kit`：`Manager::try_from_config` 现在会对完整 `Config` 做 fail-fast 校验，而不再只检查 `client`；手动构造的无效 server 配置会在构造期直接失败，不再拖到首次连接时才暴露。
 - `mcp-kit`：config 驱动的连接路径现在会把相对 `cwd` 锚定到 `mcp.json` 所在的 thread root，并把 `cwd` 复用判断收口到稳定目录身份；同一物理目录的 `.`/`..` 等不同词法写法不再误判成不同连接上下文。
 - `mcp-kit`：`streamable_http` 现在会在配置校验阶段拒绝 `http_headers` / `env_http_headers` 里试图声明 transport 保留头（例如 `MCP-Protocol-Version`），避免用户配置重新覆盖握手边界。
+- `mcp-kit`：`streamable_http` 的 transport 保留头集合现在补齐到 `mcp-session-id` / `Accept` / `Content-Type`（以及既有的 `MCP-Protocol-Version` / `Authorization`），并同时在配置校验、连接建头和回归测试三层收口，避免配置覆盖会话粘连与内容协商边界。
+- `mcp-kit`：config override、`mcpctl --config`、`stdout_log` root 边界和 `cwd` identity 的 ancestor/prefix helper 现在只把 `NotFound` 当作“缺失组件”，`NotADirectory`/`PermissionDenied` 等其他文件系统错误会原样上抛，不再被误降级成“不存在”后继续判定。
 - `mcp-kit`：`SharedManager::disconnect_and_wait` 现在会把同 server 的 lifecycle gate 一直持有到 wait 结束，避免旧连接 teardown 仍在进行时，同名 server 的冷启动重连先一步穿透进来。
 - `mcp-kit`：`stdout_log.path` 的 root 边界检查现在会解析已存在路径前缀的真实 symlink 身份，再判断是否仍落在 root 内；中间目录 symlink 越界不再能绕过检查。
 - `mcp-kit`：stdio transport 默认不再把子进程 `stderr` 继承到宿主进程；库层现在 fail-closed 到空设备，避免 foundation 边界替调用方决定日志输出与潜在 secret 泄露面。

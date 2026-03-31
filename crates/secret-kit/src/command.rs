@@ -146,14 +146,20 @@ fn start_process_tree_cleanup(cleanup: ProcessTreeCleanup) {
 
 #[cfg(all(unix, target_os = "linux"))]
 impl LinuxCleanupDispatcher {
+    fn lock_sender(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Option<std::sync::mpsc::Sender<ProcessTreeCleanup>>> {
+        match self.sender.lock() {
+            Ok(sender) => sender,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     fn send(&self, cleanup: ProcessTreeCleanup) -> std::result::Result<(), ProcessTreeCleanup> {
         let mut cleanup = cleanup;
         for _ in 0..2 {
             let sender = {
-                let mut sender = self
-                    .sender
-                    .lock()
-                    .expect("linux cleanup dispatcher mutex poisoned");
+                let mut sender = self.lock_sender();
                 if sender.is_none() {
                     *sender = spawn_linux_cleanup_worker().ok();
                 }
@@ -168,11 +174,7 @@ impl LinuxCleanupDispatcher {
                 Ok(()) => return Ok(()),
                 Err(std::sync::mpsc::SendError(returned_cleanup)) => {
                     cleanup = returned_cleanup;
-                    let mut sender = self
-                        .sender
-                        .lock()
-                        .expect("linux cleanup dispatcher mutex poisoned");
-                    sender.take();
+                    self.lock_sender().take();
                 }
             }
         }
@@ -184,10 +186,7 @@ impl LinuxCleanupDispatcher {
 #[cfg(all(test, unix, target_os = "linux"))]
 impl LinuxCleanupDispatcher {
     fn ensure_worker_for_test(&self) -> bool {
-        let mut sender = self
-            .sender
-            .lock()
-            .expect("linux cleanup dispatcher mutex poisoned");
+        let mut sender = self.lock_sender();
         if sender.is_none() {
             *sender = spawn_linux_cleanup_worker().ok();
         }
@@ -195,12 +194,8 @@ impl LinuxCleanupDispatcher {
     }
 
     fn reset_for_test(&self) {
-        let sender = self
-            .sender
-            .lock()
-            .expect("linux cleanup dispatcher mutex poisoned")
-            .take();
-        drop(sender);
+        let previous = self.lock_sender().take();
+        drop(previous);
     }
 }
 
@@ -696,6 +691,36 @@ mod retry_tests {
             linux_cleanup_worker_spawn_count(),
             before + 1,
             "the first successful retry should start exactly one worker"
+        );
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[test]
+    fn linux_cleanup_dispatcher_mutex_poison_recovers_without_panicking() {
+        let _guard = linux_cleanup_test_lock()
+            .lock()
+            .expect("linux cleanup test mutex poisoned");
+        linux_cleanup_dispatcher().reset_for_test();
+        force_linux_cleanup_worker_spawn_failures(0);
+
+        let dispatcher = linux_cleanup_dispatcher();
+        let before = linux_cleanup_worker_spawn_count();
+        let _ = std::panic::catch_unwind(|| {
+            let _sender = dispatcher
+                .sender
+                .lock()
+                .expect("lock sender for poison test");
+            panic!("poison linux cleanup dispatcher mutex");
+        });
+
+        assert!(
+            dispatcher.ensure_worker_for_test(),
+            "poisoned best-effort cleanup state should recover instead of panicking"
+        );
+        assert_eq!(
+            linux_cleanup_worker_spawn_count(),
+            before + 1,
+            "the first post-poison recovery should start exactly one worker"
         );
     }
 }

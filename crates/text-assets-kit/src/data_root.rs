@@ -143,11 +143,9 @@ where
             let workspace_root = current_dir()?.join(options.dir_name);
             match workspace_root_state(&workspace_root)? {
                 WorkspaceRootState::Missing | WorkspaceRootState::Directory => {
-                    return normalize_root(&workspace_root);
+                    normalize_root(&workspace_root)
                 }
-                WorkspaceRootState::Invalid => {
-                    return Err(invalid_workspace_root(&workspace_root));
-                }
+                WorkspaceRootState::Invalid => Err(invalid_workspace_root(&workspace_root)),
             }
         }
     }

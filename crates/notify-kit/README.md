@@ -150,9 +150,10 @@ notify-kit = { path = "crates/notify-kit", default-features = false, features = 
 
 ## 用法
 
-`Hub::notify` 是 fire-and-forget：在 **Tokio runtime** 中 spawn 后台任务并立即返回。
+`Hub::notify` 是 fire-and-forget：在 **Tokio runtime** 中把事件入队后立即返回。
 
-- 如果当前没有 Tokio runtime：`notify` 会丢弃通知并 `tracing::warn!`；可用 `Hub::try_notify` 检测。
+- 如果当前没有 Tokio runtime 或 Hub 已过载：`notify` 会返回 `TryNotifyError`，而不是静默丢弃。
+- 如果你明确接受“尽力而为 + warning 日志”的老语义，请显式使用 `Hub::notify_lossy(...)`。
 - 如果需要可观测结果：用 `Hub::send(event).await`（会等待所有 sinks 完成/超时）。
 - 注意：`HubConfig.per_sink_timeout` 是 Hub 对每个 sink 的兜底超时；如果你把某个 sink 的 `timeout` 调大，也需要把 `per_sink_timeout` 调到 >= 该值，否则 Hub 可能会先超时。
 - 运行时限制（例如 `max_inflight_events`、`max_sink_sends_in_parallel`）放在 `HubLimits`，避免把执行期背压策略混进 `HubConfig` 的语义配置里。
@@ -171,7 +172,8 @@ let hub = Hub::new(
     vec![Arc::new(SoundSink::new(SoundConfig { command_argv: None }))],
 );
 
-hub.notify(Event::new("turn_completed", Severity::Success, "done"));
+hub.notify(Event::new("turn_completed", Severity::Success, "done"))
+    .expect("enqueue notify");
 ```
 
 ## 安全提示
@@ -191,6 +193,7 @@ hub.notify(Event::new("turn_completed", Severity::Success, "done"));
 
 它们只是 convenience helper，适合快速接线或共享一套简单约定；不是强制协议，也不是核心架构边界。
 这套 helper 自带的中性约定是 `NOTIFY_*`，例如 `NOTIFY_SOUND`、`NOTIFY_WEBHOOK_URL`、`NOTIFY_TIMEOUT_MS`、`NOTIFY_EVENTS`。
+布尔型 env（如 `NOTIFY_SOUND`）采用 fail-closed 解析：非法值会直接返回错误，而不是偷偷回退默认值。
 公开入口就是 `notify_kit::env::...`；不要在 crate root 上再叠一层快捷别名。
 
 ## 标准 helper 示例

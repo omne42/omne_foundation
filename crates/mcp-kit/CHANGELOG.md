@@ -20,7 +20,7 @@
 - `mcp-kit`：`ErrorKind` 现在会按 `mcp_jsonrpc::Error` 的真实变体分类，底层 transport I/O 故障不再被误标成 `Protocol`；`mcpctl` 的 cwd-unavailable helper 测试也会在退出前恢复有效工作目录，避免留下已删除 cwd 的测试噪音。
 - `mcp-kit`：README、crate docs 和 FAQ 现在明确区分“当前实例内按需重建已关闭连接”和“后台自动重连/daemon 化”，避免文档与实现语义漂移。
 - `mcp-kit`（BREAKING）：`Config::with_path`、`Manager::with_protocol_version` 和 `Manager::with_capabilities` 现在会在构造期做 fail-fast 校验并返回 `Result<Self>`；相对 config path、空 `protocol_version` 和非 object `capabilities` 不再拖到后续 `current_dir()` 解析或 `initialize` 握手时才炸。
-- `mcp-kit`：`SharedManager` 对已复用连接的 `request` / `notify` / `request_connected` / `notify_connected` 现在会在借到 `ClientHandle` 后立即释放 same-server lifecycle gate，不再把 gate 错误持有到整段 JSON-RPC I/O 结束；只有 cold-start config 驱动首次请求仍会把 gate 保留到首个操作完成。
+- `mcp-kit`：`SharedManager` 的 `request` / `notify` / `request_connected` / `notify_connected` 现在都会在借到 `ClientHandle` 后立即释放 same-server lifecycle gate，包括 cold-start config 驱动首次请求；同 server 的普通 RPC 不再被错误串行化到首个 I/O 完成。
 - `mcp-kit`：`SharedManager` 的 config 驱动 `request` / `notify` 现在对已复用连接先走 per-server 读门禁，只把 cold-start / disconnect / reconnect 留在写门禁里；同 server 普通 RPC 在借到 handle 后可并发，而生命周期变更仍会等在读侧收尾后再继续。
 - `mcp-kit`：`shared_manager_request_allows_concurrent_same_server_reuse_after_connect` 回归测试不再假设并发请求的到达顺序固定，只继续验证“两次请求都会在首个响应前抵达 server”，避免把 Tokio 调度先后误判成连接复用回归。
 - `mcp-kit`：`SharedManager` 新增 `spawn_inheriting_handler_scope(...)`，把 handler 子任务回调 `SharedManager` 时的 reentrant fail-fast 语义从“依赖 Tokio task-local 是否碰巧继承”收口成显式入口；同时文档与测试明确了 bare `tokio::spawn(...)` 仍按外部调用处理，不会自动继承 handler scope。
@@ -33,7 +33,7 @@
 - `mcp-kit`：`ServerNameError` 的 structured error code 映射现在在内部字面量漂移时会回退到稳定的 internal code，而不是因为 `ErrorCode::try_new(...)` 直接 panic。
 - `mcp-kit`：crate 级 `README.md` 现在收紧为地图式入口，只保留领域、边界、结构地图和文档下钻路径；配置 schema、CLI 用法与示例统一回到 `docs/`。
 - `mcp-kit`：`SharedManager` 的 config 驱动连接安装现在复用 `Manager` 内部共享 helper 完成 install/commit/cleanup/cwd 记录，避免第二套连接安装状态机继续漂移。
-- `mcp-kit`：`SharedManager` 的 config 驱动 cold-start `request` / `notify` 现在会把同 server 的 lifecycle gate 一直持有到连接完成且首次 I/O 收尾，避免不同 clone 在 connect 与首次发包之间穿插 `disconnect`/重连，把请求打到错误连接、误报 `not connected`，或在旧连接刚建好就被抢先切断。
+- `mcp-kit`：`SharedManager` 的 config 驱动 cold-start `request` / `notify` 现在只把 same-server lifecycle gate 持有到连接安装并借出 client 为止；随后首个 JSON-RPC I/O 与 `disconnect`/重连可以并发收尾，语义与已复用连接保持一致。
 - `mcp-kit`：`SharedManager` 在 reentrant handler 场景下处理 request/notify 的 JSON-RPC/IO cleanup 时，不再因为 cleanup 抢不到共享锁而把原始传输错误覆盖成 `REENTRANT_HANDLER_ERROR`；现在会保留原始错误，并在必要时把断连 cleanup 延后到后台任务完成。
 - `mcp-kit`：配置加载与 connection cwd 记录路径上不再依赖隐式 `expect()` 契约；候选配置层缺少 path、或内部 server name 失配时都会返回结构化错误，而不是 panic。
 - `mcp-kit`：`stdout_log.max_parts` 现在在 `mcp.json`、手动 Rust `StdoutLogConfig` 构造和底层 `mcp-jsonrpc` 之间统一语义；`0`/`Some(0)` 都表示 unlimited，避免公开配置契约与 `validate()` 路径继续分裂。

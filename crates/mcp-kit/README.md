@@ -43,6 +43,7 @@
   - 单个已初始化会话
 - [`src/shared_manager.rs`](./src/shared_manager.rs)
   - 面向共享调用方的 single-flight 生命周期包装，通过 `mcp_kit::shared::SharedManager` 暴露
+  - connect/disconnect 仍共享 same-server gate，但 request/notify 在借到 client 后就会释放 gate
   - 同时提供 handler 子任务的显式 scope 继承入口
 - [`src/error.rs`](./src/error.rs)
   - crate 级公开错误边界，暴露 `ErrorKind` / `Result`

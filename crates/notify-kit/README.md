@@ -161,6 +161,7 @@ notify-kit = { path = "crates/notify-kit", default-features = false, features = 
 - 如果当前没有 Tokio runtime 或 Hub 已过载：`notify` 会返回 `TryNotifyError`，而不是静默丢弃。
 - 如果你明确接受“尽力而为 + warning 日志”的老语义，请显式使用 `Hub::notify_lossy(...)`。
 - 如果需要可观测结果：用 `Hub::send(event).await`（会等待所有 sinks 完成/超时）。
+- 如果某个 sink 在 `name()` 或 `send()` 里 panic，`Hub` 会把这次发送记为失败，并将该 sink 标记为 disabled；后续事件不会继续复用一个已经可能损坏内部状态的 sink 实例。
 - 注意：`HubConfig.per_sink_timeout` 是 Hub 对每个 sink 的兜底超时；如果你把某个 sink 的 `timeout` 调大，也需要把 `per_sink_timeout` 调到 >= 该值，否则 Hub 可能会先超时。
 - 运行时限制（例如 `max_inflight_events`、`max_sink_sends_in_parallel`）放在 `HubLimits`，避免把执行期背压策略混进 `HubConfig` 的语义配置里。
 

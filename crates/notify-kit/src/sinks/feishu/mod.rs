@@ -10,7 +10,7 @@ use self::media::{
     normalize_local_image_base_dir, normalize_local_image_roots, normalize_secret,
 };
 use crate::Event;
-use crate::SecretString;
+use crate::NotifySecret;
 use crate::sinks::crypto::hmac_sha256_base64;
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
@@ -18,6 +18,7 @@ use http_kit::{
     read_json_body_after_http_success, redact_url, redact_url_str, send_reqwest,
     validate_url_path_prefix,
 };
+use secret_kit::SecretString;
 
 const FEISHU_MAX_CHARS: usize = 4000;
 const FEISHU_DEFAULT_IMAGE_UPLOAD_MAX_BYTES: usize = 10 * 1024 * 1024;
@@ -31,7 +32,7 @@ pub struct FeishuWebhookMediaConfig {
     pub local_image_base_dir: Option<PathBuf>,
     pub image_upload_max_bytes: usize,
     pub app_id: Option<String>,
-    pub app_secret: Option<SecretString>,
+    pub app_secret: Option<NotifySecret>,
 }
 
 impl Default for FeishuWebhookMediaConfig {
@@ -98,7 +99,7 @@ impl FeishuWebhookMediaConfig {
     pub fn with_app_credentials(
         mut self,
         app_id: impl Into<String>,
-        app_secret: impl Into<SecretString>,
+        app_secret: impl Into<NotifySecret>,
     ) -> Self {
         self.app_id = Some(app_id.into());
         self.app_secret = Some(app_secret.into());
@@ -238,7 +239,7 @@ impl FeishuWebhookConfig {
     pub fn with_app_credentials(
         mut self,
         app_id: impl Into<String>,
-        app_secret: impl Into<SecretString>,
+        app_secret: impl Into<NotifySecret>,
     ) -> Self {
         let media = self.media_config_mut();
         media.app_id = Some(app_id.into());
@@ -340,7 +341,7 @@ impl FeishuWebhookSink {
 
     pub fn new_with_secret(
         config: FeishuWebhookConfig,
-        secret: impl Into<SecretString>,
+        secret: impl Into<NotifySecret>,
     ) -> crate::Result<Self> {
         let secret = normalize_secret(secret)?;
         Self::new_internal(config, Some(secret), false)
@@ -348,7 +349,7 @@ impl FeishuWebhookSink {
 
     pub fn new_with_secret_strict(
         config: FeishuWebhookConfig,
-        secret: impl Into<SecretString>,
+        secret: impl Into<NotifySecret>,
     ) -> crate::Result<Self> {
         let secret = normalize_secret(secret)?;
         Self::new_internal(config, Some(secret), true)
@@ -356,7 +357,7 @@ impl FeishuWebhookSink {
 
     pub async fn new_with_secret_strict_async(
         config: FeishuWebhookConfig,
-        secret: impl Into<SecretString>,
+        secret: impl Into<NotifySecret>,
     ) -> crate::Result<Self> {
         let secret = normalize_secret(secret)?;
         Self::new_internal_async(config, Some(secret), true).await
@@ -743,7 +744,7 @@ mod tests {
             round_trip
                 .app_secret
                 .as_ref()
-                .map(SecretString::expose_secret),
+                .map(crate::NotifySecret::expose_secret),
             Some("app_secret")
         );
     }

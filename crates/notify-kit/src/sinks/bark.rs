@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::Event;
-use crate::SecretString;
+use crate::NotifySecret;
 use crate::sinks::text::{TextLimits, format_event_body_and_tags_limited, truncate_chars};
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
@@ -10,13 +10,14 @@ use http_kit::{
     read_text_body_limited, redact_url, response_body_read_error, send_reqwest,
     validate_url_path_prefix,
 };
+use secret_kit::SecretString;
 
 const BARK_ALLOWED_HOSTS: [&str; 1] = ["api.day.app"];
 
 #[non_exhaustive]
 #[derive(Clone)]
 pub struct BarkConfig {
-    pub device_key: SecretString,
+    pub device_key: NotifySecret,
     pub group: Option<String>,
     pub timeout: Duration,
     pub max_chars: usize,
@@ -36,7 +37,7 @@ impl std::fmt::Debug for BarkConfig {
 }
 
 impl BarkConfig {
-    pub fn new(device_key: impl Into<SecretString>) -> Self {
+    pub fn new(device_key: impl Into<NotifySecret>) -> Self {
         Self {
             device_key: device_key.into(),
             group: None,
@@ -143,7 +144,7 @@ fn normalize_optional_trimmed(value: Option<String>) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn normalize_secret(secret: SecretString, field: &str) -> crate::Result<SecretString> {
+fn normalize_secret(secret: NotifySecret, field: &str) -> crate::Result<SecretString> {
     let secret = secret.expose_secret().trim();
     if secret.is_empty() {
         return Err(anyhow::anyhow!("bark {field} must not be empty").into());

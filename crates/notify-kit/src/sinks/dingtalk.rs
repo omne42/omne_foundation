@@ -1,12 +1,13 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::Event;
-use crate::SecretString;
+use crate::NotifySecret;
 use crate::sinks::crypto::hmac_sha256_base64;
 use crate::sinks::text::{TextLimits, format_event_text_limited};
 use crate::sinks::webhook_common::JsonWebhookEndpoint;
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{read_json_body_after_http_success, redact_url, redact_url_str};
+use secret_kit::SecretString;
 
 const DINGTALK_ALLOWED_HOSTS: [&str; 1] = ["oapi.dingtalk.com"];
 
@@ -14,7 +15,7 @@ const DINGTALK_ALLOWED_HOSTS: [&str; 1] = ["oapi.dingtalk.com"];
 #[derive(Clone)]
 pub struct DingTalkWebhookConfig {
     pub webhook_url: String,
-    pub secret: Option<SecretString>,
+    pub secret: Option<NotifySecret>,
     pub timeout: Duration,
     pub max_chars: usize,
     pub enforce_public_ip: bool,
@@ -44,7 +45,7 @@ impl DingTalkWebhookConfig {
     }
 
     #[must_use]
-    pub fn with_secret(mut self, secret: impl Into<SecretString>) -> Self {
+    pub fn with_secret(mut self, secret: impl Into<NotifySecret>) -> Self {
         self.secret = Some(secret.into());
         self
     }
@@ -148,7 +149,7 @@ impl DingTalkWebhookSink {
     }
 }
 
-fn normalize_optional_trimmed(value: Option<SecretString>) -> crate::Result<Option<SecretString>> {
+fn normalize_optional_trimmed(value: Option<NotifySecret>) -> crate::Result<Option<SecretString>> {
     match value {
         Some(value) => {
             let value = value.expose_secret().trim();

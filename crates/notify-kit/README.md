@@ -133,7 +133,7 @@ notify-kit = { path = "crates/notify-kit", default-features = false, features = 
 - `sound-command` 现在依赖 `sound`，因为它只扩展 `SoundSink` 的外部命令能力。
 - `selective-sinks` 仍保留为兼容 alias，但 `default-features = false` 已足以收紧编译与依赖图；不用再额外打开它。
 - 当 `all-sinks` 关闭且 `notify_kit::env::build_hub_from_standard_env(...)` 遇到未启用的 sink 配置时，会返回显式错误，而不是静默忽略配置。
-- `secret_kit::SecretString` 只在启用了需要 secret-backed 配置的 sinks（或默认 `all-sinks`）时从 crate root re-export；纯 `sound/slack/discord/wecom` 之类的子集不再被无条件拖上 `secret-kit`。
+- secret-backed 内置 sink 现在统一通过 `notify_kit::NotifySecret` 暴露公开配置边界；`notify-kit` 不再把 `secret-kit::SecretString` 的持有模型直接作为自己的 public API。
 
 ## 文档
 

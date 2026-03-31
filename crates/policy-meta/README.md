@@ -15,7 +15,7 @@
 
 - `PolicyMetaV1` 与 `PolicyProfileV1`
 - `risk_profile`、`write_scope`、`execution_isolation`、`decision` 的 canonical 语义
-- checked-in JSON Schema
+- checked-in JSON Schema（当前导出目标是 JSON Schema 2019-09）
 - checked-in TypeScript bindings
 - baseline profiles
 - artifact export / drift check 二进制
@@ -50,9 +50,10 @@
 
 - `src/lib.rs`
   - canonical enum / struct 定义
-  - JSON Schema 生成
+  - JSON Schema 2019-09 生成
   - TypeScript declarations 导出
   - checked-in artifact drift 检查与 stale artifact 清理
+  - 结构化 artifact 错误边界
 - `src/bin/export-artifacts.rs`
   - 同时导出并校验 `schema/`、`bindings/`、`profiles/`
 - `src/bin/export-schemas.rs`
@@ -87,6 +88,13 @@
 
 checked-in schema 和 TypeScript bindings 由 Rust 类型定义导出，并通过 `export-artifacts` 做同步校验。
 `profiles/` 也纳入同一个 drift check；目录里如果残留额外的旧 artifact，`--check` 会直接失败，默认导出会把这些陈旧文件清掉。
+
+artifact 导出 API 当前公开返回 `ArtifactError`，调用方可以结构化区分：
+
+- drift
+- unexpected stale artifacts
+- I/O 失败
+- JSON 解析失败
 
 `schema/` 和 `bindings/` 被视为精确的 generated artifact 目录：
 

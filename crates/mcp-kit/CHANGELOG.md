@@ -11,6 +11,7 @@
 
 ### Changed
 - `mcp-kit`（BREAKING）：`Config::with_path`、`Manager::with_protocol_version` 和 `Manager::with_capabilities` 现在会在构造期做 fail-fast 校验并返回 `Result<Self>`；相对 config path、空 `protocol_version` 和非 object `capabilities` 不再拖到后续 `current_dir()` 解析或 `initialize` 握手时才炸。
+- `mcp-kit`：`SharedManager` 对已复用连接的 `request` / `notify` / `request_connected` / `notify_connected` 现在会在借到 `ClientHandle` 后立即释放 same-server lifecycle gate，不再把 gate 错误持有到整段 JSON-RPC I/O 结束；只有 cold-start config 驱动首次请求仍会把 gate 保留到首个操作完成。
 - `mcp-kit`：`SharedManager` 的 config 驱动 `request` / `notify` 现在对已复用连接先走 per-server 读门禁，只把 cold-start / disconnect / reconnect 留在写门禁里；同 server 普通 RPC 在借到 handle 后可并发，而生命周期变更仍会等在读侧收尾后再继续。
 - `mcp-kit`：`shared_manager_request_allows_concurrent_same_server_reuse_after_connect` 回归测试不再假设并发请求的到达顺序固定，只继续验证“两次请求都会在首个响应前抵达 server”，避免把 Tokio 调度先后误判成连接复用回归。
 - `mcp-kit`：`SharedManager` 新增 `spawn_inheriting_handler_scope(...)`，把 handler 子任务回调 `SharedManager` 时的 reentrant fail-fast 语义从“依赖 Tokio task-local 是否碰巧继承”收口成显式入口；同时文档与测试明确了 bare `tokio::spawn(...)` 仍按外部调用处理，不会自动继承 handler scope。

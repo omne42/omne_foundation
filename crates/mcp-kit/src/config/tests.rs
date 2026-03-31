@@ -1,4 +1,5 @@
 use super::*;
+use crate::ServerName;
 use std::path::PathBuf;
 
 #[tokio::test]
@@ -318,6 +319,23 @@ fn config_with_path_accepts_absolute_path() {
         .with_path(path.clone())
         .expect("absolute config path should succeed");
     assert_eq!(cfg.path(), Some(path.as_path()));
+}
+
+#[test]
+fn config_server_lookup_normalizes_trimmed_server_name() {
+    let mut servers = std::collections::BTreeMap::new();
+    servers.insert(
+        ServerName::parse("remote").expect("server name"),
+        ServerConfig::stdio(vec!["mcp-remote".to_string()]).expect("server config"),
+    );
+    let cfg = Config::new(ClientConfig::default(), servers);
+
+    assert!(cfg.server("remote").is_some());
+    assert!(cfg.server(" remote ").is_some());
+    assert!(
+        cfg.server_named(&ServerName::parse(" remote ").expect("normalized server name"))
+            .is_some()
+    );
 }
 
 #[test]

@@ -847,6 +847,37 @@ async fn load_denies_streamable_http_with_reserved_http_header_name() {
 }
 
 #[tokio::test]
+async fn load_denies_streamable_http_with_transport_owned_http_headers() {
+    for header in ["Accept", "Content-Type", "mcp-session-id"] {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join("mcp.json"),
+            format!(
+                r#"{{
+  "version": 1,
+  "servers": {{
+    "litellm": {{
+      "transport": "streamable_http",
+      "url": "https://example.com/mcp",
+      "http_headers": {{ "{header}": "override" }}
+    }}
+  }}
+}}"#
+            ),
+        )
+        .await
+        .unwrap();
+
+        let err = Config::load(dir.path(), None).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("http_headers key is reserved by transport"),
+            "header={header} err={err:#}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn load_denies_streamable_http_with_reserved_env_http_header_name() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(
@@ -898,6 +929,37 @@ async fn load_denies_streamable_http_with_reserved_authorization_env_header_name
             .contains("env_http_headers key is reserved by transport"),
         "err={err:#}"
     );
+}
+
+#[tokio::test]
+async fn load_denies_streamable_http_with_transport_owned_env_http_headers() {
+    for header in ["Accept", "Content-Type", "mcp-session-id"] {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join("mcp.json"),
+            format!(
+                r#"{{
+  "version": 1,
+  "servers": {{
+    "litellm": {{
+      "transport": "streamable_http",
+      "url": "https://example.com/mcp",
+      "env_http_headers": {{ "{header}": "MCP_TOKEN" }}
+    }}
+  }}
+}}"#
+            ),
+        )
+        .await
+        .unwrap();
+
+        let err = Config::load(dir.path(), None).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("env_http_headers key is reserved by transport"),
+            "header={header} err={err:#}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -6,7 +6,9 @@ use std::time::Duration;
 use anyhow::Context;
 use tokio::process::{Child, Command};
 
-use crate::protocol::{AUTHORIZATION_HEADER, MCP_PROTOCOL_VERSION_HEADER};
+use crate::protocol::{
+    AUTHORIZATION_HEADER, MCP_PROTOCOL_VERSION_HEADER, is_reserved_streamable_http_transport_header,
+};
 use crate::{ServerConfig, Transport, TrustMode, UntrustedStreamableHttpPolicy};
 
 use super::placeholders::{
@@ -95,7 +97,12 @@ async fn connect_stdio_transport(
     let stdout_log = server_cfg.stdout_log().map(|log| {
         let resolved_log_path = absolutize_with_base(&log.path, &cwd);
         if !ctx.allow_stdout_log_outside_root
-            && !stdout_log_path_within_root(&resolved_log_path, &cwd)
+            && !stdout_log_path_within_root(&resolved_log_path, &cwd).with_context(|| {
+                format!(
+                    "check stdout_log.path root boundary for server {server_name}: {}",
+                    log.path.display()
+                )
+            })?
         {
             anyhow::bail!(
                 "mcp server {server_name}: stdout_log.path must be within root (set Manager::with_allow_stdout_log_outside_root(true) to override): {}",
@@ -341,11 +348,11 @@ fn build_streamable_http_headers(
 }
 
 fn is_reserved_streamable_http_header(header: &str) -> bool {
-    header.eq_ignore_ascii_case(MCP_PROTOCOL_VERSION_HEADER)
+    is_reserved_streamable_http_transport_header(header)
 }
 
 fn is_reserved_streamable_http_env_header(header: &str) -> bool {
-    is_reserved_streamable_http_header(header) || header.eq_ignore_ascii_case(AUTHORIZATION_HEADER)
+    is_reserved_streamable_http_header(header)
 }
 
 pub(super) fn absolutize_with_base(path: &Path, base: &Path) -> PathBuf {
@@ -371,38 +378,64 @@ fn normalize_path_for_prefix_check(path: &Path) -> PathBuf {
     normalized
 }
 
-fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
+fn canonicalize_existing_prefix(path: &Path) -> anyhow::Result<Option<PathBuf>> {
     let normalized = normalize_path_for_prefix_check(path);
     let mut existing = normalized.as_path();
     let mut missing_components = Vec::new();
 
-    while std::fs::symlink_metadata(existing).is_err() {
-        let component = existing.file_name()?;
-        missing_components.push(component.to_os_string());
-        existing = existing.parent()?;
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let Some(component) = existing.file_name() else {
+                    return Ok(None);
+                };
+                missing_components.push(component.to_os_string());
+                let Some(parent) = existing.parent() else {
+                    return Ok(None);
+                };
+                existing = parent;
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "inspect existing path prefix for root-boundary check: {}",
+                        normalized.display()
+                    )
+                });
+            }
+        }
     }
 
-    let mut resolved = std::fs::canonicalize(existing).ok()?;
+    let mut resolved = std::fs::canonicalize(existing).with_context(|| {
+        format!(
+            "canonicalize existing path prefix for root-boundary check: {}",
+            existing.display()
+        )
+    })?;
     for component in missing_components.iter().rev() {
         resolved.push(component);
     }
-    Some(resolved)
+    Ok(Some(resolved))
 }
 
-pub(super) fn stdout_log_path_within_root(stdout_log_path: &Path, root: &Path) -> bool {
+pub(super) fn stdout_log_path_within_root(
+    stdout_log_path: &Path,
+    root: &Path,
+) -> anyhow::Result<bool> {
     if !root.is_absolute() {
-        return false;
+        return Ok(false);
     }
 
     let resolved_stdout_log_path = absolutize_with_base(stdout_log_path, root);
-    let Some(resolved_root) = canonicalize_existing_prefix(root) else {
-        return false;
+    let Some(resolved_root) = canonicalize_existing_prefix(root)? else {
+        return Ok(false);
     };
-    let Some(resolved_stdout_log_path) = canonicalize_existing_prefix(&resolved_stdout_log_path)
+    let Some(resolved_stdout_log_path) = canonicalize_existing_prefix(&resolved_stdout_log_path)?
     else {
-        return false;
+        return Ok(false);
     };
-    resolved_stdout_log_path.starts_with(&resolved_root)
+    Ok(resolved_stdout_log_path.starts_with(&resolved_root))
 }
 
 #[cfg(test)]
@@ -460,5 +493,45 @@ mod tests {
             headers.get(MCP_PROTOCOL_VERSION_HEADER).map(String::as_str),
             Some(MCP_PROTOCOL_VERSION)
         );
+    }
+
+    #[test]
+    fn http_headers_cannot_override_transport_owned_headers() {
+        let ctx = trusted_connect_context();
+        for header in ["Accept", "Content-Type", "mcp-session-id"] {
+            let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+            server_cfg
+                .http_headers_mut()
+                .unwrap()
+                .insert(header.to_string(), "override".to_string());
+
+            let err = build_streamable_http_headers(&ctx, "srv", &server_cfg, Path::new("."))
+                .expect_err("transport-owned static header should be rejected");
+            assert!(
+                err.to_string()
+                    .contains("http header is reserved by transport"),
+                "header={header} err={err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn env_http_headers_cannot_override_transport_owned_headers() {
+        let ctx = trusted_connect_context();
+        for header in ["Accept", "Content-Type", "mcp-session-id"] {
+            let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+            server_cfg
+                .env_http_headers_mut()
+                .unwrap()
+                .insert(header.to_string(), "MCP_TOKEN".to_string());
+
+            let err = build_streamable_http_headers(&ctx, "srv", &server_cfg, Path::new("."))
+                .expect_err("transport-owned env header should be rejected");
+            assert!(
+                err.to_string()
+                    .contains("http header env var targets a reserved transport header"),
+                "header={header} err={err:#}"
+            );
+        }
     }
 }

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::ServerName;
-use crate::protocol::{AUTHORIZATION_HEADER, MCP_PROTOCOL_VERSION_HEADER};
+use crate::protocol::is_reserved_streamable_http_transport_header;
 
 macro_rules! public_bail {
     ($($arg:tt)*) => {
@@ -149,10 +149,7 @@ fn empty_kv_map() -> &'static BTreeMap<String, String> {
 }
 
 fn is_reserved_streamable_http_header(header: &HeaderName) -> bool {
-    header
-        .as_str()
-        .eq_ignore_ascii_case(MCP_PROTOCOL_VERSION_HEADER)
-        || header.as_str().eq_ignore_ascii_case(AUTHORIZATION_HEADER)
+    is_reserved_streamable_http_transport_header(header.as_str())
 }
 
 fn is_reserved_streamable_http_env_header(header: &HeaderName) -> bool {

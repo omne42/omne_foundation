@@ -49,15 +49,25 @@ fn load_json_value_from_file(path: &Path) -> anyhow::Result<Value> {
         .into_value())
 }
 
-fn canonicalize_existing_ancestor(path: &Path) -> Option<PathBuf> {
+fn canonicalize_existing_ancestor(path: &Path) -> anyhow::Result<Option<PathBuf>> {
     let mut cursor = Some(path);
     while let Some(candidate) = cursor {
-        if let Ok(canonical) = std::fs::canonicalize(candidate) {
-            return Some(canonical);
+        match std::fs::canonicalize(candidate) {
+            Ok(canonical) => return Ok(Some(canonical)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                cursor = candidate.parent();
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "canonicalize existing ancestor for MCP config boundary check: {}",
+                        path.display()
+                    )
+                });
+            }
         }
-        cursor = candidate.parent();
     }
-    None
+    Ok(None)
 }
 
 fn resolve_override_path(
@@ -75,9 +85,19 @@ fn resolve_override_path(
         return Ok(path);
     }
 
-    let canonical_root =
-        std::fs::canonicalize(thread_root).unwrap_or_else(|_| thread_root.to_path_buf());
-    if let Some(canonical_override_or_parent) = canonicalize_existing_ancestor(&path)
+    let canonical_root = match std::fs::canonicalize(thread_root) {
+        Ok(canonical_root) => canonical_root,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => thread_root.to_path_buf(),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "canonicalize MCP config root for override boundary check: {}",
+                    thread_root.display()
+                )
+            });
+        }
+    };
+    if let Some(canonical_override_or_parent) = canonicalize_existing_ancestor(&path)?
         && !canonical_override_or_parent.starts_with(&canonical_root)
     {
         anyhow::bail!(
@@ -517,5 +537,49 @@ impl Config {
                 err,
             ))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{ConfigLoadPolicy, canonicalize_existing_ancestor, resolve_override_path};
+
+    #[cfg(not(windows))]
+    #[test]
+    fn canonicalize_existing_ancestor_reports_non_not_found_errors() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("blocked");
+        std::fs::write(&path, b"not a directory").unwrap();
+
+        let err = canonicalize_existing_ancestor(&path.join("mcp.json"))
+            .expect_err("non-directory ancestor should not be treated as missing");
+        assert!(err.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotADirectory)
+        }));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn resolve_override_path_reports_non_not_found_boundary_errors() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("blocked"), b"not a directory").unwrap();
+
+        let err = resolve_override_path(
+            &root,
+            PathBuf::from("blocked/mcp.json"),
+            ConfigLoadPolicy::default(),
+        )
+        .expect_err("non-directory override prefix should not be treated as missing");
+        assert!(err.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotADirectory)
+        }));
     }
 }

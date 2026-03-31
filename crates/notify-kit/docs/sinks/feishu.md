@@ -141,16 +141,19 @@ let sink = FeishuWebhookSink::new(cfg)?;
 
 ## Markdown 图片上传（可选）
 
-如果你希望 Markdown 图片真正显示为“图片”而不是链接，需要提供应用凭据：
+如果你希望 Markdown 图片真正显示为“图片”而不是链接，建议把这组更宽的媒体能力显式放进 `FeishuWebhookMediaConfig`：
 
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
-use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+use notify_kit::{FeishuWebhookConfig, FeishuWebhookMediaConfig, FeishuWebhookSink};
 
 let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx")
-    .with_app_credentials("cli_xxx", "app_secret_xxx")
-    .with_image_upload_max_bytes(10 * 1024 * 1024);
+    .with_media_config(
+        FeishuWebhookMediaConfig::new()
+            .with_app_credentials("cli_xxx", "app_secret_xxx")
+            .with_image_upload_max_bytes(10 * 1024 * 1024),
+    );
 let sink = FeishuWebhookSink::new(cfg)?;
 # Ok(())
 # }
@@ -166,12 +169,15 @@ let sink = FeishuWebhookSink::new(cfg)?;
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
-use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+use notify_kit::{FeishuWebhookConfig, FeishuWebhookMediaConfig, FeishuWebhookSink};
 
 let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx")
-    .with_app_credentials("cli_xxx", "app_secret_xxx")
-    .with_local_image_files(true)
-    .with_local_image_root("/abs/path/to/exported-images");
+    .with_media_config(
+        FeishuWebhookMediaConfig::new()
+            .with_app_credentials("cli_xxx", "app_secret_xxx")
+            .with_local_image_files(true)
+            .with_local_image_root("/abs/path/to/exported-images"),
+    );
 let sink = FeishuWebhookSink::new(cfg)?;
 # Ok(())
 # }

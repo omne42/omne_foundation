@@ -54,7 +54,7 @@ pub use dingtalk::{DingTalkWebhookConfig, DingTalkWebhookSink};
 #[cfg(any(feature = "all-sinks", feature = "discord"))]
 pub use discord::{DiscordWebhookConfig, DiscordWebhookSink};
 #[cfg(any(feature = "all-sinks", feature = "feishu"))]
-pub use feishu::{FeishuWebhookConfig, FeishuWebhookSink};
+pub use feishu::{FeishuWebhookConfig, FeishuWebhookMediaConfig, FeishuWebhookSink};
 #[cfg(any(feature = "all-sinks", feature = "generic-webhook"))]
 pub use generic_webhook::{GenericWebhookConfig, GenericWebhookSink};
 #[cfg(any(feature = "all-sinks", feature = "github"))]

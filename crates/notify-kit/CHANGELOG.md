@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `Hub::notify(...)` 和 Feishu 图片失败 warning 现在会对日志里的第三方 HTTP 响应摘要做脱敏；`Hub` 的 warning 不再把 `response=...` 直接打进 tracing，Feishu 图片失败日志也不再原样泄漏签名 URL 或本地绝对路径。
 - `GitHubCommentSink::new(...)` 现在会在构造阶段校验 token-bearing GitHub API 目标；默认仅信任 `https://api.github.com`，只有显式 `with_allow_custom_api_base_with_token(true)` 后，才会把 bearer token 发送到非 `api.github.com` 的 HTTPS API base。
 - `notify-kit` 的公开 sink config/builder 不再直接暴露 `secret-kit::SecretString`；新增 crate 本地的 `NotifySecret` 作为公开边界，内部实现仍可继续复用 `secret-kit` 存放长期凭证，避免通知域 API 把下层 secret 持有模型固定进契约里。
 - `notify-kit::Error` 在多 sink 聚合失败时恢复标准 `Error::source()` 链：聚合错误现在把首个 `SinkFailure` 作为 source，而 `SinkFailure` 继续指向对应的底层错误；需要完整多错误信息时仍使用 `sink_failures()`。

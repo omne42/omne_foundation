@@ -9,14 +9,14 @@ use std::time::Duration;
 
 use anyhow::Context;
 
-#[cfg(any(not(feature = "selective-sinks"), feature = "feishu"))]
+#[cfg(any(feature = "all-sinks", feature = "feishu"))]
 use crate::{FeishuWebhookConfig, FeishuWebhookSink};
-#[cfg(any(not(feature = "selective-sinks"), feature = "generic-webhook"))]
+#[cfg(any(feature = "all-sinks", feature = "generic-webhook"))]
 use crate::{GenericWebhookConfig, GenericWebhookSink};
 use crate::{Hub, HubConfig, HubLimits, Sink};
-#[cfg(any(not(feature = "selective-sinks"), feature = "slack"))]
+#[cfg(any(feature = "all-sinks", feature = "slack"))]
 use crate::{SlackWebhookConfig, SlackWebhookSink};
-#[cfg(any(not(feature = "selective-sinks"), feature = "sound"))]
+#[cfg(any(feature = "all-sinks", feature = "sound"))]
 use crate::{SoundConfig, SoundSink};
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -60,19 +60,16 @@ where
     Ok(Duration::from_millis(timeout.max(1)))
 }
 
-#[cfg(all(
-    feature = "selective-sinks",
-    not(all(
-        feature = "sound",
-        feature = "generic-webhook",
-        feature = "feishu",
-        feature = "slack"
-    ))
-))]
+#[cfg(not(all(
+    feature = "sound",
+    feature = "generic-webhook",
+    feature = "feishu",
+    feature = "slack"
+)))]
 #[allow(dead_code)]
 fn unavailable_sink_feature_error(env_var: &str, feature: &str) -> anyhow::Error {
     anyhow::anyhow!(
-        "{env_var} requires notify-kit feature `{feature}` when `selective-sinks` is enabled"
+        "{env_var} requires notify-kit feature `{feature}` when `all-sinks` is disabled"
     )
 }
 
@@ -86,7 +83,7 @@ where
 {
     const NOTIFY_SOUND_ENV: &str = "NOTIFY_SOUND";
     const NOTIFY_WEBHOOK_URL_ENV: &str = "NOTIFY_WEBHOOK_URL";
-    #[cfg(any(not(feature = "selective-sinks"), feature = "generic-webhook"))]
+    #[cfg(any(feature = "all-sinks", feature = "generic-webhook"))]
     const NOTIFY_WEBHOOK_FIELD_ENV: &str = "NOTIFY_WEBHOOK_FIELD";
     const NOTIFY_FEISHU_WEBHOOK_URL_ENV: &str = "NOTIFY_FEISHU_WEBHOOK_URL";
     const NOTIFY_SLACK_WEBHOOK_URL_ENV: &str = "NOTIFY_SLACK_WEBHOOK_URL";
@@ -98,7 +95,7 @@ where
         .with_context(|| format!("invalid {NOTIFY_TIMEOUT_MS_ENV}"))?;
 
     #[cfg(any(
-        not(feature = "selective-sinks"),
+        feature = "all-sinks",
         feature = "sound",
         feature = "generic-webhook",
         feature = "feishu",
@@ -106,7 +103,7 @@ where
     ))]
     let mut sinks: Vec<Arc<dyn Sink>> = Vec::new();
     #[cfg(all(
-        feature = "selective-sinks",
+        not(feature = "all-sinks"),
         not(any(
             feature = "sound",
             feature = "generic-webhook",
@@ -116,13 +113,13 @@ where
     ))]
     let sinks: Vec<Arc<dyn Sink>> = Vec::new();
     if sound_enabled {
-        #[cfg(any(not(feature = "selective-sinks"), feature = "sound"))]
+        #[cfg(any(feature = "all-sinks", feature = "sound"))]
         sinks.push(Arc::new(SoundSink::new(SoundConfig { command_argv: None })));
-        #[cfg(all(feature = "selective-sinks", not(feature = "sound")))]
+        #[cfg(all(not(feature = "all-sinks"), not(feature = "sound")))]
         return Err(unavailable_sink_feature_error(NOTIFY_SOUND_ENV, "sound"));
     }
 
-    #[cfg(any(not(feature = "selective-sinks"), feature = "generic-webhook"))]
+    #[cfg(any(feature = "all-sinks", feature = "generic-webhook"))]
     if let Some(url) = env_nonempty(NOTIFY_WEBHOOK_URL_ENV, get) {
         let mut cfg = GenericWebhookConfig::new(url).with_timeout(timeout);
         if let Some(field) = env_nonempty(NOTIFY_WEBHOOK_FIELD_ENV, get) {
@@ -132,7 +129,7 @@ where
             GenericWebhookSink::new(cfg).context("build generic webhook sink")?,
         ));
     }
-    #[cfg(all(feature = "selective-sinks", not(feature = "generic-webhook")))]
+    #[cfg(all(not(feature = "all-sinks"), not(feature = "generic-webhook")))]
     if env_nonempty(NOTIFY_WEBHOOK_URL_ENV, get).is_some() {
         return Err(unavailable_sink_feature_error(
             NOTIFY_WEBHOOK_URL_ENV,
@@ -140,14 +137,14 @@ where
         ));
     }
 
-    #[cfg(any(not(feature = "selective-sinks"), feature = "feishu"))]
+    #[cfg(any(feature = "all-sinks", feature = "feishu"))]
     if let Some(url) = env_nonempty(NOTIFY_FEISHU_WEBHOOK_URL_ENV, get) {
         let cfg = FeishuWebhookConfig::new(url).with_timeout(timeout);
         sinks.push(Arc::new(
             FeishuWebhookSink::new(cfg).context("build feishu sink")?,
         ));
     }
-    #[cfg(all(feature = "selective-sinks", not(feature = "feishu")))]
+    #[cfg(all(not(feature = "all-sinks"), not(feature = "feishu")))]
     if env_nonempty(NOTIFY_FEISHU_WEBHOOK_URL_ENV, get).is_some() {
         return Err(unavailable_sink_feature_error(
             NOTIFY_FEISHU_WEBHOOK_URL_ENV,
@@ -155,14 +152,14 @@ where
         ));
     }
 
-    #[cfg(any(not(feature = "selective-sinks"), feature = "slack"))]
+    #[cfg(any(feature = "all-sinks", feature = "slack"))]
     if let Some(url) = env_nonempty(NOTIFY_SLACK_WEBHOOK_URL_ENV, get) {
         let cfg = SlackWebhookConfig::new(url).with_timeout(timeout);
         sinks.push(Arc::new(
             SlackWebhookSink::new(cfg).context("build slack sink")?,
         ));
     }
-    #[cfg(all(feature = "selective-sinks", not(feature = "slack")))]
+    #[cfg(all(not(feature = "all-sinks"), not(feature = "slack")))]
     if env_nonempty(NOTIFY_SLACK_WEBHOOK_URL_ENV, get).is_some() {
         return Err(unavailable_sink_feature_error(
             NOTIFY_SLACK_WEBHOOK_URL_ENV,
@@ -205,7 +202,7 @@ mod tests {
 
     use super::*;
 
-    #[cfg(any(not(feature = "selective-sinks"), feature = "sound"))]
+    #[cfg(any(feature = "all-sinks", feature = "sound"))]
     #[test]
     fn build_hub_from_standard_env_uses_sound_when_enabled() {
         let env = HashMap::from([(String::from("NOTIFY_SOUND"), String::from("1"))]);
@@ -221,7 +218,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "selective-sinks", not(feature = "sound")))]
+    #[cfg(all(not(feature = "all-sinks"), not(feature = "sound")))]
     #[test]
     fn build_hub_from_standard_env_rejects_unavailable_sound_sink() {
         let env = HashMap::from([(String::from("NOTIFY_SOUND"), String::from("1"))]);
@@ -236,7 +233,7 @@ mod tests {
         assert!(err.to_string().contains("feature `sound`"), "{err:#}");
     }
 
-    #[cfg(all(feature = "selective-sinks", not(feature = "slack")))]
+    #[cfg(all(not(feature = "all-sinks"), not(feature = "slack")))]
     #[test]
     fn build_hub_from_standard_env_rejects_unavailable_slack_sink() {
         let env = HashMap::from([(

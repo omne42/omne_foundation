@@ -52,7 +52,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ### Changed
 - `Event` 现在收口为单一 `StructuredText` 真相，`title` / `body` / `tags` 不再作为可直接写坏的公开字段暴露；调用方改用 `title()` / `body()` / `tags()` 以及 `title_text()` / `body_text()` / `tag_texts()` 访问，避免字符串侧和结构化侧出现自相矛盾状态。
 - `FeishuWebhookConfig` 新增 `local_image_base_dir` / `with_local_image_base_dir(...)`；本地图片相对路径不再隐式依赖进程 `current_dir()`，只有显式配置 base dir 后才允许解析相对路径。
-- `notify-kit`：新增兼容优先的 sink 级 feature 切分。默认模式仍继续导出全部内置 sinks，避免现有调用方因为未声明 feature 而失效；只有显式启用 `selective-sinks` 时，crate 才会按 `sound` / `slack` / `github` 等单独 feature 收紧导出与编译面。`notify_kit::env::build_hub_from_standard_env(...)` 在 selective 模式下如果遇到未启用的 sink 配置，也会返回显式错误而不是静默忽略。
+- `notify-kit`：默认“全部内置 sinks”模式现在改为显式依赖默认特性 `all-sinks`，而不是靠 `not(selective-sinks)` 的隐式编译分支；因此 `default-features = false` 时不仅会收紧导出面，也会真正裁掉未选 sink 的依赖图。`selective-sinks` 继续保留为兼容 alias，但不再是收紧依赖图所必需。
+- `notify-kit`：新增兼容优先的 sink 级 feature 切分。默认模式仍继续导出全部内置 sinks，避免现有调用方因为未声明 feature 而失效；当默认 `all-sinks` 被关闭时，crate 会按 `sound` / `slack` / `github` 等单独 feature 收紧导出与编译面。`notify_kit::env::build_hub_from_standard_env(...)` 在这类精简模式下如果遇到未启用的 sink 配置，也会返回显式错误而不是静默忽略。
 - `notify-kit`：补齐 `selective-sinks` 子集下 `sinks/text` helper 的 feature gating，避免像 `selective-sinks + github`、`selective-sinks + bark` 这类只启用部分 sink 时触发 `dead_code` 并在 `-D warnings`/跨平台 CI 下失败。
 - `FeishuWebhookSink`：远程 Markdown 图片下载现在始终强制做 DNS 公网 IP 校验，不再跟随 webhook 主请求的 `with_public_ip_check(false)` 放宽，避免正文图片路径引入 SSRF 到内网 / special-use HTTPS 目标。
 - `FeishuWebhookSink`：本地图片 opt-in 从“只开布尔开关”收紧为“显式开启 + 显式 `local_image_root(s)` allowlist”；加载前会先做绝对路径归一、root 边界检查，并拒绝 `..` 逃逸、symlink 组件和其他特殊路径。

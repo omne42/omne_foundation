@@ -128,6 +128,20 @@ impl From<crate::TryNotifyError> for Error {
     }
 }
 
+#[cfg(any(
+    feature = "all-sinks",
+    feature = "bark",
+    feature = "dingtalk",
+    feature = "discord",
+    feature = "feishu",
+    feature = "generic-webhook",
+    feature = "github",
+    feature = "pushplus",
+    feature = "serverchan",
+    feature = "slack",
+    feature = "telegram",
+    feature = "wecom"
+))]
 impl From<http_kit::Error> for Error {
     fn from(err: http_kit::Error) -> Self {
         Self::from(anyhow::Error::new(err))

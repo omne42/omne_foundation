@@ -104,12 +104,13 @@ notify-kit = { path = "crates/notify-kit" }
 ## Features
 
 默认兼容模式下，`notify-kit` 会继续像现在一样导出全部内置 sinks，不要求调用方显式打开每个 sink feature。
+这条兼容路径现在通过默认启用 `all-sinks` 实现，所以默认依赖行为保持不变，但 `default-features = false` 时也会真正收紧依赖图。
 
 如果你明确想把 crate 收紧成“只编译/导出所选 sinks”，可以显式进入 selective 模式：
 
 ```toml
 [dependencies]
-notify-kit = { path = "crates/notify-kit", default-features = false, features = ["selective-sinks", "sound", "slack"] }
+notify-kit = { path = "crates/notify-kit", default-features = false, features = ["sound", "slack"] }
 ```
 
 可选 sink features：
@@ -130,7 +131,9 @@ notify-kit = { path = "crates/notify-kit", default-features = false, features = 
 补充说明：
 
 - `sound-command` 现在依赖 `sound`，因为它只扩展 `SoundSink` 的外部命令能力。
-- selective 模式下，`notify_kit::env::build_hub_from_standard_env(...)` 如果遇到未启用的 sink 配置，会返回显式错误，而不是静默忽略配置。
+- `selective-sinks` 仍保留为兼容 alias，但 `default-features = false` 已足以收紧编译与依赖图；不用再额外打开它。
+- 当 `all-sinks` 关闭且 `notify_kit::env::build_hub_from_standard_env(...)` 遇到未启用的 sink 配置时，会返回显式错误，而不是静默忽略配置。
+- `secret_kit::SecretString` 只在启用了需要 secret-backed 配置的 sinks（或默认 `all-sinks`）时从 crate root re-export；纯 `sound/slack/discord/wecom` 之类的子集不再被无条件拖上 `secret-kit`。
 
 ## 文档
 

@@ -208,7 +208,7 @@ fn format_event_text_parts_limited(
 
 #[cfg(any(
     test,
-    not(feature = "selective-sinks"),
+    feature = "all-sinks",
     feature = "dingtalk",
     feature = "discord",
     feature = "feishu",
@@ -223,7 +223,7 @@ pub(crate) fn format_event_text_limited(event: &Event, limits: TextLimits) -> St
 }
 
 #[cfg(any(
-    not(feature = "selective-sinks"),
+    feature = "all-sinks",
     feature = "bark",
     feature = "pushplus",
     feature = "serverchan"
@@ -290,7 +290,7 @@ fn truncate_chars_cow(input: &str, max_chars: usize) -> Cow<'_, str> {
 
 #[cfg(any(
     test,
-    not(feature = "selective-sinks"),
+    feature = "all-sinks",
     feature = "bark",
     feature = "feishu",
     feature = "pushplus",

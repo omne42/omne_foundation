@@ -437,6 +437,10 @@ impl SharedManager {
             .await?)
     }
 
+    pub async fn is_connected_named(&self, server_name: &ServerName) -> crate::Result<bool> {
+        self.is_connected(server_name.as_str()).await
+    }
+
     pub async fn connected_server_names(&self) -> crate::Result<Vec<ServerName>> {
         Ok(self
             .with_manager_lock("connected_server_names", |manager| {
@@ -454,6 +458,10 @@ impl SharedManager {
             .await?)
     }
 
+    pub async fn disconnect_named(&self, server_name: &ServerName) -> crate::Result<bool> {
+        self.disconnect(server_name.as_str()).await
+    }
+
     pub async fn disconnect_and_wait(
         &self,
         server_name: &str,
@@ -468,6 +476,16 @@ impl SharedManager {
             .await?
             .prepare_disconnect_for_wait_with_cwd_cleanup(server_name);
         Ok(disconnect.wait_with_timeout(timeout, on_timeout).await?)
+    }
+
+    pub async fn disconnect_and_wait_named(
+        &self,
+        server_name: &ServerName,
+        timeout: Duration,
+        on_timeout: mcp_jsonrpc::WaitOnTimeout,
+    ) -> crate::Result<Option<std::process::ExitStatus>> {
+        self.disconnect_and_wait(server_name.as_str(), timeout, on_timeout)
+            .await
     }
 
     pub async fn request(
@@ -502,6 +520,18 @@ impl SharedManager {
             }
         }
         Ok(result?)
+    }
+
+    pub async fn request_named(
+        &self,
+        config: &Config,
+        server_name: &ServerName,
+        method: &str,
+        params: Option<Value>,
+        cwd: &Path,
+    ) -> crate::Result<Value> {
+        self.request(config, server_name.as_str(), method, params, cwd)
+            .await
     }
 
     pub async fn request_connected(
@@ -539,6 +569,16 @@ impl SharedManager {
         Ok(result?)
     }
 
+    pub async fn request_connected_named(
+        &self,
+        server_name: &ServerName,
+        method: &str,
+        params: Option<Value>,
+    ) -> crate::Result<Value> {
+        self.request_connected(server_name.as_str(), method, params)
+            .await
+    }
+
     pub async fn request_typed<R: McpRequest>(
         &self,
         config: &Config,
@@ -553,6 +593,17 @@ impl SharedManager {
         crate::mcp::deserialize_request_result::<R>(server_name, result)
     }
 
+    pub async fn request_typed_named<R: McpRequest>(
+        &self,
+        config: &Config,
+        server_name: &ServerName,
+        params: Option<R::Params>,
+        cwd: &Path,
+    ) -> crate::Result<R::Result> {
+        self.request_typed::<R>(config, server_name.as_str(), params, cwd)
+            .await
+    }
+
     pub async fn request_typed_connected<R: McpRequest>(
         &self,
         server_name: &str,
@@ -563,6 +614,15 @@ impl SharedManager {
             .request_connected(server_name, R::METHOD, params)
             .await?;
         crate::mcp::deserialize_request_result::<R>(server_name, result)
+    }
+
+    pub async fn request_typed_connected_named<R: McpRequest>(
+        &self,
+        server_name: &ServerName,
+        params: Option<R::Params>,
+    ) -> crate::Result<R::Result> {
+        self.request_typed_connected::<R>(server_name.as_str(), params)
+            .await
     }
 
     pub async fn notify(
@@ -599,6 +659,18 @@ impl SharedManager {
             }
         }
         Ok(result?)
+    }
+
+    pub async fn notify_named(
+        &self,
+        config: &Config,
+        server_name: &ServerName,
+        method: &str,
+        params: Option<Value>,
+        cwd: &Path,
+    ) -> crate::Result<()> {
+        self.notify(config, server_name.as_str(), method, params, cwd)
+            .await
     }
 
     pub async fn notify_connected(
@@ -638,6 +710,16 @@ impl SharedManager {
         Ok(result?)
     }
 
+    pub async fn notify_connected_named(
+        &self,
+        server_name: &ServerName,
+        method: &str,
+        params: Option<Value>,
+    ) -> crate::Result<()> {
+        self.notify_connected(server_name.as_str(), method, params)
+            .await
+    }
+
     pub async fn notify_typed<N: McpNotification>(
         &self,
         config: &Config,
@@ -650,6 +732,17 @@ impl SharedManager {
             .await
     }
 
+    pub async fn notify_typed_named<N: McpNotification>(
+        &self,
+        config: &Config,
+        server_name: &ServerName,
+        params: Option<N::Params>,
+        cwd: &Path,
+    ) -> crate::Result<()> {
+        self.notify_typed::<N>(config, server_name.as_str(), params, cwd)
+            .await
+    }
+
     pub async fn notify_typed_connected<N: McpNotification>(
         &self,
         server_name: &str,
@@ -659,12 +752,29 @@ impl SharedManager {
         self.notify_connected(server_name, N::METHOD, params).await
     }
 
+    pub async fn notify_typed_connected_named<N: McpNotification>(
+        &self,
+        server_name: &ServerName,
+        params: Option<N::Params>,
+    ) -> crate::Result<()> {
+        self.notify_typed_connected::<N>(server_name.as_str(), params)
+            .await
+    }
+
     pub async fn server_handler_timeout_count(&self, server_name: &str) -> crate::Result<u64> {
         Ok(self
             .with_manager_lock("server_handler_timeout_count", |manager| {
                 manager.server_handler_timeout_count(server_name)
             })
             .await?)
+    }
+
+    pub async fn server_handler_timeout_count_named(
+        &self,
+        server_name: &ServerName,
+    ) -> crate::Result<u64> {
+        self.server_handler_timeout_count(server_name.as_str())
+            .await
     }
 
     /// Returns a snapshot of timeout counts for all servers without draining shared state.
@@ -729,8 +839,8 @@ mod tests {
 
     use crate::shared::SharedManager;
     use crate::{
-        ClientConfig, Config, Manager, McpRequest, ProtocolVersionCheck, ServerConfig, ServerName,
-        ServerRequestHandler, ServerRequestOutcome, TrustMode,
+        ClientConfig, Config, Manager, McpNotification, McpRequest, ProtocolVersionCheck,
+        ServerConfig, ServerName, ServerRequestHandler, ServerRequestOutcome, TrustMode,
     };
 
     struct NestedRequest;
@@ -749,6 +859,18 @@ mod tests {
         const METHOD: &'static str = "nested";
         type Params = NestedParams;
         type Result = NestedResult;
+    }
+
+    struct NamedNotification;
+
+    #[derive(Serialize)]
+    struct NamedNotificationParams {
+        phase: &'static str,
+    }
+
+    impl McpNotification for NamedNotification {
+        const METHOD: &'static str = "named/notify";
+        type Params = NamedNotificationParams;
     }
 
     #[cfg(not(windows))]
@@ -842,6 +964,102 @@ mod tests {
         assert_eq!(shared.connected_server_names().await.unwrap().len(), 1);
         let result = clone.request_connected("srv", "ping", None).await.unwrap();
         assert_eq!(result, serde_json::json!({ "ok": true }));
+
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shared_manager_named_facade_delegates_to_server_name_api() {
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let server_task = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            let init_id = init_value["id"].clone();
+
+            let init_response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": init_id,
+                "result": { "serverInfo": { "name": "demo" } },
+            });
+            let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+            init_response_line.push('\n');
+            server_write
+                .write_all(init_response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let initialized_line = lines.next_line().await.unwrap().unwrap();
+            let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+            assert_eq!(initialized_value["method"], "notifications/initialized");
+
+            let notify_line = lines.next_line().await.unwrap().unwrap();
+            let notify_value: Value = serde_json::from_str(&notify_line).unwrap();
+            assert_eq!(notify_value["method"], "named/notify");
+            assert_eq!(notify_value["params"]["phase"], "connected");
+
+            let request_line = lines.next_line().await.unwrap().unwrap();
+            let request_value: Value = serde_json::from_str(&request_line).unwrap();
+            assert_eq!(request_value["method"], "ping");
+            let request_id = request_value["id"].clone();
+
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": { "ok": true },
+            });
+            let mut response_line = serde_json::to_string(&response).unwrap();
+            response_line.push('\n');
+            server_write
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let eof = lines.next_line().await.unwrap();
+            assert!(eof.is_none(), "expected EOF after named disconnect");
+        });
+
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted);
+        manager
+            .connect_io("srv", client_read, client_write)
+            .await
+            .unwrap();
+
+        let shared = manager.into_shared();
+        let server_name = ServerName::parse("srv").unwrap();
+
+        assert!(shared.is_connected_named(&server_name).await.unwrap());
+        assert_eq!(
+            shared
+                .server_handler_timeout_count_named(&server_name)
+                .await
+                .unwrap(),
+            0
+        );
+
+        shared
+            .notify_typed_connected_named::<NamedNotification>(
+                &server_name,
+                Some(NamedNotificationParams { phase: "connected" }),
+            )
+            .await
+            .unwrap();
+
+        let result = shared
+            .request_connected_named(&server_name, "ping", None)
+            .await
+            .unwrap();
+        assert_eq!(result, serde_json::json!({ "ok": true }));
+
+        assert!(shared.disconnect_named(&server_name).await.unwrap());
+        assert!(!shared.is_connected_named(&server_name).await.unwrap());
 
         server_task.await.unwrap();
     }

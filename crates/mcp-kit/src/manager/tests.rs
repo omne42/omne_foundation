@@ -4,20 +4,11 @@ use std::ffi::OsString;
 #[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::Path;
-#[cfg(not(windows))]
 use std::path::PathBuf;
-#[cfg(not(windows))]
-use std::process::Command;
 #[cfg(not(windows))]
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-
-#[cfg(not(windows))]
-const CWD_UNAVAILABLE_HELPER_ENV: &str = "MCP_KIT_CWD_UNAVAILABLE_HELPER";
-#[cfg(not(windows))]
-const CWD_UNAVAILABLE_TEST_FILTER: &str =
-    "resolve_connection_cwd_errors_when_current_dir_is_unavailable";
 
 fn seed_manager_side_state(manager: &mut Manager, server_name: &str) {
     manager
@@ -31,25 +22,6 @@ fn seed_manager_side_state(manager: &mut Manager, server_name: &str) {
         .server_handler_timeout_counts
         .counter_for(&ServerName::parse(server_name).unwrap())
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-}
-
-#[cfg(not(windows))]
-fn maybe_run_cwd_unavailable_helper() -> bool {
-    if std::env::var_os(CWD_UNAVAILABLE_HELPER_ENV).is_none() {
-        return false;
-    }
-
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    std::env::set_current_dir(tempdir.path()).expect("enter tempdir");
-    std::fs::remove_dir(tempdir.path()).expect("remove tempdir");
-
-    let err = resolve_connection_cwd(Path::new("relative"))
-        .expect_err("relative cwd should fail without current dir");
-    assert!(
-        err.to_string()
-            .contains("determine current working directory for relative MCP cwd")
-    );
-    true
 }
 
 #[cfg(not(windows))]
@@ -86,15 +58,8 @@ impl Drop for CurrentDirTestGuard {
     }
 }
 
-#[cfg(not(windows))]
-fn current_dir_for_test() -> PathBuf {
-    let _guard = cwd_test_guard();
-    std::env::current_dir().expect("current dir")
-}
-
-#[cfg(windows)]
-fn current_dir_for_test() -> PathBuf {
-    std::env::current_dir().expect("current dir")
+fn explicit_cwd_for_direct_connect_test() -> PathBuf {
+    std::env::temp_dir()
 }
 
 #[test]
@@ -315,19 +280,14 @@ fn resolve_connection_cwd_with_base_rejects_relative_base() {
 
 #[cfg(not(windows))]
 #[test]
-fn resolve_connection_cwd_errors_when_current_dir_is_unavailable() {
-    if maybe_run_cwd_unavailable_helper() {
-        return;
-    }
-
-    let current_exe = std::env::current_exe().expect("current test binary");
-    let status = Command::new(current_exe)
-        .arg(CWD_UNAVAILABLE_TEST_FILTER)
-        .env(CWD_UNAVAILABLE_HELPER_ENV, "1")
-        .env("RUST_TEST_THREADS", "1")
-        .status()
-        .expect("spawn current_dir helper process");
-    assert!(status.success(), "helper process should exit cleanly");
+fn resolve_connection_cwd_rejects_relative_path_without_base() {
+    let err = resolve_connection_cwd(Path::new("relative"))
+        .expect_err("relative cwd should require an explicit base");
+    assert!(
+        err.to_string()
+            .contains("relative MCP cwd requires an explicit absolute base"),
+        "{err:#}"
+    );
 }
 
 #[test]
@@ -516,9 +476,14 @@ async fn try_prepare_connected_client_rejects_different_cwd_context() {
         .await
         .unwrap();
 
-    let current_dir = current_dir_for_test();
-    let connected_cwd = current_dir.join("workspace").join("a");
-    let other_cwd = current_dir.join("workspace").join("b");
+    let connected_cwd = std::env::current_dir()
+        .expect("current dir")
+        .join("workspace")
+        .join("a");
+    let other_cwd = std::env::current_dir()
+        .expect("current dir")
+        .join("workspace")
+        .join("b");
 
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
         .with_trust_mode(TrustMode::Trusted);
@@ -561,7 +526,10 @@ async fn try_prepare_connected_client_reuses_same_cwd_identity() {
         .await
         .unwrap();
 
-    let connected_cwd = current_dir_for_test().join("workspace").join("demo");
+    let connected_cwd = std::env::current_dir()
+        .expect("current dir")
+        .join("workspace")
+        .join("demo");
     let same_cwd_different_spelling = connected_cwd
         .parent()
         .expect("parent")
@@ -3392,7 +3360,7 @@ async fn untrusted_manager_refuses_stdio_spawn() {
     let server_cfg = ServerConfig::stdio(vec!["mcp-server".to_string()]).unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, Path::new("."))
+        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
     assert!(err.to_string().contains("untrusted mode"));
@@ -3435,7 +3403,7 @@ async fn untrusted_manager_refuses_unix_connect() {
     let server_cfg = ServerConfig::unix(PathBuf::from("/tmp/mcp.sock")).unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, Path::new("."))
+        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
     assert!(err.to_string().contains("untrusted mode"));
@@ -3452,7 +3420,7 @@ async fn untrusted_manager_refuses_streamable_http_env_secrets() {
         .unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, Path::new("."))
+        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
     assert!(err.to_string().contains("bearer token env var"));
@@ -3470,7 +3438,7 @@ async fn untrusted_manager_refuses_streamable_http_env_header_secrets() {
         .insert("x-api-key".to_string(), "MCP_API_KEY".to_string());
 
     let err = manager
-        .connect("srv", &server_cfg, Path::new("."))
+        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
     assert!(err.to_string().contains("http header env vars"));
@@ -3484,7 +3452,7 @@ async fn untrusted_manager_refuses_streamable_http_non_https_urls() {
     let server_cfg = ServerConfig::streamable_http("http://example.com/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, Path::new("."))
+        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
     assert!(err.to_string().contains("non-https"));
@@ -3498,7 +3466,7 @@ async fn untrusted_manager_refuses_streamable_http_localhost() {
     let server_cfg = ServerConfig::streamable_http("https://localhost/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, Path::new("."))
+        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
     assert!(err.to_string().contains("localhost"));
@@ -3512,7 +3480,7 @@ async fn untrusted_manager_refuses_streamable_http_localdomain() {
     let server_cfg = ServerConfig::streamable_http("https://localhost.localdomain/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, Path::new("."))
+        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
     assert!(err.to_string().contains("localdomain"));
@@ -3526,7 +3494,7 @@ async fn untrusted_manager_refuses_streamable_http_single_label_hosts() {
     let server_cfg = ServerConfig::streamable_http("https://example/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, Path::new("."))
+        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
     assert!(err.to_string().contains("single-label"));
@@ -3540,7 +3508,7 @@ async fn untrusted_manager_refuses_streamable_http_private_ip() {
     let server_cfg = ServerConfig::streamable_http("https://192.168.0.10/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, Path::new("."))
+        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
     assert!(
@@ -3557,7 +3525,7 @@ async fn untrusted_manager_refuses_streamable_http_ipv4_mapped_ipv6_loopback() {
     let server_cfg = ServerConfig::streamable_http("https://[::ffff:127.0.0.1]/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, Path::new("."))
+        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
     assert!(
@@ -3574,7 +3542,7 @@ async fn untrusted_manager_refuses_streamable_http_nat64_well_known_prefix_priva
     let server_cfg = ServerConfig::streamable_http("https://[64:ff9b::c0a8:0001]/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, Path::new("."))
+        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
     assert!(
@@ -3591,7 +3559,7 @@ async fn untrusted_manager_refuses_streamable_http_6to4_private_ip() {
     let server_cfg = ServerConfig::streamable_http("https://[2002:c0a8:0001::]/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, Path::new("."))
+        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
     assert!(
@@ -3608,7 +3576,7 @@ async fn untrusted_manager_refuses_streamable_http_discard_only_ipv6_prefix() {
     let server_cfg = ServerConfig::streamable_http("https://[100::1]/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, Path::new("."))
+        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
     assert!(
@@ -3625,7 +3593,7 @@ async fn untrusted_manager_refuses_streamable_http_ipv6_benchmark_prefix() {
     let server_cfg = ServerConfig::streamable_http("https://[2001:2::1]/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, Path::new("."))
+        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
     assert!(
@@ -3642,7 +3610,7 @@ async fn untrusted_manager_refuses_streamable_http_url_credentials() {
     let server_cfg = ServerConfig::streamable_http("https://user:pass@example.com/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, Path::new("."))
+        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
     assert!(err.to_string().contains("url credentials"));
@@ -3665,7 +3633,7 @@ async fn untrusted_manager_refuses_streamable_http_hostname_resolving_to_non_glo
     let server_cfg = ServerConfig::streamable_http("https://localhost/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, Path::new("."))
+        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
     assert!(
@@ -3896,7 +3864,7 @@ async fn argv_placeholder_errors_do_not_leak_plain_argv() {
     .unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, Path::new("."))
+        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -3946,7 +3914,7 @@ async fn url_placeholder_errors_do_not_leak_plain_url() {
             .unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, Path::new("."))
+        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
     let msg = err.to_string();

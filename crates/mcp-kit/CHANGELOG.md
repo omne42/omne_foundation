@@ -11,6 +11,7 @@
 
 ### Changed
 - `mcp-kit`：公开 `ErrorKind` 分类不再退化成英文字符串匹配；config / manager-state 路径改为带类型标记的边界错误，`Error::context` / `with_context` 也会保留原始分类。
+- `mcp-kit`：initialize 握手前的空 `protocol_version` / 非 object `capabilities` 兜底校验现在也会保留 `ErrorKind::Config`，不会再静默退化成 `Other`。
 - `mcp-kit`：`ErrorKind` 现在会按 `mcp_jsonrpc::Error` 的真实变体分类，底层 transport I/O 故障不再被误标成 `Protocol`；`mcpctl` 的 cwd-unavailable helper 测试也会在退出前恢复有效工作目录，避免留下已删除 cwd 的测试噪音。
 - `mcp-kit`：README、crate docs 和 FAQ 现在明确区分“当前实例内按需重建已关闭连接”和“后台自动重连/daemon 化”，避免文档与实现语义漂移。
 - `mcp-kit`（BREAKING）：`Config::with_path`、`Manager::with_protocol_version` 和 `Manager::with_capabilities` 现在会在构造期做 fail-fast 校验并返回 `Result<Self>`；相对 config path、空 `protocol_version` 和非 object `capabilities` 不再拖到后续 `current_dir()` 解析或 `initialize` 握手时才炸。

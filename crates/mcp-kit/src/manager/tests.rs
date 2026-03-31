@@ -291,6 +291,28 @@ fn try_from_config_rejects_invalid_client_config() {
 }
 
 #[test]
+fn with_protocol_version_rejects_empty_value() {
+    let err = match Manager::new("test-client", "0.0.0", Duration::from_secs(1))
+        .with_protocol_version("   ")
+    {
+        Ok(_) => panic!("empty protocol version should fail fast"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("protocol_version"), "err={err:#}");
+}
+
+#[test]
+fn with_capabilities_rejects_non_object() {
+    let err = match Manager::new("test-client", "0.0.0", Duration::from_secs(1))
+        .with_capabilities(serde_json::json!(1))
+    {
+        Ok(_) => panic!("non-object capabilities should fail fast"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("capabilities"), "err={err:#}");
+}
+
+#[test]
 fn try_from_config_rejects_invalid_server_config() {
     let mut server = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
     server
@@ -669,7 +691,9 @@ fn prepare_transport_connect_resolves_relative_cwd_from_config_thread_root() {
         ServerName::parse("srv").unwrap(),
         ServerConfig::unix(PathBuf::from("/tmp/mock.sock")).unwrap(),
     );
-    let config = Config::new(crate::ClientConfig::default(), servers).with_path(config_path);
+    let config = Config::new(crate::ClientConfig::default(), servers)
+        .with_path(config_path)
+        .unwrap();
 
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
         .with_trust_mode(TrustMode::Trusted);

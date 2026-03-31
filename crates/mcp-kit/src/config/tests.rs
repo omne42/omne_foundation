@@ -304,6 +304,23 @@ fn config_validate_rejects_invalid_client_roots() {
 }
 
 #[test]
+fn config_with_path_rejects_relative_path() {
+    let err = Config::new(ClientConfig::default(), std::collections::BTreeMap::new())
+        .with_path(PathBuf::from("mcp.json"))
+        .expect_err("relative config path should fail fast");
+    assert!(err.to_string().contains("must be absolute"), "err={err:#}");
+}
+
+#[test]
+fn config_with_path_accepts_absolute_path() {
+    let path = std::env::temp_dir().join("mcp.json");
+    let cfg = Config::new(ClientConfig::default(), std::collections::BTreeMap::new())
+        .with_path(path.clone())
+        .expect("absolute config path should succeed");
+    assert_eq!(cfg.path(), Some(path.as_path()));
+}
+
+#[test]
 fn server_config_validate_rejects_stdio_stdout_log_with_parent_dir() {
     let mut cfg = ServerConfig::stdio(vec!["mcp-a".to_string()]).unwrap();
     cfg.set_stdout_log(Some(StdoutLogConfig {

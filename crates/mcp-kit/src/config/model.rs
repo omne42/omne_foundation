@@ -553,6 +553,13 @@ fn transport_tag(transport: Transport) -> &'static str {
     }
 }
 
+fn validate_config_path(path: &Path) -> crate::Result<()> {
+    if !path.is_absolute() {
+        public_bail!("mcp config path must be absolute");
+    }
+    Ok(())
+}
+
 impl Config {
     pub fn new(client: ClientConfig, servers: BTreeMap<ServerName, ServerConfig>) -> Self {
         Self {
@@ -562,9 +569,10 @@ impl Config {
         }
     }
 
-    pub fn with_path(mut self, path: PathBuf) -> Self {
+    pub fn with_path(mut self, path: PathBuf) -> crate::Result<Self> {
+        validate_config_path(&path)?;
         self.path = Some(path);
-        self
+        Ok(self)
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -584,6 +592,9 @@ impl Config {
     }
 
     pub fn validate(&self) -> crate::Result<()> {
+        if let Some(path) = self.path() {
+            validate_config_path(path)?;
+        }
         self.client.validate().map_err(|err| {
             let msg = format!("invalid mcp client config: {err}");
             err.context(msg)

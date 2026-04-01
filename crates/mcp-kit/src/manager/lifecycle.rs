@@ -8,7 +8,7 @@ use tokio::process::Child;
 use crate::{ServerConfig, ServerName};
 
 use super::{
-    Connection, Manager, ProtocolVersionCheck, ProtocolVersionMismatch,
+    CachedConnection, Connection, Manager, ProtocolVersionCheck, ProtocolVersionMismatch,
     handlers::HandlerAttachSnapshot,
 };
 
@@ -367,10 +367,11 @@ impl Manager {
             }
         }
 
-        self.init_results
-            .insert(completed.server_name.clone(), completed.init_result);
-        self.conns
-            .insert(completed.server_name, completed.connection);
+        self.connections.insert(
+            completed.server_name,
+            CachedConnection::new(completed.connection)
+                .with_initialize_result(completed.init_result),
+        );
     }
 
     pub(crate) fn commit_transport_install(
@@ -380,14 +381,14 @@ impl Manager {
         let server_name = completed.completed.server_name.clone();
         self.commit_connection_install(completed.completed);
         self.record_connection_server_config(server_name.as_str(), &completed.server_config)?;
-        self.record_resolved_connection_cwd(server_name, completed.cwd);
+        self.record_resolved_connection_cwd(server_name, completed.cwd)?;
         Ok(())
     }
 
     pub(crate) fn prepare_disconnect_for_wait(&mut self, server_name: &str) -> PreparedDisconnect {
         let server_name = super::normalize_server_name_lookup(server_name).to_string();
         let connection = self.remove_cached_connection(&server_name);
-        self.clear_connection_side_state(&server_name, connection.is_some());
+        self.clear_connection_side_state(&server_name, false);
         PreparedDisconnect {
             server_name,
             connection,
@@ -402,7 +403,7 @@ impl Manager {
         let server_name = super::normalize_server_name_lookup(server_name).to_string();
         let connection = self.remove_cached_connection_if_matches(&server_name, connection_id);
         if connection.is_some() {
-            self.clear_connection_side_state(&server_name, true);
+            self.clear_connection_side_state(&server_name, false);
         }
         PreparedDisconnect {
             server_name,
@@ -416,14 +417,18 @@ impl Manager {
         clear_init_result: bool,
     ) {
         if clear_init_result {
-            self.init_results.remove(server_name);
+            if let Some(cached) = self.connections.get_mut(server_name) {
+                cached.initialize_result = None;
+            }
         }
         self.server_handler_timeout_counts.remove(server_name);
         self.remove_protocol_version_mismatch(server_name);
     }
 
     pub(super) fn remove_cached_connection(&mut self, server_name: &str) -> Option<Connection> {
-        self.conns.remove(server_name)
+        self.connections
+            .remove(server_name)
+            .map(|cached| cached.connection)
     }
 
     fn remove_cached_connection_if_matches(
@@ -432,11 +437,14 @@ impl Manager {
         connection_id: u64,
     ) -> Option<Connection> {
         let should_remove = self
-            .conns
+            .connections
             .get(server_name)
-            .is_some_and(|conn| conn.id() == connection_id);
+            .is_some_and(|cached| cached.connection.id() == connection_id);
         if should_remove {
-            return self.conns.remove(server_name);
+            return self
+                .connections
+                .remove(server_name)
+                .map(|cached| cached.connection);
         }
         None
     }
@@ -462,16 +470,16 @@ impl Manager {
     }
 
     pub(super) fn connection_exited(&mut self, server_name: &str) -> Option<bool> {
-        let conn = self.conns.get_mut(server_name)?;
-        let exited = match &mut conn.child {
+        let conn = self.connections.get_mut(server_name)?;
+        let exited = match &mut conn.connection.child {
             Some(child) => {
                 if child.try_wait().ok().flatten().is_some() {
                     true
                 } else {
-                    conn.client.is_closed()
+                    conn.connection.client.is_closed()
                 }
             }
-            None => conn.client.is_closed(),
+            None => conn.connection.client.is_closed(),
         };
 
         if exited {
@@ -479,6 +487,7 @@ impl Manager {
         }
 
         if conn
+            .connection
             .handler_tasks
             .iter()
             .any(tokio::task::JoinHandle::is_finished)

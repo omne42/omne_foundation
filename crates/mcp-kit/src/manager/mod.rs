@@ -246,10 +246,7 @@ impl ServerHandlerTimeoutCounts {
 pub struct Manager {
     instance_id: u64,
     active_handler_scopes: Arc<AtomicU64>,
-    conns: HashMap<ServerName, Connection>,
-    connection_cwds: HashMap<ServerName, ConnectionCwdIdentity>,
-    connection_server_configs: HashMap<ServerName, ServerConfig>,
-    init_results: HashMap<ServerName, Value>,
+    connections: HashMap<ServerName, CachedConnection>,
     client_name: String,
     client_version: String,
     protocol_version: String,
@@ -275,9 +272,21 @@ pub struct Connection {
     handler_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
+struct CachedConnection {
+    connection: Connection,
+    initialize_result: Option<Value>,
+    metadata: CachedConnectionMetadata,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConnectionCwdIdentity {
     stable_identity: PathBuf,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct CachedConnectionMetadata {
+    cwd_identity: Option<ConnectionCwdIdentity>,
+    server_config: Option<ServerConfig>,
 }
 
 pub(crate) struct PreparedConnectedClient {
@@ -515,6 +524,21 @@ impl Connection {
     }
 }
 
+impl CachedConnection {
+    fn new(connection: Connection) -> Self {
+        Self {
+            connection,
+            initialize_result: None,
+            metadata: CachedConnectionMetadata::default(),
+        }
+    }
+
+    fn with_initialize_result(mut self, initialize_result: Value) -> Self {
+        self.initialize_result = Some(initialize_result);
+        self
+    }
+}
+
 impl Drop for Connection {
     fn drop(&mut self) {
         for task in self.handler_tasks.drain(..) {
@@ -598,10 +622,7 @@ impl Manager {
         Self {
             instance_id: NEXT_MANAGER_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
             active_handler_scopes: Arc::new(AtomicU64::new(0)),
-            conns: HashMap::new(),
-            connection_cwds: HashMap::new(),
-            connection_server_configs: HashMap::new(),
-            init_results: HashMap::new(),
+            connections: HashMap::new(),
             client_name: client_name.into(),
             client_version: client_version.into(),
             protocol_version: MCP_PROTOCOL_VERSION.to_string(),
@@ -760,11 +781,7 @@ impl Manager {
 
     pub fn is_connected(&mut self, server_name: &str) -> bool {
         let server_name = normalize_server_name_lookup(server_name);
-        let connected = self.is_connected_and_alive(server_name);
-        if !connected {
-            self.clear_connection_cwd(server_name);
-        }
-        connected
+        self.is_connected_and_alive(server_name)
     }
 
     pub fn is_connected_named(&mut self, server_name: &ServerName) -> bool {
@@ -772,20 +789,15 @@ impl Manager {
     }
 
     pub fn connected_server_names(&mut self) -> Vec<ServerName> {
-        let mut names = self.conns.keys().cloned().collect::<Vec<_>>();
-        names.retain(|name| {
-            let connected = self.is_connected_and_alive(name.as_str());
-            if !connected {
-                self.clear_connection_cwd(name.as_str());
-            }
-            connected
-        });
+        let mut names = self.connections.keys().cloned().collect::<Vec<_>>();
+        names.retain(|name| self.is_connected_and_alive(name.as_str()));
         names
     }
 
     pub fn initialize_result(&self, server_name: &str) -> Option<&Value> {
-        self.init_results
+        self.connections
             .get(normalize_server_name_lookup(server_name))
+            .and_then(|cached| cached.initialize_result.as_ref())
     }
 
     pub fn initialize_result_named(&self, server_name: &ServerName) -> Option<&Value> {
@@ -812,22 +824,37 @@ impl Manager {
         self.record_resolved_connection_cwd(
             server_name,
             resolve_connection_cwd_with_base(base, cwd)?,
-        );
+        )
+    }
+
+    fn record_resolved_connection_cwd(
+        &mut self,
+        server_name: ServerName,
+        cwd: PathBuf,
+    ) -> anyhow::Result<()> {
+        let server_name_str = server_name.as_str().to_string();
+        let cached = self
+            .connections
+            .get_mut(server_name.as_str())
+            .ok_or_else(|| {
+                crate::error::tagged_message(
+                    crate::error::ErrorKind::ManagerState,
+                    format!(
+                        "mcp server {server_name_str} is not connected and cannot record cwd metadata"
+                    ),
+                )
+            })?;
+        cached.metadata.cwd_identity = Some(ConnectionCwdIdentity {
+            stable_identity: cwd,
+        });
         Ok(())
     }
 
-    fn record_resolved_connection_cwd(&mut self, server_name: ServerName, cwd: PathBuf) {
-        self.connection_cwds.insert(
-            server_name,
-            ConnectionCwdIdentity {
-                stable_identity: cwd,
-            },
-        );
-    }
-
     pub(crate) fn clear_connection_cwd(&mut self, server_name: &str) {
-        self.connection_cwds.remove(server_name);
-        self.clear_connection_server_config(server_name);
+        if let Some(cached) = self.connections.get_mut(server_name) {
+            cached.metadata.cwd_identity = None;
+            cached.metadata.server_config = None;
+        }
     }
 
     pub(crate) fn record_connection_server_config(
@@ -836,13 +863,20 @@ impl Manager {
         server_config: &ServerConfig,
     ) -> anyhow::Result<()> {
         let server_name = parse_server_name_anyhow(server_name)?;
-        self.connection_server_configs
-            .insert(server_name, server_config.clone());
+        let server_name_str = server_name.as_str().to_string();
+        let cached = self
+            .connections
+            .get_mut(server_name.as_str())
+            .ok_or_else(|| {
+                crate::error::tagged_message(
+                    crate::error::ErrorKind::ManagerState,
+                    format!(
+                        "mcp server {server_name_str} is not connected and cannot record reusable config metadata"
+                    ),
+                )
+            })?;
+        cached.metadata.server_config = Some(server_config.clone());
         Ok(())
-    }
-
-    pub(crate) fn clear_connection_server_config(&mut self, server_name: &str) {
-        self.connection_server_configs.remove(server_name);
     }
 
     fn ensure_connection_server_config_matches(
@@ -850,7 +884,11 @@ impl Manager {
         server_name: &str,
         requested: &ServerConfig,
     ) -> anyhow::Result<()> {
-        let Some(connected) = self.connection_server_configs.get(server_name) else {
+        let Some(connected) = self
+            .connections
+            .get(server_name)
+            .and_then(|cached| cached.metadata.server_config.as_ref())
+        else {
             return Err(crate::error::tagged_message(
                 crate::error::ErrorKind::ManagerState,
                 format!(
@@ -875,7 +913,11 @@ impl Manager {
         server_name: &str,
         requested_cwd: &Path,
     ) -> anyhow::Result<()> {
-        let Some(connected_cwd) = self.connection_cwds.get(server_name) else {
+        let Some(connected_cwd) = self
+            .connections
+            .get(server_name)
+            .and_then(|cached| cached.metadata.cwd_identity.as_ref())
+        else {
             return Ok(());
         };
         if connected_cwd.stable_identity == requested_cwd {
@@ -918,14 +960,14 @@ impl Manager {
         }
 
         let conn = self
-            .conns
+            .connections
             .get(server_name)
             .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?;
         Ok(Some(PreparedConnectedClient {
             server_name: server_name.to_string(),
-            connection_id: conn.id(),
+            connection_id: conn.connection.id(),
             timeout: self.request_timeout,
-            client: conn.client.handle(),
+            client: conn.connection.client.handle(),
         }))
     }
 
@@ -972,7 +1014,6 @@ impl Manager {
             self.ensure_connection_server_config_matches(server_name_key.as_str(), server_cfg)?;
             return Ok(None);
         }
-        self.clear_connection_cwd(server_name_key.as_str());
 
         server_cfg
             .validate()
@@ -999,13 +1040,7 @@ impl Manager {
         &mut self,
         server_name: &str,
     ) -> crate::manager::lifecycle::PreparedDisconnect {
-        let normalized = normalize_server_name_lookup(server_name).to_string();
-        let should_clear = self.conns.contains_key(normalized.as_str());
-        let disconnect = self.prepare_disconnect_for_wait(&normalized);
-        if should_clear {
-            self.clear_connection_cwd(&normalized);
-        }
-        disconnect
+        self.prepare_disconnect_for_wait(server_name)
     }
 
     pub(crate) fn prepare_disconnect_for_wait_if_connection_with_cwd_cleanup(
@@ -1013,16 +1048,7 @@ impl Manager {
         server_name: &str,
         connection_id: u64,
     ) -> crate::manager::lifecycle::PreparedDisconnect {
-        let normalized = normalize_server_name_lookup(server_name).to_string();
-        let should_clear = self
-            .conns
-            .get(normalized.as_str())
-            .is_some_and(|conn| conn.id() == connection_id);
-        let disconnect = self.prepare_disconnect_for_wait_if_connection(&normalized, connection_id);
-        if should_clear {
-            self.clear_connection_cwd(&normalized);
-        }
-        disconnect
+        self.prepare_disconnect_for_wait_if_connection(server_name, connection_id)
     }
 
     pub async fn connect(
@@ -1056,7 +1082,6 @@ impl Manager {
             self.ensure_connection_server_config_matches(server_name_key.as_str(), server_cfg)?;
             return Ok(());
         }
-        self.clear_connection_cwd(server_name_key.as_str());
 
         server_cfg
             .validate()
@@ -1133,7 +1158,6 @@ impl Manager {
         if self.is_connected_and_alive(server_name_key.as_str()) {
             return Ok(());
         }
-        self.clear_connection_cwd(server_name_key.as_str());
 
         let child = client.take_child();
         self.install_connection_parsed(server_name_key, client, child)
@@ -1183,7 +1207,6 @@ impl Manager {
         if self.is_connected_and_alive(server_name_key.as_str()) {
             return Ok(());
         }
-        self.clear_connection_cwd(server_name_key.as_str());
 
         let client = mcp_jsonrpc::Client::connect_io(read, write)
             .await
@@ -1331,9 +1354,10 @@ impl Manager {
     /// to avoid leaving a child process running/zombied.
     pub fn take_connection(&mut self, server_name: &str) -> Option<Connection> {
         let server_name = normalize_server_name_lookup(server_name);
-        self.init_results.remove(server_name);
-        let conn = self.remove_cached_connection(server_name);
-        self.clear_connection_cwd(server_name);
+        let conn = self
+            .connections
+            .remove(server_name)
+            .map(|cached| cached.connection);
         if conn.is_some() {
             self.clear_connection_side_state(server_name, false);
         }
@@ -1355,18 +1379,14 @@ impl Manager {
     /// `Manager::disconnect` / `Manager::disconnect_and_wait` for the same server name.
     pub fn take_session(&mut self, server_name: &str) -> Option<Session> {
         let server_name = normalize_server_name_lookup(server_name);
-        self.clear_connection_cwd(server_name);
-        let Some((server_name, connection)) = self.conns.remove_entry(server_name) else {
-            self.init_results.remove(server_name);
-            return None;
-        };
-        let Some(initialize_result) = self.init_results.remove(&server_name) else {
-            self.conns.insert(server_name, connection);
+        let (server_name, cached) = self.connections.remove_entry(server_name)?;
+        let Some(initialize_result) = cached.initialize_result else {
+            self.connections.insert(server_name, cached);
             return None;
         };
         Some(Session::new(
             server_name,
-            connection,
+            cached.connection,
             initialize_result,
             self.request_timeout,
         ))
@@ -1385,6 +1405,36 @@ impl Manager {
         let server_name = normalize_server_name_lookup(server_name);
         self.clear_connection_side_state(server_name, false);
         session
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_connection_for_test(
+        &mut self,
+        server_name: ServerName,
+        connection: Connection,
+    ) {
+        self.connections
+            .insert(server_name, CachedConnection::new(connection));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_initialize_result_for_test(&mut self, server_name: &str) {
+        if let Some(cached) = self
+            .connections
+            .get_mut(normalize_server_name_lookup(server_name))
+        {
+            cached.initialize_result = None;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_initialize_result_for_test(&mut self, server_name: &str, value: Value) {
+        if let Some(cached) = self
+            .connections
+            .get_mut(normalize_server_name_lookup(server_name))
+        {
+            cached.initialize_result = Some(value);
+        }
     }
 
     pub fn take_session_and_clear_state_named(

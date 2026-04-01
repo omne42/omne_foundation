@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Make `allow_localhost=true` consistent across syntax and DNS validation by continuing to allow loopback DNS answers for `localhost`/`localhost.localdomain`/`*.localhost`, while keeping `allow_private_ips=true` scoped to actual private-address ranges instead of also opening loopback or other non-private special-use targets.
+- Make `allow_localhost=true` consistent across syntax and DNS validation by continuing to allow localhost-style DNS answers for `localhost`/`localhost.localdomain`/`*.localhost` (including host-local `0.0.0.0/8` answers used by some resolvers), while keeping `allow_private_ips=true` scoped to actual private-address ranges instead of also opening loopback or other non-private special-use targets.
 - Drain small successful responses even when `Content-Length` is missing, so chunked/unknown-length 2xx bodies still get a bounded best-effort connection-reuse path instead of forcing avoidable socket churn.
 - Keep untrusted outbound DNS checks fail-closed for hostname targets even when `allow_private_ips=true`, so DNS answers that land on always-disallowed addresses (for example `0.0.0.0`) are still rejected instead of bypassing the hostname path.
 - Break `select_http_client_with_options(...)` by removing the unused `base_client` parameter, so the public API no longer pretends to preserve opaque `reqwest::Client` state that it must rebuild from `HttpClientOptions` anyway.

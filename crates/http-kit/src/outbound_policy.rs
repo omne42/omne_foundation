@@ -153,15 +153,15 @@ fn validate_resolved_addrs(
 }
 
 fn is_ip_disallowed_for_host(policy: &UntrustedOutboundPolicy, host: &str, ip: IpAddr) -> bool {
+    if is_localhost_resolution_ip(ip) {
+        return !(policy.allow_localhost && is_loopback_hostname(host));
+    }
+
     if is_always_disallowed_ip(ip) {
         return true;
     }
 
     let ip = normalize_ip(ip);
-    if is_loopback_ip(ip) {
-        return !(policy.allow_localhost && is_loopback_hostname(host));
-    }
-
     if is_private_ip(ip) {
         return !policy.allow_private_ips;
     }
@@ -176,11 +176,15 @@ fn is_private_ip(ip: IpAddr) -> bool {
     }
 }
 
-fn is_loopback_ip(ip: IpAddr) -> bool {
+fn is_localhost_resolution_ip(ip: IpAddr) -> bool {
     match normalize_ip(ip) {
-        IpAddr::V4(ip) => ip.is_loopback(),
+        IpAddr::V4(ip) => ip.is_loopback() || is_host_local_ipv4(ip),
         IpAddr::V6(ip) => ip.is_loopback(),
     }
+}
+
+fn is_host_local_ipv4(ip: std::net::Ipv4Addr) -> bool {
+    ip.octets()[0] == 0 && !ip.is_unspecified()
 }
 
 fn normalized_host(url: &reqwest::Url) -> Result<&str, UntrustedOutboundError> {
@@ -369,6 +373,21 @@ mod tests {
             UntrustedOutboundError::ResolvedToNonGlobalIp { ip, .. }
                 if ip == IpAddr::from([192, 168, 1, 10])
         ));
+    }
+
+    #[test]
+    fn allow_localhost_allows_host_local_ipv4_dns_results() {
+        let policy = UntrustedOutboundPolicy {
+            allow_localhost: true,
+            ..Default::default()
+        };
+
+        validate_resolved_addrs(
+            &policy,
+            "localhost",
+            [std::net::SocketAddr::from(([0, 0, 0, 1], 443))],
+        )
+        .expect("localhost should allow host-local 0.0.0.0/8 answers used by some resolvers");
     }
 
     #[tokio::test]

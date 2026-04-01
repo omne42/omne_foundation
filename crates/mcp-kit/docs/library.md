@@ -71,6 +71,8 @@ let tools = manager
 - `request*` 会自动 `connect + initialize`（若未连接）。
 - timeout 是 `Manager` 级别的 per-request 超时；可用 `.with_timeout(...)` 调整。
 - `mcp_kit::mcp` 只覆盖常用 MCP method 的子集；缺的部分继续用 `serde_json::Value` 即可。
+- direct `Manager` 连接 API 仍要求绝对 `cwd`；只有 config 驱动入口会把相对 `cwd` 锚定到 `Config::thread_root()`。
+- 这些相对 `cwd` 必须保持在显式 base/thread root 内部；包含 `.` / `..` segment 的路径会直接 fail-closed。
 
 ## 连接与会话：把 `Session` 交出去
 

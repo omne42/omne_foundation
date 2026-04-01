@@ -29,14 +29,16 @@
 //! `shared::SharedManager` is intentionally a single-flight wrapper around `Manager`, not an
 //! actor. It serializes manager state mutations across clones and also uses same-server
 //! lifecycle gates so cold-start connect/disconnect/`disconnect_and_wait` paths cannot overlap.
-//! Request/notify operations release the manager lock and same-server lifecycle gate before
-//! awaiting JSON-RPC I/O once they have borrowed a `ClientHandle`, including the cold-start
-//! config-driven path after the freshly installed connection has been prepared. Operations that
-//! still require the shared lock or lifecycle gate fail fast when they are called reentrantly
-//! from manager-owned handlers and would otherwise deadlock. Prefer plain `Manager` when you
-//! need fine-grained lifecycle control or handler callbacks that may need to call back into
-//! connection setup/teardown paths. If a handler must spawn a child task that calls back into
-//! `shared::SharedManager`, use
+//! Request/notify operations release the shared manager lock once they have borrowed a
+//! `ClientHandle`, but they keep the same-server lifecycle gate in read mode until the
+//! corresponding JSON-RPC I/O finishes. That lets same-server request/notify traffic overlap
+//! while still blocking concurrent same-server `disconnect` from tearing down the borrowed
+//! connection underneath in-flight RPCs, including the cold-start config-driven path after the
+//! freshly installed connection has been prepared. Operations that still require the shared lock
+//! or lifecycle gate fail fast when they are called reentrantly from manager-owned handlers and
+//! would otherwise deadlock. Prefer plain `Manager` when you need fine-grained lifecycle control
+//! or handler callbacks that may need to call back into connection setup/teardown paths. If a
+//! handler must spawn a child task that calls back into `shared::SharedManager`, use
 //! `shared::SharedManager::spawn_inheriting_handler_scope(...)`; bare `tokio::spawn(...)` does
 //! not inherit the handler task-local reentrancy scope automatically.
 //!
@@ -45,7 +47,9 @@
 //!
 //! When you use config-driven connection helpers (`Manager::request`, `get_or_connect`, etc.),
 //! relative `cwd` values are resolved against the loaded `mcp.json` thread root when available,
-//! not against the ambient process directory.
+//! not against the ambient process directory. Those relative `cwd` values must stay lexical
+//! descendants of that explicit base: `.` / `..` segments are rejected instead of being
+//! normalized through the base/thread-root boundary.
 //!
 //! Config-driven helpers may reopen a cached server name after the old transport has already
 //! closed, but this is only an on-demand reconnect inside the current `Manager`/`SharedManager`.

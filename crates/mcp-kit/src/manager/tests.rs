@@ -1258,6 +1258,67 @@ async fn server_request_handler_sync_panic_disables_future_dispatch() {
 }
 
 #[tokio::test]
+async fn cached_connection_queries_do_not_prune_dead_state_until_liveness_refresh() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["method"], "initialize");
+
+        let response_line = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_value["id"].clone(),
+            "result": { "protocolVersion": MCP_PROTOCOL_VERSION }
+        })
+        .to_string()
+            + "\n";
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let note_line = lines.next_line().await.unwrap().unwrap();
+        let note_value: Value = serde_json::from_str(&note_line).unwrap();
+        assert_eq!(note_value["method"], "notifications/initialized");
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+    seed_manager_side_state(&mut manager, "srv");
+
+    server_task.await.unwrap();
+
+    while !matches!(manager.connection_exited("srv"), Some(true)) {
+        tokio::task::yield_now().await;
+    }
+
+    assert!(manager.is_connected_cached("srv"));
+    assert_eq!(
+        manager.connected_server_names_cached(),
+        vec![ServerName::parse("srv").unwrap()]
+    );
+    assert!(manager.initialize_result("srv").is_some());
+    assert_eq!(manager.server_handler_timeout_count("srv"), 1);
+    assert_eq!(manager.protocol_version_mismatches().len(), 1);
+
+    assert!(!manager.is_connected("srv"));
+    assert!(!manager.is_connected_cached("srv"));
+    assert!(manager.connected_server_names_cached().is_empty());
+    assert!(manager.initialize_result("srv").is_none());
+    assert_eq!(manager.server_handler_timeout_count("srv"), 0);
+    assert!(manager.protocol_version_mismatches().is_empty());
+}
+
+#[tokio::test]
 async fn server_request_handler_async_panic_disables_future_dispatch() {
     let (client_stream, server_stream) = tokio::io::duplex(2048);
     let (client_read, client_write) = tokio::io::split(client_stream);

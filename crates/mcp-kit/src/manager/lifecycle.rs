@@ -8,8 +8,8 @@ use tokio::process::Child;
 use crate::{ServerConfig, ServerName};
 
 use super::{
-    CachedConnection, Connection, Manager, ProtocolVersionCheck, ProtocolVersionMismatch,
-    handlers::HandlerAttachSnapshot,
+    CachedConnection, Connection, Manager, PreparedTransportConnect, ProtocolVersionCheck,
+    ProtocolVersionMismatch, handlers::HandlerAttachSnapshot,
 };
 
 const BEST_EFFORT_REAP_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -336,6 +336,18 @@ fn start_background_child_reap(mut child: Child) {
 }
 
 impl Manager {
+    pub(crate) async fn connect_prepared_transport(
+        prepared: &PreparedTransportConnect,
+    ) -> anyhow::Result<(mcp_jsonrpc::Client, Option<Child>)> {
+        super::connect_transport(
+            &prepared.ctx,
+            &prepared.server_name,
+            &prepared.server_cfg,
+            &prepared.cwd,
+        )
+        .await
+    }
+
     pub(crate) fn prepare_connection_install(
         &self,
         server_name: &ServerName,
@@ -369,6 +381,20 @@ impl Manager {
 
     pub(crate) fn cleanup_failed_connection_install(&mut self, server_name: &ServerName) {
         self.clear_connection_side_state(server_name.as_str(), false);
+    }
+
+    pub(crate) fn finish_transport_install_attempt(
+        &mut self,
+        server_name: &ServerName,
+        result: anyhow::Result<CompletedTransportInstall>,
+    ) -> anyhow::Result<()> {
+        match result {
+            Ok(completed) => self.commit_transport_install(completed),
+            Err(err) => {
+                self.cleanup_failed_connection_install(server_name);
+                Err(err)
+            }
+        }
     }
 
     pub(crate) fn commit_connection_install(&mut self, completed: CompletedConnectionInstall) {

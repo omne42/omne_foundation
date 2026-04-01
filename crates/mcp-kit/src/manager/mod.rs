@@ -779,18 +779,46 @@ impl Manager {
         self
     }
 
+    /// Returns whether the named server is still connected.
+    ///
+    /// This is a liveness-refreshing query: when the cached connection has
+    /// already died, `Manager` also prunes the dead connection record and its
+    /// associated side state before returning `false`.
     pub fn is_connected(&mut self, server_name: &str) -> bool {
         let server_name = normalize_server_name_lookup(server_name);
         self.is_connected_and_alive(server_name)
+    }
+
+    /// Returns whether a connection entry is currently cached for
+    /// `server_name` without probing liveness or pruning dead state.
+    pub fn is_connected_cached(&self, server_name: &str) -> bool {
+        self.connections
+            .contains_key(normalize_server_name_lookup(server_name))
     }
 
     pub fn is_connected_named(&mut self, server_name: &ServerName) -> bool {
         self.is_connected(server_name.as_str())
     }
 
+    pub fn is_connected_cached_named(&self, server_name: &ServerName) -> bool {
+        self.is_connected_cached(server_name.as_str())
+    }
+
+    /// Returns the names of currently connected servers.
+    ///
+    /// Like [`Manager::is_connected`], this refreshes liveness and prunes dead
+    /// cached connections before returning the result.
     pub fn connected_server_names(&mut self) -> Vec<ServerName> {
-        let mut names = self.connections.keys().cloned().collect::<Vec<_>>();
+        let mut names = self.connected_server_names_cached();
         names.retain(|name| self.is_connected_and_alive(name.as_str()));
+        names
+    }
+
+    /// Returns the cached connection names without probing liveness or pruning
+    /// dead state.
+    pub fn connected_server_names_cached(&self) -> Vec<ServerName> {
+        let mut names = self.connections.keys().cloned().collect::<Vec<_>>();
+        names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         names
     }
 
@@ -811,6 +839,24 @@ impl Manager {
         cwd: &Path,
     ) -> anyhow::Result<()> {
         self.record_connection_cwd_with_base(server_name, cwd, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_connection_side_state_for_test(&mut self, server_name: &str) {
+        self.protocol_version_mismatches
+            .push(ProtocolVersionMismatch {
+                server_name: ServerName::parse(server_name).unwrap(),
+                client_protocol_version: MCP_PROTOCOL_VERSION.to_string(),
+                server_protocol_version: "1900-01-01".to_string(),
+            });
+        self.server_handler_timeout_counts
+            .counter_for(&ServerName::parse(server_name).unwrap())
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connection_is_closed_for_test(&mut self, server_name: &str) -> bool {
+        matches!(self.connection_exited(server_name), Some(true))
     }
 
     #[cfg(test)]
@@ -1222,17 +1268,20 @@ impl Manager {
         server_name: &str,
         cwd: &Path,
     ) -> crate::Result<()> {
-        let server_cfg = config.server(server_name).ok_or_else(|| {
-            crate::error::tagged_message(
-                crate::error::ErrorKind::Config,
-                format!("unknown mcp server: {server_name}"),
-            )
-        })?;
-        Ok(self
-            .connect_with_builder(server_name, server_cfg, cwd, config.thread_root(), || {
-                parse_server_name_anyhow(server_name)
-            })
-            .await?)
+        let cwd = resolve_connection_cwd_with_base_async(config.thread_root(), cwd).await?;
+        let prepared = self.prepare_transport_connect_resolved(config, server_name, cwd)?;
+        let Some(prepared) = prepared else {
+            return Ok(());
+        };
+
+        let (client, child) = Self::connect_prepared_transport(&prepared).await?;
+        let install = self.prepare_transport_install(
+            &prepared.server_name_key,
+            &prepared.cwd,
+            &prepared.server_cfg,
+        );
+        let result = install.run(client, child).await;
+        Ok(self.finish_transport_install_attempt(&prepared.server_name_key, result)?)
     }
 
     pub async fn get_or_connect_named(
@@ -1241,22 +1290,7 @@ impl Manager {
         server_name: &ServerName,
         cwd: &Path,
     ) -> crate::Result<()> {
-        let server_cfg = config.server_named(server_name).ok_or_else(|| {
-            crate::error::tagged_message(
-                crate::error::ErrorKind::Config,
-                format!("unknown mcp server: {server_name}"),
-            )
-        })?;
-        let server_name_key = server_name.clone();
-        Ok(self
-            .connect_with_builder(
-                server_name.as_str(),
-                server_cfg,
-                cwd,
-                config.thread_root(),
-                || Ok(server_name_key),
-            )
-            .await?)
+        self.get_or_connect(config, server_name.as_str(), cwd).await
     }
 
     pub async fn get_or_connect_session(

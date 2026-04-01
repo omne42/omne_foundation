@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::panic::{self, UnwindSafe};
 
 use schemars::{
     JsonSchema,
@@ -10,6 +11,19 @@ use serde::{
     de::{Error as DeError, Unexpected},
 };
 use ts_rs::TS;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ArtifactGenerationError {
+    #[error("failed to serialize generated {context}: {source}")]
+    Serialize {
+        context: &'static str,
+        source: serde_json::Error,
+    },
+    #[error("generated {context} must be a json object")]
+    RootNotObject { context: &'static str },
+    #[error("failed to generate {context}: {details}")]
+    Panic { context: String, details: String },
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
@@ -278,15 +292,17 @@ impl From<&PolicyProfileV1> for PolicyMetaV1 {
     }
 }
 
-pub fn policy_meta_schema_document() -> serde_json::Value {
+pub fn policy_meta_schema_document() -> Result<serde_json::Value, ArtifactGenerationError> {
     export_schema_document::<PolicyMetaV1>(POLICY_META_SCHEMA_ID, POLICY_META_SCHEMA_DESCRIPTION)
 }
 
-pub fn policy_profile_schema_document() -> serde_json::Value {
-    let mut value = policy_meta_schema_document();
+pub fn policy_profile_schema_document() -> Result<serde_json::Value, ArtifactGenerationError> {
+    let mut value = policy_meta_schema_document()?;
     let object = value
         .as_object_mut()
-        .expect("generated root schema should be an object");
+        .ok_or(ArtifactGenerationError::RootNotObject {
+            context: "policy profile schema document",
+        })?;
 
     object.insert(
         "$id".to_string(),
@@ -310,14 +326,18 @@ pub fn policy_profile_schema_document() -> serde_json::Value {
         ]),
     );
 
-    value
+    Ok(value)
 }
 
-pub fn schema_documents() -> [(&'static str, serde_json::Value); 2] {
-    [
-        (POLICY_META_SCHEMA_FILE, policy_meta_schema_document()),
-        (POLICY_PROFILE_SCHEMA_FILE, policy_profile_schema_document()),
-    ]
+pub fn schema_documents() -> Result<[(&'static str, serde_json::Value); 2], ArtifactGenerationError>
+{
+    Ok([
+        (POLICY_META_SCHEMA_FILE, policy_meta_schema_document()?),
+        (
+            POLICY_PROFILE_SCHEMA_FILE,
+            policy_profile_schema_document()?,
+        ),
+    ])
 }
 
 pub fn profile_documents() -> [(&'static str, PolicyProfileV1); 4] {
@@ -357,15 +377,15 @@ pub fn profile_documents() -> [(&'static str, PolicyProfileV1); 4] {
     ]
 }
 
-pub fn policy_meta_typescript_bindings() -> String {
+pub fn policy_meta_typescript_bindings() -> Result<String, ArtifactGenerationError> {
     let declarations = [
-        <SpecVersion as TS>::decl(),
-        <RiskProfile as TS>::decl(),
-        <WriteScope as TS>::decl(),
-        <ExecutionIsolation as TS>::decl(),
-        <Decision as TS>::decl(),
-        <PolicyMetaV1 as TS>::decl(),
-        <PolicyProfileV1 as TS>::decl(),
+        typescript_declaration::<SpecVersion>("SpecVersion")?,
+        typescript_declaration::<RiskProfile>("RiskProfile")?,
+        typescript_declaration::<WriteScope>("WriteScope")?,
+        typescript_declaration::<ExecutionIsolation>("ExecutionIsolation")?,
+        typescript_declaration::<Decision>("Decision")?,
+        typescript_declaration::<PolicyMetaV1>("PolicyMetaV1")?,
+        typescript_declaration::<PolicyProfileV1>("PolicyProfileV1")?,
     ];
 
     let mut output = String::from(
@@ -377,24 +397,45 @@ pub fn policy_meta_typescript_bindings() -> String {
         output.push_str(&declaration);
         output.push('\n');
     }
-    output
+    Ok(output)
 }
 
 fn export_schema_document<T: JsonSchema>(
     schema_id: &'static str,
     description: &'static str,
-) -> serde_json::Value {
-    let settings = SchemaSettings::draft2019_09().with(|settings| {
-        settings.option_nullable = false;
-        settings.option_add_null_type = false;
-        settings.inline_subschemas = true;
-    });
+) -> Result<serde_json::Value, ArtifactGenerationError> {
+    catch_generation(format!("{} schema document", T::schema_name()), || {
+        let settings = SchemaSettings::draft2019_09().with(|settings| {
+            settings.option_nullable = false;
+            settings.option_add_null_type = false;
+            settings.inline_subschemas = true;
+        });
 
-    let mut value = serde_json::to_value(settings.into_generator().into_root_schema_for::<T>())
-        .expect("serialize generated schema");
+        let value = serde_json::to_value(settings.into_generator().into_root_schema_for::<T>())
+            .map_err(|source| ArtifactGenerationError::Serialize {
+                context: "json schema document",
+                source,
+            })?;
+        decorate_schema_document(
+            value,
+            schema_id,
+            description,
+            T::schema_name(),
+            "json schema document",
+        )
+    })
+}
+
+fn decorate_schema_document(
+    mut value: serde_json::Value,
+    schema_id: &'static str,
+    description: &'static str,
+    title: String,
+    context: &'static str,
+) -> Result<serde_json::Value, ArtifactGenerationError> {
     let object = value
         .as_object_mut()
-        .expect("generated root schema should be an object");
+        .ok_or(ArtifactGenerationError::RootNotObject { context })?;
 
     object.insert(
         "$schema".to_string(),
@@ -404,10 +445,7 @@ fn export_schema_document<T: JsonSchema>(
         "$id".to_string(),
         serde_json::Value::String(schema_id.to_string()),
     );
-    object.insert(
-        "title".to_string(),
-        serde_json::Value::String(T::schema_name()),
-    );
+    object.insert("title".to_string(), serde_json::Value::String(title));
     object.insert(
         "description".to_string(),
         serde_json::Value::String(description.to_string()),
@@ -420,7 +458,38 @@ fn export_schema_document<T: JsonSchema>(
         object.remove("definitions");
     }
 
-    value
+    Ok(value)
+}
+
+fn typescript_declaration<T: TS>(
+    type_name: &'static str,
+) -> Result<String, ArtifactGenerationError> {
+    catch_generation(format!("typescript declaration for {type_name}"), || {
+        Ok(T::decl())
+    })
+}
+
+fn catch_generation<T>(
+    context: String,
+    operation: impl FnOnce() -> Result<T, ArtifactGenerationError> + UnwindSafe,
+) -> Result<T, ArtifactGenerationError> {
+    match panic::catch_unwind(operation) {
+        Ok(result) => result,
+        Err(payload) => Err(ArtifactGenerationError::Panic {
+            context,
+            details: panic_payload_to_string(payload),
+        }),
+    }
+}
+
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(message) => (*message).to_string(),
+            Err(_) => "non-string panic payload".to_string(),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -542,31 +611,39 @@ mod tests {
 
     #[test]
     fn generated_policy_meta_schema_matches_contract() {
-        assert_policy_meta_schema(&policy_meta_schema_document());
+        assert_policy_meta_schema(&policy_meta_schema_document().expect("generate policy schema"));
     }
 
     #[test]
     fn generated_policy_profile_schema_matches_contract() {
-        assert_policy_profile_schema(&policy_profile_schema_document());
+        assert_policy_profile_schema(
+            &policy_profile_schema_document().expect("generate policy profile schema"),
+        );
     }
 
     #[test]
     fn checked_in_policy_meta_schema_matches_contract() {
         let checked_in = checked_in_schema(POLICY_META_SCHEMA_FILE);
         assert_policy_meta_schema(&checked_in);
-        assert_eq!(checked_in, policy_meta_schema_document());
+        assert_eq!(
+            checked_in,
+            policy_meta_schema_document().expect("generate policy schema")
+        );
     }
 
     #[test]
     fn checked_in_policy_profile_schema_matches_contract() {
         let checked_in = checked_in_schema(POLICY_PROFILE_SCHEMA_FILE);
         assert_policy_profile_schema(&checked_in);
-        assert_eq!(checked_in, policy_profile_schema_document());
+        assert_eq!(
+            checked_in,
+            policy_profile_schema_document().expect("generate policy profile schema")
+        );
     }
 
     #[test]
     fn generated_typescript_bindings_contain_core_types() {
-        let bindings = policy_meta_typescript_bindings();
+        let bindings = policy_meta_typescript_bindings().expect("generate ts bindings");
         assert!(bindings.contains("export type SpecVersion = 1;"));
         assert!(bindings.contains(
             "export type RiskProfile = \"safe\" | \"standard\" | \"proactive\" | \"danger\";"
@@ -582,7 +659,10 @@ mod tests {
             .join("bindings")
             .join(POLICY_META_TYPES_FILE);
         let checked_in = std::fs::read_to_string(path).expect("read typescript bindings");
-        assert_eq!(checked_in, policy_meta_typescript_bindings());
+        assert_eq!(
+            checked_in,
+            policy_meta_typescript_bindings().expect("generate ts bindings")
+        );
     }
 
     #[test]
@@ -636,10 +716,45 @@ mod tests {
 
     #[test]
     fn policy_profile_schema_reuses_fragment_property_domain() {
-        let fragment = policy_meta_schema_document();
-        let profile = policy_profile_schema_document();
+        let fragment = policy_meta_schema_document().expect("generate policy schema");
+        let profile = policy_profile_schema_document().expect("generate profile schema");
 
         assert_eq!(profile["properties"], fragment["properties"]);
+    }
+
+    #[test]
+    fn schema_decoration_rejects_non_object_root() {
+        let err = decorate_schema_document(
+            json!(null),
+            POLICY_META_SCHEMA_ID,
+            POLICY_META_SCHEMA_DESCRIPTION,
+            "PolicyMetaV1".to_string(),
+            "test schema document",
+        )
+        .expect_err("non-object roots should fail");
+
+        assert!(matches!(
+            err,
+            ArtifactGenerationError::RootNotObject {
+                context: "test schema document"
+            }
+        ));
+    }
+
+    #[test]
+    fn generation_helpers_surface_panics_as_errors() {
+        let err = catch_generation("panic test".to_string(), || {
+            panic!("boom");
+            #[allow(unreachable_code)]
+            Ok::<(), ArtifactGenerationError>(())
+        })
+        .expect_err("panic should become an error");
+
+        assert!(matches!(
+            err,
+            ArtifactGenerationError::Panic { ref context, ref details }
+            if context == "panic test" && details == "boom"
+        ));
     }
 
     fn assert_common_properties(schema: &Value) {

@@ -50,8 +50,8 @@
 
 - `src/lib.rs`
   - canonical enum / struct 定义
-  - JSON Schema 2019-09 生成
-  - TypeScript declarations 导出
+  - fallible JSON Schema 2019-09 生成
+  - fallible TypeScript declarations 导出
   - checked-in artifact drift 检查与 stale artifact 清理
   - 结构化 artifact 错误边界
 - `src/bin/export-artifacts.rs`
@@ -87,6 +87,11 @@
 - Baseline profiles: `profiles/*.yaml`
 
 checked-in schema 和 TypeScript bindings 由 Rust 类型定义导出，并通过 `export-artifacts` 做同步校验。
+
+导出相关边界分两层：
+
+- 库层只负责纯生成结果，但生成 API 现在是 fallible 的；上游如果遇到 schema/TS 生成器行为漂移，会得到可处理错误而不是 panic
+- 文件系统写入、目录漂移检查和 CLI 参数错误继续收口在 `src/bin/` 的 typed error 边界
 `profiles/` 也纳入同一个 drift check；目录里如果残留额外的旧 artifact，`--check` 会直接失败，默认导出会把这些陈旧文件清掉。
 
 artifact 的文件系统导出/校验工作流只收口在 `src/bin/` 的 CLI 层：

@@ -569,6 +569,23 @@ async fn load_parses_unix_transport_and_resolves_relative_path() {
 }
 
 #[tokio::test]
+async fn load_denies_unix_transport_parent_dir_escape() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{ "version": 1, "servers": { "sock": { "transport": "unix", "unix_path": "../sock/mcp.sock" } } }"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(
+        err.to_string().contains("unix_path") && err.to_string().contains("`..`"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
 async fn load_parses_streamable_http_transport() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(

@@ -189,6 +189,12 @@ impl ServerConfig {
         if unix_path.as_os_str().is_empty() {
             public_bail!("mcp server transport=unix: unix_path must not be empty");
         }
+        if unix_path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        {
+            public_bail!("mcp server transport=unix: unix_path must not contain `..` segments");
+        }
         Ok(Self::Unix(UnixServerConfig { unix_path }))
     }
 
@@ -255,6 +261,15 @@ impl ServerConfig {
             Self::Unix(cfg) => {
                 if cfg.unix_path.as_os_str().is_empty() {
                     public_bail!("mcp server transport=unix: unix_path must not be empty");
+                }
+                if cfg
+                    .unix_path
+                    .components()
+                    .any(|component| matches!(component, Component::ParentDir))
+                {
+                    public_bail!(
+                        "mcp server transport=unix: unix_path must not contain `..` segments"
+                    );
                 }
             }
             Self::StreamableHttp(cfg) => {

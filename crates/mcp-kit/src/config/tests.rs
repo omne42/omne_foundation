@@ -1184,6 +1184,24 @@ async fn load_override_path_is_fail_closed() {
 }
 
 #[tokio::test]
+async fn load_fails_closed_when_candidate_discovery_root_is_missing() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let missing_root = tempdir.path().join("missing-root");
+    drop(tempdir);
+
+    let err = Config::load(&missing_root, None).await.unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("inspect MCP config root before candidate discovery"),
+        "err={msg}"
+    );
+    assert!(
+        msg.contains(&missing_root.display().to_string()),
+        "err={msg}"
+    );
+}
+
+#[tokio::test]
 async fn load_rejects_relative_override_path_outside_root() {
     let root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();

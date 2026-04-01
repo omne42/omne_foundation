@@ -924,7 +924,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -989,7 +989,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -1085,7 +1085,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -1138,7 +1138,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": {},
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -1190,7 +1190,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -1281,7 +1281,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -1371,7 +1371,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -1484,7 +1484,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -1603,7 +1603,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -1793,7 +1793,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -1859,7 +1859,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "old" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "old" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -1894,7 +1894,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "new" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "new" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -2125,7 +2125,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -2169,7 +2169,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo-reconnect" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo-reconnect" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -2316,7 +2316,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -2538,7 +2538,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -2662,7 +2662,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -2799,7 +2799,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -2986,7 +2986,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "slow" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "slow" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -3035,7 +3035,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "fast" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "fast" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -3183,7 +3183,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -3310,7 +3310,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -3400,7 +3400,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -3537,7 +3537,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -3620,7 +3620,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -3733,7 +3733,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -3831,7 +3831,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo-a" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo-a" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');
@@ -3951,7 +3951,7 @@ mod tests {
             let init_response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": init_id,
-                "result": { "serverInfo": { "name": "demo-a" } },
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo-a" } },
             });
             let mut init_response_line = serde_json::to_string(&init_response).unwrap();
             init_response_line.push('\n');

@@ -116,7 +116,19 @@ impl InitializeSnapshot {
                     ProtocolVersionCheck::Ignore => ProtocolVersionMismatchUpdate::None,
                 }
             }
-            Some(_) | None => ProtocolVersionMismatchUpdate::Clear,
+            None => match self.protocol_version_check {
+                ProtocolVersionCheck::Strict => {
+                    anyhow::bail!(
+                        "mcp initialize missing protocolVersion in result (server={}): client={}",
+                        server_name.as_str(),
+                        self.protocol_version
+                    );
+                }
+                ProtocolVersionCheck::Warn | ProtocolVersionCheck::Ignore => {
+                    ProtocolVersionMismatchUpdate::Clear
+                }
+            },
+            Some(_) => ProtocolVersionMismatchUpdate::Clear,
         };
 
         Manager::notify_raw(

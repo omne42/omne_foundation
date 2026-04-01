@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `CachingSecretResolver` 现在把同一 cacheable spec 的 single-flight 边界前移到 `prepare_secret_resolution(...)`；并发 miss 不会再重复执行昂贵的 prepare 阶段，相关语义也补了 prepare-stage 回归测试。
 - `secret-kit` no longer vendors `omne-fs-primitives` / `omne-process-primitives` inside `omne_foundation`; it now depends on the canonical runtime-owned crates from `omne-runtime`, so host/runtime primitives stop drifting across two workspaces.
 - `secret-kit` 现在明确标记为 `publish = false`。在它依赖的 workspace/runtime foundation crate 还未形成独立 crates.io 发布链前，本 crate 只承诺 Git / monorepo 复用边界，不再让 manifest 隐含“当前可直接单独发布”的错误信号。
 - `secret-kit`：根命名空间现在只保留 `SecretString` / `SecretError` / `Result` 这类值对象；`secret://` 规范与运行时契约收口到显式的 `secret_kit::spec` / `secret_kit::runtime` 子模块，避免把解析规范、运行时边界和值对象继续混成一个平面 API。

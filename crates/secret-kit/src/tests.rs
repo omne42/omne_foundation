@@ -287,6 +287,69 @@ impl Default for SlowResolver {
     }
 }
 
+struct SlowPrepareResolver {
+    prepare_calls: AtomicUsize,
+    resolve_calls: AtomicUsize,
+    delay: Duration,
+}
+
+impl Default for SlowPrepareResolver {
+    fn default() -> Self {
+        Self {
+            prepare_calls: AtomicUsize::new(0),
+            resolve_calls: AtomicUsize::new(0),
+            delay: Duration::from_millis(50),
+        }
+    }
+}
+
+impl SecretResolver for SlowPrepareResolver {
+    fn resolve_secret<'a>(
+        &'a self,
+        _spec: &'a str,
+        _context: SecretResolutionContext<'a>,
+    ) -> SecretResolveFuture<'a> {
+        Box::pin(async move {
+            let call = self.resolve_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            tokio::time::sleep(self.delay).await;
+            Ok(SecretString::from(format!("value-{call}")))
+        })
+    }
+}
+
+impl CacheAwareSecretResolver for SlowPrepareResolver {
+    type Prepared = ();
+
+    fn lookup_secret_cache_partitioning(
+        &self,
+        _spec: &str,
+        _context: SecretResolutionContext<'_>,
+    ) -> Option<SecretCachePartitioning> {
+        Some(SecretCachePartitioning::Environment)
+    }
+
+    async fn prepare_secret_resolution(
+        &self,
+        spec: &str,
+        _context: SecretResolutionContext<'_>,
+    ) -> Result<PreparedSecretResolution<Self::Prepared>> {
+        self.prepare_calls.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(self.delay).await;
+        Ok(PreparedSecretResolution::cached(
+            (),
+            format!("prepared:{spec}"),
+        ))
+    }
+
+    async fn resolve_prepared_secret(
+        &self,
+        _prepared: Self::Prepared,
+        context: SecretResolutionContext<'_>,
+    ) -> Result<SecretString> {
+        self.resolve_secret("", context).await
+    }
+}
+
 impl SecretResolver for SlowResolver {
     fn resolve_secret<'a>(
         &'a self,
@@ -2531,6 +2594,64 @@ async fn caching_resolver_coalesces_concurrent_misses() -> Result<()> {
     assert_eq!(first?, "value-1");
     assert_eq!(second?, "value-1");
     assert_eq!(resolver.inner().calls.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn caching_resolver_coalesces_concurrent_prepare_stage() -> Result<()> {
+    let resolver =
+        CachingSecretResolver::new(SlowPrepareResolver::default(), Duration::from_secs(60));
+    let env = TestEnv::default();
+
+    let first = async { resolver.resolve_secret_text("spec-a", &env).await };
+    let second = async { resolver.resolve_secret_text("spec-a", &env).await };
+    let (first, second) = tokio::join!(first, second);
+
+    assert_eq!(first?, "value-1");
+    assert_eq!(second?, "value-1");
+    assert_eq!(
+        resolver.inner().prepare_calls.load(Ordering::SeqCst),
+        1,
+        "prepare stage should also be coalesced for the same cacheable spec",
+    );
+    assert_eq!(
+        resolver.inner().resolve_calls.load(Ordering::SeqCst),
+        1,
+        "successful fill should still happen once",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn caching_resolver_coalesces_prepare_before_cache_key_is_known() -> Result<()> {
+    let resolver =
+        CachingSecretResolver::new(SlowPrepareResolver::default(), Duration::from_secs(60));
+    let env = TestEnv::default();
+
+    let first = async { resolver.resolve_secret_text("spec-a", &env).await };
+    let second = async { resolver.resolve_secret_text("spec-a", &env).await };
+    let (first, second) = tokio::join!(first, second);
+
+    assert_eq!(first?, "value-1");
+    assert_eq!(second?, "value-1");
+    assert_eq!(resolver.inner().prepare_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(resolver.inner().resolve_calls.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn caching_resolver_reuses_cached_value_after_prepare_only_cache_key() -> Result<()> {
+    let resolver =
+        CachingSecretResolver::new(SlowPrepareResolver::default(), Duration::from_secs(60));
+    let env = TestEnv::default();
+
+    let first = resolver.resolve_secret_text("spec-a", &env).await?;
+    let second = resolver.resolve_secret_text("spec-a", &env).await?;
+
+    assert_eq!(first, "value-1");
+    assert_eq!(second, "value-1");
+    assert_eq!(resolver.inner().prepare_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(resolver.inner().resolve_calls.load(Ordering::SeqCst), 1);
     Ok(())
 }
 

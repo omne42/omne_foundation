@@ -29,3 +29,8 @@ async fn core_namespace_supports_hub_without_builtin_sinks() {
         .await
         .expect("core hub send should succeed");
 }
+
+#[test]
+fn builtin_namespace_exposes_env_bootstrap() {
+    let _ = notify_kit::builtin::env::StandardEnvHubOptions::default();
+}

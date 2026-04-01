@@ -8,6 +8,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ### Changed
 - `notify-kit::Error` 现在提供稳定的 `error-kit::ErrorRecord` 映射；调用方可以按 machine-readable error code/category/retry metadata 判断 runtime-unavailable、聚合 sink failure 等公开错误语义，而不必继续解析显示文案。
+- `notify_kit::builtin::env` 现在被明确为标准 `NOTIFY_*` bootstrap helper 的 canonical 入口；crate root 下的 `notify_kit::env` 仅继续作为隐藏的兼容出口保留，避免 integration helper 继续占据核心命名空间。
 - 收紧 `README.md` 到 crate 级地图与边界说明，把更窄的 features、helper、示例和专题细节收口到 `docs/`，以保持 crate 文档符合仓库的渐进披露规则。
 - `GitHubCommentConfig` 的 `Debug` 输出现在也会像 `GitHubCommentSink` 一样对 `api_base` 做 URL 脱敏，不再把 query、credentials 或额外 path 细节原样写进日志。
 - `GitHubCommentSink` 现在继续复用 `github-kit` 的 bearer-token 目标校验与 public-IP pinning 约束；即使显式信任自定义 GitHub API base，localhost、单标签主机和私网 IP literal 目标仍会在发送前被拒绝。

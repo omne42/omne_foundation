@@ -90,7 +90,7 @@ pub async fn validate_untrusted_outbound_url_dns(
     policy: &UntrustedOutboundPolicy,
     url: &reqwest::Url,
 ) -> Result<(), UntrustedOutboundError> {
-    if !policy.dns_check || policy.allow_private_ips {
+    if !policy.dns_check {
         return Ok(());
     }
 
@@ -130,9 +130,19 @@ pub async fn validate_untrusted_outbound_url_dns(
         }
     };
 
+    validate_resolved_addrs(policy, host, addrs)?;
+
+    Ok(())
+}
+
+fn validate_resolved_addrs(
+    policy: &UntrustedOutboundPolicy,
+    host: &str,
+    addrs: impl IntoIterator<Item = std::net::SocketAddr>,
+) -> Result<(), UntrustedOutboundError> {
     for addr in addrs {
         let ip = normalize_ip(addr.ip());
-        if is_always_disallowed_ip(ip) || is_non_global_ip(ip) {
+        if is_always_disallowed_ip(ip) || (!policy.allow_private_ips && is_non_global_ip(ip)) {
             return Err(UntrustedOutboundError::ResolvedToNonGlobalIp {
                 host: host.to_string(),
                 ip,
@@ -326,5 +336,40 @@ mod tests {
         validate_untrusted_outbound_url_dns(&policy, &url)
             .await
             .expect("fail-open dns policy");
+    }
+
+    #[tokio::test]
+    async fn dns_check_with_private_ip_override_still_allows_loopback_results() {
+        let policy = UntrustedOutboundPolicy {
+            allow_localhost: true,
+            allow_private_ips: true,
+            dns_check: true,
+            ..Default::default()
+        };
+        let url = reqwest::Url::parse("https://localhost/mcp").expect("parse url");
+        validate_untrusted_outbound_url_dns(&policy, &url)
+            .await
+            .expect("private-ip override should still allow loopback dns results");
+    }
+
+    #[test]
+    fn resolved_always_disallowed_ip_is_rejected_even_with_private_ip_override() {
+        let policy = UntrustedOutboundPolicy {
+            allow_private_ips: true,
+            ..Default::default()
+        };
+
+        let err = validate_resolved_addrs(
+            &policy,
+            "example.test",
+            [std::net::SocketAddr::from(([0, 0, 0, 0], 443))],
+        )
+        .expect_err("always-disallowed ip must still be rejected");
+
+        assert!(matches!(
+            err,
+            UntrustedOutboundError::ResolvedToNonGlobalIp { ip, .. }
+                if ip == IpAddr::from([0, 0, 0, 0])
+        ));
     }
 }

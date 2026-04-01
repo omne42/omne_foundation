@@ -302,26 +302,29 @@ impl Manager {
                             }
                         }
 
-                        match outcome {
+                        let response = match outcome {
                             ServerRequestOutcome::Ok(result) => {
-                                let _ = req.respond_ok(result).await;
+                                req.respond_ok(result).await
                             }
                             ServerRequestOutcome::Error {
                                 code,
                                 message,
                                 data,
                             } => {
-                                let _ = req.respond_error(code, message, data).await;
+                                req.respond_error(code, message, data).await
                             }
                             ServerRequestOutcome::MethodNotFound => {
-                                let _ = req
-                                    .respond_error(
-                                        JSONRPC_METHOD_NOT_FOUND,
-                                        format!("method not found: {}", method.as_str()),
-                                        None,
-                                    )
-                                    .await;
+                                req.respond_error(
+                                    JSONRPC_METHOD_NOT_FOUND,
+                                    format!("method not found: {}", method.as_str()),
+                                    None,
+                                )
+                                .await
                             }
+                        };
+
+                        if response.is_err() {
+                            return HandlerTaskStatus::Stop;
                         }
 
                         status

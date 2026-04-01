@@ -60,6 +60,7 @@ wecom = ["dep:http-kit", "dep:reqwest"]
 [dependencies]
 anyhow = "1"
 base64 = { version = "0.22", optional = true }
+error-kit = { version = "0.1.0", path = "../error-kit" }
 futures-util = "0.3"
 hmac = { version = "0.12", optional = true }
 http-kit = { version = "0.1.0", path = "../http-kit", optional = true }

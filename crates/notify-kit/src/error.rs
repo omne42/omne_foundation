@@ -1,3 +1,5 @@
+use error_kit::{ErrorCategory, ErrorCode, ErrorRecord, ErrorRetryAdvice};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     Other,
@@ -87,6 +89,63 @@ impl Error {
     pub fn from_sink_failures(failures: Vec<SinkFailure>) -> Self {
         Self::new(ErrorKind::SinkFailures, ErrorRepr::SinkFailures(failures))
     }
+
+    #[must_use]
+    pub fn error_code(&self) -> ErrorCode {
+        literal_error_code(match self.kind {
+            ErrorKind::Other => "notify_kit.other",
+            ErrorKind::RuntimeUnavailable => "notify_kit.runtime_unavailable",
+            ErrorKind::SinkFailures => "notify_kit.sink_failures",
+        })
+    }
+
+    #[must_use]
+    pub fn error_category(&self) -> ErrorCategory {
+        match self.kind {
+            ErrorKind::Other | ErrorKind::SinkFailures => ErrorCategory::ExternalDependency,
+            ErrorKind::RuntimeUnavailable => ErrorCategory::Unavailable,
+        }
+    }
+
+    #[must_use]
+    pub fn retry_advice(&self) -> ErrorRetryAdvice {
+        match self.kind {
+            ErrorKind::SinkFailures => ErrorRetryAdvice::Retryable,
+            ErrorKind::Other | ErrorKind::RuntimeUnavailable => ErrorRetryAdvice::DoNotRetry,
+        }
+    }
+
+    #[must_use]
+    pub fn error_record(&self) -> ErrorRecord {
+        ErrorRecord::new_freeform(self.error_code(), kind_user_text(self.kind))
+            .with_category(self.error_category())
+            .with_retry_advice(self.retry_advice())
+            .with_freeform_diagnostic_text(self.to_string())
+    }
+
+    #[must_use]
+    pub fn into_error_record(self) -> ErrorRecord {
+        match self {
+            Self {
+                kind,
+                repr: ErrorRepr::Other(err),
+            } => {
+                ErrorRecord::new_freeform(literal_error_code(kind_code(kind)), kind_user_text(kind))
+                    .with_category(kind_category(kind))
+                    .with_retry_advice(kind_retry_advice(kind))
+                    .with_freeform_diagnostic_text(err.to_string())
+            }
+            Self {
+                kind,
+                repr: ErrorRepr::SinkFailures(failures),
+            } => {
+                ErrorRecord::new_freeform(literal_error_code(kind_code(kind)), kind_user_text(kind))
+                    .with_category(kind_category(kind))
+                    .with_retry_advice(kind_retry_advice(kind))
+                    .with_freeform_diagnostic_text(format_sink_failures(&failures))
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for Error {
@@ -162,8 +221,57 @@ impl From<std::io::Error> for Error {
     }
 }
 
+impl From<Error> for ErrorRecord {
+    fn from(error: Error) -> Self {
+        error.into_error_record()
+    }
+}
+
+fn literal_error_code(code: &'static str) -> ErrorCode {
+    ErrorCode::try_new(code).expect("literal error code should validate")
+}
+
+fn kind_code(kind: ErrorKind) -> &'static str {
+    match kind {
+        ErrorKind::Other => "notify_kit.other",
+        ErrorKind::RuntimeUnavailable => "notify_kit.runtime_unavailable",
+        ErrorKind::SinkFailures => "notify_kit.sink_failures",
+    }
+}
+
+fn kind_user_text(kind: ErrorKind) -> &'static str {
+    match kind {
+        ErrorKind::Other => "notify-kit operation failed",
+        ErrorKind::RuntimeUnavailable => "notify-kit runtime is unavailable",
+        ErrorKind::SinkFailures => "one or more notification sinks failed",
+    }
+}
+
+fn kind_category(kind: ErrorKind) -> ErrorCategory {
+    match kind {
+        ErrorKind::Other | ErrorKind::SinkFailures => ErrorCategory::ExternalDependency,
+        ErrorKind::RuntimeUnavailable => ErrorCategory::Unavailable,
+    }
+}
+
+fn kind_retry_advice(kind: ErrorKind) -> ErrorRetryAdvice {
+    match kind {
+        ErrorKind::SinkFailures => ErrorRetryAdvice::Retryable,
+        ErrorKind::Other | ErrorKind::RuntimeUnavailable => ErrorRetryAdvice::DoNotRetry,
+    }
+}
+
+fn format_sink_failures(failures: &[SinkFailure]) -> String {
+    failures
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
+    use error_kit::{ErrorCategory, ErrorRetryAdvice};
     use std::error::Error as _;
 
     use super::{Error, ErrorKind, SinkFailure};
@@ -183,5 +291,36 @@ mod tests {
             .source()
             .expect("sink failure should expose inner error");
         assert_eq!(root.to_string(), "disk full");
+    }
+
+    #[test]
+    fn runtime_unavailable_maps_to_unavailable_record() {
+        let record = Error::from(crate::TryNotifyError::NoTokioRuntime).into_error_record();
+
+        assert_eq!(record.code().as_str(), "notify_kit.runtime_unavailable");
+        assert_eq!(record.category(), ErrorCategory::Unavailable);
+        assert_eq!(record.retry_advice(), ErrorRetryAdvice::DoNotRetry);
+    }
+
+    #[test]
+    fn aggregate_sink_failures_map_to_retryable_external_dependency_records() {
+        let record = Error::from_sink_failures(vec![SinkFailure::new(
+            0,
+            "slack",
+            Error::from(std::io::Error::other("dial failed")),
+        )])
+        .into_error_record();
+
+        assert_eq!(record.code().as_str(), "notify_kit.sink_failures");
+        assert_eq!(record.category(), ErrorCategory::ExternalDependency);
+        assert_eq!(record.retry_advice(), ErrorRetryAdvice::Retryable);
+        let diagnostic = format!(
+            "{}",
+            record
+                .diagnostic_text()
+                .expect("diagnostic text")
+                .diagnostic_display()
+        );
+        assert!(diagnostic.contains("slack"));
     }
 }

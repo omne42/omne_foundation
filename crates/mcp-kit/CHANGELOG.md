@@ -10,8 +10,9 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：`streamable_http` / `jsonrpc` 文档里的 `request_timeout` 说明现在与 `mcp-jsonrpc` 主线实现保持一致：它只约束单次 POST 的建连、首个 HTTP response 和非 SSE JSON body 读取，不再声称会截断健康的 POST-as-SSE 持续响应流。
 - `mcp-kit`：`cwd` identity 与 `stdout_log.path` root-boundary 检查现在复用同一套私有路径归一化/已存在前缀 canonicalize helper，减少后续边界修补时两处逻辑漂移的风险，同时保持现有 fail-open/fail-closed 语义不变。
-- `mcp-kit`：`SharedManager::{request_connected,notify_connected}` 现在会把 same-server 读门禁一直持有到对应 JSON-RPC I/O 完成，避免并发 `disconnect("srv")` 在 in-flight connected request/notify 中途拆掉底层连接。
+- `mcp-kit`：`SharedManager::{request,notify,request_connected,notify_connected}` 现在都会在借到连接后把 same-server 生命周期门禁降级成读门禁并持有到对应 JSON-RPC I/O 完成；同 server 的 request/notify 仍可 overlap，但并发 `disconnect("srv")` 不会再中途拆掉借出的连接。
 - `mcp-kit`：`Config::load*` 在候选 `mcp.json` 探测前会先验证 config root 本身存在；缺失/失效 root 不再被静默当成“没有配置文件”并回退为空配置，而是 fail-closed 返回真实文件系统错误。
 - `mcp-kit`：`transport=unix` 的 `unix_path` 现在和 `stdout_log.path` 一样 fail-closed 拒绝 `..` segment；相对 socket 路径仍按 `--root` 解析，但不再允许通过 `../` 静默逃逸 root 边界。
 - `mcp-kit`：server request handler 在响应写回失败时不再吞掉错误继续复用 dispatch loop；现在会立即停掉该 request handler 任务，让 `Manager` 的连接存活性检查把这条坏 session fail-closed 清理掉，并补充回归测试锁住该语义。
@@ -32,7 +33,6 @@
 - `mcp-kit`：`ErrorKind` 现在会按 `mcp_jsonrpc::Error` 的真实变体分类，底层 transport I/O 故障不再被误标成 `Protocol`；`mcpctl` 的 cwd-unavailable helper 测试也会在退出前恢复有效工作目录，避免留下已删除 cwd 的测试噪音。
 - `mcp-kit`：README、crate docs 和 FAQ 现在明确区分“当前实例内按需重建已关闭连接”和“后台自动重连/daemon 化”，避免文档与实现语义漂移。
 - `mcp-kit`（BREAKING）：`Config::with_path`、`Manager::with_protocol_version` 和 `Manager::with_capabilities` 现在会在构造期做 fail-fast 校验并返回 `Result<Self>`；相对 config path、空 `protocol_version` 和非 object `capabilities` 不再拖到后续 `current_dir()` 解析或 `initialize` 握手时才炸。
-- `mcp-kit`：`SharedManager` 的 `request` / `notify` / `request_connected` / `notify_connected` 现在都会在借到 `ClientHandle` 后立即释放 same-server lifecycle gate，包括 cold-start config 驱动首次请求；同 server 的普通 RPC 不再被错误串行化到首个 I/O 完成。
 - `mcp-kit`：`SharedManager` 的 config 驱动 `request` / `notify` 现在对已复用连接先走 per-server 读门禁，只把 cold-start / disconnect / reconnect 留在写门禁里；同 server 普通 RPC 在借到 handle 后可并发，而生命周期变更仍会等在读侧收尾后再继续。
 - `mcp-kit`：`shared_manager_request_allows_concurrent_same_server_reuse_after_connect` 回归测试不再假设并发请求的到达顺序固定，只继续验证“两次请求都会在首个响应前抵达 server”，避免把 Tokio 调度先后误判成连接复用回归。
 - `mcp-kit`：`SharedManager` 新增 `spawn_inheriting_handler_scope(...)`，把 handler 子任务回调 `SharedManager` 时的 reentrant fail-fast 语义从“依赖 Tokio task-local 是否碰巧继承”收口成显式入口；同时文档与测试明确了 bare `tokio::spawn(...)` 仍按外部调用处理，不会自动继承 handler scope。

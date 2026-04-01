@@ -18,12 +18,12 @@ const REENTRANT_HANDLER_ERROR: &str = "SharedManager async operations cannot be 
 /// This wrapper is intentionally a single-flight lifecycle gate, not an actor. It serializes
 /// manager state access through a single async mutex, while same-server connect/disconnect paths
 /// also share a per-server gate so cold starts and teardown cannot overlap. Config-driven
-/// request/notify operations release the lifecycle gate before awaiting JSON-RPC I/O once they
-/// have borrowed a client handle, including the cold-start path after the freshly installed
-/// connection has been prepared for use. Already-connected request/notify operations keep the
-/// same-server read gate until their I/O finishes so concurrent `disconnect` cannot tear down the
-/// borrowed connection underneath them. Lifecycle and inspection operations still execute under
-/// the shared lock.
+/// request/notify operations downgrade the lifecycle gate to a same-server read lock before
+/// awaiting JSON-RPC I/O, including the cold-start path after the freshly installed connection
+/// has been prepared for use. That read gate stays alive until the in-flight request/notify
+/// finishes, so concurrent same-server `disconnect` cannot tear down the borrowed connection
+/// underneath it while sibling request/notify operations can still overlap. Lifecycle and
+/// inspection operations still execute under the shared lock.
 ///
 /// Reentrant fail-fast is scoped to the current manager handler task, not to global handler
 /// activity. If some other handler for the same `Manager` is active elsewhere, external callers
@@ -318,10 +318,9 @@ impl SharedManager {
             .try_prepare_reusable_connected_client(operation, config, server_name, Some(&cwd))
             .await?
         {
-            drop(read_gate);
             return Ok(PreparedSharedClient {
                 prepared,
-                same_server_gate: None,
+                same_server_gate: Some(read_gate),
             });
         }
         drop(read_gate);
@@ -354,10 +353,10 @@ impl SharedManager {
                     ),
                 )
             })?;
-        drop(OwnedRwLockWriteGuard::downgrade(write_gate));
+        let same_server_gate = OwnedRwLockWriteGuard::downgrade(write_gate);
         Ok(PreparedSharedClient {
             prepared,
-            same_server_gate: None,
+            same_server_gate: Some(same_server_gate),
         })
     }
 
@@ -495,7 +494,10 @@ impl SharedManager {
         params: Option<Value>,
         cwd: &Path,
     ) -> crate::Result<Value> {
-        let PreparedSharedClient { prepared, .. } = self
+        let PreparedSharedClient {
+            prepared,
+            same_server_gate: _same_server_gate,
+        } = self
             .prepare_connected_client_with_gate("request", config, server_name, cwd)
             .await?;
         let result = Manager::request_raw_handle(
@@ -629,7 +631,10 @@ impl SharedManager {
         params: Option<Value>,
         cwd: &Path,
     ) -> crate::Result<()> {
-        let PreparedSharedClient { prepared, .. } = self
+        let PreparedSharedClient {
+            prepared,
+            same_server_gate: _same_server_gate,
+        } = self
             .prepare_connected_client_with_gate("notify", config, server_name, cwd)
             .await?;
         let result = Manager::notify_raw_handle(
@@ -1339,6 +1344,115 @@ mod tests {
                 .await
                 .is_err(),
             "same-server disconnect must wait while notify_connected is still flushing"
+        );
+
+        allow_server_read_tx.send(()).unwrap();
+        notify_task.await.unwrap().unwrap();
+        assert!(disconnect_task.await.unwrap().unwrap());
+        disconnect_finished_tx.send(()).unwrap();
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shared_manager_notify_blocks_same_server_disconnect_until_write_finishes() {
+        let (client_stream, server_stream) = tokio::io::duplex(64);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+        let (allow_server_read_tx, allow_server_read_rx) = oneshot::channel();
+        let (disconnect_finished_tx, disconnect_finished_rx) = oneshot::channel();
+
+        let server_task = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            let init_id = init_value["id"].clone();
+
+            let init_response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": init_id,
+                "result": { "serverInfo": { "name": "demo" } },
+            });
+            let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+            init_response_line.push('\n');
+            server_write
+                .write_all(init_response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let initialized_line = lines.next_line().await.unwrap().unwrap();
+            let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+            assert_eq!(initialized_value["method"], "notifications/initialized");
+
+            allow_server_read_rx.await.unwrap();
+            let notify_line = lines.next_line().await.unwrap().unwrap();
+            let notify_value: Value = serde_json::from_str(&notify_line).unwrap();
+            assert_eq!(notify_value["method"], "demo/notify");
+
+            disconnect_finished_rx.await.unwrap();
+            assert!(
+                lines.next_line().await.unwrap().is_none(),
+                "disconnect should close the connection only after notify finishes"
+            );
+        });
+
+        let cwd_dir = tempfile::tempdir().unwrap();
+        let cwd = cwd_dir.path().to_path_buf();
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            ServerName::parse("srv").unwrap(),
+            ServerConfig::stdio(vec!["mock-server".to_string()]).unwrap(),
+        );
+        let config = Config::new(ClientConfig::default(), servers);
+
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted);
+        manager
+            .connect_io("srv", client_read, client_write)
+            .await
+            .expect("connect in-memory client");
+        manager
+            .record_connection_cwd("srv", &cwd)
+            .expect("record cwd identity");
+        manager
+            .record_connection_server_config("srv", config.server("srv").expect("config server"))
+            .expect("record config identity");
+
+        let shared = manager.into_shared();
+        let notify_task = tokio::spawn({
+            let shared = shared.clone();
+            let config = config.clone();
+            let cwd = cwd.clone();
+            async move {
+                shared
+                    .notify(
+                        &config,
+                        "srv",
+                        "demo/notify",
+                        Some(serde_json::json!({ "payload": "x".repeat(4096) })),
+                        &cwd,
+                    )
+                    .await
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut disconnect_task = tokio::spawn({
+            let shared = shared.clone();
+            async move { shared.disconnect("srv").await }
+        });
+
+        assert!(
+            !notify_task.is_finished(),
+            "large notify should still be blocked on the transport write"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut disconnect_task)
+                .await
+                .is_err(),
+            "same-server disconnect must wait while notify is still flushing"
         );
 
         allow_server_read_tx.send(()).unwrap();
@@ -3339,7 +3453,8 @@ mod tests {
             }
         });
 
-        let cwd = std::env::current_dir().expect("current dir");
+        let cwd_dir = tempfile::tempdir().unwrap();
+        let cwd = cwd_dir.path().to_path_buf();
         let mut servers = BTreeMap::new();
         servers.insert(
             ServerName::parse("srv").unwrap(),
@@ -3690,7 +3805,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn shared_manager_disconnect_proceeds_after_borrowed_client_is_prepared() {
+    async fn shared_manager_disconnect_waits_while_borrowed_client_gate_is_alive() {
         let socket_path = unique_socket_path("borrowed-client-gate");
         let _ = std::fs::remove_file(&socket_path);
         let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
@@ -3770,7 +3885,7 @@ mod tests {
         let disconnect_finished = Arc::new(AtomicBool::new(false));
         let disconnect_shared = shared.clone();
         let disconnect_finished_task = Arc::clone(&disconnect_finished);
-        let disconnect_task = tokio::spawn(async move {
+        let mut disconnect_task = tokio::spawn(async move {
             let disconnected = disconnect_shared.disconnect("srv").await.unwrap();
             disconnect_finished_task.store(true, Ordering::SeqCst);
             disconnected
@@ -3782,19 +3897,22 @@ mod tests {
             .await
             .expect("first cold-start should borrow client before disconnect proceeds");
         assert!(
-            tokio::time::timeout(Duration::from_millis(200), disconnect_task)
+            tokio::time::timeout(Duration::from_millis(200), &mut disconnect_task)
                 .await
-                .expect("disconnect should no longer wait after the borrowed client is prepared")
-                .unwrap(),
-            "disconnect should close the prepared connection even while the borrowed client stays alive"
+                .is_err(),
+            "disconnect must wait while the borrowed client still holds the same-server read gate"
         );
-        connection_closed_rx.await.unwrap();
 
         release_gate_tx.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(1), prepared_client)
             .await
             .unwrap()
             .unwrap();
+        assert!(
+            disconnect_task.await.unwrap(),
+            "disconnect should succeed after the borrowed client releases the read gate"
+        );
+        connection_closed_rx.await.unwrap();
 
         tokio::time::timeout(Duration::from_secs(1), server_task)
             .await
@@ -3805,7 +3923,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn shared_manager_cold_start_request_releases_gate_before_first_io_completes() {
+    async fn shared_manager_cold_start_request_blocks_disconnect_until_io_completes() {
         let socket_path = unique_socket_path("request-first-io-gate");
         let _ = std::fs::remove_file(&socket_path);
         let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
@@ -3815,6 +3933,7 @@ mod tests {
         let (first_init_seen_tx, first_init_seen_rx) = oneshot::channel();
         let (release_first_init_tx, release_first_init_rx) = oneshot::channel();
         let (first_request_seen_tx, first_request_seen_rx) = oneshot::channel();
+        let (respond_tx, respond_rx) = oneshot::channel();
         let (disconnect_finished_tx, disconnect_finished_rx) = oneshot::channel();
 
         let server_task = tokio::spawn(async move {
@@ -3849,13 +3968,29 @@ mod tests {
             let request_line = lines.next_line().await.unwrap().unwrap();
             let request_value: Value = serde_json::from_str(&request_line).unwrap();
             assert_eq!(request_value["method"], "ping");
+            let request_id = request_value["id"].clone();
             first_request_seen_tx.send(()).unwrap();
+
+            respond_rx.await.unwrap();
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": { "ok": true },
+            });
+            let mut response_line = serde_json::to_string(&response).unwrap();
+            response_line.push('\n');
+            server_write
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
             disconnect_finished_rx.await.unwrap();
 
             let eof = lines.next_line().await.unwrap();
             assert!(
                 eof.is_none(),
-                "cold-start request must not keep the same-server gate until I/O finishes"
+                "disconnect should close the connection only after the cold-start request finishes"
             );
         });
 
@@ -3889,7 +4024,7 @@ mod tests {
         let disconnect_finished = Arc::new(AtomicBool::new(false));
         let disconnect_shared = shared.clone();
         let disconnect_finished_task = Arc::clone(&disconnect_finished);
-        let disconnect_task = tokio::spawn(async move {
+        let mut disconnect_task = tokio::spawn(async move {
             let disconnected = disconnect_shared.disconnect("srv").await.unwrap();
             disconnect_finished_task.store(true, Ordering::SeqCst);
             disconnected
@@ -3899,22 +4034,24 @@ mod tests {
         first_request_seen_rx.await.unwrap();
 
         assert!(
-            tokio::time::timeout(Duration::from_millis(200), disconnect_task)
+            tokio::time::timeout(Duration::from_millis(200), &mut disconnect_task)
                 .await
-                .expect("disconnect should no longer wait for the cold-start request gate")
-                .unwrap(),
-            "disconnect should close the cold-start connection while request I/O is pending"
+                .is_err(),
+            "disconnect must wait while the cold-start request is still in flight"
         );
+        respond_tx.send(()).unwrap();
+        assert_eq!(
+            first_request.await.unwrap().unwrap(),
+            serde_json::json!({ "ok": true })
+        );
+        assert!(disconnect_task.await.unwrap());
         disconnect_finished_tx.send(()).unwrap();
 
         tokio::time::timeout(Duration::from_secs(1), server_task)
             .await
-            .expect("server task should observe disconnect before a response is sent")
+            .expect("server task should observe disconnect after the request response")
             .unwrap();
         assert!(disconnect_finished.load(Ordering::SeqCst));
-        first_request.await.unwrap().expect_err(
-            "request should fail once disconnect closes the in-flight cold-start connection",
-        );
         let _ = std::fs::remove_file(socket_path);
     }
 }

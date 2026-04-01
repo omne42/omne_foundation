@@ -1525,10 +1525,16 @@ async fn handle_incoming_value(
     match value {
         Value::Array(items) => {
             if items.is_empty() {
-                let _ = ctx
-                    .responder
-                    .respond_error_raw_id(Value::Null, INVALID_REQUEST, "empty batch", None)
-                    .await;
+                send_error_raw_id_or_close(
+                    ctx.responder,
+                    None,
+                    Value::Null,
+                    INVALID_REQUEST,
+                    "empty batch",
+                    None,
+                    "invalid request response",
+                )
+                .await;
                 return Err("peer sent empty JSON-RPC batch".to_string());
             }
 
@@ -1545,14 +1551,15 @@ async fn handle_incoming_value(
                 )
                 .await
                 {
-                    let _ = batch.finish().await;
+                    finish_batch_or_close(ctx.responder, &batch, "invalid request batch response")
+                        .await;
                     return Err(reason);
                 }
                 if ctx.responder.is_closed() {
                     return Ok(());
                 }
             }
-            let _ = batch.finish().await;
+            finish_batch_or_close(ctx.responder, &batch, "invalid request batch response").await;
             Ok(())
         }
         other => {
@@ -1576,6 +1583,42 @@ async fn close_notification_queue_overflow(
         .await;
 }
 
+async fn close_response_write_failure(
+    responder: &ClientHandle,
+    response_kind: &'static str,
+    err: Error,
+) {
+    responder
+        .close_with_error(format!("failed to write {response_kind}: {err}"), err)
+        .await;
+}
+
+async fn send_error_raw_id_or_close(
+    responder: &ClientHandle,
+    batch: Option<&BatchResponseWriter>,
+    id: Value,
+    code: i64,
+    message: impl Into<String>,
+    data: Option<Value>,
+    response_kind: &'static str,
+) {
+    if let Err(err) =
+        send_batch_or_direct_error_raw_id(responder, batch, id, code, message, data).await
+    {
+        close_response_write_failure(responder, response_kind, err).await;
+    }
+}
+
+async fn finish_batch_or_close(
+    responder: &ClientHandle,
+    batch: &BatchResponseWriter,
+    response_kind: &'static str,
+) {
+    if let Err(err) = batch.finish().await {
+        close_response_write_failure(responder, response_kind, err).await;
+    }
+}
+
 struct IncomingValueContext<'a> {
     pending: &'a PendingRequests,
     cancelled_request_ids: &'a CancelledRequestIds,
@@ -1597,26 +1640,28 @@ async fn handle_incoming_item(
     match value {
         Value::Array(items) => {
             if !allow_batch_expansion {
-                let _ = send_batch_or_direct_error_raw_id(
+                send_error_raw_id_or_close(
                     ctx.responder,
                     batch,
                     Value::Null,
                     INVALID_REQUEST,
                     "nested batch is not allowed",
                     None,
+                    "invalid request response",
                 )
                 .await;
                 return Err("peer sent nested JSON-RPC batch".to_string());
             }
 
             if items.is_empty() {
-                let _ = send_batch_or_direct_error_raw_id(
+                send_error_raw_id_or_close(
                     ctx.responder,
                     batch,
                     Value::Null,
                     INVALID_REQUEST,
                     "empty batch",
                     None,
+                    "invalid request response",
                 )
                 .await;
                 return Err("peer sent empty nested JSON-RPC batch".to_string());
@@ -1635,13 +1680,14 @@ async fn handle_incoming_item(
                     if !jsonrpc_valid {
                         if let Some(id_value) = id_value {
                             let id_value = error_response_id_or_null(id_value);
-                            let _ = send_batch_or_direct_error_raw_id(
+                            send_error_raw_id_or_close(
                                 ctx.responder,
                                 batch,
                                 id_value,
                                 INVALID_REQUEST,
                                 "invalid jsonrpc version",
                                 None,
+                                "invalid request response",
                             )
                             .await;
                         }
@@ -1654,13 +1700,14 @@ async fn handle_incoming_item(
                     let params = map.remove("params");
                     if let Some(id_value) = id_value {
                         let Some(id) = parse_id_owned(id_value) else {
-                            let _ = send_batch_or_direct_error_raw_id(
+                            send_error_raw_id_or_close(
                                 ctx.responder,
                                 batch,
                                 Value::Null,
                                 INVALID_REQUEST,
                                 "invalid request id",
                                 None,
+                                "invalid request response",
                             )
                             .await;
                             return Err("peer sent request with invalid id".to_string());
@@ -1732,13 +1779,14 @@ async fn handle_incoming_item(
                 Some(_) => {
                     if let Some(id_value) = map.remove("id") {
                         let id_value = error_response_id_or_null(id_value);
-                        let _ = send_batch_or_direct_error_raw_id(
+                        send_error_raw_id_or_close(
                             ctx.responder,
                             batch,
                             id_value,
                             INVALID_REQUEST,
                             "invalid request method",
                             None,
+                            "invalid request response",
                         )
                         .await;
                     }
@@ -1751,13 +1799,14 @@ async fn handle_incoming_item(
                 .map_err(|err| err.to_string())
         }
         _ => {
-            let _ = send_batch_or_direct_error_raw_id(
+            send_error_raw_id_or_close(
                 ctx.responder,
                 batch,
                 Value::Null,
                 INVALID_REQUEST,
                 "invalid message",
                 None,
+                "invalid request response",
             )
             .await;
             Err("peer sent non-object JSON-RPC message".to_string())
@@ -2437,6 +2486,81 @@ mod incoming_value_tests {
         let close_reason = client.handle.close_reason().expect("close reason set");
         assert!(
             close_reason.contains("failed to write server request response"),
+            "{close_reason}"
+        );
+
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn invalid_request_response_write_failure_closes_transport_fail_closed() {
+        let (client_stream, mut server_stream) = tokio::io::duplex(2048);
+        let (client_read, _) = tokio::io::split(client_stream);
+
+        let client = Client::connect_io(client_read, AlwaysErrWriter)
+            .await
+            .expect("connect client");
+
+        server_stream
+            .write_all(br#"{"jsonrpc":"2.0","id":1,"method":1}"#)
+            .await
+            .expect("write invalid request");
+        server_stream.write_all(b"\n").await.expect("write newline");
+        server_stream.flush().await.expect("flush invalid request");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !client.handle.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("client should publish close after invalid request response write failure");
+        let close_reason = client.handle.close_reason().expect("close reason set");
+        assert!(
+            close_reason.contains("failed to write invalid request response"),
+            "{close_reason}"
+        );
+        assert!(
+            close_reason.contains("simulated write failure"),
+            "{close_reason}"
+        );
+
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn invalid_request_batch_response_write_failure_closes_transport_fail_closed() {
+        let (client_stream, mut server_stream) = tokio::io::duplex(2048);
+        let (client_read, _) = tokio::io::split(client_stream);
+
+        let client = Client::connect_io(client_read, AlwaysErrWriter)
+            .await
+            .expect("connect client");
+
+        server_stream
+            .write_all(br#"[[{"jsonrpc":"2.0","method":"demo"}]]"#)
+            .await
+            .expect("write invalid nested batch");
+        server_stream.write_all(b"\n").await.expect("write newline");
+        server_stream
+            .flush()
+            .await
+            .expect("flush invalid nested batch");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !client.handle.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("client should publish close after invalid batch response write failure");
+        let close_reason = client.handle.close_reason().expect("close reason set");
+        assert!(
+            close_reason.contains("failed to write invalid request batch response"),
+            "{close_reason}"
+        );
+        assert!(
+            close_reason.contains("simulated write failure"),
             "{close_reason}"
         );
 

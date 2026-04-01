@@ -553,7 +553,7 @@ async fn try_prepare_connected_client_rejects_different_cwd_context() {
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
         .with_trust_mode(TrustMode::Trusted);
     let server_name = ServerName::parse("srv").unwrap();
-    manager.conns.insert(
+    manager.insert_connection_for_test(
         server_name.clone(),
         Connection {
             id: 1,
@@ -604,7 +604,7 @@ async fn try_prepare_connected_client_reuses_same_cwd_identity() {
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
         .with_trust_mode(TrustMode::Trusted);
     let server_name = ServerName::parse("srv").unwrap();
-    manager.conns.insert(
+    manager.insert_connection_for_test(
         server_name,
         Connection {
             id: 1,
@@ -647,7 +647,7 @@ async fn try_prepare_connected_client_reuses_symlink_aware_cwd_identity() {
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
         .with_trust_mode(TrustMode::Trusted);
     let server_name = ServerName::parse("srv").unwrap();
-    manager.conns.insert(
+    manager.insert_connection_for_test(
         server_name,
         Connection {
             id: 1,
@@ -679,7 +679,7 @@ async fn prepare_transport_connect_rejects_different_cwd_context() {
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
         .with_trust_mode(TrustMode::Trusted);
     let server_name = ServerName::parse("srv").unwrap();
-    manager.conns.insert(
+    manager.insert_connection_for_test(
         server_name.clone(),
         Connection {
             id: 1,
@@ -728,7 +728,7 @@ async fn prepare_transport_connect_rejects_reuse_without_config_metadata() {
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
         .with_trust_mode(TrustMode::Trusted);
     let server_name = ServerName::parse("srv").unwrap();
-    manager.conns.insert(
+    manager.insert_connection_for_test(
         server_name.clone(),
         Connection {
             id: 1,
@@ -777,7 +777,7 @@ async fn prepare_transport_connect_rejects_different_effective_config() {
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
         .with_trust_mode(TrustMode::Trusted);
     let server_name = ServerName::parse("srv").unwrap();
-    manager.conns.insert(
+    manager.insert_connection_for_test(
         server_name.clone(),
         Connection {
             id: 1,
@@ -876,7 +876,7 @@ async fn disconnect_reaps_child_best_effort() {
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
         .with_trust_mode(TrustMode::Trusted);
     let server_name = ServerName::parse("srv").unwrap();
-    manager.conns.insert(
+    manager.insert_connection_for_test(
         server_name.clone(),
         Connection {
             id: next_connection_id(),
@@ -885,9 +885,7 @@ async fn disconnect_reaps_child_best_effort() {
             handler_tasks: Vec::new(),
         },
     );
-    manager
-        .init_results
-        .insert(server_name, serde_json::json!({ "ok": true }));
+    manager.set_initialize_result_for_test("srv", serde_json::json!({ "ok": true }));
 
     assert!(manager.disconnect("srv"));
 
@@ -3149,7 +3147,7 @@ async fn take_session_keeps_connection_when_init_result_is_missing() {
         .unwrap();
     assert!(manager.is_connected("srv"));
 
-    manager.init_results.remove("srv");
+    manager.clear_initialize_result_for_test("srv");
     assert!(
         manager.take_session("srv").is_none(),
         "take_session should fail when initialize result is missing"
@@ -3390,9 +3388,10 @@ async fn connect_io_reconnects_when_existing_connection_is_closed() {
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             if manager
-                .conns
+                .connections
                 .get("srv")
                 .expect("srv conn exists")
+                .connection
                 .client
                 .handle()
                 .is_closed()

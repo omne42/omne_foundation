@@ -58,6 +58,8 @@
   - hub 配置、限制、并发发送与错误聚合
 - `src/sinks/mod.rs`
   - sink trait、条件导出和 selective feature 入口
+- `src/sinks/feishu/`
+  - Feishu webhook 适配内部再按 webhook send、payload 和 media support 拆开；图片加载、tenant token cache 与上传编排属于内部 media 子组件，不继续平铺在 sink 本体
 - `src/env.rs`
   - convenience helper 的兼容 shim；不属于核心协议边界
 - `bots/`
@@ -77,6 +79,12 @@
 
 - 依赖 `log-kit` 统一关键 warning 的稳定日志 code 与字段
 - 详细用法和 sink 专题文档放在 crate 自己的 `docs/`
+
+## Feishu Boundary
+
+- `FeishuWebhookSink` 的 canonical 责任仍是 webhook 发送、签名和 payload 组装。
+- markdown image upload 需要的远程下载、本地文件白名单、tenant token cache 与上传编排，已经收口到内部 media support 子组件，而不是继续扩张 `Sink` trait。
+- 如果需要 construction-time 的公网 IP 预检，优先使用 async strict constructor；sync strict constructor 仅保留为兼容入口。
 
 ## 接入边界
 

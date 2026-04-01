@@ -12,6 +12,9 @@ use super::{
     handlers::HandlerAttachSnapshot,
 };
 
+const BEST_EFFORT_REAP_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const BEST_EFFORT_REAP_TIMEOUT: Duration = Duration::from_millis(200);
+
 enum ProtocolVersionMismatchUpdate {
     None,
     Clear,
@@ -294,8 +297,6 @@ impl PreparedDisconnect {
 }
 
 fn reap_stale_child_best_effort(mut child: Child) {
-    const REAP_TIMEOUT: Duration = Duration::from_millis(200);
-
     if child.try_wait().ok().flatten().is_some() {
         return;
     }
@@ -307,9 +308,31 @@ fn reap_stale_child_best_effort(mut child: Child) {
 
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         drop(handle.spawn(async move {
-            let _ = tokio::time::timeout(REAP_TIMEOUT, child.wait()).await; // pre-commit: allow-let-underscore
+            let _ = tokio::time::timeout(BEST_EFFORT_REAP_TIMEOUT, child.wait()).await; // pre-commit: allow-let-underscore
         }));
+        return;
     }
+
+    start_background_child_reap(child);
+}
+
+fn start_background_child_reap(mut child: Child) {
+    let _ = std::thread::Builder::new()
+        .name("mcp-kit-child-reap".to_string())
+        .spawn(move || {
+            let deadline = std::time::Instant::now() + BEST_EFFORT_REAP_TIMEOUT;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) | Err(_) => return,
+                    Ok(None) => {
+                        if std::time::Instant::now() >= deadline {
+                            return;
+                        }
+                    }
+                }
+                std::thread::sleep(BEST_EFFORT_REAP_POLL_INTERVAL);
+            }
+        });
 }
 
 impl Manager {

@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：`Manager::disconnect()` / `Connection::drop` 的 best-effort child reaping 现在在 sync/no-runtime 路径也会继续轮询 `try_wait()` 到短超时收口；不再只有已有 Tokio runtime 时才真正 wait，因此 Linux 等平台不会把被 kill 的 child 留成 zombie 到更晚的 runtime/drop 阶段。
 - `mcp-kit`：untrusted `streamable_http` 连接的 transport-level public-IP pinning 现在会和 `allow_private_ips` / `allow_localhost` 语义保持一致；显式放开私网或 localhost 目标后，不再在实际建连时被 `mcp-jsonrpc` 的 public-only socket 选择路径二次打回。
 - `mcp-kit`：仅供 Unix 回归测试使用的 `Manager` 测试 helper 现在按平台条件裁剪，避免 Windows 的 `-D warnings` / all-targets 质量门禁把未使用测试入口误判成构建失败；不改变产品行为。
 - `mcp-kit`：`Manager` 现在把缓存连接、initialize 结果和可复用 metadata 收口到单一内部连接记录里，install/reuse/disconnect/take-session 不再靠多张并行表维持一致性，减少后续生命周期修补时的状态漂移风险。

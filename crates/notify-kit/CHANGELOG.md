@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `GitHubCommentSink` no longer allows `with_public_ip_check(false)` in bearer-token mode; token-bearing GitHub comment requests now fail closed unless public-IP pinning stays enabled, so custom API-base opt-in cannot be combined with private-IP delivery.
 - Clarified the `Event` structured-text contract: built-in sinks pass freeform text through verbatim but only stringify non-freeform `StructuredText` via a stable fallback; locale-aware rendering remains an upper-layer responsibility.
 - `notify-kit` 现在明确标记为 `publish = false`，并把 README 的接入说明收口到 Git / monorepo 复用边界；在依赖的 foundation crate 形成独立 crates.io 发布链之前，不再暗示当前可以直接走 crates.io 安装。
 - `Hub::try_notify_spawn(...)` 改为用 `Option<Event>` 表达“过载时返还原始事件”，移除了局部 `#[allow(clippy::result_large_err)]`，同时保持现有的丢弃/重试语义不变。
@@ -161,6 +162,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Dev: `githooks/pre-commit` 新增严格门禁（`scripts/pre-commit-check.sh`），提交前执行 clippy（`-D warnings`）与生产目标关键 lint（`unwrap/expect`、`let _ =` 忽略 must_use、冗余 clone）。
 
 ### Fixed
+- `GitHubCommentSink` now always sends token-bearing requests through a pinned public-IP client; disabling the generic public-IP toggle no longer bypasses DNS/public-address validation for GitHub bearer tokens.
 - `FeishuWebhookSink`：等待 tenant access token 刷新完成时改为在释放状态锁前预注册 `Notify` waiter，修复并发图片上传场景下可能丢唤醒并永久卡住的问题，并补回归测试覆盖“notify 先于 await”窗口。
 - Webhook/API sinks: 修复 `pinned client` 过期后若刷新失败（如 DNS 超时）时，过期缓存条目可能长期残留的问题，并新增回归测试覆盖该路径。
 - `ServerChanSink`：修复 SC3 `send_key` 边界校验缺口；`sctp{uid}t`（缺少后缀 code）现在会在构造阶段被拒绝，避免生成无效目标 URL 后在发送期失败。

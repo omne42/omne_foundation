@@ -31,4 +31,5 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Clarified that bootstrap/rollback only serializes same-root attempts and performs best-effort cleanup for the current attempt; it does not promise crash-safe or power-loss-recovery transactions.
 - Demoted `BootstrapTransactionGuard` / `lock_bootstrap_transaction(...)` from crate-root first-class exports to deprecated compatibility re-exports, and documented `bootstrap_lock` as a hidden low-level module instead of a canonical boundary entry.
 - Demoted the root `LazyValue` / `LazyInitError` exports to deprecated compatibility re-exports and documented the underlying lazy module as a blocking shim instead of an async runtime-facing foundation API.
+- `LazyValue` / `LazyInitError` 的类型定义本体现在也带 `#[deprecated]` 标记；调用方即使绕过 crate-root re-export 直接走 `text_assets_kit::lazy_value::*`，也会看到同样的 compat-shim 边界信号。
 - Documented the ambient `current_dir()` resolution helpers as compatibility entry points; explicit-base APIs are now the canonical boundary whenever the caller already owns a stable workspace root.

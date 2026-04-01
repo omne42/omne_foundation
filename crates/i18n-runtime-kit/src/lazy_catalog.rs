@@ -12,10 +12,10 @@ use crate::{resolve_locale_from_argv, resolve_locale_from_cli_args};
 ///
 /// Concurrent access while the initializer is already running waits for the
 /// initializer to finish and then observes the settled result. Recursive
-/// initialization from the same thread is still rejected. Initializers must
-/// not block on other threads or tasks that might re-enter the same catalog.
-/// Because this path uses a blocking `Condvar`-based primitive, async runtime
-/// boundaries should prefer eager load/bootstrap plus `GlobalCatalog`.
+/// initialization from the same thread is still rejected, and thread-level
+/// cross-thread wait cycles are rejected before they can deadlock. Because
+/// this path uses a blocking `Condvar`-based primitive, async runtime
+/// boundaries should still prefer eager load/bootstrap plus `GlobalCatalog`.
 #[deprecated(
     since = "0.1.0",
     note = "LazyCatalog is a blocking compatibility shim; prefer GlobalCatalog plus eager load/bootstrap for runtime-facing catalog access"
@@ -113,6 +113,9 @@ fn shared_lazy_catalog_error(error: LazyInitError<CatalogInitError>) -> CatalogI
         LazyInitError::ReentrantInitialization => {
             CatalogInitError::new(ReentrantCatalogInitialization)
         }
+        LazyInitError::CrossThreadCycleDetected => {
+            CatalogInitError::new(CrossThreadCatalogInitialization)
+        }
     }
 }
 
@@ -126,6 +129,17 @@ impl Display for ReentrantCatalogInitialization {
 }
 
 impl StdError for ReentrantCatalogInitialization {}
+
+#[derive(Debug)]
+struct CrossThreadCatalogInitialization;
+
+impl Display for CrossThreadCatalogInitialization {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str("cross-thread catalog initialization cycle detected")
+    }
+}
+
+impl StdError for CrossThreadCatalogInitialization {}
 
 #[cfg(test)]
 #[allow(deprecated)]

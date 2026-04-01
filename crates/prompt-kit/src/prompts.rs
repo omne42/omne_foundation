@@ -151,10 +151,12 @@ impl Default for PromptDirectoryHandle {
 /// Legacy blocking prompt directory shim.
 ///
 /// Concurrent access while initialization is in flight waits for the
-/// initializer to finish and then observes the settled result. Because this
-/// path uses a blocking `Condvar`-based primitive, it is best kept out of
-/// async runtime-facing boundaries; prefer `PromptDirectoryHandle` plus eager
-/// load/bootstrap when the directory must be shared at runtime.
+/// initializer to finish and then observes the settled result, while detected
+/// thread-level cross-thread wait cycles fail fast instead of deadlocking.
+/// Because this path uses a blocking `Condvar`-based primitive, it is best
+/// kept out of async runtime-facing boundaries; prefer
+/// `PromptDirectoryHandle` plus eager load/bootstrap when the directory must
+/// be shared at runtime.
 #[deprecated(
     since = "0.1.0",
     note = "LazyPromptDirectory is a blocking compatibility shim; prefer PromptDirectoryHandle plus eager load/bootstrap for runtime-facing prompt access"
@@ -219,6 +221,9 @@ fn shared_prompt_error_detail(error: LazyInitError<io::Error>) -> Arc<io::Error>
         LazyInitError::Inner(error) => error,
         LazyInitError::ReentrantInitialization => Arc::new(io::Error::other(
             "reentrant prompt directory initialization",
+        )),
+        LazyInitError::CrossThreadCycleDetected => Arc::new(io::Error::other(
+            "cross-thread prompt directory initialization cycle detected",
         )),
     }
 }

@@ -37,6 +37,50 @@ struct ResolvedStreamableHttpUrls {
     post_url_field: &'static str,
 }
 
+pub(super) fn should_enforce_streamable_http_public_ip_pinning(
+    trust_mode: TrustMode,
+    policy: &UntrustedStreamableHttpPolicy,
+    sse_url: &str,
+    post_url: &str,
+) -> bool {
+    if trust_mode == TrustMode::Trusted {
+        return false;
+    }
+
+    if policy.outbound.allow_private_ips {
+        return false;
+    }
+
+    if !policy.outbound.allow_localhost {
+        return true;
+    }
+
+    !streamable_http_urls_include_loopback_hostname(sse_url, post_url)
+}
+
+fn streamable_http_urls_include_loopback_hostname(sse_url: &str, post_url: &str) -> bool {
+    streamable_http_url_uses_loopback_hostname(sse_url)
+        || streamable_http_url_uses_loopback_hostname(post_url)
+}
+
+fn streamable_http_url_uses_loopback_hostname(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|url| {
+            url.host_str()
+                .map(|host| host.trim_end_matches('.').to_string())
+        })
+        .is_some_and(|host| is_loopback_hostname(&host))
+}
+
+fn is_loopback_hostname(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host.eq_ignore_ascii_case("localhost.localdomain")
+        || host
+            .get(host.len().saturating_sub(".localhost".len())..)
+            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".localhost"))
+}
+
 pub(crate) async fn connect_transport(
     ctx: &ConnectContext,
     server_name: &str,
@@ -212,12 +256,22 @@ async fn connect_streamable_http_transport(
     }
 
     let headers = build_streamable_http_headers(ctx, server_name, server_cfg, cwd)?;
+    let enforce_public_ip = should_enforce_streamable_http_public_ip_pinning(
+        ctx.trust_mode,
+        &ctx.untrusted_streamable_http_policy,
+        &resolved_urls.sse_url,
+        &resolved_urls.post_url,
+    );
     let client = mcp_jsonrpc::Client::connect_streamable_http_split_with_options(
         &resolved_urls.sse_url,
         &resolved_urls.post_url,
         mcp_jsonrpc::StreamableHttpOptions {
             headers,
-            enforce_public_ip: ctx.trust_mode != TrustMode::Trusted,
+            // `mcp-jsonrpc` only exposes a strict public-only DNS pinning mode. Once the
+            // untrusted policy intentionally allows non-public endpoints, keep syntax/DNS
+            // validation but stop forcing the transport into a contradictory public-only socket
+            // selection path.
+            enforce_public_ip,
             request_timeout: Some(ctx.request_timeout),
             ..Default::default()
         },

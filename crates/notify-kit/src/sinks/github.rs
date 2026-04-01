@@ -91,6 +91,11 @@ impl GitHubCommentConfig {
         self
     }
 
+    /// Bearer-token GitHub comment requests always require public-IP pinning.
+    ///
+    /// `GitHubCommentSink` carries a GitHub token on every request, so
+    /// disabling the public-IP check is treated as invalid configuration and
+    /// `GitHubCommentSink::new(...)` will fail closed.
     /// Trust a custom HTTPS GitHub API base for token-bearing comment requests.
     ///
     /// By default, `GitHubCommentSink` only sends bearer tokens to
@@ -135,6 +140,12 @@ impl std::fmt::Debug for GitHubCommentSink {
 
 impl GitHubCommentSink {
     pub fn new(config: GitHubCommentConfig) -> crate::Result<Self> {
+        if !config.enforce_public_ip {
+            return Err(anyhow::anyhow!(
+                "github token-bearing requests require public_ip_check=true"
+            )
+            .into());
+        }
         let owner = normalize_github_identifier("owner", &config.owner)?;
         let repo = normalize_github_identifier("repo", &config.repo)?;
         if config.issue_number == 0 {
@@ -219,17 +230,18 @@ impl Sink for GitHubCommentSink {
 
     fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
+            let request_options = GitHubApiRequestOptions::new()
+                .with_user_agent("notify-kit")
+                .with_bearer_token(Some(self.token.expose_secret()))
+                .with_allow_custom_bearer_api_base(self.allow_custom_api_base_with_token);
             let client = self
                 .http
-                .select_for_url(&self.api_url, self.enforce_public_ip)
+                .select_for_url(&self.api_url, request_options.requires_public_ip_pinning())
                 .await?;
             let payload = Self::build_payload(event, self.max_chars);
             let request = apply_github_api_headers(
                 client.post(self.api_url.as_str()).json(&payload),
-                GitHubApiRequestOptions::new()
-                    .with_user_agent("notify-kit")
-                    .with_bearer_token(Some(self.token.expose_secret()))
-                    .with_allow_custom_bearer_api_base(self.allow_custom_api_base_with_token),
+                request_options,
             );
 
             let resp = send_reqwest(request, "github comment").await?;
@@ -337,10 +349,26 @@ mod tests {
             .with_api_base("https://10.0.0.5/api/v3/")
             .with_allow_custom_api_base_with_token(true)
             .with_public_ip_check(false);
-        let sink = GitHubCommentSink::new(cfg).expect("build sink");
-        assert_eq!(
-            sink.api_url.as_str(),
-            "https://10.0.0.5/api/v3/repos/owner/repo/issues/1/comments"
-        );
+        let err = GitHubCommentSink::new(cfg).expect_err("private token target must fail closed");
+        assert!(err.to_string().contains("public_ip_check=true"), "{err:#}");
+    }
+
+    #[test]
+    fn rejects_disabling_public_ip_check_even_for_canonical_api_base() {
+        let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok").with_public_ip_check(false);
+        let err =
+            GitHubCommentSink::new(cfg).expect_err("token-bearing canonical target must pin IPs");
+        assert!(err.to_string().contains("public_ip_check=true"), "{err:#}");
+    }
+
+    #[test]
+    fn rejects_trusted_localhost_api_base_even_with_public_ip_check_enabled() {
+        let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok")
+            .with_api_base("https://localhost/api/v3/")
+            .with_allow_custom_api_base_with_token(true);
+        let err = GitHubCommentSink::new(cfg)
+            .expect_err("localhost token target should be rejected before send");
+        assert!(err.to_string().contains("localhost"), "{err:#}");
+        assert!(err.to_string().contains("not allowed"), "{err:#}");
     }
 }

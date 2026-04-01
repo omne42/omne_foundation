@@ -13,7 +13,7 @@
 负责：
 
 - GitHub API 请求头默认值与可选 bearer token 注入
-- bearer token 的目标校验：默认只允许 `https://api.github.com`，自定义 GitHub API base 必须显式 trust opt-in
+- bearer token 的目标校验：默认只允许 `https://api.github.com`，自定义 GitHub API base 必须显式 trust opt-in，且 localhost / 单标签主机 / 私网 IP literal 仍然会被拒绝
 - `owner/repo` 形式的 repository 标识校验
 - latest release endpoint URL 构造
 - latest release metadata DTO 与获取

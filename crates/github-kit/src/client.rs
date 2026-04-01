@@ -1,3 +1,4 @@
+use http_kit::{UntrustedOutboundPolicy, validate_untrusted_outbound_url};
 use reqwest::RequestBuilder;
 use reqwest::header::{ACCEPT, USER_AGENT};
 
@@ -73,6 +74,11 @@ impl<'a> GitHubApiRequestOptions<'a> {
         self.bearer_token.is_some()
     }
 
+    #[must_use]
+    pub fn requires_public_ip_pinning(&self) -> bool {
+        self.has_bearer_token()
+    }
+
     fn allows_custom_bearer_api_base(&self) -> bool {
         self.allow_custom_bearer_api_base
     }
@@ -123,7 +129,7 @@ pub fn validate_github_api_request_url(
     url: &reqwest::Url,
     options: GitHubApiRequestOptions<'_>,
 ) -> Result<()> {
-    if !options.has_bearer_token() {
+    if !options.requires_public_ip_pinning() {
         return Ok(());
     }
 
@@ -151,6 +157,12 @@ pub fn validate_github_api_request_url(
             details: "bearer token requires the canonical GitHub API base `https://api.github.com` unless custom bases are explicitly trusted".to_string(),
         });
     }
+
+    validate_untrusted_outbound_url(&UntrustedOutboundPolicy::default(), url).map_err(|err| {
+        GitHubApiError::InvalidApiBase {
+            details: format!("bearer token target is not allowed: {err}"),
+        }
+    })?;
 
     Ok(())
 }
@@ -186,5 +198,39 @@ mod tests {
                 .with_allow_custom_bearer_api_base(true),
         )
         .expect("explicitly trusted custom base should be allowed");
+    }
+
+    #[test]
+    fn rejects_localhost_custom_bearer_api_base_even_after_explicit_opt_in() {
+        let url = reqwest::Url::parse("https://localhost/api/v3/repos/omne42/repo").expect("url");
+
+        let err = validate_github_api_request_url(
+            &url,
+            GitHubApiRequestOptions::new()
+                .with_bearer_token(Some("secret-token"))
+                .with_allow_custom_bearer_api_base(true),
+        )
+        .expect_err("localhost target should be rejected");
+
+        let message = err.to_string();
+        assert!(message.contains("not allowed"), "{message}");
+        assert!(message.contains("localhost"), "{message}");
+    }
+
+    #[test]
+    fn rejects_private_ip_literal_custom_bearer_api_base_even_after_explicit_opt_in() {
+        let url = reqwest::Url::parse("https://10.0.0.5/api/v3/repos/omne42/repo").expect("url");
+
+        let err = validate_github_api_request_url(
+            &url,
+            GitHubApiRequestOptions::new()
+                .with_bearer_token(Some("secret-token"))
+                .with_allow_custom_bearer_api_base(true),
+        )
+        .expect_err("private ip literal should be rejected");
+
+        let message = err.to_string();
+        assert!(message.contains("not allowed"), "{message}");
+        assert!(message.contains("10.0.0.5"), "{message}");
     }
 }

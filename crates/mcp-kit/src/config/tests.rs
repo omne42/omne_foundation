@@ -101,6 +101,17 @@ async fn load_defaults_to_empty_when_missing() {
 }
 
 #[tokio::test]
+async fn load_rejects_relative_thread_root() {
+    let err = Config::load(std::path::Path::new("relative-root"), None)
+        .await
+        .expect_err("relative thread_root should fail closed");
+    assert!(
+        err.to_string().contains("must be absolute"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[tokio::test]
 async fn load_required_errors_when_missing() {
     let dir = tempfile::tempdir().unwrap();
     let err = Config::load_required(dir.path(), None).await.unwrap_err();

@@ -49,6 +49,16 @@ fn load_json_value_from_file(path: &Path) -> anyhow::Result<Value> {
         .into_value())
 }
 
+fn ensure_absolute_thread_root(thread_root: &Path) -> anyhow::Result<()> {
+    if thread_root.is_absolute() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "mcp config root must be absolute to avoid cwd-dependent path drift: {}",
+        thread_root.display()
+    );
+}
+
 fn ensure_candidate_discovery_root_exists(thread_root: &Path) -> anyhow::Result<()> {
     match std::fs::symlink_metadata(thread_root) {
         Ok(_) => Ok(()),
@@ -531,6 +541,12 @@ impl Config {
         override_path: Option<PathBuf>,
         policy: ConfigLoadPolicy,
     ) -> crate::Result<Self> {
+        ensure_absolute_thread_root(thread_root).map_err(|err| {
+            crate::Error::from(crate::error::tag_anyhow(
+                crate::error::ErrorKind::Config,
+                err,
+            ))
+        })?;
         let Some((path, json)) = load_initial_path_and_value(thread_root, override_path, policy)
             .await
             .map_err(|err| {

@@ -271,13 +271,7 @@ impl SharedManager {
             return Ok(());
         };
 
-        let (client, child) = crate::manager::connect_transport(
-            &prepared.ctx,
-            &prepared.server_name,
-            &prepared.server_cfg,
-            &prepared.cwd,
-        )
-        .await?;
+        let (client, child) = Manager::connect_prepared_transport(&prepared).await?;
 
         let install = self
             .lock_for_async_op(operation)
@@ -288,18 +282,10 @@ impl SharedManager {
                 &prepared.server_cfg,
             );
 
-        match install.run(client, child).await {
-            Ok(completed) => self
-                .lock_for_async_op(operation)
-                .await?
-                .commit_transport_install(completed),
-            Err(err) => {
-                self.lock_for_async_op(operation)
-                    .await?
-                    .cleanup_failed_connection_install(&prepared.server_name_key);
-                Err(err)
-            }
-        }
+        let result = install.run(client, child).await;
+        self.lock_for_async_op(operation)
+            .await?
+            .finish_transport_install_attempt(&prepared.server_name_key, result)
     }
 
     async fn prepare_connected_client_with_gate(
@@ -429,22 +415,47 @@ impl SharedManager {
         });
     }
 
+    /// Returns whether the named server is still connected.
+    ///
+    /// This refreshes liveness under the shared manager lock and prunes dead
+    /// cached connections before returning `false`.
     pub async fn is_connected(&self, server_name: &str) -> crate::Result<bool> {
         Ok(self
             .with_manager_lock("is_connected", |manager| manager.is_connected(server_name))
             .await?)
     }
 
+    /// Returns whether a connection entry is currently cached for `server_name`
+    /// without probing liveness or pruning dead state.
+    pub async fn is_connected_cached(&self, server_name: &str) -> crate::Result<bool> {
+        self.inspect(|manager| manager.is_connected_cached(server_name))
+            .await
+    }
+
     pub async fn is_connected_named(&self, server_name: &ServerName) -> crate::Result<bool> {
         self.is_connected(server_name.as_str()).await
     }
 
+    pub async fn is_connected_cached_named(&self, server_name: &ServerName) -> crate::Result<bool> {
+        self.is_connected_cached(server_name.as_str()).await
+    }
+
+    /// Returns the names of currently connected servers.
+    ///
+    /// Like [`SharedManager::is_connected`], this refreshes liveness and prunes
+    /// dead cached connections before returning the result.
     pub async fn connected_server_names(&self) -> crate::Result<Vec<ServerName>> {
         Ok(self
             .with_manager_lock("connected_server_names", |manager| {
                 manager.connected_server_names()
             })
             .await?)
+    }
+
+    /// Returns the cached connection names without probing liveness or pruning
+    /// dead state.
+    pub async fn connected_server_names_cached(&self) -> crate::Result<Vec<ServerName>> {
+        self.inspect(Manager::connected_server_names_cached).await
     }
 
     pub async fn disconnect(&self, server_name: &str) -> crate::Result<bool> {
@@ -2431,6 +2442,100 @@ mod tests {
             Err(_) => panic!("unique owner should unwrap"),
         };
         assert_eq!(inner.trust_mode(), TrustMode::Untrusted);
+    }
+
+    #[tokio::test]
+    async fn shared_manager_cached_connection_queries_do_not_prune_dead_state_until_refresh() {
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let server_task = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            assert_eq!(init_value["method"], "initialize");
+
+            let response_line = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": init_value["id"].clone(),
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION }
+            })
+            .to_string()
+                + "\n";
+            server_write
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let note_line = lines.next_line().await.unwrap().unwrap();
+            let note_value: Value = serde_json::from_str(&note_line).unwrap();
+            assert_eq!(note_value["method"], "notifications/initialized");
+        });
+
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted);
+        manager
+            .connect_io("srv", client_read, client_write)
+            .await
+            .unwrap();
+        manager.seed_connection_side_state_for_test("srv");
+
+        let shared = manager.into_shared();
+
+        server_task.await.unwrap();
+
+        loop {
+            let closed = shared
+                .with_manager_lock("connection_is_closed_for_test", |manager| {
+                    manager.connection_is_closed_for_test("srv")
+                })
+                .await
+                .unwrap();
+            if closed {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert!(shared.is_connected_cached("srv").await.unwrap());
+        assert_eq!(
+            shared.connected_server_names_cached().await.unwrap(),
+            vec![ServerName::parse("srv").unwrap()]
+        );
+        assert_eq!(shared.server_handler_timeout_count("srv").await.unwrap(), 1);
+        assert_eq!(shared.protocol_version_mismatches().await.unwrap().len(), 1);
+        assert!(
+            shared
+                .inspect(|manager| manager.initialize_result("srv").is_some())
+                .await
+                .unwrap()
+        );
+
+        assert!(!shared.is_connected("srv").await.unwrap());
+        assert!(!shared.is_connected_cached("srv").await.unwrap());
+        assert!(
+            shared
+                .connected_server_names_cached()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(shared.server_handler_timeout_count("srv").await.unwrap(), 0);
+        assert!(
+            shared
+                .protocol_version_mismatches()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !shared
+                .inspect(|manager| manager.initialize_result("srv").is_some())
+                .await
+                .unwrap()
+        );
     }
 
     #[test]

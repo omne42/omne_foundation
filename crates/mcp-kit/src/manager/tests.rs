@@ -3894,6 +3894,90 @@ fn untrusted_policy_allows_private_ip_when_configured() {
 }
 
 #[test]
+fn streamable_http_public_ip_pinning_stays_enabled_for_default_untrusted_policy() {
+    assert!(
+        super::connect::should_enforce_streamable_http_public_ip_pinning(
+            TrustMode::Untrusted,
+            &UntrustedStreamableHttpPolicy::default(),
+            "https://example.com/sse",
+            "https://example.com/mcp",
+        )
+    );
+}
+
+#[test]
+fn streamable_http_public_ip_pinning_turns_off_when_private_ips_are_allowed() {
+    let policy = UntrustedStreamableHttpPolicy {
+        outbound: http_kit::UntrustedOutboundPolicy {
+            allow_private_ips: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    assert!(
+        !super::connect::should_enforce_streamable_http_public_ip_pinning(
+            TrustMode::Untrusted,
+            &policy,
+            "https://internal.example/sse",
+            "https://internal.example/mcp",
+        )
+    );
+}
+
+#[test]
+fn streamable_http_public_ip_pinning_turns_off_for_allowed_localhost_targets() {
+    let policy = UntrustedStreamableHttpPolicy {
+        outbound: http_kit::UntrustedOutboundPolicy {
+            allow_localhost: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    assert!(
+        !super::connect::should_enforce_streamable_http_public_ip_pinning(
+            TrustMode::Untrusted,
+            &policy,
+            "https://localhost/sse",
+            "https://localhost/mcp",
+        )
+    );
+}
+
+#[test]
+fn streamable_http_public_ip_pinning_stays_enabled_for_public_hosts_even_with_allow_localhost() {
+    let policy = UntrustedStreamableHttpPolicy {
+        outbound: http_kit::UntrustedOutboundPolicy {
+            allow_localhost: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    assert!(
+        super::connect::should_enforce_streamable_http_public_ip_pinning(
+            TrustMode::Untrusted,
+            &policy,
+            "https://example.com/sse",
+            "https://example.com/mcp",
+        )
+    );
+}
+
+#[test]
+fn streamable_http_public_ip_pinning_is_disabled_in_trusted_mode() {
+    assert!(
+        !super::connect::should_enforce_streamable_http_public_ip_pinning(
+            TrustMode::Trusted,
+            &UntrustedStreamableHttpPolicy::default(),
+            "https://example.com/sse",
+            "https://example.com/mcp",
+        )
+    );
+}
+
+#[test]
 fn untrusted_policy_allows_nat64_well_known_prefix_when_embedded_ipv4_is_public() {
     let policy = UntrustedStreamableHttpPolicy::default();
 

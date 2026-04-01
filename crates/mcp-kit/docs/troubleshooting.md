@@ -104,6 +104,8 @@
 - CLI：加 `--allow-private-ip`
 - 代码：`UntrustedStreamableHttpPolicy { allow_private_ips: true, .. }`
 
+补充说明：开启后，`streamable_http` transport 也会同步关闭 strict public-IP pinning；否则实际建连阶段仍会把 socket 目标限制在公网地址。
+
 ### refusing to connect hostname that resolves to non-global ip in untrusted mode
 
 原因：默认启用了 `dns_check`，并且该 hostname 解析到了非公网 IP。
@@ -113,6 +115,8 @@
 - 关闭 `dns_check`（CLI 使用 `--no-dns-check`）
 - CLI：加 `--allow-private-ip`（允许私网/loopback）
 - 或使用 `--trust --yes-trust`（Trusted mode）
+
+如果目标本身就是 `localhost` / `localhost.localdomain` / `*.localhost`，也可以改为使用 `--allow-localhost`；该选项会同时让 transport 停止对这类 localhost 目标强制 public-IP pinning。
 
 ### refusing to connect hostname with failed/timed out dns lookup in untrusted mode
 

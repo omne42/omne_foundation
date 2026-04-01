@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：untrusted `streamable_http` 连接的 transport-level public-IP pinning 现在会和 `allow_private_ips` / `allow_localhost` 语义保持一致；显式放开私网或 localhost 目标后，不再在实际建连时被 `mcp-jsonrpc` 的 public-only socket 选择路径二次打回。
 - `mcp-kit`：仅供 Unix 回归测试使用的 `Manager` 测试 helper 现在按平台条件裁剪，避免 Windows 的 `-D warnings` / all-targets 质量门禁把未使用测试入口误判成构建失败；不改变产品行为。
 - `mcp-kit`：`Manager` 现在把缓存连接、initialize 结果和可复用 metadata 收口到单一内部连接记录里，install/reuse/disconnect/take-session 不再靠多张并行表维持一致性，减少后续生命周期修补时的状态漂移风险。
 - `mcp-kit` 现在把 `allow_localhost` 的语义完整传递到 untrusted `dns_check` 路径：`localhost` / `localhost.localdomain` / `*.localhost` 在显式允许后不再因为 loopback DNS 结果被二次打回，但 `allow_private_ips` 仍只放开真正的私网地址，不会顺带允许 loopback。

@@ -1,4 +1,5 @@
-mod bootstrap_lock;
+#[doc(hidden)]
+pub mod bootstrap_lock;
 mod data_root;
 #[doc(hidden)]
 pub mod lazy_value;
@@ -10,6 +11,10 @@ mod text_directory;
 mod text_resource;
 mod text_tree_scan;
 
+#[deprecated(
+    since = "0.1.0",
+    note = "BootstrapTransactionGuard and lock_bootstrap_transaction are low-level coordination primitives. Prefer bootstrap_text_resources_then_load(...) or bootstrap_text_resources_with_report(...) at crate boundaries."
+)]
 pub use bootstrap_lock::{BootstrapTransactionGuard, lock_bootstrap_transaction};
 pub use data_root::{
     DataRootOptions, DataRootScope, ensure_data_root, ensure_data_root_with_base,

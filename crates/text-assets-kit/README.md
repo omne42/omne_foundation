@@ -66,7 +66,7 @@
 - `src/resource_bootstrap.rs`
   - bootstrap、创建报告与失败回滚
 - `src/bootstrap_lock.rs`
-  - bootstrap 并发串行化与跨进程协调
+  - bootstrap 并发串行化与跨进程协调；仅作为低层兼容原语保留
 - `src/lazy_value.rs`
   - 仅供兼容层复用的阻塞式 lazy-init 原语，不作为 async runtime-facing canonical 边界
 
@@ -75,6 +75,7 @@
 - `text-assets-kit` 会串行化同一 resource root 上的并发 bootstrap 尝试，避免一个尝试的 rollback 与另一个尝试的 load 互相踩到。
 - 如果同一次 bootstrap 尝试里后续步骤失败，它会按创建报告对本次新建的文件/目录做 best-effort rollback。
 - 这不是 crash-safe 或断电恢复事务：如果进程在 bootstrap 写入后异常退出，已创建的文件可能仍然留在磁盘上。
+- crate root 的 canonical 入口仍然是 `bootstrap_text_resources_then_load(...)` / `bootstrap_text_resources_with_report(...)`；`bootstrap_lock` 模块只保留给确实需要低层协调的兼容调用方，默认不建议直接依赖。
 
 ## 与其他 crate 的关系
 

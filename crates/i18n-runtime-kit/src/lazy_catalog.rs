@@ -113,6 +113,9 @@ fn shared_lazy_catalog_error(error: LazyInitError<CatalogInitError>) -> CatalogI
         LazyInitError::ReentrantInitialization => {
             CatalogInitError::new(ReentrantCatalogInitialization)
         }
+        LazyInitError::SameThreadInitializationConflict => {
+            CatalogInitError::new(SameThreadCatalogInitializationConflict)
+        }
         LazyInitError::CrossThreadCycleDetected => {
             CatalogInitError::new(CrossThreadCatalogInitialization)
         }
@@ -129,6 +132,17 @@ impl Display for ReentrantCatalogInitialization {
 }
 
 impl StdError for ReentrantCatalogInitialization {}
+
+#[derive(Debug)]
+struct SameThreadCatalogInitializationConflict;
+
+impl Display for SameThreadCatalogInitializationConflict {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str("same-thread catalog initialization conflict")
+    }
+}
+
+impl StdError for SameThreadCatalogInitializationConflict {}
 
 #[derive(Debug)]
 struct CrossThreadCatalogInitialization;
@@ -417,6 +431,15 @@ mod tests {
             .initialize()
             .expect_err("reentrant init should fail");
         assert_eq!(error.to_string(), "reentrant catalog initialization");
+    }
+
+    #[test]
+    fn lazy_catalog_reports_same_thread_conflict() {
+        let error = shared_lazy_catalog_error(LazyInitError::SameThreadInitializationConflict);
+        assert_eq!(
+            error.to_string(),
+            "same-thread catalog initialization conflict"
+        );
     }
 
     #[test]

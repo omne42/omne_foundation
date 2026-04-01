@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -25,6 +26,7 @@ enum LazyState<T: ?Sized, E> {
 pub enum LazyInitError<E> {
     Inner(Arc<E>),
     ReentrantInitialization,
+    SameThreadInitializationConflict,
     CrossThreadCycleDetected,
 }
 
@@ -63,8 +65,12 @@ impl<T: ?Sized, E> LazyValue<T, E> {
     /// Returns the initialized value, running `initializer` at most once per
     /// successful initialization attempt.
     ///
-    /// Same-thread recursive initialization is rejected explicitly, and
-    /// thread-level cross-thread wait cycles between tracked `LazyValue`
+    /// Same-thread recursive initialization is rejected explicitly. If another
+    /// access somehow re-enters the same OS thread while initialization is
+    /// still in flight, this blocking shim also fails fast instead of trying to
+    /// park the thread behind itself.
+    ///
+    /// Thread-level cross-thread wait cycles between tracked `LazyValue`
     /// initializers/waiters are rejected before blocking.
     ///
     /// Callers still must avoid unrelated waits that can re-enter the same
@@ -88,7 +94,11 @@ impl<T: ?Sized, E> LazyValue<T, E> {
                     waiting_threads,
                 } => {
                     if *owner_thread_id == thread_id {
-                        return Err(LazyInitError::ReentrantInitialization);
+                        return Err(if current_thread_is_initializing_lazy(lazy_id) {
+                            LazyInitError::ReentrantInitialization
+                        } else {
+                            LazyInitError::SameThreadInitializationConflict
+                        });
                     }
 
                     if !waiting_for_current_attempt {
@@ -310,10 +320,16 @@ impl LazyWaitGraph {
 }
 
 fn begin_lazy_initialization(thread_id: ThreadId, lazy_id: u64) {
+    ACTIVE_LAZY_INITIALIZATIONS.with(|active| {
+        active.borrow_mut().insert(lazy_id);
+    });
     lock_unpoisoned(lazy_wait_graph()).begin_initialization(thread_id, lazy_id);
 }
 
 fn finish_lazy_initialization(thread_id: ThreadId, lazy_id: u64) {
+    ACTIVE_LAZY_INITIALIZATIONS.with(|active| {
+        active.borrow_mut().remove(&lazy_id);
+    });
     lock_unpoisoned(lazy_wait_graph()).finish_initialization(thread_id, lazy_id);
 }
 
@@ -328,6 +344,14 @@ fn finish_lazy_wait(thread_id: ThreadId, lazy_id: u64) {
 fn lazy_wait_graph() -> &'static Mutex<LazyWaitGraph> {
     static WAIT_GRAPH: OnceLock<Mutex<LazyWaitGraph>> = OnceLock::new();
     WAIT_GRAPH.get_or_init(|| Mutex::new(LazyWaitGraph::default()))
+}
+
+thread_local! {
+    static ACTIVE_LAZY_INITIALIZATIONS: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
+}
+
+fn current_thread_is_initializing_lazy(lazy_id: u64) -> bool {
+    ACTIVE_LAZY_INITIALIZATIONS.with(|active| active.borrow().contains(&lazy_id))
 }
 
 #[cfg(test)]
@@ -494,6 +518,7 @@ mod tests {
                 .map_err(|error| match error {
                     LazyInitError::Inner(error) => *error,
                     LazyInitError::ReentrantInitialization => "reentrant",
+                    LazyInitError::SameThreadInitializationConflict => "same-thread",
                     LazyInitError::CrossThreadCycleDetected => "cycle",
                 });
             result_tx.send(result).expect("publish waiter result");
@@ -606,6 +631,30 @@ mod tests {
             .get_or_init(|| reentrant_init(&lazy))
             .expect("outer initialization should recover");
         assert_eq!(*value, 1);
+    }
+
+    #[test]
+    fn same_thread_conflict_is_not_reported_as_recursive_reentrancy() {
+        let _guard = lazy_value_test_lock()
+            .lock()
+            .expect("lazy value test mutex poisoned");
+        reset_lazy_wait_graph_for_test();
+
+        let lazy = LazyValue::<u32, &'static str>::new();
+        *lock_unpoisoned(&lazy.state) = LazyState::Initializing {
+            thread_id: std::thread::current().id(),
+            waiting_threads: 0,
+        };
+
+        let err = lazy
+            .get_or_init(|| -> Result<Arc<u32>, &'static str> { Ok(Arc::new(1)) })
+            .expect_err("same-thread in-flight state should fail fast");
+        assert!(matches!(
+            err,
+            LazyInitError::SameThreadInitializationConflict
+        ));
+
+        *lock_unpoisoned(&lazy.state) = LazyState::Uninitialized;
     }
 
     #[test]

@@ -267,10 +267,10 @@ impl LazyWaitGraph {
     }
 
     fn finish_wait(&mut self, thread_id: ThreadId, lazy_id: u64) {
-        if let Some(state) = self.threads.get_mut(&thread_id) {
-            if state.waiting_on == Some(lazy_id) {
-                state.waiting_on = None;
-            }
+        if let Some(state) = self.threads.get_mut(&thread_id)
+            && state.waiting_on == Some(lazy_id)
+        {
+            state.waiting_on = None;
         }
         self.compact_thread(thread_id);
     }

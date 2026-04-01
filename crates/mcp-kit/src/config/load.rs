@@ -49,6 +49,24 @@ fn load_json_value_from_file(path: &Path) -> anyhow::Result<Value> {
         .into_value())
 }
 
+fn ensure_candidate_discovery_root_exists(thread_root: &Path) -> anyhow::Result<()> {
+    match std::fs::symlink_metadata(thread_root) {
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(err).with_context(|| {
+            format!(
+                "inspect MCP config root before candidate discovery: {}",
+                thread_root.display()
+            )
+        }),
+        Err(err) => Err(err).with_context(|| {
+            format!(
+                "inspect MCP config root before candidate discovery: {}",
+                thread_root.display()
+            )
+        }),
+    }
+}
+
 fn canonicalize_existing_ancestor(path: &Path) -> anyhow::Result<Option<PathBuf>> {
     let mut cursor = Some(path);
     while let Some(candidate) = cursor {
@@ -121,28 +139,31 @@ async fn load_initial_path_and_value(
             let value = load_json_value_from_file(&path)?;
             Ok(Some((path, value)))
         }
-        None => Ok(SchemaConfigLoader::new()
-            .add_candidate_file_layer(
-                "mcp config",
-                thread_root,
-                DEFAULT_CONFIG_CANDIDATES,
-                schema_file_layer_options(false),
-            )
-            .load_optional::<Value>()?
-            .map(|loaded| {
-                let path = loaded
-                    .layers()
-                    .last()
-                    .and_then(|layer| layer.path())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "mcp config loader returned a candidate file layer without a path"
-                        )
-                    })?
-                    .to_path_buf();
-                Ok::<_, anyhow::Error>((path, loaded.into_value()))
-            })
-            .transpose()?),
+        None => {
+            ensure_candidate_discovery_root_exists(thread_root)?;
+            Ok(SchemaConfigLoader::new()
+                .add_candidate_file_layer(
+                    "mcp config",
+                    thread_root,
+                    DEFAULT_CONFIG_CANDIDATES,
+                    schema_file_layer_options(false),
+                )
+                .load_optional::<Value>()?
+                .map(|loaded| {
+                    let path = loaded
+                        .layers()
+                        .last()
+                        .and_then(|layer| layer.path())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "mcp config loader returned a candidate file layer without a path"
+                            )
+                        })?
+                        .to_path_buf();
+                    Ok::<_, anyhow::Error>((path, loaded.into_value()))
+                })
+                .transpose()?)
+        }
     }
 }
 

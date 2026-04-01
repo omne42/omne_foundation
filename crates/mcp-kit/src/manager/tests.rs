@@ -3839,15 +3839,8 @@ async fn untrusted_manager_refuses_streamable_http_url_credentials() {
 }
 
 #[tokio::test]
-async fn untrusted_manager_refuses_streamable_http_hostname_resolving_to_non_global_ip_by_default()
-{
-    let policy = UntrustedStreamableHttpPolicy {
-        outbound: http_kit::UntrustedOutboundPolicy {
-            allow_localhost: true,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
+async fn untrusted_manager_refuses_streamable_http_localhost_without_allow_localhost() {
+    let policy = UntrustedStreamableHttpPolicy::default();
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
         .with_untrusted_streamable_http_policy(policy);
     assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
@@ -3859,7 +3852,7 @@ async fn untrusted_manager_refuses_streamable_http_hostname_resolving_to_non_glo
         .await
         .unwrap_err();
     assert!(
-        err.to_string().contains("resolves to non-global ip"),
+        err.to_string().contains("localhost/local/single-label"),
         "unexpected error: {err}"
     );
 }
@@ -3976,7 +3969,7 @@ fn untrusted_policy_allow_localhost_does_not_allow_local_domains_or_single_label
 }
 
 #[tokio::test]
-async fn untrusted_policy_dns_check_blocks_localhost_without_allow_private_ip() {
+async fn untrusted_policy_dns_check_allows_localhost_without_allow_private_ip() {
     let policy = UntrustedStreamableHttpPolicy {
         outbound: http_kit::UntrustedOutboundPolicy {
             allow_localhost: true,
@@ -3987,11 +3980,9 @@ async fn untrusted_policy_dns_check_blocks_localhost_without_allow_private_ip() 
     };
 
     validate_streamable_http_url_untrusted(&policy, "srv", "url", "https://localhost/mcp").unwrap();
-    let err =
-        validate_streamable_http_url_untrusted_dns(&policy, "srv", "url", "https://localhost/mcp")
-            .await
-            .unwrap_err();
-    assert!(err.to_string().contains("resolves to non-global ip"));
+    validate_streamable_http_url_untrusted_dns(&policy, "srv", "url", "https://localhost/mcp")
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

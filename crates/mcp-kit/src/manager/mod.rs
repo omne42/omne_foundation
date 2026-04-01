@@ -1,7 +1,7 @@
 //! Connection cache + MCP initialize + request helpers.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -104,6 +104,15 @@ pub(crate) fn resolve_connection_cwd_with_base(
     let resolved = if cwd.is_absolute() {
         cwd.to_path_buf()
     } else {
+        if cwd
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+        {
+            anyhow::bail!(
+                "relative MCP cwd must not contain '.' or '..' segments: {}",
+                cwd.display()
+            );
+        }
         let base = match base {
             Some(base) if base.is_absolute() => base.to_path_buf(),
             Some(base) => {

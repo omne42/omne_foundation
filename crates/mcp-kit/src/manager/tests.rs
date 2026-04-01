@@ -284,6 +284,19 @@ fn resolve_connection_cwd_with_base_rejects_relative_base() {
     assert!(err.to_string().contains("base must be absolute"), "{err:#}");
 }
 
+#[test]
+fn resolve_connection_cwd_with_base_rejects_dot_segments() {
+    for cwd in [Path::new("./demo"), Path::new("nested/../demo")] {
+        let err = resolve_connection_cwd_with_base(Some(Path::new("/workspace")), cwd)
+            .expect_err("dot segments should fail closed");
+        assert!(
+            err.to_string()
+                .contains("relative MCP cwd must not contain '.' or '..' segments"),
+            "{err:#}"
+        );
+    }
+}
+
 #[cfg(not(windows))]
 #[test]
 fn resolve_connection_cwd_rejects_relative_path_without_base() {

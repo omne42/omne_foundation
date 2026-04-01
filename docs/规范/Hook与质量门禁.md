@@ -83,11 +83,12 @@
 
 - 文档系统入口检查
 - workspace 内部 crate 依赖方向检查
+- workspace 发布契约回归检查
 - `cargo fmt --all -- --check`
 - `cargo check --workspace --all-targets --all-features`
 - `cargo test --workspace --all-features`
 
-也就是说，提交前默认要满足文档结构、依赖方向、格式、编译和测试这五类本地门禁。
+也就是说，提交前默认要满足文档结构、依赖方向、发布契约、格式、编译和测试这六类本地门禁。
 
 `scripts/workspace_check/` 是这里的共享实现；`scripts/check-workspace.sh` 只是保留给手动执行和 CI 复用的薄入口。
 
@@ -108,6 +109,22 @@ scripts/check-workspace.sh dependency-direction
 - 先决定边界是否合理
 - 再同步更新 `ARCHITECTURE.md`
 - 然后让 gate 接受新的依赖方向
+
+### publish contract gate
+
+`scripts/workspace_check/` 现在也会机械检查“改动中的 crate 是否还维持一致的发布契约”。
+
+当前规则是：
+
+- 这条 gate 会扫描整个 workspace 的 `crates/*/Cargo.toml`
+- 如果某个 crate 的普通依赖或 build-dependencies（含 target-specific 表）引用了 workspace 内已经声明 `publish = false` 的 crate，它自己也必须显式 `publish = false`
+- 否则 gate 会直接失败，避免 manifest 继续暗示“当前可单独走 crates.io 发布”，直到 `cargo package` 或 `cargo publish --dry-run` 才暴露真实边界
+
+可以单独执行：
+
+```bash
+scripts/check-workspace.sh publish-contract
+```
 
 ## asset checks
 
@@ -170,6 +187,7 @@ scripts/check-workspace.sh dependency-direction
 - `ci`
 - `docs-system`
 - `dependency-direction`
+- `publish-contract`
 - `asset-checks [all|policy-meta|mcp-kit|notify-kit]`
 - `secret-kit-target <target-triple>`
 
@@ -178,6 +196,7 @@ scripts/check-workspace.sh dependency-direction
 - `ci` 在 `local` 基础上增加 `clippy` 和全量 asset checks
 - `docs-system` 只运行文档系统入口与链接约束检查
 - `dependency-direction` 只运行 workspace 内部 crate 依赖方向 gate
+- `publish-contract` 只运行 workspace 发布契约 gate
 - `secret-kit-target` 用于检查 `secret-kit` 的特定 target 编译
 
 ## `commit-msg` 当前做什么

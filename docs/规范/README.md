@@ -10,7 +10,7 @@
 - 想看版本号、兼容和 public API gate：看 [`./版本与兼容.md`](./版本与兼容.md)
 - 想看分支命名和 Conventional Commits：看 [`./提交与分支.md`](./提交与分支.md)
 - 想看 changelog 维护规则：看 [`./变更记录.md`](./变更记录.md)
-- 想看 githook、workspace checks 和 asset checks：看 [`./Hook与质量门禁.md`](./Hook与质量门禁.md)
+- 想看 githook、workspace checks、发布契约回归 gate 和 asset checks：看 [`./Hook与质量门禁.md`](./Hook与质量门禁.md)
 
 ## 设计原则
 

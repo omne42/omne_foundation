@@ -19,6 +19,8 @@ use crate::{SlackWebhookConfig, SlackWebhookSink};
 use crate::{SoundConfig, SoundSink};
 
 const DEFAULT_TIMEOUT_MS: u64 = 5000;
+const LEGACY_HUB_TIMEOUT_GRACE_MIN_MS: u64 = 250;
+const LEGACY_HUB_TIMEOUT_GRACE_MAX_MS: u64 = 1000;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StandardEnvHubOptions {
@@ -137,23 +139,6 @@ where
     Ok(Some(Duration::from_millis(timeout.max(1))))
 }
 
-fn resolve_timeout_ms_env<F>(
-    primary_key: &'static str,
-    fallback_key: &'static str,
-    get: &F,
-) -> Result<Duration, EnvHubError>
-where
-    F: Fn(&str) -> Option<String>,
-{
-    if let Some(timeout) = parse_timeout_ms_env_optional(primary_key, get)? {
-        return Ok(timeout);
-    }
-    if let Some(timeout) = parse_timeout_ms_env_optional(fallback_key, get)? {
-        return Ok(timeout);
-    }
-    Ok(Duration::from_millis(DEFAULT_TIMEOUT_MS))
-}
-
 fn parse_timeout_config<F>(get: &F) -> Result<EnvTimeoutConfig, EnvHubError>
 where
     F: Fn(&str) -> Option<String>,
@@ -162,16 +147,42 @@ where
     const NOTIFY_SINK_TIMEOUT_MS_ENV: &str = "NOTIFY_SINK_TIMEOUT_MS";
     const NOTIFY_HUB_TIMEOUT_MS_ENV: &str = "NOTIFY_HUB_TIMEOUT_MS";
 
-    // Keep the legacy shared timeout as a compatibility fallback, but prefer
-    // the split control plane when callers opt into it.
+    let explicit_sink_timeout = parse_timeout_ms_env_optional(NOTIFY_SINK_TIMEOUT_MS_ENV, get)?;
+    let explicit_hub_timeout = parse_timeout_ms_env_optional(NOTIFY_HUB_TIMEOUT_MS_ENV, get)?;
+
+    if let (Some(sink_timeout), Some(hub_timeout)) = (explicit_sink_timeout, explicit_hub_timeout) {
+        return Ok(EnvTimeoutConfig {
+            sink_timeout,
+            hub_timeout,
+        });
+    }
+
+    if let Some(legacy_timeout) = parse_timeout_ms_env_optional(NOTIFY_TIMEOUT_MS_ENV, get)? {
+        let sink_timeout = explicit_sink_timeout.unwrap_or(legacy_timeout);
+        let hub_timeout = explicit_hub_timeout
+            .unwrap_or_else(|| sink_timeout.saturating_add(legacy_hub_timeout_grace(sink_timeout)));
+        return Ok(EnvTimeoutConfig {
+            sink_timeout,
+            hub_timeout,
+        });
+    }
+
     Ok(EnvTimeoutConfig {
-        sink_timeout: resolve_timeout_ms_env(
-            NOTIFY_SINK_TIMEOUT_MS_ENV,
-            NOTIFY_TIMEOUT_MS_ENV,
-            get,
-        )?,
-        hub_timeout: resolve_timeout_ms_env(NOTIFY_HUB_TIMEOUT_MS_ENV, NOTIFY_TIMEOUT_MS_ENV, get)?,
+        sink_timeout: explicit_sink_timeout
+            .unwrap_or_else(|| Duration::from_millis(DEFAULT_TIMEOUT_MS)),
+        hub_timeout: explicit_hub_timeout
+            .unwrap_or_else(|| Duration::from_millis(DEFAULT_TIMEOUT_MS)),
     })
+}
+
+fn legacy_hub_timeout_grace(sink_timeout: Duration) -> Duration {
+    let grace_ms = sink_timeout.as_millis().saturating_div(5).clamp(
+        u128::from(LEGACY_HUB_TIMEOUT_GRACE_MIN_MS),
+        u128::from(LEGACY_HUB_TIMEOUT_GRACE_MAX_MS),
+    );
+    Duration::from_millis(
+        u64::try_from(grace_ms).expect("legacy hub timeout grace should stay within u64"),
+    )
 }
 
 #[cfg(not(all(
@@ -418,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_timeout_config_uses_legacy_timeout_as_shared_fallback() {
+    fn parse_timeout_config_uses_legacy_timeout_as_sink_timeout_and_adds_hub_slack() {
         let env = HashMap::from([(String::from("NOTIFY_TIMEOUT_MS"), String::from("1200"))]);
 
         let config = parse_timeout_config(&|key| env.get(key).cloned()).expect("parse timeout");
@@ -427,7 +438,7 @@ mod tests {
             config,
             EnvTimeoutConfig {
                 sink_timeout: Duration::from_millis(1200),
-                hub_timeout: Duration::from_millis(1200),
+                hub_timeout: Duration::from_millis(1450),
             }
         );
     }
@@ -496,5 +507,46 @@ mod tests {
 
         let msg = format!("{err:#}");
         assert!(msg.contains("invalid NOTIFY_HUB_TIMEOUT_MS"), "{msg}");
+    }
+
+    #[test]
+    fn parse_timeout_config_uses_legacy_timeout_for_missing_explicit_hub_timeout() {
+        let env = HashMap::from([
+            (String::from("NOTIFY_TIMEOUT_MS"), String::from("1200")),
+            (String::from("NOTIFY_SINK_TIMEOUT_MS"), String::from("900")),
+        ]);
+
+        let config = parse_timeout_config(&|key| env.get(key).cloned()).expect("parse timeout");
+
+        assert_eq!(
+            config,
+            EnvTimeoutConfig {
+                sink_timeout: Duration::from_millis(900),
+                hub_timeout: Duration::from_millis(1150),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_timeout_config_clamps_legacy_hub_timeout_grace() {
+        let fast_env = HashMap::from([(String::from("NOTIFY_TIMEOUT_MS"), String::from("1"))]);
+        let fast = parse_timeout_config(&|key| fast_env.get(key).cloned()).expect("fast timeout");
+        assert_eq!(
+            fast,
+            EnvTimeoutConfig {
+                sink_timeout: Duration::from_millis(1),
+                hub_timeout: Duration::from_millis(251),
+            }
+        );
+
+        let slow_env = HashMap::from([(String::from("NOTIFY_TIMEOUT_MS"), String::from("9000"))]);
+        let slow = parse_timeout_config(&|key| slow_env.get(key).cloned()).expect("slow timeout");
+        assert_eq!(
+            slow,
+            EnvTimeoutConfig {
+                sink_timeout: Duration::from_millis(9000),
+                hub_timeout: Duration::from_millis(10000),
+            }
+        );
     }
 }

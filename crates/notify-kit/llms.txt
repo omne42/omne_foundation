@@ -1746,6 +1746,7 @@ impl Sink for StderrSink {
 
 - 调大 `per_sink_timeout`
 - 或优化/拆分你的 sink（避免单次发送太慢）
+- 如果你在用 `notify_kit::builtin::env::build_hub_from_standard_env(...)`，优先显式区分 `NOTIFY_SINK_TIMEOUT_MS` 和 `NOTIFY_HUB_TIMEOUT_MS`；仅设置兼容入口 `NOTIFY_TIMEOUT_MS` 时，helper 会自动给 Hub timeout 加一段 slack，避免 DNS/public-IP 预检先把更具体错误吞掉。
 
 ## `send()` 返回了聚合错误，我该怎么处理？
 

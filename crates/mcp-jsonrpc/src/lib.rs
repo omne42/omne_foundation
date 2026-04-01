@@ -47,9 +47,18 @@ pub use transport::{
 
 const REUSABLE_LINE_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 const READ_LINE_INITIAL_CAP_BYTES: usize = 4 * 1024;
+const DROPPED_DIRECT_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn no_runtime_close_reason(action: &str) -> String {
     format!("cannot {action} without a Tokio runtime; transport closed fail-closed")
+}
+
+fn no_time_driver_close_reason(action: &str) -> String {
+    format!("cannot {action} without a Tokio time driver; transport closed fail-closed")
+}
+
+fn dropped_request_response_timeout_reason(timeout: Duration) -> String {
+    format!("timed out after {timeout:?} while writing dropped request response")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -1367,9 +1376,32 @@ impl Drop for IncomingRequest {
         match &self.responder.target {
             RequestResponseTarget::Direct(handle) => {
                 if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    if ensure_tokio_time_driver("IncomingRequest::drop dropped request response")
+                        .is_err()
+                    {
+                        handle.schedule_close_once(no_time_driver_close_reason(
+                            "send a dropped request response",
+                        ));
+                        return;
+                    }
                     let handle = handle.clone();
                     drop(runtime.spawn(async move {
-                        drop(handle.write_json_line(&response).await);
+                        match tokio::time::timeout(
+                            DROPPED_DIRECT_RESPONSE_WRITE_TIMEOUT,
+                            handle.write_json_line(&response),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) => handle.schedule_close_once(format!(
+                                "failed to write dropped request response: {err}"
+                            )),
+                            Err(_) => {
+                                handle.schedule_close_once(dropped_request_response_timeout_reason(
+                                    DROPPED_DIRECT_RESPONSE_WRITE_TIMEOUT,
+                                ))
+                            }
+                        }
                     }));
                 } else {
                     handle.schedule_close_once(no_runtime_close_reason(
@@ -2260,6 +2292,8 @@ mod line_limit_tests {
 mod incoming_value_tests {
     use super::*;
     use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Context, Poll};
 
     use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
@@ -2290,6 +2324,37 @@ mod incoming_value_tests {
             _cx: &mut Context<'_>,
         ) -> Poll<Result<(), std::io::Error>> {
             Poll::Ready(Ok(()))
+        }
+    }
+
+    struct PendingWriter {
+        entered: Arc<AtomicBool>,
+    }
+
+    impl AsyncWrite for PendingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<Result<usize, std::io::Error>> {
+            self.entered.store(true, Ordering::Relaxed);
+            Poll::Pending
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), std::io::Error>> {
+            self.entered.store(true, Ordering::Relaxed);
+            Poll::Pending
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), std::io::Error>> {
+            self.entered.store(true, Ordering::Relaxed);
+            Poll::Pending
         }
     }
 
@@ -2433,6 +2498,53 @@ mod incoming_value_tests {
         assert_eq!(
             response["error"]["message"],
             "request handler dropped request without responding"
+        );
+
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn dropped_direct_request_write_timeout_closes_transport_fail_closed() {
+        let (client_stream, mut server_stream) = tokio::io::duplex(2048);
+        let (client_read, _client_write) = tokio::io::split(client_stream);
+        let entered = Arc::new(AtomicBool::new(false));
+
+        let mut client = Client::connect_io(
+            client_read,
+            PendingWriter {
+                entered: entered.clone(),
+            },
+        )
+        .await
+        .expect("connect client");
+        let mut requests = client.take_requests().expect("request receiver");
+
+        server_stream
+            .write_all(br#"{"jsonrpc":"2.0","id":1,"method":"first"}"#)
+            .await
+            .expect("write request");
+        server_stream.write_all(b"\n").await.expect("write newline");
+        server_stream.flush().await.expect("flush request");
+
+        let request = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .expect("request timeout")
+            .expect("request");
+        drop(request);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !client.handle.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("client should publish close after dropped-request write timeout");
+
+        assert!(entered.load(Ordering::Relaxed));
+        let close_reason = client.handle.close_reason().expect("close reason set");
+        assert!(
+            close_reason.contains("timed out after 1s while writing dropped request response"),
+            "{close_reason}"
         );
 
         drop(client);
@@ -2745,6 +2857,62 @@ mod incoming_value_tests {
                 "cannot send a dropped request response without a Tokio runtime; transport closed fail-closed"
             )
         );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build read runtime");
+
+        runtime.block_on(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+            let response_line = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+                .await
+                .expect("response timeout");
+            assert!(response_line.expect("read response").is_none());
+
+            drop(client);
+        });
+    }
+
+    #[test]
+    fn dropped_direct_request_without_time_driver_closes_transport_fail_closed() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build setup runtime");
+
+        let (server_read, client) = runtime.block_on(async {
+            let (client_stream, server_stream) = tokio::io::duplex(2048);
+            let (client_read, client_write) = tokio::io::split(client_stream);
+            let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+            let mut client = Client::connect_io(client_read, client_write)
+                .await
+                .expect("connect client");
+            let mut requests = client.take_requests().expect("request receiver");
+
+            server_write
+                .write_all(br#"{"jsonrpc":"2.0","id":1,"method":"first"}"#)
+                .await
+                .expect("write request");
+            server_write.write_all(b"\n").await.expect("write newline");
+            server_write.flush().await.expect("flush request");
+
+            let request = requests.recv().await.expect("request");
+
+            drop(request);
+            tokio::task::yield_now().await;
+
+            assert!(client.handle.is_closed());
+            assert_eq!(
+                client.handle.close_reason().as_deref(),
+                Some(
+                    "cannot send a dropped request response without a Tokio time driver; transport closed fail-closed"
+                )
+            );
+
+            (server_read, client)
+        });
+        drop(runtime);
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

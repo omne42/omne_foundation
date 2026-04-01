@@ -437,6 +437,7 @@ pub(super) fn normalize_local_image_roots(
     if !allow_local_image_files {
         return Ok(Vec::new());
     }
+    ensure_local_image_files_supported()?;
 
     let normalized = roots
         .into_iter()
@@ -451,6 +452,24 @@ pub(super) fn normalize_local_image_roots(
     Ok(normalized)
 }
 
+pub(super) fn validate_local_image_platform_support(
+    allow_local_image_files: bool,
+) -> crate::Result<()> {
+    if !allow_local_image_files {
+        return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        return Err(anyhow::anyhow!("local image files are not supported on this platform").into());
+    }
+
+    #[cfg(unix)]
+    {
+        Ok(())
+    }
+}
+
 pub(super) fn normalize_local_image_base_dir(
     allow_local_image_files: bool,
     base_dir: Option<PathBuf>,
@@ -458,8 +477,21 @@ pub(super) fn normalize_local_image_base_dir(
     if !allow_local_image_files {
         return Ok(None);
     }
+    ensure_local_image_files_supported()?;
 
     base_dir.map(normalize_local_image_root).transpose()
+}
+
+fn ensure_local_image_files_supported() -> crate::Result<()> {
+    #[cfg(unix)]
+    {
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        Err(anyhow::anyhow!("local image files are not supported on this platform").into())
+    }
 }
 
 fn normalize_local_image_root(root: PathBuf) -> crate::Result<PathBuf> {
@@ -748,6 +780,7 @@ mod tests {
         ensure_local_image_path_has_no_symlink_components, normalize_local_image_base_dir,
         normalize_local_image_roots, resolve_local_image_path, resolve_local_image_path_with_base,
         tenant_access_token_cache_ttl, tenant_access_token_refresh_waiter,
+        validate_local_image_platform_support,
     };
 
     #[tokio::test]
@@ -807,6 +840,24 @@ mod tests {
         let base_dir = normalize_local_image_base_dir(false, Some(PathBuf::from("relative-root")))
             .expect("disabled local files should ignore configured base dir");
         assert!(base_dir.is_none());
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn local_image_platform_support_fails_closed_when_enabled() {
+        let err = validate_local_image_platform_support(true)
+            .expect_err("non-unix platforms should reject local image files at config time");
+        assert!(
+            err.to_string().contains("not supported on this platform"),
+            "{err:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_image_platform_support_allows_unix_safe_open_path() {
+        validate_local_image_platform_support(true)
+            .expect("unix platforms should allow local image files when enabled");
     }
 
     #[test]

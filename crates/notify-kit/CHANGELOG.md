@@ -17,6 +17,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `notify-kit`：同步把 `Hub::try_notify_spawn(...)` 的内部 helper 签名格式化到 rustfmt 输出，避免后续 hook/PR 留下无意义的工作树脏改动。
 - `Hub` 现在对 panic 的 sink 采取 fail-closed 处理：内置的 panic 隔离边界仍会把当前次发送转换成结构化 sink failure，但同一个 sink 一旦在 `name()` 或 `send()` 中 panic，就会被标记为 disabled，后续发送不再继续复用该实例。
 - `Hub::notify(...)` 和 Feishu 图片失败 warning 现在会对日志里的第三方 HTTP 响应摘要做脱敏；`Hub` 的 warning 不再把 `response=...` 直接打进 tracing，Feishu 图片失败日志也不再原样泄漏签名 URL 或本地绝对路径。
+- `SoundSink` 的终端响铃回退现在会把阻塞式 stderr 写入移到 blocking task 上，避免默认 sink 在 stderr 背压时卡住 Tokio worker；没有 Tokio runtime 时仍保留同步回退。
 - `notify_kit::builtin::env::build_hub_from_standard_env(...)` 现在把 sink timeout 和 `HubConfig.per_sink_timeout` 的控制面拆开：新增 `NOTIFY_SINK_TIMEOUT_MS` 与 `NOTIFY_HUB_TIMEOUT_MS`，并保留 `NOTIFY_TIMEOUT_MS` 作为兼容回退；兼容入口会被解释成 sink timeout，并自动给 Hub timeout 增加一段 slack，避免单个 env 同时制造 sink 假超时和 Hub 假超时。
 - `GitHubCommentSink::new(...)` 现在会在构造阶段校验 token-bearing GitHub API 目标；默认仅信任 `https://api.github.com`，只有显式 `with_allow_custom_api_base_with_token(true)` 后，才会把 bearer token 发送到非 `api.github.com` 的 HTTPS API base。
 - `notify-kit` 的公开 sink config/builder 不再直接暴露 `secret-kit::SecretString`；新增 crate 本地的 `NotifySecret` 作为公开边界，内部实现仍可继续复用 `secret-kit` 存放长期凭证，避免通知域 API 把下层 secret 持有模型固定进契约里。
@@ -26,6 +27,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `notify_kit::builtin::env::build_hub_from_standard_env(...)` 现在返回 `notify-kit` 自己的 `Result`/`Error` 边界，不再把 `anyhow::Result` 暴露成公开 helper 契约；文档 canonical 路径也收口到 `notify_kit::builtin::env::...`，而 `notify_kit::env::...` 仅作为兼容出口保留。
 - `FeishuWebhookSink` 现在把远程/本地图片、tenant token 缓存和媒体上传能力收口到显式的 `FeishuWebhookMediaConfig` / internal media support 边界；基础 webhook 配置继续可用，但更宽的图片/上传语义不再和 webhook 主状态平铺混在一起。
 - `FeishuWebhookSink` 的本地图片配置现在按开关正交处理：当 `with_local_image_files(false)` 时，会忽略 `local_image_root(s)` 和 `local_image_base_dir`，不再因为未启用路径上的附带配置提前报错。
+- `FeishuWebhookSink` 现在会在构造阶段就对 `allow_local_image_files=true` 做平台能力校验；不支持 no-follow 本地文件打开语义的平台会直接 fail closed，而不是拖到发送图片时才报错。
 - workspace 内部 crate 的 path 依赖现在补齐版本声明，允许 `config-kit` / `secret-kit` / `text-assets-kit` 等核心 foundation crate 正常通过 `cargo package --no-verify` 做跨仓发布校验。
 - `SlackWebhookSink` / `DiscordWebhookSink` / `WeComWebhookSink` / `DingTalkWebhookSink` / `GenericWebhookSink` 现在复用统一的内部 webhook endpoint helper，收口重复的 HTTPS URL 校验、HTTP profile 构建和 JSON POST 骨架，减少后续出站策略调整时的散弹式修改；外部 API 与行为保持不变。
 - `GenericWebhookConfig::with_public_ip_check(false)` 不再在所有构造路径上被提前判成非法；只要 host allowlist 和 path scope 已经成立，sink 现在会在发送期按配置选择 unpinned/pinned HTTP client，而不是把公开配置开关做成无效契约。
@@ -165,6 +167,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Dev: `githooks/pre-commit` 新增严格门禁（`scripts/pre-commit-check.sh`），提交前执行 clippy（`-D warnings`）与生产目标关键 lint（`unwrap/expect`、`let _ =` 忽略 must_use、冗余 clone）。
 
 ### Fixed
+- `FeishuWebhookSink`：当启用 `allow_local_image_files` 时，非 Unix 平台现在会在构造阶段直接 fail closed，避免把“不支持本地图片”的错误拖到真正发送带图片消息时才暴露。
 - `GitHubCommentSink` now always sends token-bearing requests through a pinned public-IP client; disabling the generic public-IP toggle no longer bypasses DNS/public-address validation for GitHub bearer tokens.
 - `FeishuWebhookSink`：等待 tenant access token 刷新完成时改为在释放状态锁前预注册 `Notify` waiter，修复并发图片上传场景下可能丢唤醒并永久卡住的问题，并补回归测试覆盖“notify 先于 await”窗口。
 - Webhook/API sinks: 修复 `pinned client` 过期后若刷新失败（如 DNS 超时）时，过期缓存条目可能长期残留的问题，并新增回归测试覆盖该路径。

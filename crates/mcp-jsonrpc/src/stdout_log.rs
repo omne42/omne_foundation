@@ -4,6 +4,9 @@ use tokio::io::AsyncWriteExt;
 
 use crate::StdoutLog;
 
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
+
 async fn ensure_stdout_log_path_has_no_symlink(path: &Path) -> Result<(), std::io::Error> {
     use std::path::Component;
 
@@ -94,7 +97,7 @@ impl LogState {
         let current_len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
         let next_part = next_rotating_log_part(&base_path).await.unwrap_or(1);
         if let Some(max_parts) = max_parts {
-            let _ = prune_rotating_log_parts(&base_path, max_parts).await;
+            enforce_max_parts_limit(&base_path, max_parts).await?;
         }
 
         Ok(Self {
@@ -122,7 +125,7 @@ impl LogState {
                 self.file.flush().await?;
                 self.next_part = rotate_log_file(&self.base_path, self.next_part).await?;
                 if let Some(max_parts) = self.max_parts {
-                    let _ = prune_rotating_log_parts(&self.base_path, max_parts).await;
+                    enforce_max_parts_limit(&self.base_path, max_parts).await?;
                 }
                 self.file = open_stdout_log_append(&self.base_path).await?;
                 self.current_len = 0;
@@ -281,6 +284,43 @@ pub(crate) async fn prune_rotating_log_parts(
     Ok(())
 }
 
+async fn enforce_max_parts_limit(base_path: &Path, max_parts: u32) -> Result<(), std::io::Error> {
+    #[cfg(test)]
+    if let Some(err) = take_injected_prune_error() {
+        return Err(err);
+    }
+    prune_rotating_log_parts(base_path, max_parts).await
+}
+
+#[cfg(test)]
+fn injected_prune_error_slot() -> &'static Mutex<Option<std::io::ErrorKind>> {
+    static SLOT: OnceLock<Mutex<Option<std::io::ErrorKind>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+fn prune_test_mutex() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(test)]
+fn inject_prune_error(kind: std::io::ErrorKind) {
+    let mut slot = injected_prune_error_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *slot = Some(kind);
+}
+
+#[cfg(test)]
+fn take_injected_prune_error() -> Option<std::io::Error> {
+    let mut slot = injected_prune_error_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    slot.take()
+        .map(|kind| std::io::Error::new(kind, "injected stdout_log prune failure"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +346,54 @@ mod tests {
             parts.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
             vec![4, 5]
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn log_state_new_propagates_prune_failure() {
+        let _guard = prune_test_mutex()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("server.stdout.log");
+        inject_prune_error(std::io::ErrorKind::PermissionDenied);
+
+        let err = match LogState::new(StdoutLog {
+            path: base,
+            max_bytes_per_part: 1024,
+            max_parts: Some(1),
+        })
+        .await
+        {
+            Ok(_) => panic!("init should fail when prune cannot enforce max_parts"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn write_line_bytes_propagates_rotation_prune_failure() {
+        let _guard = prune_test_mutex()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("server.stdout.log");
+        let mut state = LogState::new(StdoutLog {
+            path: base,
+            max_bytes_per_part: 1,
+            max_parts: Some(1),
+        })
+        .await
+        .unwrap();
+
+        state.write_line_bytes(b"a").await.unwrap();
+        inject_prune_error(std::io::ErrorKind::PermissionDenied);
+        let err = state
+            .write_line_bytes(b"b")
+            .await
+            .expect_err("rotation should fail when prune cannot enforce max_parts");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     #[tokio::test]

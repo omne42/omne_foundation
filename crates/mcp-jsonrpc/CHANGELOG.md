@@ -7,6 +7,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：server→client request 响应写回一旦失败，现在会立刻发布关闭原因并 fail-closed 关闭 transport，而不是只把 I/O 错误返回给 handler 后继续把连接留在“看起来还活着”的状态。
+- `mcp-jsonrpc`：`StdoutLog.max_parts` 的保留上限现在改成强约束；初始化和轮转阶段一旦无法完成 prune，就会直接报错而不是静默退化成 best-effort。
 - `mcp-jsonrpc`：sync/no-runtime 的 dropped-request 与 batch 收尾不再偷偷启动 detached Tokio runtime；这些路径现在会显式 fail-closed 并发布关闭原因，而不是隐式补一个后台执行环境。
 - `mcp-jsonrpc`：`streamable_http` 现在拒绝配置覆盖 transport 独占头 `Accept` / `Content-Type` / `mcp-session-id`，避免会话粘连和内容协商边界被调用方 headers 破坏。
 - `mcp-jsonrpc`：所有通用出站写路径现在会在拿到 writer 锁后再次检查关闭状态，避免 close/drop 已发布后、排队中的 request/notify/response 仍继续写到底层 transport。

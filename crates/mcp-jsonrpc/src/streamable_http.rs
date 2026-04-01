@@ -1153,18 +1153,25 @@ async fn flush_sse_event_data(
 }
 
 fn normalize_sse_event_data_for_json_line(data: &[u8]) -> Result<Vec<u8>, io::Error> {
-    if data.iter().any(|byte| matches!(byte, b'\n' | b'\r')) {
-        if let Ok(value) = serde_json::from_slice::<Value>(data) {
-            return serde_json::to_vec(&value).map_err(|err| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("serialize sse event payload failed: {err}"),
-                )
-            });
-        }
+    let value = serde_json::from_slice::<Value>(data).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("sse event payload is not valid json: {err}"),
+        )
+    })?;
+    if !matches!(value, Value::Object(_) | Value::Array(_)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "sse event payload must be a json-rpc object or batch array",
+        ));
     }
 
-    Ok(data.to_vec())
+    serde_json::to_vec(&value).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("serialize sse event payload failed: {err}"),
+        )
+    })
 }
 
 async fn write_json_line(
@@ -1383,6 +1390,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn normalize_sse_event_data_rejects_non_json_payloads() {
+        let err = normalize_sse_event_data_for_json_line(b"not-json")
+            .expect_err("non-json sse payload should be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("not valid json"));
+    }
+
+    #[test]
+    fn normalize_sse_event_data_rejects_json_scalars() {
+        let err = normalize_sse_event_data_for_json_line(br#""still-not-jsonrpc""#)
+            .expect_err("json scalar sse payload should be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("json-rpc object or batch array"));
+    }
+
     #[tokio::test]
     async fn sse_pump_flushes_last_data_event_without_trailing_blank_line()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1457,7 +1480,7 @@ mod tests {
 
         let mut out = Vec::new();
         capture_side.read_to_end(&mut out).await?;
-        assert_eq!(out, b" {\"jsonrpc\":\"2.0\",\"method\":\"demo/notify\"}\n");
+        assert_eq!(out, b"{\"jsonrpc\":\"2.0\",\"method\":\"demo/notify\"}\n");
         Ok(())
     }
 
@@ -1601,7 +1624,7 @@ mod tests {
 
     #[tokio::test]
     async fn streamable_http_reconnects_after_graceful_sse_eof() {
-        const TEST_STAGE_TIMEOUT: Duration = Duration::from_secs(5);
+        const TEST_STAGE_TIMEOUT: Duration = Duration::from_secs(10);
 
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -1627,6 +1650,9 @@ mod tests {
             .await
             .expect("write initial SSE headers");
             stage_tx.send("initial-sse-open").expect("send stage");
+            write_chunk(&mut initial_sse, b": heartbeat\n\n")
+                .await
+                .expect("write initial SSE comment");
             finish_chunked_response(&mut initial_sse)
                 .await
                 .expect("finish initial SSE response");

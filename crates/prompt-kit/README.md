@@ -56,7 +56,7 @@
 
 - 代码上它本质是建立在 [`text-assets-kit`](../text-assets-kit/README.md) 之上的薄封装。
 - `PromptDirectoryHandle` 是当前推荐的 runtime-facing 共享句柄；`LazyPromptDirectory` 仅保留为已废弃的阻塞式兼容层。
-- `LazyPromptDirectory` 对同线程重入和可检测的线程级跨线程初始化环路会返回显式错误，但它仍然是阻塞式兼容层，不应继续扩张成 runtime-facing canonical API。
+- `LazyPromptDirectory` 对同线程递归初始化、同线程初始化冲突以及可检测的线程级跨线程初始化环路都会返回显式错误，但它仍然是阻塞式兼容层，不应继续扩张成 runtime-facing canonical API。
 - 当前跨仓库已证明的 prompt 复用面，并不主要是“prompt 目录加载”。
 - 因此当前不应该继续往 `prompt-kit` 塞入模板 DSL、版本管理、schema 绑定、fingerprint 或 cache-key 语义。
 

@@ -13,6 +13,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ### Fixed
 - `text-assets-kit` 现在显式标记 `publish = false`，因为它当前直接依赖 workspace-only 的 `omne-fs-primitives`，不再让 manifest 暗示可单独 crates.io 发布。
+- `LazyValue` 现在把“同线程但并非当前递归调用”的 in-flight 初始化冲突单独建模出来，不再把这类 blocking compatibility shim 的死锁前兆误报成 `ReentrantInitialization`。
 - `LazyValue` now detects thread-level cross-thread wait cycles between tracked lazy initializers and fails fast with an explicit error instead of leaving both threads permanently blocked.
 - Cleaned up the new `LazyWaitGraph` wait-state teardown branch so the crate continues to satisfy the workspace `clippy -D warnings` CI gate after the cycle-detection fix.
 - `lock_bootstrap_transaction(...)` now fails closed when inspecting or canonicalizing the bootstrap root prefix fails, instead of silently deriving an unstable lock key from partial path information.

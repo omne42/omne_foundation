@@ -8,6 +8,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ### Changed
 - `mcp-jsonrpc`：`Client::close_in_background_once(...)` 现在会像显式关闭路径一样先 abort reader/transport tasks，并接管 child 的 best-effort kill/reap；`mcp-kit::Session::notify` 超时不再把后台任务和子进程留到 `Client::drop` 才收尾。
+- `mcp-jsonrpc`：放宽 `streamable_http_reconnects_after_graceful_sse_eof` 回归测试的阶段等待窗口，避免完整 workspace 门禁负载下把 SSE 重连语义的真通过误判成超时假失败；不改变产品逻辑。
 - `mcp-jsonrpc`：已有 Tokio runtime 的 dropped-request direct writeback 现在也带有单独的 1 秒收敛超时；如果底层 writer 永久 pending，连接会发布明确关闭原因并 fail-closed，而不是留下悬挂的 best-effort 写任务。
 - `mcp-jsonrpc`：invalid-request / batch-invalid-request 的错误响应写回一旦失败，现在会立即 fail-closed 并保留真实 transport 关闭原因，而不是把写回失败静默吞掉后继续用协议错误掩盖响应丢失。
 - `mcp-jsonrpc`：server→client request 响应写回一旦失败，现在会立刻发布关闭原因并 fail-closed 关闭 transport，而不是只把 I/O 错误返回给 handler 后继续把连接留在“看起来还活着”的状态。

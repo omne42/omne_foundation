@@ -312,7 +312,7 @@ fn read_catalog_sources_from_materialized_directory(
     let total_bytes = Cell::new(0usize);
 
     scan_text_directory(
-        &root,
+        root,
         |relative_path, _, entries| {
             let display_path = root.join(relative_path);
             validate_catalog_directory_width(

@@ -127,6 +127,8 @@ static LINUX_CLEANUP_WORKER_SPAWN_COUNT: std::sync::atomic::AtomicUsize =
 #[cfg(all(test, unix, target_os = "linux"))]
 static LINUX_CLEANUP_WORKER_FORCED_SPAWN_FAILURES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+#[cfg(all(test, unix, target_os = "linux"))]
+static LINUX_CLEANUP_LAST_WARNING: OnceLock<std::sync::Mutex<Option<String>>> = OnceLock::new();
 
 fn start_process_tree_cleanup(cleanup: ProcessTreeCleanup) {
     #[cfg(all(unix, target_os = "linux"))]
@@ -219,18 +221,31 @@ fn spawn_linux_cleanup_worker() -> std::io::Result<std::sync::mpsc::Sender<Proce
         )
         .is_ok()
     {
-        return Err(std::io::Error::other(
-            "injected secret-kit linux cleanup worker spawn failure",
-        ));
+        let err = std::io::Error::other("injected secret-kit linux cleanup worker spawn failure");
+        report_linux_cleanup_warning(&err);
+        return Err(err);
     }
 
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::Builder::new()
         .name("secret-kit-linux-cleanup".to_string())
-        .spawn(move || run_linux_cleanup_worker(receiver))?;
+        .spawn(move || run_linux_cleanup_worker(receiver))
+        .inspect_err(report_linux_cleanup_warning)?;
     #[cfg(test)]
     LINUX_CLEANUP_WORKER_SPAWN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok(sender)
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn report_linux_cleanup_warning(err: &std::io::Error) {
+    eprintln!("secret-kit: linux cleanup worker unavailable: {err}");
+    #[cfg(test)]
+    {
+        let storage = LINUX_CLEANUP_LAST_WARNING.get_or_init(|| std::sync::Mutex::new(None));
+        *storage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(err.to_string());
+    }
 }
 
 #[cfg(all(unix, target_os = "linux"))]
@@ -300,6 +315,15 @@ fn linux_cleanup_worker_spawn_count() -> usize {
 #[cfg(all(test, unix, target_os = "linux"))]
 fn force_linux_cleanup_worker_spawn_failures(count: usize) {
     LINUX_CLEANUP_WORKER_FORCED_SPAWN_FAILURES.store(count, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(all(test, unix, target_os = "linux"))]
+fn take_linux_cleanup_warning_for_test() -> Option<String> {
+    LINUX_CLEANUP_LAST_WARNING
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
 }
 
 #[cfg(all(test, unix, target_os = "linux"))]
@@ -669,6 +693,7 @@ mod retry_tests {
             .lock()
             .expect("linux cleanup test mutex poisoned");
         linux_cleanup_dispatcher().reset_for_test();
+        let _ = take_linux_cleanup_warning_for_test();
         force_linux_cleanup_worker_spawn_failures(1);
         let before = linux_cleanup_worker_spawn_count();
 
@@ -681,6 +706,9 @@ mod retry_tests {
             after_failed_send, before,
             "failed spawn attempts should not report a started worker"
         );
+        let warning = take_linux_cleanup_warning_for_test()
+            .expect("failed worker initialization should emit a warning");
+        assert!(warning.contains("spawn failure"), "{warning}");
 
         force_linux_cleanup_worker_spawn_failures(0);
         assert!(

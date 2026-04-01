@@ -400,6 +400,8 @@ struct SecretCacheState {
     entries: BTreeMap<SecretCacheKey, SecretCacheEntry>,
     lru: VecDeque<SecretCacheKey>,
     inflight: BTreeMap<SecretCacheKey, broadcast::Sender<()>>,
+    prepare_inflight: BTreeMap<PrepareFlightKey, broadcast::Sender<()>>,
+    prepare_cache_keys: BTreeMap<PrepareFlightKey, SecretCacheKey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -407,6 +409,13 @@ struct SecretCacheKey {
     env_partition: String,
     runtime_partition: Option<String>,
     scope: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PrepareFlightKey {
+    env_partition: String,
+    runtime_partition: Option<String>,
+    spec: String,
 }
 
 struct SecretCacheEntry {
@@ -420,11 +429,22 @@ enum SecretCacheLookup {
     Leader(broadcast::Sender<()>),
 }
 
+enum PrepareFlightLookup {
+    Wait(broadcast::Receiver<()>),
+    Leader(broadcast::Sender<()>),
+}
+
 struct SecretCacheFillGuard<'a, R> {
     resolver: &'a CachingSecretResolver<R>,
     key: Option<SecretCacheKey>,
     waiter_done: broadcast::Sender<()>,
     value: Option<SecretString>,
+}
+
+struct PrepareFlightGuard<'a, R> {
+    resolver: &'a CachingSecretResolver<R>,
+    key: Option<PrepareFlightKey>,
+    waiter_done: broadcast::Sender<()>,
 }
 
 impl<R> CachingSecretResolver<R> {
@@ -472,12 +492,48 @@ impl<R> CachingSecretResolver<R> {
         SecretCacheLookup::Leader(waiter_done)
     }
 
+    fn lookup_prepare_flight(&self, key: &PrepareFlightKey) -> PrepareFlightLookup {
+        let mut state = lock_cache_state(&self.state);
+        state.prune_expired(self.ttl);
+        if let Some(waiter_done) = state.prepare_inflight.get(key) {
+            return PrepareFlightLookup::Wait(waiter_done.subscribe());
+        }
+
+        let (waiter_done, _) = broadcast::channel(1);
+        state
+            .prepare_inflight
+            .insert(key.clone(), waiter_done.clone());
+        PrepareFlightLookup::Leader(waiter_done)
+    }
+
     fn cached_value(&self, key: &SecretCacheKey) -> Option<SecretString> {
         let mut state = lock_cache_state(&self.state);
         state.prune_expired(self.ttl);
         let value = state.entries.get(key).map(|entry| entry.value.clone())?;
         state.touch_key(key);
         Some(value)
+    }
+
+    fn cached_value_for_prepare_key(&self, key: &PrepareFlightKey) -> Option<SecretString> {
+        let mut state = lock_cache_state(&self.state);
+        state.prune_expired(self.ttl);
+        let cache_key = state.prepare_cache_keys.get(key)?.clone();
+        let value = state
+            .entries
+            .get(&cache_key)
+            .map(|entry| entry.value.clone());
+        if value.is_none() {
+            state.prepare_cache_keys.remove(key);
+            return None;
+        }
+        state.touch_key(&cache_key);
+        value
+    }
+
+    fn remember_prepare_cache_key(&self, prepare_key: PrepareFlightKey, cache_key: SecretCacheKey) {
+        let mut state = lock_cache_state(&self.state);
+        state.prune_expired(self.ttl);
+        state.prepare_cache_keys.insert(prepare_key, cache_key);
     }
 
     async fn resolve_with_fill(
@@ -508,30 +564,59 @@ where
     ) -> SecretResolveFuture<'a> {
         Box::pin(async move {
             loop {
-                if let Some(key) = self
+                let cache_partitioning = self.inner.lookup_secret_cache_partitioning(spec, context);
+                let prepare_key = cache_partitioning.and_then(|partitioning| {
+                    PrepareFlightKey::for_context(spec, partitioning, context)
+                });
+                let hinted_key = self
                     .inner
                     .lookup_secret_cache_scope(spec, context)?
                     .and_then(|scope| {
-                        self.inner
-                            .lookup_secret_cache_partitioning(spec, context)
-                            .and_then(|partitioning| {
-                                SecretCacheKey::for_context(scope, partitioning, context)
-                            })
-                    })
-                    && let Some(value) = self.cached_value(&key)
+                        cache_partitioning.and_then(|partitioning| {
+                            SecretCacheKey::for_context(scope, partitioning, context)
+                        })
+                    });
+                if let Some(key) = hinted_key.as_ref()
+                    && let Some(value) = self.cached_value(key)
                 {
                     return Ok(value);
                 }
+
+                if let Some(key) = prepare_key.as_ref()
+                    && let Some(value) = self.cached_value_for_prepare_key(key)
+                {
+                    return Ok(value);
+                }
+
+                let prepare_guard = match prepare_key
+                    .as_ref()
+                    .map(|key| (key.clone(), self.lookup_prepare_flight(key)))
+                {
+                    Some((_, PrepareFlightLookup::Wait(mut waiter_done))) => {
+                        let _ = waiter_done.recv().await;
+                        continue;
+                    }
+                    Some((key, PrepareFlightLookup::Leader(waiter_done))) => {
+                        Some(PrepareFlightGuard::new(self, key, waiter_done))
+                    }
+                    None => None,
+                };
 
                 let prepared = self.inner.prepare_secret_resolution(spec, context).await?;
                 let prepared_key = prepared.cache_key(context);
 
                 let Some(key) = prepared_key else {
-                    return self
+                    let result = self
                         .inner
                         .resolve_prepared_secret(prepared.into_prepared(), context)
                         .await;
+                    drop(prepare_guard);
+                    return result;
                 };
+
+                if let Some(prepare_key) = prepare_key {
+                    self.remember_prepare_cache_key(prepare_key, key.clone());
+                }
 
                 match self.lookup_cache(&key) {
                     SecretCacheLookup::Hit(value) => return Ok(value),
@@ -540,9 +625,11 @@ where
                     }
                     SecretCacheLookup::Leader(waiter_done) => {
                         let fill = SecretCacheFillGuard::new(self, key.clone(), waiter_done);
-                        return self
+                        let result = self
                             .resolve_with_fill(prepared.into_prepared(), context, fill)
                             .await;
+                        drop(prepare_guard);
+                        return result;
                     }
                 }
             }
@@ -569,6 +656,20 @@ impl<'a, R> SecretCacheFillGuard<'a, R> {
     }
 }
 
+impl<'a, R> PrepareFlightGuard<'a, R> {
+    fn new(
+        resolver: &'a CachingSecretResolver<R>,
+        key: PrepareFlightKey,
+        waiter_done: broadcast::Sender<()>,
+    ) -> Self {
+        Self {
+            resolver,
+            key: Some(key),
+            waiter_done,
+        }
+    }
+}
+
 impl<R> Drop for SecretCacheFillGuard<'_, R> {
     fn drop(&mut self) {
         let Some(key) = self.key.take() else {
@@ -583,6 +684,19 @@ impl<R> Drop for SecretCacheFillGuard<'_, R> {
         }
         drop(state);
 
+        let _ = self.waiter_done.send(());
+    }
+}
+
+impl<R> Drop for PrepareFlightGuard<'_, R> {
+    fn drop(&mut self) {
+        let Some(key) = self.key.take() else {
+            return;
+        };
+
+        lock_cache_state(&self.resolver.state)
+            .prepare_inflight
+            .remove(&key);
         let _ = self.waiter_done.send(());
     }
 }
@@ -689,6 +803,35 @@ impl SecretCacheKey {
             env_partition,
             runtime_partition,
             scope,
+        })
+    }
+}
+
+impl PrepareFlightKey {
+    fn for_context(
+        spec: &str,
+        partitioning: SecretCachePartitioning,
+        context: SecretResolutionContext<'_>,
+    ) -> Option<Self> {
+        let env_partition = normalize_secret_cache_component(
+            context.environment().secret_cache_partition()?.into_owned(),
+        )?;
+        let spec = normalize_secret_cache_component(spec.to_string())?;
+        let runtime_partition = match partitioning {
+            SecretCachePartitioning::Environment => None,
+            SecretCachePartitioning::EnvironmentAndCommandRuntime => {
+                Some(normalize_secret_cache_component(
+                    context
+                        .command_runtime()
+                        .secret_cache_partition()?
+                        .into_owned(),
+                )?)
+            }
+        };
+        Some(Self {
+            env_partition,
+            runtime_partition,
+            spec,
         })
     }
 }

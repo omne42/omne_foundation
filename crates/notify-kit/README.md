@@ -51,7 +51,7 @@
 - `notify_kit::builtin`
   - 内置 provider sinks 的适配层；crate root 继续保留 re-export 仅为兼容
 - `notify_kit::builtin::env`
-  - 标准 `NOTIFY_*` bootstrap helper 的 canonical 入口；`notify_kit::env` 仅保留为兼容别名
+  - 标准 `NOTIFY_*` bootstrap helper 的 canonical 入口；`notify_kit::env` 仅保留为兼容出口，并建议迁移到这里
 - `src/event.rs`
   - 统一事件模型
 - `src/hub.rs`
@@ -91,6 +91,8 @@
 `notify-kit` 当前不是独立的 crates.io 发布契约。它依赖的 foundation crate 仍按 workspace 一起演进，因此当前接入方式以 Git / monorepo 为准，不应假设 crates.io 依赖链已经稳定。
 
 如果你要跨仓复用，优先依赖对应 Git revision；如果你在 monorepo 内接入，直接使用 workspace path 即可。
+
+默认 feature 仍继续启用 `all-sinks` 以保持兼容；如果调用方想主动缩小依赖面，可以显式关闭默认 feature 再按需开启具体 sink feature。
 
 ## 进一步阅读
 

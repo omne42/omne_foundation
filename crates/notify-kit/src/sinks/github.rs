@@ -10,7 +10,7 @@ use github_kit::{
 };
 use http_kit::{
     HttpClientOptions, HttpClientProfile, build_http_client_profile, ensure_http_success,
-    redact_url, send_reqwest,
+    redact_url, redact_url_str, send_reqwest,
 };
 use secret_kit::SecretString;
 
@@ -31,7 +31,7 @@ pub struct GitHubCommentConfig {
 impl std::fmt::Debug for GitHubCommentConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GitHubCommentConfig")
-            .field("api_base", &self.api_base)
+            .field("api_base", &redact_url_str(&self.api_base))
             .field("owner", &self.owner)
             .field("repo", &self.repo)
             .field("issue_number", &self.issue_number)
@@ -299,12 +299,18 @@ mod tests {
 
     #[test]
     fn debug_redacts_token() {
-        let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok_secret");
+        let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok_secret")
+            .with_api_base("https://github.example.com/api/v3?token=top");
         let cfg_dbg = format!("{cfg:?}");
         assert!(!cfg_dbg.contains("tok_secret"), "{cfg_dbg}");
+        assert!(!cfg_dbg.contains("api/v3"), "{cfg_dbg}");
+        assert!(!cfg_dbg.contains("top"), "{cfg_dbg}");
+        assert!(cfg_dbg.contains("github.example.com"), "{cfg_dbg}");
         assert!(cfg_dbg.contains("<redacted>"), "{cfg_dbg}");
 
-        let sink = GitHubCommentSink::new(cfg).expect("build sink");
+        let sink =
+            GitHubCommentSink::new(GitHubCommentConfig::new("owner", "repo", 1, "tok_secret"))
+                .expect("build sink");
         let sink_dbg = format!("{sink:?}");
         assert!(!sink_dbg.contains("tok_secret"), "{sink_dbg}");
         assert!(sink_dbg.contains("api.github.com"), "{sink_dbg}");

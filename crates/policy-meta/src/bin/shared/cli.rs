@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use policy_meta::ArtifactError;
+use crate::artifacts::ArtifactError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {

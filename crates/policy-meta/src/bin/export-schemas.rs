@@ -1,10 +1,12 @@
+#[path = "shared/artifacts.rs"]
+mod artifacts;
 #[path = "shared/cli.rs"]
 mod cli;
 
 use std::path::PathBuf;
 
+use artifacts::{check_schema_dir, write_schema_dir};
 use cli::{CliError, next_path_arg};
-use policy_meta::{check_schema_dir, write_schema_dir};
 
 fn main() -> Result<(), CliError> {
     let mut check = false;

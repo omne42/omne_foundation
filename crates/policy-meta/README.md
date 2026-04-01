@@ -89,12 +89,11 @@
 checked-in schema 和 TypeScript bindings 由 Rust 类型定义导出，并通过 `export-artifacts` 做同步校验。
 `profiles/` 也纳入同一个 drift check；目录里如果残留额外的旧 artifact，`--check` 会直接失败，默认导出会把这些陈旧文件清掉。
 
-artifact 导出 API 当前公开返回 `ArtifactError`，调用方可以结构化区分：
+artifact 的文件系统导出/校验工作流只收口在 `src/bin/` 的 CLI 层：
 
-- drift
-- unexpected stale artifacts
-- I/O 失败
-- JSON 解析失败
+- `policy-meta` 库本身只暴露共享策略语义和纯导出结果
+- `export-artifacts` / `export-schemas` / `export-types` CLI 继续保留 typed error，区分参数错误和 artifact drift / I/O 失败
+- 下游如果需要生成文件，应调用这些 bin，而不是把文件系统 workflow 当作 contract crate API 依赖
 
 `schema/` 和 `bindings/` 被视为精确的 generated artifact 目录：
 

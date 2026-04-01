@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use self::media::{
     AccessTokenCache, FeishuAppCredentials, normalize_app_credentials,
     normalize_local_image_base_dir, normalize_local_image_roots, normalize_secret,
+    validate_local_image_platform_support,
 };
 use crate::Event;
 use crate::NotifySecret;
@@ -288,6 +289,7 @@ fn normalize_media_support(
         return Ok(None);
     };
 
+    validate_local_image_platform_support(config.allow_local_image_files)?;
     let app_credentials = normalize_app_credentials(config.app_id, config.app_secret)?;
     let local_image_roots =
         normalize_local_image_roots(config.allow_local_image_files, config.local_image_roots)?;
@@ -812,6 +814,17 @@ mod tests {
         );
     }
 
+    #[cfg(not(unix))]
+    #[test]
+    fn local_image_opt_in_fails_closed_at_construction_on_unsupported_platforms() {
+        let err = FeishuWebhookSink::new(local_image_enabled_config())
+            .expect_err("unsupported platforms should reject local images during construction");
+        assert!(
+            err.to_string().contains("not supported on this platform"),
+            "{err:#}"
+        );
+    }
+
     #[test]
     fn remote_images_always_enforce_public_ip_checks() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1121,30 +1134,12 @@ mod tests {
     #[cfg(not(unix))]
     #[test]
     fn local_image_files_fail_closed_on_platforms_without_safe_open() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build runtime");
-        rt.block_on(async {
-            let path = local_image_test_root().join(format!(
-                "{}.png",
-                unique_local_image_test_name("notify-kit-feishu-local-image-unsupported")
-            ));
-            std::fs::write(&path, b"png").expect("write local image");
-
-            let sink = FeishuWebhookSink::new(local_image_enabled_config()).expect("build sink");
-
-            let err = sink
-                .load_image(path.to_str().expect("utf8 path"))
-                .await
-                .expect_err("platform should fail closed");
-            assert!(
-                err.to_string().contains("not supported on this platform"),
-                "{err:#}"
-            );
-
-            let _ = std::fs::remove_file(path);
-        });
+        let err = FeishuWebhookSink::new(local_image_enabled_config())
+            .expect_err("platform should fail closed");
+        assert!(
+            err.to_string().contains("not supported on this platform"),
+            "{err:#}"
+        );
     }
 
     #[test]

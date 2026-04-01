@@ -40,14 +40,31 @@ impl SoundSink {
         }
     }
 
-    fn send_terminal_bell(event: &Event) -> crate::Result<()> {
+    fn write_terminal_bells(mut stderr: impl Write, count: usize) -> std::io::Result<()> {
         let bell = "\u{0007}";
-        let count = Self::bell_count(event.severity);
-        let mut stderr = std::io::stderr().lock();
         for _ in 0..count {
             stderr.write_all(bell.as_bytes())?;
         }
         stderr.flush()?;
+        Ok(())
+    }
+
+    async fn send_terminal_bell(event: &Event) -> crate::Result<()> {
+        let count = Self::bell_count(event.severity);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            return handle
+                .spawn_blocking(move || {
+                    let stderr = std::io::stderr();
+                    let mut stderr = stderr.lock();
+                    Self::write_terminal_bells(&mut stderr, count).map_err(crate::Error::from)
+                })
+                .await
+                .map_err(|err| anyhow::anyhow!("join terminal bell task: {err}"))?;
+        }
+
+        let stderr = std::io::stderr();
+        let mut stderr = stderr.lock();
+        Self::write_terminal_bells(&mut stderr, count)?;
         Ok(())
     }
 
@@ -98,12 +115,12 @@ impl Sink for SoundSink {
                     if !WARNED_SOUND_COMMAND_DISABLED.swap(true, Ordering::Relaxed) {
                         warn_sound_command_disabled_fallback();
                     }
-                    Self::send_terminal_bell(event)?;
+                    Self::send_terminal_bell(event).await?;
                     return Ok(());
                 }
             }
 
-            Self::send_terminal_bell(event)?;
+            Self::send_terminal_bell(event).await?;
             Ok(())
         })
     }
@@ -111,8 +128,14 @@ impl Sink for SoundSink {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "sound-command")]
     use super::*;
+
+    #[test]
+    fn write_terminal_bells_writes_expected_count() {
+        let mut out = Vec::new();
+        SoundSink::write_terminal_bells(&mut out, 3).expect("write bells");
+        assert_eq!(out, vec![0x07, 0x07, 0x07]);
+    }
 
     #[cfg(feature = "sound-command")]
     #[test]

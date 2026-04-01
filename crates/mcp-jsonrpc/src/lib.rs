@@ -58,6 +58,8 @@ pub use transport::{
 const REUSABLE_LINE_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 const READ_LINE_INITIAL_CAP_BYTES: usize = 4 * 1024;
 const DROPPED_DIRECT_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+const BACKGROUND_CHILD_REAP_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const BACKGROUND_CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -737,7 +739,7 @@ impl ClientHandle {
 
 pub struct Client {
     handle: ClientHandle,
-    child: Option<Child>,
+    child: Mutex<Option<Child>>,
     notifications_rx: Option<mpsc::Receiver<Notification>>,
     requests_rx: Option<mpsc::Receiver<IncomingRequest>>,
     task: tokio::task::JoinHandle<()>,
@@ -758,6 +760,24 @@ pub enum WaitOnTimeout {
 }
 
 impl Client {
+    fn lock_child(&self) -> std::sync::MutexGuard<'_, Option<Child>> {
+        match self.child.lock() {
+            Ok(child) => child,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn take_child_locked(&self) -> Option<Child> {
+        self.lock_child().take()
+    }
+
+    fn abort_transport_tasks(&self) {
+        self.task.abort();
+        for task in &self.transport_tasks {
+            task.abort();
+        }
+    }
+
     pub fn stats(&self) -> ClientStats {
         self.handle.stats()
     }
@@ -922,7 +942,7 @@ impl Client {
 
         Ok(Self {
             handle,
-            child,
+            child: Mutex::new(child),
             notifications_rx: Some(notify_rx),
             requests_rx: Some(request_rx),
             task,
@@ -935,10 +955,7 @@ impl Client {
     }
 
     pub async fn close(&self, reason: impl Into<String>) {
-        self.task.abort();
-        for task in &self.transport_tasks {
-            task.abort();
-        }
+        self.abort_transport_tasks();
         self.handle.close(reason).await;
     }
 
@@ -947,15 +964,21 @@ impl Client {
     /// This marks the client closed immediately and starts a best-effort background close path.
     /// Repeated calls after the first one are no-ops.
     pub fn close_in_background_once(&self, reason: impl Into<String>) {
+        self.abort_transport_tasks();
+        if let Some(child) = self.take_child_locked() {
+            start_background_child_reap(child);
+        }
         self.handle.schedule_close_once(reason.into());
     }
 
     pub fn child_id(&self) -> Option<u32> {
-        self.child.as_ref().and_then(tokio::process::Child::id)
+        self.lock_child()
+            .as_ref()
+            .and_then(tokio::process::Child::id)
     }
 
     pub fn take_child(&mut self) -> Option<Child> {
-        self.child.take()
+        self.take_child_locked()
     }
 
     pub fn take_notifications(&mut self) -> Option<mpsc::Receiver<Notification>> {
@@ -1005,16 +1028,13 @@ impl Client {
     /// Note: this method can hang indefinitely if the child process does not exit.
     /// Prefer `Client::wait_with_timeout` if you need an upper bound.
     pub async fn wait(&mut self) -> Result<Option<std::process::ExitStatus>, Error> {
-        self.task.abort();
-        for task in self.transport_tasks.drain(..) {
-            task.abort();
-        }
+        self.abort_transport_tasks();
         self.handle.close_with_reason("client closed").await;
 
-        match &mut self.child {
-            Some(child) => Ok(Some(child.wait().await?)),
-            None => Ok(None),
-        }
+        let Some(mut child) = self.take_child_locked() else {
+            return Ok(None);
+        };
+        Ok(Some(child.wait().await?))
     }
 
     /// Closes the client and waits for the underlying child process to exit, up to `timeout`.
@@ -1036,44 +1056,55 @@ impl Client {
     ) -> Result<Option<std::process::ExitStatus>, Error> {
         ensure_tokio_time_driver("Client::wait_with_timeout")?;
         let deadline = tokio::time::Instant::now() + timeout;
-        self.task.abort();
-        for task in self.transport_tasks.drain(..) {
-            task.abort();
-        }
+        self.abort_transport_tasks();
+        let mut child = self.take_child_locked();
         if tokio::time::timeout_at(deadline, self.handle.close_with_reason("client closed"))
             .await
             .is_err()
         {
             if let WaitOnTimeout::Kill { kill_timeout } = on_timeout {
-                if let Some(child) = &mut self.child {
-                    let child_id = child.id();
-                    if let Err(err) = child.start_kill() {
-                        return match child.try_wait() {
+                if let Some(mut owned_child) = child.take() {
+                    let child_id = owned_child.id();
+                    if let Err(err) = owned_child.start_kill() {
+                        return match owned_child.try_wait() {
                             Ok(Some(status)) => Ok(Some(status)),
-                            Ok(None) => Err(Error::protocol(
-                                ProtocolErrorKind::WaitTimeout,
-                                format!(
-                                    "wait timed out after {timeout:?} while closing client; failed to kill child (id={child_id:?}): {err}"
-                                ),
-                            )),
-                            Err(try_wait_err) => Err(Error::protocol(
-                                ProtocolErrorKind::WaitTimeout,
-                                format!(
-                                    "wait timed out after {timeout:?} while closing client; failed to kill child (id={child_id:?}): {err}; try_wait failed: {try_wait_err}"
-                                ),
-                            )),
+                            Ok(None) => {
+                                self.lock_child().replace(owned_child);
+                                Err(Error::protocol(
+                                    ProtocolErrorKind::WaitTimeout,
+                                    format!(
+                                        "wait timed out after {timeout:?} while closing client; failed to kill child (id={child_id:?}): {err}"
+                                    ),
+                                ))
+                            }
+                            Err(try_wait_err) => {
+                                self.lock_child().replace(owned_child);
+                                Err(Error::protocol(
+                                    ProtocolErrorKind::WaitTimeout,
+                                    format!(
+                                        "wait timed out after {timeout:?} while closing client; failed to kill child (id={child_id:?}): {err}; try_wait failed: {try_wait_err}"
+                                    ),
+                                ))
+                            }
                         };
                     }
-                    return match tokio::time::timeout(kill_timeout, child.wait()).await {
+                    return match tokio::time::timeout(kill_timeout, owned_child.wait()).await {
                         Ok(status) => Ok(Some(status?)),
-                        Err(_) => Err(Error::protocol(
-                            ProtocolErrorKind::WaitTimeout,
-                            format!(
-                                "wait timed out after {timeout:?} while closing client; killed child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
-                            ),
-                        )),
+                        Err(_) => {
+                            self.lock_child().replace(owned_child);
+                            Err(Error::protocol(
+                                ProtocolErrorKind::WaitTimeout,
+                                format!(
+                                    "wait timed out after {timeout:?} while closing client; killed child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
+                                ),
+                            ))
+                        }
                     };
                 }
+            }
+
+            if let Some(child) = child {
+                self.lock_child().replace(child);
             }
 
             return Err(Error::protocol(
@@ -1082,7 +1113,7 @@ impl Client {
             ));
         }
 
-        let Some(child) = &mut self.child else {
+        let Some(mut child) = child else {
             return Ok(None);
         };
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -1090,16 +1121,20 @@ impl Client {
         match tokio::time::timeout(remaining, child.wait()).await {
             Ok(status) => Ok(Some(status?)),
             Err(_) => match on_timeout {
-                WaitOnTimeout::ReturnError => Err(Error::protocol(
-                    ProtocolErrorKind::WaitTimeout,
-                    format!("wait timed out after {timeout:?}"),
-                )),
+                WaitOnTimeout::ReturnError => {
+                    self.lock_child().replace(child);
+                    Err(Error::protocol(
+                        ProtocolErrorKind::WaitTimeout,
+                        format!("wait timed out after {timeout:?}"),
+                    ))
+                }
                 WaitOnTimeout::Kill { kill_timeout } => {
                     let child_id = child.id();
                     if let Err(err) = child.start_kill() {
                         match child.try_wait() {
                             Ok(Some(status)) => return Ok(Some(status)),
                             Ok(None) => {
+                                self.lock_child().replace(child);
                                 return Err(Error::protocol(
                                     ProtocolErrorKind::WaitTimeout,
                                     format!(
@@ -1108,6 +1143,7 @@ impl Client {
                                 ));
                             }
                             Err(try_wait_err) => {
+                                self.lock_child().replace(child);
                                 return Err(Error::protocol(
                                     ProtocolErrorKind::WaitTimeout,
                                     format!(
@@ -1120,12 +1156,15 @@ impl Client {
 
                     match tokio::time::timeout(kill_timeout, child.wait()).await {
                         Ok(status) => Ok(Some(status?)),
-                        Err(_) => Err(Error::protocol(
-                            ProtocolErrorKind::WaitTimeout,
-                            format!(
-                                "wait timed out after {timeout:?}; killed child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
-                            ),
-                        )),
+                        Err(_) => {
+                            self.lock_child().replace(child);
+                            Err(Error::protocol(
+                                ProtocolErrorKind::WaitTimeout,
+                                format!(
+                                    "wait timed out after {timeout:?}; killed child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
+                                ),
+                            ))
+                        }
                     }
                 }
             },
@@ -1138,10 +1177,7 @@ impl Drop for Client {
         let close_published = self
             .handle
             .begin_close("client closed".to_string(), CloseReasonPriority::Fallback);
-        self.task.abort();
-        for task in self.transport_tasks.drain(..) {
-            task.abort();
-        }
+        self.abort_transport_tasks();
         let err = Error::protocol(ProtocolErrorKind::Closed, "client closed");
         drain_pending(&self.handle.pending, &err);
         if !close_published {
@@ -1159,6 +1195,34 @@ impl Drop for Client {
             drop(std::mem::replace(&mut *write, Box::new(tokio::io::sink())));
         }
     }
+}
+
+fn start_background_child_reap(mut child: Child) {
+    if child.try_wait().ok().flatten().is_some() {
+        return;
+    }
+
+    let _ = child.start_kill(); // pre-commit: allow-let-underscore
+    if child.try_wait().ok().flatten().is_some() {
+        return;
+    }
+
+    let _ = std::thread::Builder::new()
+        .name("mcp-jsonrpc-child-reap".to_string())
+        .spawn(move || {
+            let deadline = std::time::Instant::now() + BACKGROUND_CHILD_REAP_TIMEOUT;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) | Err(_) => return,
+                    Ok(None) => {
+                        if std::time::Instant::now() >= deadline {
+                            return;
+                        }
+                    }
+                }
+                std::thread::sleep(BACKGROUND_CHILD_REAP_POLL_INTERVAL);
+            }
+        });
 }
 
 struct PendingRequestGuard {
@@ -3043,12 +3107,21 @@ mod stats_tests {
 mod wait_timeout_tests {
     use super::*;
     use std::pin::Pin;
+    use std::process::Command;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Context, Poll};
 
     struct BlockingWrite {
         entered: Arc<AtomicBool>,
+    }
+
+    fn child_is_alive(pid: u32) -> bool {
+        Command::new("sh")
+            .arg("-c")
+            .arg(format!("kill -0 {pid}"))
+            .status()
+            .is_ok_and(|status| status.success())
     }
 
     impl tokio::io::AsyncWrite for BlockingWrite {
@@ -3108,6 +3181,30 @@ mod wait_timeout_tests {
 
         assert!(entered.load(Ordering::Relaxed));
         assert!(!status.success());
+    }
+
+    #[tokio::test]
+    async fn close_in_background_once_reaps_child_without_waiting_for_drop() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg("exec sleep 10");
+
+        let mut client = Client::spawn_command(cmd).await.expect("spawn client");
+        let pid = client.child_id().expect("child pid");
+
+        client.close_in_background_once("background close after notify timeout");
+
+        assert!(
+            client.take_child().is_none(),
+            "background close should take ownership of child cleanup"
+        );
+
+        tokio::time::timeout(Duration::from_secs(2), async move {
+            while child_is_alive(pid) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("background close should reap child promptly");
     }
 
     #[test]
@@ -3360,6 +3457,27 @@ mod background_close_tests {
             Ok(Ok(None)) | Err(_) => {}
             Ok(Err(err)) => panic!("read result: {err}"),
         }
+    }
+
+    #[tokio::test]
+    async fn close_in_background_once_aborts_reader_task_and_closes_request_channel() {
+        let (client_stream, _server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+
+        let mut client = Client::connect_io(client_read, client_write)
+            .await
+            .expect("connect client");
+        let mut requests = client.take_requests().expect("request receiver");
+
+        client.close_in_background_once("notification timeout closed transport");
+
+        let next = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .expect("request channel should close after reader abort");
+        assert!(
+            next.is_none(),
+            "reader abort should drop request sender and close receiver"
+        );
     }
 }
 

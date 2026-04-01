@@ -91,4 +91,4 @@ MCP/JSON-RPC 允许 server 主动发消息给 client：
 - **日志**：由上层选择是否将 server stdout 旋转落盘（`mcp_jsonrpc::SpawnOptions`，支持 `max_parts` 保留上限）。
 - **超时**：`Manager` 级别的 per-request timeout（默认 30s）。
 - **重连**：v1 只支持当前 `Manager`/`SharedManager` 内部的按需重建连接；不提供后台重连循环、keepalive 或退避策略。
-- **并发**：同一连接串行；不同 server 可由上层并发使用多个 `Manager` 或拆分任务。
+- **并发**：同一连接写入串行，但 request/notify 可以并发发起；`SharedManager` 会用 same-server 读门禁保护 in-flight RPC，不让同 server `disconnect` 中途拆掉借出的连接。

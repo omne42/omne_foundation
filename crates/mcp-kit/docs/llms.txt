@@ -1180,7 +1180,7 @@ data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}
 `StreamableHttpOptions`：
 
 - `connect_timeout`：只用于建立 SSE/HTTP 连接（默认 10s）
-- `request_timeout`：用于单次 POST 的 send/response（包括 POST 返回 SSE 时的响应流）；不要用于限制主 SSE（GET）长连接
+- `request_timeout`：用于单次 POST 的建连、首个 HTTP response 以及非 SSE JSON body 读取；如果 POST 成功返回 `text/event-stream`，后续持续产出的 SSE 响应流不再受这个超时上限约束。不要用于限制主 SSE（GET）长连接
 
 请求级别行为：
 
@@ -1583,7 +1583,7 @@ if let Some(status) = status {
 
 - `headers`：额外 header
 - `connect_timeout`：建立连接超时（默认 10s）
-- `request_timeout`：用于单次 POST 的 send/response（包括 POST 返回 SSE 时的响应流）；不要用于限制主 SSE（GET）长连接
+- `request_timeout`：用于单次 POST 的建连、首个 HTTP response 以及非 SSE JSON body 读取；如果 POST 成功返回 `text/event-stream`，后续持续产出的 SSE 响应流不再受这个超时上限约束。不要用于限制主 SSE（GET）长连接
 - `follow_redirects`：是否跟随 HTTP redirects（默认 `false`，减少 SSRF 风险）
 - `error_body_preview_bytes`：HTTP 错误/非 JSON 响应时，桥接到 JSON-RPC error data 的 body 预览最大字节数（默认 `0`，避免意外泄露）
 
@@ -1768,7 +1768,7 @@ MCP/JSON-RPC 允许 server 主动发消息给 client：
 - **日志**：由上层选择是否将 server stdout 旋转落盘（`mcp_jsonrpc::SpawnOptions`，支持 `max_parts` 保留上限）。
 - **超时**：`Manager` 级别的 per-request timeout（默认 30s）。
 - **重连**：v1 只支持当前 `Manager`/`SharedManager` 内部的按需重建连接；不提供后台重连循环、keepalive 或退避策略。
-- **并发**：同一连接串行；不同 server 可由上层并发使用多个 `Manager` 或拆分任务。
+- **并发**：同一连接写入串行，但 request/notify 可以并发发起；`SharedManager` 会用 same-server 读门禁保护 in-flight RPC，不让同 server `disconnect` 中途拆掉借出的连接。
 
 ---
 

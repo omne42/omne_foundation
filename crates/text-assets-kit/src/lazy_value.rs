@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -22,6 +24,10 @@ enum LazyState<T: ?Sized, E> {
     Initialized(Arc<T>),
 }
 
+#[deprecated(
+    since = "0.1.0",
+    note = "LazyInitError is part of a blocking compatibility shim. Prefer eager snapshots or runtime-owned handles at crate boundaries."
+)]
 #[derive(Debug)]
 pub enum LazyInitError<E> {
     Inner(Arc<E>),
@@ -30,6 +36,10 @@ pub enum LazyInitError<E> {
     CrossThreadCycleDetected,
 }
 
+#[deprecated(
+    since = "0.1.0",
+    note = "LazyValue is a blocking compatibility shim. Prefer eager snapshots or runtime-owned handles at crate boundaries."
+)]
 pub struct LazyValue<T: ?Sized, E> {
     id: OnceLock<u64>,
     state: Mutex<LazyState<T, E>>,

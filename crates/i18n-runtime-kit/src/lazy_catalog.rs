@@ -1,8 +1,11 @@
+#![allow(deprecated)]
+
 use std::error::Error as StdError;
 use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 
 use i18n_kit::{Catalog, Locale, TemplateArg};
+#[allow(deprecated)]
 use text_assets_kit::lazy_value::{LazyInitError, LazyValue};
 
 use crate::catalog_error::{CatalogInitError, CatalogLocaleError};
@@ -20,6 +23,7 @@ use crate::{resolve_locale_from_argv, resolve_locale_from_cli_args};
     since = "0.1.0",
     note = "LazyCatalog is a blocking compatibility shim; prefer GlobalCatalog plus eager load/bootstrap for runtime-facing catalog access"
 )]
+#[allow(deprecated)]
 pub struct LazyCatalog {
     inner: LazyValue<dyn Catalog, CatalogInitError>,
     initializer: Box<dyn Fn() -> Result<Arc<dyn Catalog>, CatalogInitError> + Send + Sync>,
@@ -107,6 +111,7 @@ impl LazyCatalog {
     }
 }
 
+#[allow(deprecated)]
 fn shared_lazy_catalog_error(error: LazyInitError<CatalogInitError>) -> CatalogInitError {
     match error {
         LazyInitError::Inner(error) => error.as_ref().clone(),

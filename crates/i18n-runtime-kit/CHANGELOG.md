@@ -12,6 +12,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Clarified that the shared bootstrap/rollback primitives used here provide best-effort cleanup for the current attempt, not crash-safe transactions.
 - Clarified `GlobalCatalog` as the runtime-facing canonical handle and downgraded the root `LazyCatalog` export to a deprecated blocking compatibility path.
 - `LazyCatalog` 本体现在也带 `#[deprecated]` 标记，和 README / crate root 的兼容层定位保持一致，避免 runtime-facing 调用方继续把它误当成推荐入口。
+- `i18n-runtime-kit` 内部对 `text-assets-kit::lazy_value::*` 的 compat-shim 依赖现在也显式标注为 `#[allow(deprecated)]`，避免仓内 compat path 悄悄绕过上游的边界信号。
 - `i18n-runtime-kit` 现在补齐了显式 base 驱动的公共入口：`bootstrap_i18n_catalog_with_base(...)`、`load_i18n_catalog_from_directory_with_base(...)`、`reload_i18n_catalog_from_directory_with_base(...)`，让调用方在已知 workspace/root 时不必继续依赖 ambient `current_dir()`。
 - `LazyCatalog` 现在把检测到的线程级跨线程初始化环路收敛成显式错误，而不是把兼容层调用者永久卡死。
 - `LazyCatalog` 现在会把“同线程但并非当前递归调用”的初始化冲突单独映射成显式错误，避免 deprecated blocking shim 继续把这类冲突误报成 reentrant 初始化。

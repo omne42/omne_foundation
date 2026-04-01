@@ -1,11 +1,14 @@
+#![allow(deprecated)]
+
 use std::io;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+#[allow(deprecated)]
+use text_assets_kit::lazy_value::{LazyInitError, LazyValue};
 use text_assets_kit::{
     BootstrapLoadError, ResourceManifest, TextDirectory, bootstrap_text_resources_then_load,
     bootstrap_text_resources_then_load_with_base,
-    lazy_value::{LazyInitError, LazyValue},
 };
 
 #[derive(Debug)]
@@ -161,6 +164,7 @@ impl Default for PromptDirectoryHandle {
     since = "0.1.0",
     note = "LazyPromptDirectory is a blocking compatibility shim; prefer PromptDirectoryHandle plus eager load/bootstrap for runtime-facing prompt access"
 )]
+#[allow(deprecated)]
 pub struct LazyPromptDirectory {
     inner: LazyValue<TextDirectory, io::Error>,
     initializer: Box<dyn Fn() -> Result<TextDirectory, io::Error> + Send + Sync>,
@@ -216,6 +220,7 @@ impl LazyPromptDirectory {
     }
 }
 
+#[allow(deprecated)]
 fn shared_prompt_error_detail(error: LazyInitError<io::Error>) -> Arc<io::Error> {
     match error {
         LazyInitError::Inner(error) => error,
@@ -231,6 +236,7 @@ fn shared_prompt_error_detail(error: LazyInitError<io::Error>) -> Arc<io::Error>
     }
 }
 
+#[allow(deprecated)]
 fn shared_prompt_error(error: LazyInitError<io::Error>) -> PromptDirectoryError {
     PromptDirectoryError::new(shared_prompt_error_detail(error))
 }

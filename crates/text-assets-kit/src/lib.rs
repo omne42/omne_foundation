@@ -1,6 +1,7 @@
 #[doc(hidden)]
 pub mod bootstrap_lock;
 mod data_root;
+#[doc = "Deprecated blocking compatibility shim module. Prefer crate-root runtime APIs or explicit runtime-owned handles instead."]
 #[doc(hidden)]
 pub mod lazy_value;
 mod managed_bootstrap;
@@ -22,8 +23,9 @@ pub use data_root::{
 };
 #[deprecated(
     since = "0.1.0",
-    note = "LazyValue is a blocking, thread-oriented compatibility primitive. Prefer eager snapshots or runtime-owned handles at crate boundaries."
+    note = "LazyValue and LazyInitError are blocking, thread-oriented compatibility primitives. Prefer eager snapshots or runtime-owned handles at crate boundaries."
 )]
+#[allow(deprecated)]
 pub use lazy_value::{LazyInitError, LazyValue};
 pub use managed_bootstrap::{
     BootstrapLoadError, bootstrap_text_resources_then_load,

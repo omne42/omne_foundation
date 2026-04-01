@@ -11,7 +11,9 @@ use std::collections::BTreeSet;
 use omne_fs_primitives::MissingRootPolicy;
 
 use crate::resource_path::normalize_resource_path;
-use crate::resource_path::{materialize_resource_root, resource_identity_key};
+use crate::resource_path::{
+    materialize_resource_root, materialize_resource_root_with_base, resource_identity_key,
+};
 use crate::secure_fs::SecureRoot;
 use crate::secure_fs::validate_total_text_bytes;
 
@@ -24,6 +26,32 @@ impl TextDirectory {
     /// Loads a text directory and treats a missing root as an error.
     pub fn load(root: &Path) -> io::Result<Self> {
         let root = materialize_resource_root(root)?;
+        Self::load_materialized(&root)
+    }
+
+    /// Loads a text directory relative to an explicit absolute base path.
+    pub fn load_with_base(base: &Path, root: &Path) -> io::Result<Self> {
+        let root = materialize_resource_root_with_base(base, root)?;
+        Self::load_materialized(&root)
+    }
+
+    pub fn load_resource_files(root: &Path, relative_paths: &[String]) -> io::Result<Self> {
+        let root = materialize_resource_root(root)?;
+        Self::load_resource_files_materialized(&root, relative_paths)
+    }
+
+    /// Loads selected text resource files relative to an explicit absolute
+    /// base path.
+    pub fn load_resource_files_with_base(
+        base: &Path,
+        root: &Path,
+        relative_paths: &[String],
+    ) -> io::Result<Self> {
+        let root = materialize_resource_root_with_base(base, root)?;
+        Self::load_resource_files_materialized(&root, relative_paths)
+    }
+
+    fn load_materialized(root: &Path) -> io::Result<Self> {
         let Some(root) = SecureRoot::open(&root, MissingRootPolicy::ReturnNone)? else {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -34,8 +62,10 @@ impl TextDirectory {
         Ok(Self { entries })
     }
 
-    pub fn load_resource_files(root: &Path, relative_paths: &[String]) -> io::Result<Self> {
-        let root = materialize_resource_root(root)?;
+    fn load_resource_files_materialized(
+        root: &Path,
+        relative_paths: &[String],
+    ) -> io::Result<Self> {
         let root = SecureRoot::open(&root, MissingRootPolicy::ReturnNone)?.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -189,6 +219,28 @@ mod tests {
 
         let error = TextDirectory::load(&missing).expect_err("missing root should fail");
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn text_directory_load_with_base_uses_explicit_base_across_cwd_changes() {
+        let temp = TempDir::new().expect("temp dir");
+        let workspace_a = temp.path().join("workspace_a");
+        let workspace_b = temp.path().join("workspace_b");
+        let prompts_dir = workspace_a.join("prompts");
+        fs::create_dir_all(prompts_dir.join("nested")).expect("mkdir prompts");
+        fs::create_dir_all(&workspace_b).expect("mkdir workspace_b");
+        fs::write(prompts_dir.join("nested").join("system.md"), "hello").expect("write prompt");
+
+        let original_cwd =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+        std::env::set_current_dir(&workspace_b).expect("set cwd");
+        let directory = TextDirectory::load_with_base(&workspace_a, Path::new("prompts"))
+            .expect("load with base");
+        if std::env::set_current_dir(&original_cwd).is_err() {
+            std::env::set_current_dir("/").expect("restore cwd fallback");
+        }
+
+        assert_eq!(directory.get("nested/system.md"), Some("hello"));
     }
 
     #[test]

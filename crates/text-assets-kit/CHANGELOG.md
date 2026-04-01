@@ -9,6 +9,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ### Added
 - Added shared `LazyValue` / `LazyInitError` primitives plus `bootstrap_text_resources_then_load(...)`, so domain runtime adapters can reuse the same lazy-init and bootstrap+rollback orchestration without reimplementing it per crate.
 - Added explicit-base variants for path/data-root resolution: `materialize_resource_root_with_base(...)`, `resolve_data_root_with_base(...)`, and `ensure_data_root_with_base(...)`. Callers that already know their workspace root no longer need to rely on ambient `current_dir()` to resolve relative text-assets paths.
+- Added explicit-base variants for higher-level text asset entry points: `TextDirectory::load_with_base(...)`, `TextDirectory::load_resource_files_with_base(...)`, `bootstrap_text_resources_then_load_with_base(...)`, `bootstrap_text_resources_with_base(...)`, `bootstrap_text_resources_with_report_with_base(...)`, and `scan_text_directory_with_base(...)`.
 
 ### Fixed
 - `lock_bootstrap_transaction(...)` now fails closed when inspecting or canonicalizing the bootstrap root prefix fails, instead of silently deriving an unstable lock key from partial path information.

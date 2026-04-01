@@ -9,5 +9,5 @@ pub mod prompts;
 pub use prompts::LazyPromptDirectory;
 pub use prompts::{
     PromptBootstrapCleanupError, PromptDirectoryError, PromptDirectoryHandle,
-    bootstrap_prompt_directory,
+    bootstrap_prompt_directory, bootstrap_prompt_directory_with_base,
 };

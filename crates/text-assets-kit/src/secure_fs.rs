@@ -11,7 +11,8 @@ use omne_fs_primitives::{
 };
 
 use crate::resource_path::{
-    materialize_resource_root, relative_resource_components, validate_relative_resource_component,
+    materialize_resource_root, materialize_resource_root_with_base, relative_resource_components,
+    validate_relative_resource_component,
 };
 use crate::text_tree_scan::{TextTreeEntryKind, scan_text_tree};
 
@@ -35,6 +36,79 @@ pub fn scan_text_directory<
     MapDirectoryTooLarge,
 >(
     root: &Path,
+    visit_directory: VisitDirectory,
+    enter_directory: EnterDirectory,
+    visit_file: VisitFile,
+    map_file_too_large: MapFileTooLarge,
+    map_directory_too_large: MapDirectoryTooLarge,
+) -> Result<Vec<T>, E>
+where
+    E: From<io::Error>,
+    VisitDirectory: FnMut(&Path, usize, usize) -> Result<(), E>,
+    EnterDirectory: FnMut(&Path, usize) -> Result<(), E>,
+    VisitFile: FnMut(&Path, String, usize) -> Result<T, E>,
+    MapFileTooLarge: FnMut(&Path, usize, usize) -> E,
+    MapDirectoryTooLarge: FnMut(usize, usize) -> E,
+{
+    let root = materialize_resource_root(root).map_err(E::from)?;
+    scan_text_directory_materialized(
+        &root,
+        visit_directory,
+        enter_directory,
+        visit_file,
+        map_file_too_large,
+        map_directory_too_large,
+    )
+}
+
+/// Equivalent to [`scan_text_directory`] but resolves `root` relative to an
+/// explicit absolute `base`.
+pub fn scan_text_directory_with_base<
+    E,
+    T,
+    VisitDirectory,
+    EnterDirectory,
+    VisitFile,
+    MapFileTooLarge,
+    MapDirectoryTooLarge,
+>(
+    base: &Path,
+    root: &Path,
+    visit_directory: VisitDirectory,
+    enter_directory: EnterDirectory,
+    visit_file: VisitFile,
+    map_file_too_large: MapFileTooLarge,
+    map_directory_too_large: MapDirectoryTooLarge,
+) -> Result<Vec<T>, E>
+where
+    E: From<io::Error>,
+    VisitDirectory: FnMut(&Path, usize, usize) -> Result<(), E>,
+    EnterDirectory: FnMut(&Path, usize) -> Result<(), E>,
+    VisitFile: FnMut(&Path, String, usize) -> Result<T, E>,
+    MapFileTooLarge: FnMut(&Path, usize, usize) -> E,
+    MapDirectoryTooLarge: FnMut(usize, usize) -> E,
+{
+    let root = materialize_resource_root_with_base(base, root).map_err(E::from)?;
+    scan_text_directory_materialized(
+        &root,
+        visit_directory,
+        enter_directory,
+        visit_file,
+        map_file_too_large,
+        map_directory_too_large,
+    )
+}
+
+fn scan_text_directory_materialized<
+    E,
+    T,
+    VisitDirectory,
+    EnterDirectory,
+    VisitFile,
+    MapFileTooLarge,
+    MapDirectoryTooLarge,
+>(
+    root: &Path,
     mut visit_directory: VisitDirectory,
     mut enter_directory: EnterDirectory,
     mut visit_file: VisitFile,
@@ -49,7 +123,6 @@ where
     MapFileTooLarge: FnMut(&Path, usize, usize) -> E,
     MapDirectoryTooLarge: FnMut(usize, usize) -> E,
 {
-    let root = materialize_resource_root(root).map_err(E::from)?;
     let Some(root) = SecureRoot::open(&root, MissingRootPolicy::ReturnNone).map_err(E::from)?
     else {
         return Err(E::from(io::Error::new(
@@ -575,9 +648,10 @@ fn map_file_component_error(directory: &Dir, component: &Path, error: io::Error)
 
 #[cfg(test)]
 mod tests {
-    use super::scan_text_directory;
+    use super::{scan_text_directory, scan_text_directory_with_base};
     use std::fs;
     use std::io;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
     #[test]
@@ -629,6 +703,63 @@ mod tests {
         assert_eq!(
             files,
             vec![("nested/leaf.txt".to_string(), "hello".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn scan_text_directory_with_base_uses_explicit_base_across_cwd_changes() {
+        let temp = TempDir::new().expect("temp dir");
+        let workspace_a = temp.path().join("workspace_a");
+        let workspace_b = temp.path().join("workspace_b");
+        let root = workspace_a.join("catalog");
+        fs::create_dir_all(root.join("nested")).expect("mkdir catalog");
+        fs::create_dir_all(&workspace_b).expect("mkdir workspace_b");
+        fs::write(
+            root.join("nested").join("en_US.json"),
+            "{\"hello\":\"world\"}",
+        )
+        .expect("write locale file");
+
+        let original_cwd =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+        std::env::set_current_dir(&workspace_b).expect("set cwd");
+        let files = scan_text_directory_with_base(
+            &workspace_a,
+            Path::new("catalog"),
+            |_, _, _| Ok::<(), io::Error>(()),
+            |_, _| Ok::<(), io::Error>(()),
+            |relative_path, contents, _| {
+                Ok::<_, io::Error>((relative_path.to_path_buf(), contents))
+            },
+            |relative_path, bytes, max_bytes| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "text resource file exceeds size limit ({bytes} > {max_bytes} bytes): {}",
+                        relative_path.display()
+                    ),
+                )
+            },
+            |bytes, max_bytes| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "text resource directory exceeds total size limit ({bytes} > {max_bytes} bytes)"
+                    ),
+                )
+            },
+        )
+        .expect("scan text directory with base");
+        if std::env::set_current_dir(&original_cwd).is_err() {
+            std::env::set_current_dir("/").expect("restore cwd fallback");
+        }
+
+        assert_eq!(
+            files,
+            vec![(
+                PathBuf::from("nested/en_US.json"),
+                "{\"hello\":\"world\"}".to_string(),
+            )]
         );
     }
 }

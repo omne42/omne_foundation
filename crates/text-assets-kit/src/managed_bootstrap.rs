@@ -3,8 +3,9 @@ use std::io;
 use std::path::Path;
 
 use crate::{
-    ResourceManifest, bootstrap_text_resources_with_report, lock_bootstrap_transaction,
-    materialize_resource_root, rollback_created_resources,
+    BootstrapReport, ResourceManifest, bootstrap_text_resources_with_report,
+    bootstrap_text_resources_with_report_with_base, lock_bootstrap_transaction,
+    materialize_resource_root, materialize_resource_root_with_base, rollback_created_resources,
 };
 
 #[derive(Debug)]
@@ -71,6 +72,39 @@ where
     L: FnOnce(&Path, &[String]) -> Result<T, E>,
 {
     let root = materialize_resource_root(root).map_err(BootstrapLoadError::Bootstrap)?;
+    bootstrap_text_resources_then_load_impl(root, manifest, load, |root, manifest| {
+        bootstrap_text_resources_with_report(root, manifest)
+    })
+}
+
+/// Equivalent to [`bootstrap_text_resources_then_load`] but resolves `root`
+/// relative to an explicit absolute `base`.
+pub fn bootstrap_text_resources_then_load_with_base<T, E, L>(
+    base: &Path,
+    root: &Path,
+    manifest: &ResourceManifest,
+    load: L,
+) -> Result<T, BootstrapLoadError<E>>
+where
+    L: FnOnce(&Path, &[String]) -> Result<T, E>,
+{
+    let root =
+        materialize_resource_root_with_base(base, root).map_err(BootstrapLoadError::Bootstrap)?;
+    bootstrap_text_resources_then_load_impl(root.clone(), manifest, load, |_, manifest| {
+        bootstrap_text_resources_with_report_with_base(base, &root, manifest)
+    })
+}
+
+fn bootstrap_text_resources_then_load_impl<T, E, L, B>(
+    root: std::path::PathBuf,
+    manifest: &ResourceManifest,
+    load: L,
+    bootstrap: B,
+) -> Result<T, BootstrapLoadError<E>>
+where
+    L: FnOnce(&Path, &[String]) -> Result<T, E>,
+    B: FnOnce(&Path, &ResourceManifest) -> io::Result<BootstrapReport>,
+{
     let resource_paths = manifest
         .resources()
         .iter()
@@ -78,8 +112,7 @@ where
         .collect::<Vec<_>>();
     let _bootstrap_transaction =
         lock_bootstrap_transaction(&root).map_err(BootstrapLoadError::Bootstrap)?;
-    let report = bootstrap_text_resources_with_report(&root, manifest)
-        .map_err(BootstrapLoadError::Bootstrap)?;
+    let report = bootstrap(&root, manifest).map_err(BootstrapLoadError::Bootstrap)?;
 
     match load(&root, &resource_paths) {
         Ok(value) => Ok(value),
@@ -87,5 +120,71 @@ where
             Ok(()) => Err(BootstrapLoadError::Load(load)),
             Err(rollback) => Err(BootstrapLoadError::Rollback { load, rollback }),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::TextResource;
+    use std::fs;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    struct CurrentDirGuard {
+        original: std::path::PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn new() -> Self {
+            Self {
+                original: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")),
+            }
+        }
+
+        fn set(&self, path: &Path) {
+            std::env::set_current_dir(path).expect("set cwd");
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            if std::env::set_current_dir(&self.original).is_err() {
+                std::env::set_current_dir("/").expect("restore cwd fallback");
+            }
+        }
+    }
+
+    #[test]
+    fn bootstrap_text_resources_then_load_with_base_uses_explicit_base_across_cwd_changes() {
+        let cwd = CurrentDirGuard::new();
+        let temp = TempDir::new().expect("temp dir");
+        let workspace_a = temp.path().join("workspace_a");
+        let workspace_b = temp.path().join("workspace_b");
+        fs::create_dir_all(&workspace_a).expect("mkdir workspace_a");
+        fs::create_dir_all(&workspace_b).expect("mkdir workspace_b");
+        cwd.set(&workspace_a);
+
+        let manifest = ResourceManifest::new()
+            .with_resource(TextResource::new("default.md", "hello").expect("valid resource"));
+
+        let loaded_root = bootstrap_text_resources_then_load_with_base(
+            &workspace_a,
+            Path::new("prompts"),
+            &manifest,
+            |root, resource_paths| {
+                assert_eq!(resource_paths, ["default.md"]);
+                Ok::<_, io::Error>(root.to_path_buf())
+            },
+        )
+        .expect("bootstrap with base");
+
+        cwd.set(&workspace_b);
+        assert_eq!(loaded_root, workspace_a.join("prompts"));
+        assert_eq!(
+            fs::read_to_string(workspace_a.join("prompts").join("default.md")).expect("read"),
+            "hello"
+        );
     }
 }

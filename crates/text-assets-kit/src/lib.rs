@@ -25,12 +25,19 @@ pub use data_root::{
     note = "LazyValue is a blocking, thread-oriented compatibility primitive. Prefer eager snapshots or runtime-owned handles at crate boundaries."
 )]
 pub use lazy_value::{LazyInitError, LazyValue};
-pub use managed_bootstrap::{BootstrapLoadError, bootstrap_text_resources_then_load};
+pub use managed_bootstrap::{
+    BootstrapLoadError, bootstrap_text_resources_then_load,
+    bootstrap_text_resources_then_load_with_base,
+};
 pub use resource_bootstrap::{
-    BootstrapReport, bootstrap_text_resources, bootstrap_text_resources_with_report,
+    BootstrapReport, bootstrap_text_resources, bootstrap_text_resources_with_base,
+    bootstrap_text_resources_with_report, bootstrap_text_resources_with_report_with_base,
     rollback_created_resources,
 };
 pub use resource_path::{materialize_resource_root, materialize_resource_root_with_base};
-pub use secure_fs::{MAX_TEXT_DIRECTORY_TOTAL_BYTES, MAX_TEXT_RESOURCE_BYTES, scan_text_directory};
+pub use secure_fs::{
+    MAX_TEXT_DIRECTORY_TOTAL_BYTES, MAX_TEXT_RESOURCE_BYTES, scan_text_directory,
+    scan_text_directory_with_base,
+};
 pub use text_directory::TextDirectory;
 pub use text_resource::{ResourceManifest, TextResource};

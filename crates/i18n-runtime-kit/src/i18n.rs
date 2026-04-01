@@ -10,7 +10,8 @@ use i18n_kit::{
 };
 use text_assets_kit::{
     BootstrapLoadError, ResourceManifest, TextDirectory, bootstrap_text_resources_then_load,
-    materialize_resource_root, scan_text_directory,
+    bootstrap_text_resources_then_load_with_base, materialize_resource_root,
+    materialize_resource_root_with_base, scan_text_directory,
 };
 
 const MAX_CATALOG_DIRECTORIES: usize = 2048;
@@ -91,9 +92,43 @@ where
 {
     validate_catalog_manifest(manifest, default_locale, fallback_strategy)
         .map_err(ResourceCatalogError::Load)?;
-    match bootstrap_text_resources_then_load(root, manifest, |root, resource_paths| {
-        load(root, resource_paths, default_locale, fallback_strategy)
-    }) {
+    map_catalog_bootstrap_result(bootstrap_text_resources_then_load(
+        root,
+        manifest,
+        |root, resource_paths| load(root, resource_paths, default_locale, fallback_strategy),
+    ))
+}
+
+fn bootstrap_i18n_catalog_with_loader_and_base<L>(
+    base: &Path,
+    root: &Path,
+    manifest: &ResourceManifest,
+    default_locale: Locale,
+    fallback_strategy: FallbackStrategy,
+    load: L,
+) -> Result<DynamicJsonCatalog, ResourceCatalogError>
+where
+    L: FnOnce(
+        &Path,
+        &[String],
+        Locale,
+        FallbackStrategy,
+    ) -> Result<DynamicJsonCatalog, DynamicCatalogError>,
+{
+    validate_catalog_manifest(manifest, default_locale, fallback_strategy)
+        .map_err(ResourceCatalogError::Load)?;
+    map_catalog_bootstrap_result(bootstrap_text_resources_then_load_with_base(
+        base,
+        root,
+        manifest,
+        |root, resource_paths| load(root, resource_paths, default_locale, fallback_strategy),
+    ))
+}
+
+fn map_catalog_bootstrap_result(
+    result: Result<DynamicJsonCatalog, BootstrapLoadError<DynamicCatalogError>>,
+) -> Result<DynamicJsonCatalog, ResourceCatalogError> {
+    match result {
         Ok(catalog) => Ok(catalog),
         Err(BootstrapLoadError::Bootstrap(error)) => Err(ResourceCatalogError::Bootstrap(error)),
         Err(BootstrapLoadError::Load(error)) => Err(ResourceCatalogError::Load(error)),
@@ -125,6 +160,25 @@ pub fn bootstrap_i18n_catalog(
     )
 }
 
+/// Bootstraps catalog resources under `root`, anchored to an explicit absolute
+/// `base`, and then rebuilds the catalog from the managed files on disk.
+pub fn bootstrap_i18n_catalog_with_base(
+    base: &Path,
+    root: impl AsRef<Path>,
+    manifest: &ResourceManifest,
+    default_locale: Locale,
+    fallback_strategy: FallbackStrategy,
+) -> Result<DynamicJsonCatalog, ResourceCatalogError> {
+    bootstrap_i18n_catalog_with_loader_and_base(
+        base,
+        root.as_ref(),
+        manifest,
+        default_locale,
+        fallback_strategy,
+        load_catalog_from_resource_files,
+    )
+}
+
 /// Loads a dynamic i18n catalog from a filesystem directory.
 ///
 /// This adapter belongs to `i18n-runtime-kit` because it owns the runtime
@@ -138,12 +192,35 @@ pub fn load_i18n_catalog_from_directory(
     DynamicJsonCatalog::from_locale_sources(sources, default_locale, fallback_strategy)
 }
 
+/// Loads a dynamic i18n catalog from a filesystem directory relative to an
+/// explicit absolute `base`.
+pub fn load_i18n_catalog_from_directory_with_base(
+    base: &Path,
+    root: impl AsRef<Path>,
+    default_locale: Locale,
+    fallback_strategy: FallbackStrategy,
+) -> Result<DynamicJsonCatalog, DynamicCatalogError> {
+    let sources = read_catalog_sources_from_directory_with_base(base, root.as_ref())?;
+    DynamicJsonCatalog::from_locale_sources(sources, default_locale, fallback_strategy)
+}
+
 /// Reloads an existing dynamic i18n catalog from a filesystem directory.
 pub fn reload_i18n_catalog_from_directory(
     catalog: &DynamicJsonCatalog,
     root: impl AsRef<Path>,
 ) -> Result<(), DynamicCatalogError> {
     let sources = read_catalog_sources_from_directory(root.as_ref())?;
+    catalog.reload_from_locale_sources(sources)
+}
+
+/// Reloads an existing dynamic i18n catalog from a filesystem directory
+/// relative to an explicit absolute `base`.
+pub fn reload_i18n_catalog_from_directory_with_base(
+    catalog: &DynamicJsonCatalog,
+    base: &Path,
+    root: impl AsRef<Path>,
+) -> Result<(), DynamicCatalogError> {
+    let sources = read_catalog_sources_from_directory_with_base(base, root.as_ref())?;
     catalog.reload_from_locale_sources(sources)
 }
 
@@ -216,6 +293,20 @@ fn read_catalog_sources_from_directory(
     root: &Path,
 ) -> Result<Vec<(PathBuf, String)>, DynamicCatalogError> {
     let root = materialize_resource_root(root)?;
+    read_catalog_sources_from_materialized_directory(&root)
+}
+
+fn read_catalog_sources_from_directory_with_base(
+    base: &Path,
+    root: &Path,
+) -> Result<Vec<(PathBuf, String)>, DynamicCatalogError> {
+    let root = materialize_resource_root_with_base(base, root)?;
+    read_catalog_sources_from_materialized_directory(&root)
+}
+
+fn read_catalog_sources_from_materialized_directory(
+    root: &Path,
+) -> Result<Vec<(PathBuf, String)>, DynamicCatalogError> {
     let directory_count = Cell::new(0usize);
     let source_count = Cell::new(0usize);
     let total_bytes = Cell::new(0usize);
@@ -508,6 +599,38 @@ mod tests {
     }
 
     #[test]
+    fn resource_backed_catalog_bootstrap_with_base_uses_explicit_base_across_cwd_changes() {
+        let cwd = CurrentDirGuard::new();
+        let temp = TempDir::new().expect("temp dir");
+        let workspace_a = temp.path().join("workspace_a");
+        let workspace_b = temp.path().join("workspace_b");
+        std::fs::create_dir_all(&workspace_a).expect("mkdir workspace_a");
+        std::fs::create_dir_all(&workspace_b).expect("mkdir workspace_b");
+        cwd.set(&workspace_b);
+
+        let manifest = ResourceManifest::new().with_resource(
+            TextResource::new("en_US.json", r#"{"greeting":"hello"}"#).expect("valid resource"),
+        );
+        let catalog = bootstrap_i18n_catalog_with_base(
+            &workspace_a,
+            Path::new("catalog"),
+            &manifest,
+            Locale::EN_US,
+            FallbackStrategy::Both,
+        )
+        .expect("bootstrap catalog with base");
+
+        assert_eq!(
+            catalog.get_text(Locale::EN_US, "greeting"),
+            Some("hello".to_string())
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace_a.join("catalog").join("en_US.json")).expect("read"),
+            r#"{"greeting":"hello"}"#
+        );
+    }
+
+    #[test]
     fn resource_backed_catalog_loads_nested_locale_files() {
         let temp = TempDir::new().expect("temp dir");
         let manifest = ResourceManifest::new().with_resource(
@@ -725,6 +848,32 @@ mod tests {
         .expect("write nested locale");
 
         let catalog = load_directory_catalog(temp.path()).expect("load nested catalog");
+        assert_eq!(
+            catalog.get_text(Locale::EN_US, "greeting"),
+            Some("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn directory_catalog_load_with_base_uses_explicit_base_across_cwd_changes() {
+        let cwd = CurrentDirGuard::new();
+        let temp = TempDir::new().expect("temp dir");
+        let workspace_a = temp.path().join("workspace_a");
+        let workspace_b = temp.path().join("workspace_b");
+        let catalog_dir = workspace_a.join("catalog");
+        fs::create_dir_all(&catalog_dir).expect("mkdir catalog");
+        fs::create_dir_all(&workspace_b).expect("mkdir workspace_b");
+        fs::write(catalog_dir.join("en_US.json"), r#"{"greeting":"hello"}"#).expect("write locale");
+        cwd.set(&workspace_b);
+
+        let catalog = load_i18n_catalog_from_directory_with_base(
+            &workspace_a,
+            Path::new("catalog"),
+            Locale::EN_US,
+            FallbackStrategy::Both,
+        )
+        .expect("load catalog with base");
+
         assert_eq!(
             catalog.get_text(Locale::EN_US, "greeting"),
             Some("hello".to_string())

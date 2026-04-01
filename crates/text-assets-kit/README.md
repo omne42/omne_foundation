@@ -35,6 +35,7 @@
 
 - 中性默认 data root（`./.text_assets`、`TEXT_ASSETS_DIR`）以及调用方显式覆写后的 data root
 - 显式 base 驱动的 root/data-root 解析（`materialize_resource_root_with_base(...)`、`resolve_data_root_with_base(...)`、`ensure_data_root_with_base(...)`）
+- 显式 base 驱动的高层目录/manifest 入口（`TextDirectory::load_with_base(...)`、`TextDirectory::load_resource_files_with_base(...)`、`bootstrap_text_resources_then_load_with_base(...)`、`bootstrap_text_resources_with_report_with_base(...)`、`scan_text_directory_with_base(...)`）
 - 文本文件大小和目录总大小限制
 - 目录遍历、symlink、越界路径约束
 - 通用文本资源 manifest bootstrap
@@ -75,7 +76,7 @@
 - `text-assets-kit` 会串行化同一 resource root 上的并发 bootstrap 尝试，避免一个尝试的 rollback 与另一个尝试的 load 互相踩到。
 - 如果同一次 bootstrap 尝试里后续步骤失败，它会按创建报告对本次新建的文件/目录做 best-effort rollback。
 - 这不是 crash-safe 或断电恢复事务：如果进程在 bootstrap 写入后异常退出，已创建的文件可能仍然留在磁盘上。
-- crate root 的 canonical 入口仍然是 `bootstrap_text_resources_then_load(...)` / `bootstrap_text_resources_with_report(...)`；`bootstrap_lock` 模块只保留给确实需要低层协调的兼容调用方，默认不建议直接依赖。
+- crate root 的 canonical 入口仍然是 `bootstrap_text_resources_then_load(...)` / `bootstrap_text_resources_with_report(...)`；当调用方已经持有稳定 workspace/root 事实时，应优先切到对应的 `*_with_base(...)` 版本。`bootstrap_lock` 模块只保留给确实需要低层协调的兼容调用方，默认不建议直接依赖。
 
 ## 与其他 crate 的关系
 

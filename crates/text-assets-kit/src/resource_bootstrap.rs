@@ -6,7 +6,8 @@ use std::collections::BTreeSet;
 use std::path::Component;
 
 use crate::resource_path::{
-    materialize_resource_root, normalize_resource_path, resource_identity_key,
+    materialize_resource_root, materialize_resource_root_with_base, normalize_resource_path,
+    resource_identity_key,
 };
 use crate::secure_fs::{SecureRoot, WriteResult, validate_total_text_bytes};
 use crate::text_resource::{ResourceManifest, validate_text_resource_contents};
@@ -97,11 +98,39 @@ pub fn bootstrap_text_resources(
     bootstrap_text_resources_with_report(root.as_ref(), manifest).map(|_| ())
 }
 
+/// Equivalent to [`bootstrap_text_resources`] but resolves `root` relative to
+/// an explicit absolute `base`.
+pub fn bootstrap_text_resources_with_base(
+    base: &Path,
+    root: &Path,
+    manifest: &ResourceManifest,
+) -> io::Result<()> {
+    bootstrap_text_resources_with_report_with_base(base, root, manifest).map(|_| ())
+}
+
 pub fn bootstrap_text_resources_with_report(
     root: &Path,
     manifest: &ResourceManifest,
 ) -> io::Result<BootstrapReport> {
     let root = materialize_resource_root(root)?;
+    bootstrap_text_resources_with_report_impl(root, manifest)
+}
+
+/// Equivalent to [`bootstrap_text_resources_with_report`] but resolves `root`
+/// relative to an explicit absolute `base`.
+pub fn bootstrap_text_resources_with_report_with_base(
+    base: &Path,
+    root: &Path,
+    manifest: &ResourceManifest,
+) -> io::Result<BootstrapReport> {
+    let root = materialize_resource_root_with_base(base, root)?;
+    bootstrap_text_resources_with_report_impl(root, manifest)
+}
+
+fn bootstrap_text_resources_with_report_impl(
+    root: PathBuf,
+    manifest: &ResourceManifest,
+) -> io::Result<BootstrapReport> {
     validate_manifest(manifest)?;
     let root_path = root.clone();
     let mut report = BootstrapReport::new(root_path.clone());
@@ -381,8 +410,38 @@ mod tests {
     use crate::secure_fs::{MAX_TEXT_DIRECTORY_TOTAL_BYTES, MAX_TEXT_RESOURCE_BYTES};
     use crate::text_resource::TextResource;
     use std::fs;
+    use std::path::Path;
+    use std::sync::{LazyLock, Mutex, MutexGuard};
 
     use tempfile::TempDir;
+
+    static CWD_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct CurrentDirGuard {
+        _lock: MutexGuard<'static, ()>,
+        original: std::path::PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn new() -> Self {
+            Self {
+                _lock: CWD_LOCK.lock().unwrap_or_else(|poison| poison.into_inner()),
+                original: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")),
+            }
+        }
+
+        fn set(&self, path: &Path) {
+            std::env::set_current_dir(path).expect("set cwd");
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            if std::env::set_current_dir(&self.original).is_err() {
+                std::env::set_current_dir("/").expect("restore cwd fallback");
+            }
+        }
+    }
 
     #[test]
     fn bootstrap_creates_directories_and_resources() {
@@ -425,6 +484,33 @@ mod tests {
         assert_eq!(
             report.created_directory_paths(),
             vec![temp.path().join("nested"), root]
+        );
+    }
+
+    #[test]
+    fn bootstrap_with_report_with_base_uses_explicit_base_across_cwd_changes() {
+        let cwd = CurrentDirGuard::new();
+        let temp = TempDir::new().expect("temp dir");
+        let workspace_a = temp.path().join("workspace_a");
+        let workspace_b = temp.path().join("workspace_b");
+        fs::create_dir_all(&workspace_a).expect("mkdir workspace_a");
+        fs::create_dir_all(&workspace_b).expect("mkdir workspace_b");
+
+        cwd.set(&workspace_b);
+        let manifest = ResourceManifest::new()
+            .with_resource(TextResource::new("default.md", "hello").expect("valid resource"));
+        let report = bootstrap_text_resources_with_report_with_base(
+            &workspace_a,
+            Path::new("catalog"),
+            &manifest,
+        )
+        .expect("bootstrap with base");
+
+        let root = workspace_a.join("catalog");
+        assert_eq!(report.created_paths(), vec![root.join("default.md")]);
+        assert_eq!(
+            fs::read_to_string(root.join("default.md")).expect("read managed file"),
+            "hello"
         );
     }
 

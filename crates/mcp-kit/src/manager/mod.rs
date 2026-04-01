@@ -1427,7 +1427,7 @@ impl Manager {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn set_initialize_result_for_test(&mut self, server_name: &str, value: Value) {
         if let Some(cached) = self
             .connections

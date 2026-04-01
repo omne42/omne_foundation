@@ -46,11 +46,18 @@ def validate_allowed_changelog_paths(
         for path in staged.changelog_paths
         if path == "CHANGELOG.md" and path not in staged.deleted_paths
     ]
+    deleted_crate_changelogs = {
+        path
+        for path in staged.deleted_paths
+        if path.startswith("crates/") and path.endswith("/CHANGELOG.md")
+        and path.rsplit("/", 1)[0] + "/Cargo.toml" in staged.deleted_paths
+    }
     invalid = [
         path
         for path in staged.changelog_paths
         if path != "CHANGELOG.md"
         and path not in {crate_changelog_path(crate_dir) for crate_dir in layout.crate_dirs}
+        and path not in deleted_crate_changelogs
     ]
     if not disallowed and not invalid:
         return

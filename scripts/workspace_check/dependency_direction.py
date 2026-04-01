@@ -7,7 +7,7 @@ from check_common.context import CheckContext
 
 
 ALLOWED_INTERNAL_DEPS: dict[str, set[str]] = {
-    "config-kit": {"omne-fs-primitives"},
+    "config-kit": set(),
     "error-kit": {"structured-text-kit"},
     "error-protocol": {"error-kit", "structured-text-kit", "structured-text-protocol"},
     "github-kit": {"http-kit"},
@@ -18,19 +18,12 @@ ALLOWED_INTERNAL_DEPS: dict[str, set[str]] = {
     "mcp-jsonrpc": {"error-kit", "http-kit", "structured-text-kit"},
     "mcp-kit": {"config-kit", "error-kit", "http-kit", "mcp-jsonrpc", "structured-text-kit"},
     "notify-kit": {"github-kit", "http-kit", "log-kit", "secret-kit", "structured-text-kit"},
-    "omne-fs-primitives": set(),
-    "omne-process-primitives": set(),
     "policy-meta": set(),
     "prompt-kit": {"text-assets-kit"},
-    "secret-kit": {
-        "error-kit",
-        "omne-fs-primitives",
-        "omne-process-primitives",
-        "structured-text-kit",
-    },
+    "secret-kit": {"error-kit", "structured-text-kit"},
     "structured-text-kit": set(),
     "structured-text-protocol": {"structured-text-kit"},
-    "text-assets-kit": {"omne-fs-primitives"},
+    "text-assets-kit": set(),
 }
 
 

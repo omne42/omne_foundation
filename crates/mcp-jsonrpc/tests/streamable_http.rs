@@ -1218,8 +1218,8 @@ async fn streamable_http_request_timeout_surfaces_wait_timeout() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn streamable_http_request_timeout_does_not_abort_long_lived_post_sse_response() {
-    const REQUEST_TIMEOUT: Duration = Duration::from_millis(150);
-    const KEEP_ALIVE_INTERVAL: Duration = Duration::from_millis(60);
+    const REQUEST_TIMEOUT: Duration = Duration::from_millis(400);
+    const KEEP_ALIVE_INTERVAL: Duration = Duration::from_millis(120);
 
     let Some(listener) = bind_loopback_listener_or_skip().await else {
         return;

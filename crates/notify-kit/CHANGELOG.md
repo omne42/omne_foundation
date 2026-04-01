@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `GitHubCommentConfig` 的 `Debug` 输出现在也会像 `GitHubCommentSink` 一样对 `api_base` 做 URL 脱敏，不再把 query、credentials 或额外 path 细节原样写进日志。
 - `GitHubCommentSink` 现在继续复用 `github-kit` 的 bearer-token 目标校验与 public-IP pinning 约束；即使显式信任自定义 GitHub API base，localhost、单标签主机和私网 IP literal 目标仍会在发送前被拒绝。
 - `GitHubCommentSink` no longer allows `with_public_ip_check(false)` in bearer-token mode; token-bearing GitHub comment requests now fail closed unless public-IP pinning stays enabled, and even explicitly trusted custom API bases still reject localhost/private-IP literal targets before send.
 - Clarified the `Event` structured-text contract: built-in sinks pass freeform text through verbatim but only stringify non-freeform `StructuredText` via a stable fallback; locale-aware rendering remains an upper-layer responsibility.

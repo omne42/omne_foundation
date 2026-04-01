@@ -31,6 +31,6 @@ let sink = GitHubCommentSink::new(cfg)?;
 
 - 固定请求 `https://api.github.com`，不会打印 token
 - bearer token 请求始终强制做 DNS 公网 IP 校验；`with_public_ip_check(false)` 对 `GitHubCommentSink` 属于非法配置，构造会 fail closed
-- 如果显式信任自定义 GitHub API base（`with_allow_custom_api_base_with_token(true)`），仍然必须保留公网 IP 校验，不能把 token 发往私网/回环地址
+- 如果显式信任自定义 GitHub API base（`with_allow_custom_api_base_with_token(true)`），仍然必须保留公网 IP 校验；localhost / 私网 IP literal 会在构造时被拒绝，解析到私网/回环的伪装域名也不能绕过发送期的 pinned 校验
 - `Debug` 输出默认脱敏（不会泄露 token）
 - 非 2xx 的响应不会包含 response body（避免泄露多余信息）

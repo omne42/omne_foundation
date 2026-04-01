@@ -58,7 +58,7 @@ pub async fn fetch_latest_release<S: AsRef<str>>(
         }
 
         let client = match profile
-            .select_for_url(&url, options.has_bearer_token())
+            .select_for_url(&url, options.requires_public_ip_pinning())
             .await
         {
             Ok(client) => client,

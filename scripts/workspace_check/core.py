@@ -11,6 +11,7 @@ from .docs_system import run_docs_system_checks
 from .mcp_kit_assets import run_mcp_kit_asset_checks
 from .notify_kit_assets import run_notify_kit_asset_checks
 from .policy_meta_assets import run_policy_meta_asset_checks
+from .publish_contract import run_publish_contract_checks
 
 
 def has_cargo_workspace(ctx: CheckContext) -> bool:
@@ -30,6 +31,7 @@ def workspace_member_packages(ctx: CheckContext) -> list[str]:
 def run_local_checks(ctx: CheckContext) -> None:
     run_docs_system_checks(ctx)
     run_dependency_direction_checks(ctx)
+    run_publish_contract_checks(ctx)
     fmt_command = ["cargo", "fmt"]
     for package in workspace_member_packages(ctx):
         fmt_command.extend(["-p", package])
@@ -109,6 +111,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "ci",
             "docs-system",
             "dependency-direction",
+            "publish-contract",
             "asset-checks",
             "secret-kit-target",
         ),
@@ -139,6 +142,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.mode == "dependency-direction":
         run_dependency_direction_checks(ctx)
+        return 0
+    if args.mode == "publish-contract":
+        run_publish_contract_checks(ctx)
         return 0
     if args.mode == "asset-checks":
         run_asset_checks(ctx, args.extra or "all")

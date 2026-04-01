@@ -16,7 +16,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `notify-kit`：同步把 `Hub::try_notify_spawn(...)` 的内部 helper 签名格式化到 rustfmt 输出，避免后续 hook/PR 留下无意义的工作树脏改动。
 - `Hub` 现在对 panic 的 sink 采取 fail-closed 处理：内置的 panic 隔离边界仍会把当前次发送转换成结构化 sink failure，但同一个 sink 一旦在 `name()` 或 `send()` 中 panic，就会被标记为 disabled，后续发送不再继续复用该实例。
 - `Hub::notify(...)` 和 Feishu 图片失败 warning 现在会对日志里的第三方 HTTP 响应摘要做脱敏；`Hub` 的 warning 不再把 `response=...` 直接打进 tracing，Feishu 图片失败日志也不再原样泄漏签名 URL 或本地绝对路径。
-- `notify_kit::builtin::env::build_hub_from_standard_env(...)` 现在把 sink timeout 和 `HubConfig.per_sink_timeout` 的控制面拆开：新增 `NOTIFY_SINK_TIMEOUT_MS` 与 `NOTIFY_HUB_TIMEOUT_MS`，并保留 `NOTIFY_TIMEOUT_MS` 作为兼容回退，避免单个 env 同时制造 sink 假超时和 Hub 假超时。
+- `notify_kit::builtin::env::build_hub_from_standard_env(...)` 现在把 sink timeout 和 `HubConfig.per_sink_timeout` 的控制面拆开：新增 `NOTIFY_SINK_TIMEOUT_MS` 与 `NOTIFY_HUB_TIMEOUT_MS`，并保留 `NOTIFY_TIMEOUT_MS` 作为兼容回退；兼容入口会被解释成 sink timeout，并自动给 Hub timeout 增加一段 slack，避免单个 env 同时制造 sink 假超时和 Hub 假超时。
 - `GitHubCommentSink::new(...)` 现在会在构造阶段校验 token-bearing GitHub API 目标；默认仅信任 `https://api.github.com`，只有显式 `with_allow_custom_api_base_with_token(true)` 后，才会把 bearer token 发送到非 `api.github.com` 的 HTTPS API base。
 - `notify-kit` 的公开 sink config/builder 不再直接暴露 `secret-kit::SecretString`；新增 crate 本地的 `NotifySecret` 作为公开边界，内部实现仍可继续复用 `secret-kit` 存放长期凭证，避免通知域 API 把下层 secret 持有模型固定进契约里。
 - `notify-kit::Error` 在多 sink 聚合失败时恢复标准 `Error::source()` 链：聚合错误现在把首个 `SinkFailure` 作为 source，而 `SinkFailure` 继续指向对应的底层错误；需要完整多错误信息时仍使用 `sink_failures()`。

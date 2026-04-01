@@ -205,7 +205,8 @@ hub.notify(Event::new("turn_completed", Severity::Success, "done"))
 - `notify_kit::builtin::env::EnvHubError`
 
 它们只是 convenience helper，适合快速接线或共享一套简单约定；不是强制协议，也不是核心架构边界。
-这套 helper 自带的中性约定是 `NOTIFY_*`，例如 `NOTIFY_SOUND`、`NOTIFY_WEBHOOK_URL`、`NOTIFY_TIMEOUT_MS`、`NOTIFY_EVENTS`。
+这套 helper 自带的中性约定是 `NOTIFY_*`，例如 `NOTIFY_SOUND`、`NOTIFY_WEBHOOK_URL`、`NOTIFY_TIMEOUT_MS`、`NOTIFY_SINK_TIMEOUT_MS`、`NOTIFY_HUB_TIMEOUT_MS`、`NOTIFY_EVENTS`。
+如果只设置兼容入口 `NOTIFY_TIMEOUT_MS`，helper 会把它解释为 sink 级 HTTP timeout，并自动给 `HubConfig.per_sink_timeout` 留一段额外 slack，避免 DNS / public-IP 预检把更具体的 sink 错误提前压成泛化 timeout。
 布尔型 env（如 `NOTIFY_SOUND`）采用 fail-closed 解析：非法值会直接返回 `EnvHubError`，而不是偷偷回退默认值。
 公开文档入口是 `notify_kit::builtin::env::...`；旧的 `notify_kit::env::...` 仅为兼容保留，并且返回 `notify-kit` 自己的 helper 错误边界。
 

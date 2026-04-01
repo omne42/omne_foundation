@@ -487,7 +487,24 @@ impl RequestResponder {
         }
 
         match &self.target {
-            RequestResponseTarget::Direct(handle) => handle.write_json_line(&response).await,
+            RequestResponseTarget::Direct(handle) => {
+                if let Err(err) = handle.write_json_line(&response).await {
+                    if matches!(
+                        &err,
+                        Error::Io(_)
+                            | Error::Protocol(ProtocolError {
+                                kind: ProtocolErrorKind::Closed,
+                                ..
+                            })
+                    ) {
+                        handle.schedule_close_once(format!(
+                            "failed to write server request response: {err}"
+                        ));
+                    }
+                    return Err(err);
+                }
+                Ok(())
+            }
             RequestResponseTarget::Batch(batch) => batch.push_reserved_response(response).await,
         }
     }
@@ -2193,7 +2210,39 @@ mod line_limit_tests {
 #[cfg(test)]
 mod incoming_value_tests {
     use super::*;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
+
+    struct AlwaysErrWriter;
+
+    impl AsyncWrite for AlwaysErrWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<Result<usize, std::io::Error>> {
+            Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "simulated write failure",
+            )))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), std::io::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), std::io::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     #[tokio::test]
     async fn nested_batch_item_returns_invalid_request_error_in_batch_array() {
@@ -2335,6 +2384,60 @@ mod incoming_value_tests {
         assert_eq!(
             response["error"]["message"],
             "request handler dropped request without responding"
+        );
+
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn direct_request_response_write_failure_closes_transport_fail_closed() {
+        let (client_stream, mut server_stream) = tokio::io::duplex(2048);
+        let (client_read, _) = tokio::io::split(client_stream);
+
+        let mut client = Client::connect_io(client_read, AlwaysErrWriter)
+            .await
+            .expect("connect client");
+        let mut requests = client.take_requests().expect("request receiver");
+
+        server_stream
+            .write_all(br#"{"jsonrpc":"2.0","id":1,"method":"first"}"#)
+            .await
+            .expect("write request");
+        server_stream.write_all(b"\n").await.expect("write newline");
+        server_stream.flush().await.expect("flush request");
+
+        let request = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .expect("request timeout")
+            .expect("request");
+
+        let err = request
+            .respond_ok(serde_json::json!({"handled":"first"}))
+            .await
+            .expect_err("response write should fail once peer read end is gone");
+        assert!(
+            matches!(
+                err,
+                Error::Io(_)
+                    | Error::Protocol(ProtocolError {
+                        kind: ProtocolErrorKind::Closed,
+                        ..
+                    })
+            ),
+            "unexpected error: {err:?}"
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !client.handle.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("client should publish close after response write failure");
+        let close_reason = client.handle.close_reason().expect("close reason set");
+        assert!(
+            close_reason.contains("failed to write server request response"),
+            "{close_reason}"
         );
 
         drop(client);

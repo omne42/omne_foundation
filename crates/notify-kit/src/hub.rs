@@ -269,11 +269,7 @@ impl Hub {
 
     // Keep returning the original event on backpressure so callers can
     // preserve existing retry/drop behavior without reconstructing it.
-    fn try_notify_spawn(
-        &self,
-        handle: tokio::runtime::Handle,
-        event: Event,
-    ) -> Option<Event> {
+    fn try_notify_spawn(&self, handle: tokio::runtime::Handle, event: Event) -> Option<Event> {
         let inner = self.inner.clone();
 
         let permit = match inner.inflight.clone().try_acquire_owned() {

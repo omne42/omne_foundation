@@ -52,7 +52,7 @@ impl TextDirectory {
     }
 
     fn load_materialized(root: &Path) -> io::Result<Self> {
-        let Some(root) = SecureRoot::open(&root, MissingRootPolicy::ReturnNone)? else {
+        let Some(root) = SecureRoot::open(root, MissingRootPolicy::ReturnNone)? else {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("resource root does not exist: {}", root.display()),
@@ -66,7 +66,7 @@ impl TextDirectory {
         root: &Path,
         relative_paths: &[String],
     ) -> io::Result<Self> {
-        let root = SecureRoot::open(&root, MissingRootPolicy::ReturnNone)?.ok_or_else(|| {
+        let root = SecureRoot::open(root, MissingRootPolicy::ReturnNone)?.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("resource root does not exist: {}", root.display()),

@@ -123,8 +123,7 @@ where
     MapFileTooLarge: FnMut(&Path, usize, usize) -> E,
     MapDirectoryTooLarge: FnMut(usize, usize) -> E,
 {
-    let Some(root) = SecureRoot::open(&root, MissingRootPolicy::ReturnNone).map_err(E::from)?
-    else {
+    let Some(root) = SecureRoot::open(root, MissingRootPolicy::ReturnNone).map_err(E::from)? else {
         return Err(E::from(io::Error::new(
             io::ErrorKind::NotFound,
             format!("resource root does not exist: {}", root.display()),

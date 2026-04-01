@@ -1,10 +1,12 @@
+#[path = "shared/artifacts.rs"]
+mod artifacts;
 #[path = "shared/cli.rs"]
 mod cli;
 
 use std::path::PathBuf;
 
+use artifacts::{check_typescript_bindings, write_typescript_bindings};
 use cli::{CliError, next_path_arg};
-use policy_meta::{check_typescript_bindings, write_typescript_bindings};
 
 fn main() -> Result<(), CliError> {
     let mut check = false;

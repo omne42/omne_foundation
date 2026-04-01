@@ -1,4 +1,7 @@
-use policy_meta::{ExportArtifactsCommand, ExportArtifactsCommandError};
+#[path = "shared/artifacts.rs"]
+mod artifacts;
+
+use artifacts::{ExportArtifactsCommand, ExportArtifactsCommandError};
 
 fn main() -> Result<(), ExportArtifactsCommandError> {
     let command = ExportArtifactsCommand::parse_args(std::env::args().skip(1))?;

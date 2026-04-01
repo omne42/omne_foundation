@@ -384,6 +384,7 @@ async fn connect_transport_stdio_null_routes_stderr_to_devnull() {
         trust_mode: TrustMode::Trusted,
         untrusted_streamable_http_policy: UntrustedStreamableHttpPolicy::default(),
         allow_stdout_log_outside_root: false,
+        stdout_log_root: PathBuf::from("/"),
         protocol_version: MCP_PROTOCOL_VERSION.to_string(),
         request_timeout: Duration::from_secs(1),
     };
@@ -399,6 +400,51 @@ async fn connect_transport_stdio_null_routes_stderr_to_devnull() {
 
     drop(client);
     child.kill().await.expect("kill child");
+    let _ = child.wait().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn connect_transport_stdio_allows_stdout_log_within_config_root_when_cwd_differs() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let config_root = tempdir.path().join("config-root");
+    let cwd = tempdir.path().join("workspace-cwd");
+    std::fs::create_dir_all(&config_root).unwrap();
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let mut server_cfg = ServerConfig::stdio(vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        "printf 'not-json\\n'; sleep 0.1".to_string(),
+    ])
+    .unwrap();
+    server_cfg
+        .set_stdout_log(Some(crate::StdoutLogConfig {
+            path: config_root.join("logs/server.stdout.log"),
+            max_bytes_per_part: 1024,
+            max_parts: Some(4),
+        }))
+        .expect("stdout log config");
+
+    let ctx = ConnectContext {
+        trust_mode: TrustMode::Trusted,
+        untrusted_streamable_http_policy: UntrustedStreamableHttpPolicy::default(),
+        allow_stdout_log_outside_root: false,
+        stdout_log_root: config_root.clone(),
+        protocol_version: MCP_PROTOCOL_VERSION.to_string(),
+        request_timeout: Duration::from_secs(1),
+    };
+
+    let (client, child) = connect_transport(&ctx, "srv", &server_cfg, &cwd)
+        .await
+        .expect("stdio transport should accept stdout_log within config root");
+    let mut child = child.expect("stdio transport should expose child");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let stdout_log_path = config_root.join("logs/server.stdout.log");
+    assert!(stdout_log_path.is_file(), "stdout log should be created");
+
+    drop(client);
     let _ = child.wait().await;
 }
 

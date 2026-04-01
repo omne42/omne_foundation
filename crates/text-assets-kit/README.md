@@ -69,7 +69,7 @@
 - `src/bootstrap_lock.rs`
   - bootstrap 并发串行化与跨进程协调；仅作为低层兼容原语保留
 - `src/lazy_value.rs`
-  - 仅供兼容层复用的阻塞式 lazy-init 原语，不作为 async runtime-facing canonical 边界
+  - 仅供兼容层复用的阻塞式 lazy-init 原语；同线程重入和可检测的线程级跨线程等待环路会显式报错，不作为 async runtime-facing canonical 边界
 
 ## bootstrap/rollback 语义
 

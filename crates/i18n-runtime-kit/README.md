@@ -55,7 +55,7 @@
 - `src/i18n.rs`
   - 目录型 catalog 加载、bootstrap、reload 与错误映射
 - `src/lazy_catalog.rs`
-  - 仅保留给迁移路径的、已废弃的阻塞式 lazy catalog 兼容层
+  - 仅保留给迁移路径的、已废弃的阻塞式 lazy catalog 兼容层；同线程重入和可检测的线程级跨线程初始化环路会显式报错
 - `src/global_catalog.rs`
   - 可热替换、runtime-facing 的 canonical catalog 句柄
 - `src/locale_selection.rs`

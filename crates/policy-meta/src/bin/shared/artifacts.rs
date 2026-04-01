@@ -9,8 +9,8 @@ use std::{
 #[cfg(test)]
 use policy_meta::POLICY_META_SCHEMA_FILE;
 use policy_meta::{
-    POLICY_META_TYPES_FILE, PolicyProfileV1, policy_meta_typescript_bindings, profile_documents,
-    schema_documents,
+    ArtifactGenerationError, POLICY_META_TYPES_FILE, PolicyProfileV1,
+    policy_meta_typescript_bindings, profile_documents, schema_documents,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -59,6 +59,11 @@ pub(crate) enum ArtifactError {
     RenderSchema { source: serde_json::Error },
     #[error("failed to render profile: {source}")]
     RenderProfile { source: serde_yaml::Error },
+    #[error("failed to generate {kind} artifact content: {source}")]
+    GenerateArtifact {
+        kind: ArtifactKind,
+        source: ArtifactGenerationError,
+    },
     #[error("unexpected {kind} artifacts present: {}. Run `cargo run -p policy-meta --bin export-artifacts` to regenerate the canonical artifact set.", files.join(", "))]
     UnexpectedArtifacts {
         kind: ArtifactKind,
@@ -191,15 +196,19 @@ pub(crate) enum ExportArtifactsCommandError {
 }
 
 pub(crate) fn write_schema_dir(output_dir: &Path) -> Result<(), ArtifactError> {
+    let documents = schema_documents().map_err(|source| ArtifactError::GenerateArtifact {
+        kind: ArtifactKind::Schema,
+        source,
+    })?;
     fs::create_dir_all(output_dir).map_err(|source| ArtifactError::CreateDir {
         path: output_dir.to_path_buf(),
         source,
     })?;
     prune_unexpected_artifacts(
         output_dir,
-        schema_documents().iter().map(|(file_name, _)| *file_name),
+        documents.iter().map(|(file_name, _)| *file_name),
     )?;
-    for (file_name, schema) in schema_documents() {
+    for (file_name, schema) in documents {
         let path = output_dir.join(file_name);
         fs::write(&path, render_schema(&schema)?)
             .map_err(|source| ArtifactError::WriteFile { path, source })?;
@@ -208,14 +217,18 @@ pub(crate) fn write_schema_dir(output_dir: &Path) -> Result<(), ArtifactError> {
 }
 
 pub(crate) fn check_schema_dir(output_dir: &Path) -> Result<(), ArtifactError> {
+    let documents = schema_documents().map_err(|source| ArtifactError::GenerateArtifact {
+        kind: ArtifactKind::Schema,
+        source,
+    })?;
     check_no_unexpected_artifacts(
         output_dir,
-        schema_documents().iter().map(|(file_name, _)| *file_name),
+        documents.iter().map(|(file_name, _)| *file_name),
         ArtifactKind::Schema,
     )?;
     let mut drift = Vec::<String>::new();
 
-    for (file_name, expected) in schema_documents() {
+    for (file_name, expected) in documents {
         let path = output_dir.join(file_name);
         let contents = fs::read_to_string(&path).map_err(|source| ArtifactError::ReadFile {
             path: path.clone(),
@@ -243,18 +256,27 @@ pub(crate) fn check_schema_dir(output_dir: &Path) -> Result<(), ArtifactError> {
 }
 
 pub(crate) fn write_typescript_bindings(output_dir: &Path) -> Result<(), ArtifactError> {
+    let bindings =
+        policy_meta_typescript_bindings().map_err(|source| ArtifactError::GenerateArtifact {
+            kind: ArtifactKind::TypescriptBinding,
+            source,
+        })?;
     fs::create_dir_all(output_dir).map_err(|source| ArtifactError::CreateDir {
         path: output_dir.to_path_buf(),
         source,
     })?;
     prune_unexpected_artifacts(output_dir, [POLICY_META_TYPES_FILE])?;
     let path = output_dir.join(POLICY_META_TYPES_FILE);
-    fs::write(&path, policy_meta_typescript_bindings())
-        .map_err(|source| ArtifactError::WriteFile { path, source })?;
+    fs::write(&path, bindings).map_err(|source| ArtifactError::WriteFile { path, source })?;
     Ok(())
 }
 
 pub(crate) fn check_typescript_bindings(output_dir: &Path) -> Result<(), ArtifactError> {
+    let expected =
+        policy_meta_typescript_bindings().map_err(|source| ArtifactError::GenerateArtifact {
+            kind: ArtifactKind::TypescriptBinding,
+            source,
+        })?;
     check_no_unexpected_artifacts(
         output_dir,
         [POLICY_META_TYPES_FILE],
@@ -265,7 +287,6 @@ pub(crate) fn check_typescript_bindings(output_dir: &Path) -> Result<(), Artifac
         path: path.clone(),
         source,
     })?;
-    let expected = policy_meta_typescript_bindings();
 
     if actual == expected {
         Ok(())

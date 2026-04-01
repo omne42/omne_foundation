@@ -34,6 +34,7 @@
 覆盖：
 
 - `bootstrap_prompt_directory(...)`
+- `bootstrap_prompt_directory_with_base(...)`
 - `PromptDirectoryHandle`
 - 兼容层 `LazyPromptDirectory`
 - `PromptDirectoryError`
@@ -64,4 +65,5 @@
 
 - 建立在 [`text-assets-kit`](../text-assets-kit/README.md) 之上，复用通用文本资源与 bootstrap 能力
 - manifest、目录快照和文本资源类型由 [`text-assets-kit`](../text-assets-kit/README.md) 直接提供，不再从 `prompt-kit` 根导出
+- 当调用方已经持有稳定 workspace/root 事实时，应优先使用 `bootstrap_prompt_directory_with_base(...)`，而不是继续让相对目录依赖 ambient `current_dir()`
 - 不把 prompt 业务语义回塞到 `text-assets-kit`

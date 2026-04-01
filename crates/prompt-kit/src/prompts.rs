@@ -4,6 +4,7 @@ use std::sync::{Arc, RwLock};
 
 use text_assets_kit::{
     BootstrapLoadError, ResourceManifest, TextDirectory, bootstrap_text_resources_then_load,
+    bootstrap_text_resources_then_load_with_base,
     lazy_value::{LazyInitError, LazyValue},
 };
 
@@ -74,6 +75,27 @@ pub fn bootstrap_prompt_directory(
         manifest,
         TextDirectory::load_resource_files,
     )
+}
+
+/// Bootstraps prompt resources under `root`, anchored to an explicit absolute
+/// `base`, and then reloads the managed files into a fresh snapshot.
+pub fn bootstrap_prompt_directory_with_base(
+    base: &Path,
+    root: impl AsRef<Path>,
+    manifest: &ResourceManifest,
+) -> Result<TextDirectory, io::Error> {
+    match bootstrap_text_resources_then_load_with_base(
+        base,
+        root.as_ref(),
+        manifest,
+        TextDirectory::load_resource_files,
+    ) {
+        Ok(directory) => Ok(directory),
+        Err(BootstrapLoadError::Bootstrap(error) | BootstrapLoadError::Load(error)) => Err(error),
+        Err(BootstrapLoadError::Rollback { load, rollback }) => {
+            Err(prompt_bootstrap_cleanup_error(load, rollback))
+        }
+    }
 }
 
 fn prompt_bootstrap_cleanup_error(load: io::Error, rollback: io::Error) -> io::Error {
@@ -219,12 +241,41 @@ mod tests {
     use super::*;
     use std::error::Error as _;
     use std::fs;
+    use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, LazyLock, Mutex, mpsc};
+    use std::sync::{Arc, LazyLock, Mutex, MutexGuard, mpsc};
     use std::thread;
     use std::time::Duration;
     use tempfile::TempDir;
     use text_assets_kit::TextResource;
+
+    static CWD_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct CurrentDirGuard {
+        _lock: MutexGuard<'static, ()>,
+        original: std::path::PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn new() -> Self {
+            Self {
+                _lock: CWD_LOCK.lock().unwrap_or_else(|poison| poison.into_inner()),
+                original: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")),
+            }
+        }
+
+        fn set(&self, path: &Path) {
+            std::env::set_current_dir(path).expect("set cwd");
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            if std::env::set_current_dir(&self.original).is_err() {
+                std::env::set_current_dir("/").expect("restore cwd fallback");
+            }
+        }
+    }
 
     #[derive(Debug)]
     struct InnerPromptError;
@@ -486,6 +537,30 @@ mod tests {
                 .map(|(key, _)| key.to_string())
                 .collect::<Vec<_>>(),
             vec!["default.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn bootstrap_prompt_directory_with_base_uses_explicit_base_across_cwd_changes() {
+        let cwd = CurrentDirGuard::new();
+        let temp = TempDir::new().expect("temp dir");
+        let workspace_a = temp.path().join("workspace_a");
+        let workspace_b = temp.path().join("workspace_b");
+        fs::create_dir_all(&workspace_a).expect("mkdir workspace_a");
+        fs::create_dir_all(&workspace_b).expect("mkdir workspace_b");
+        cwd.set(&workspace_b);
+
+        let manifest = ResourceManifest::new()
+            .with_resource(TextResource::new("default.md", "hello").expect("valid resource"));
+
+        let directory =
+            bootstrap_prompt_directory_with_base(&workspace_a, Path::new("prompts"), &manifest)
+                .expect("bootstrap with base");
+
+        assert_eq!(directory.get("default.md"), Some("hello"));
+        assert_eq!(
+            fs::read_to_string(workspace_a.join("prompts").join("default.md")).expect("read"),
+            "hello"
         );
     }
 

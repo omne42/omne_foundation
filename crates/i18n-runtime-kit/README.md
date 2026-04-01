@@ -32,8 +32,11 @@
 覆盖：
 
 - `bootstrap_i18n_catalog(...)`
+- `bootstrap_i18n_catalog_with_base(...)`
 - `load_i18n_catalog_from_directory(...)`
+- `load_i18n_catalog_from_directory_with_base(...)`
 - `reload_i18n_catalog_from_directory(...)`
+- `reload_i18n_catalog_from_directory_with_base(...)`
 - `resolve_locale_from_cli_args(...)`
 - `resolve_locale_from_argv(...)`
 - `GlobalCatalog`
@@ -67,4 +70,5 @@
 - 依赖 [`i18n-kit`](../i18n-kit/README.md) 提供 catalog / locale / structured text 语义
 - 依赖 [`text-assets-kit`](../text-assets-kit/README.md) 提供文本资源、目录扫描、bootstrap 与 secure fs 边界
 - manifest 与文本资源类型由 [`text-assets-kit`](../text-assets-kit/README.md) 直接提供，不再从 `i18n-runtime-kit` 根导出
+- 当调用方已经持有稳定 workspace/root 事实时，应优先使用 `*_with_base(...)` 入口，而不是继续让相对目录依赖 ambient `current_dir()`
 - 刻意不把这些 runtime adapter 回塞到 `i18n-kit`，避免纯语义层重新沾上 CLI/runtime I/O

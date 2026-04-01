@@ -11,6 +11,7 @@
 
 ### Changed
 - `mcp-kit` 现在显式标记 `publish = false`，因为它当前直接依赖同 workspace 的 `config-kit`，发布契约收口为 Git / monorepo 复用而不是暗示可独立 crates.io 发布。
+- `mcp-kit`：strict `protocol_version` 校验现在对 initialize 结果里缺失 `protocolVersion` 也会 fail-closed；服务端不能再通过直接省略字段绕过严格握手检查。
 - `mcp-kit`：crate docs / README 现在明确说明 `SharedManager` 只会在借出连接后释放 shared manager lock，而 same-server 生命周期读门禁会一直持有到对应 JSON-RPC I/O 完成；同 server request/notify 仍可 overlap，但并发 `disconnect` 不会中途拆掉 in-flight 连接。
 - `mcp-kit`：config/thread-root 驱动的相对 `cwd` 现在对 `.` / `..` segment fail-closed，避免调用方通过词法相对路径静默逃逸出显式 base/thread-root 边界；相关库文档与回归测试同步更新。
 - `mcp-kit`：`streamable_http` / `jsonrpc` 文档里的 `request_timeout` 说明现在与 `mcp-jsonrpc` 主线实现保持一致：它只约束单次 POST 的建连、首个 HTTP response 和非 SSE JSON body 读取，不再声称会截断健康的 POST-as-SSE 持续响应流。

@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `config-kit` no longer vendors `omne-fs-primitives` inside the `omne_foundation` workspace; it now depends on the canonical runtime-owned crate from `omne-runtime`, so filesystem primitives only have one cross-repo owner.
 - `config-kit` 现在明确标记为 `publish = false`。在它依赖的 workspace/runtime foundation crate 形成独立 crates.io 发布链之前，本 crate 只承诺 Git / monorepo 复用边界，不再让 manifest 隐含“当前可直接单独发布”的错误信号。
 
 ### Added

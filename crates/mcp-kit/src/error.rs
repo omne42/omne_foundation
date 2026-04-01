@@ -1,3 +1,5 @@
+use error_kit::{ErrorCategory, ErrorCode, ErrorRecord, ErrorRetryAdvice};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     Other,
@@ -147,6 +149,59 @@ impl Error {
 
         ErrorKind::Other
     }
+
+    #[must_use]
+    pub fn error_code(&self) -> ErrorCode {
+        literal_error_code(match self.kind {
+            ErrorKind::Other => "mcp_kit.other",
+            ErrorKind::Config => "mcp_kit.config",
+            ErrorKind::Connection => "mcp_kit.connection",
+            ErrorKind::Protocol => "mcp_kit.protocol",
+            ErrorKind::Timeout => "mcp_kit.timeout",
+            ErrorKind::ManagerState => "mcp_kit.manager_state",
+        })
+    }
+
+    #[must_use]
+    pub fn error_category(&self) -> ErrorCategory {
+        match self.kind {
+            ErrorKind::Config => ErrorCategory::InvalidInput,
+            ErrorKind::Connection | ErrorKind::Protocol => ErrorCategory::ExternalDependency,
+            ErrorKind::Timeout => ErrorCategory::Timeout,
+            ErrorKind::ManagerState | ErrorKind::Other => ErrorCategory::Internal,
+        }
+    }
+
+    #[must_use]
+    pub fn retry_advice(&self) -> ErrorRetryAdvice {
+        match self.kind {
+            ErrorKind::Connection | ErrorKind::Timeout => ErrorRetryAdvice::Retryable,
+            ErrorKind::Config
+            | ErrorKind::Protocol
+            | ErrorKind::ManagerState
+            | ErrorKind::Other => ErrorRetryAdvice::DoNotRetry,
+        }
+    }
+
+    #[must_use]
+    pub fn error_record(&self) -> ErrorRecord {
+        ErrorRecord::new_freeform(self.error_code(), kind_user_text(self.kind))
+            .with_category(self.error_category())
+            .with_retry_advice(self.retry_advice())
+            .with_freeform_diagnostic_text(self.inner.to_string())
+    }
+
+    #[must_use]
+    pub fn into_error_record(self) -> ErrorRecord {
+        let code = self.error_code();
+        let category = self.error_category();
+        let retry_advice = self.retry_advice();
+        let diagnostic = self.inner.to_string();
+        ErrorRecord::new_freeform(code, kind_user_text(self.kind))
+            .with_category(category)
+            .with_retry_advice(retry_advice)
+            .with_freeform_diagnostic_text(diagnostic)
+    }
 }
 
 impl std::fmt::Display for Error {
@@ -208,9 +263,31 @@ impl From<crate::ServerNameError> for Error {
     }
 }
 
+impl From<Error> for ErrorRecord {
+    fn from(error: Error) -> Self {
+        error.into_error_record()
+    }
+}
+
+fn literal_error_code(code: &'static str) -> ErrorCode {
+    ErrorCode::try_new(code).expect("literal error code should validate")
+}
+
+fn kind_user_text(kind: ErrorKind) -> &'static str {
+    match kind {
+        ErrorKind::Other => "mcp-kit operation failed",
+        ErrorKind::Config => "mcp-kit configuration is invalid",
+        ErrorKind::Connection => "mcp server connection failed",
+        ErrorKind::Protocol => "mcp server spoke an invalid protocol sequence",
+        ErrorKind::Timeout => "mcp operation timed out",
+        ErrorKind::ManagerState => "mcp manager state rejected the operation",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use anyhow::anyhow;
+    use error_kit::{ErrorCategory, ErrorRetryAdvice};
 
     use super::{Error, ErrorKind, tag_anyhow, tagged_message};
 
@@ -277,5 +354,31 @@ mod tests {
         .context("outer context")
         .with_context(|| "lazy context");
         assert_eq!(err.kind(), ErrorKind::Config);
+    }
+
+    #[test]
+    fn timeout_errors_map_to_retryable_timeout_records() {
+        let err = Error::from(mcp_jsonrpc::Error::protocol(
+            mcp_jsonrpc::ProtocolErrorKind::WaitTimeout,
+            "timed out",
+        ));
+        let record = err.error_record();
+
+        assert_eq!(record.code().as_str(), "mcp_kit.timeout");
+        assert_eq!(record.category(), ErrorCategory::Timeout);
+        assert_eq!(record.retry_advice(), ErrorRetryAdvice::Retryable);
+    }
+
+    #[test]
+    fn manager_state_errors_map_to_internal_records() {
+        let record = Error::from(tagged_message(
+            ErrorKind::ManagerState,
+            "mcp server not connected: demo",
+        ))
+        .into_error_record();
+
+        assert_eq!(record.code().as_str(), "mcp_kit.manager_state");
+        assert_eq!(record.category(), ErrorCategory::Internal);
+        assert_eq!(record.retry_advice(), ErrorRetryAdvice::DoNotRetry);
     }
 }

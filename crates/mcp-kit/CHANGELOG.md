@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit::Error` 现在提供稳定的 `error-kit::ErrorRecord` 映射；下游可以按 `ErrorKind` 对齐到 machine-readable code/category/retry metadata，而不必继续依赖 `anyhow` 文案猜测语义。
 - `mcp-kit`：`Manager` / `SharedManager` 现在显式区分“纯缓存查询”和“带 liveness refresh 的查询”：新增 `is_connected_cached(...)` / `connected_server_names_cached(...)`，而现有 `is_connected(...)` / `connected_server_names(...)` 文档同步说明它们会在返回前顺手 prune 已死亡连接与 side state，避免把读路径的生命周期副作用继续藏在名字里。
 - `mcp-kit`：config 驱动的 `Manager::get_or_connect*` 路径现在复用与 `SharedManager` 同一套 `prepare_transport_connect_resolved(...)` + prepared transport connect/install helper；冷启动建连不再在 direct/shared 两层各自重写一份配置查找、cwd 解析和 transport-install 编排骨架，降低后续生命周期修补时的双写漂移风险。
 - `mcp-kit`：`Manager::disconnect()` / `Connection::drop` 的 best-effort child reaping 现在在 sync/no-runtime 路径也会继续轮询 `try_wait()` 到短超时收口；不再只有已有 Tokio runtime 时才真正 wait，因此 Linux 等平台不会把被 kill 的 child 留成 zombie 到更晚的 runtime/drop 阶段。

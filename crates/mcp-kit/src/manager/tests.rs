@@ -4599,6 +4599,63 @@ async fn connection_drop_reaps_child_best_effort() {
     .expect("dropping a connection should reap child process in best-effort mode");
 }
 
+#[cfg(unix)]
+#[test]
+fn disconnect_reaps_child_best_effort_without_runtime() {
+    fn pid_is_alive(pid: u32) -> bool {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("kill -0 {pid} 2>/dev/null"))
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .expect("build tokio runtime");
+
+    let (client, child_id, child) = rt.block_on(async {
+        let (client_stream, _server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+            .await
+            .expect("client connect");
+
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg("exec sleep 10");
+        let child = cmd.spawn().expect("spawn child");
+        let child_id = child.id().expect("child id should exist");
+        (client, child_id, child)
+    });
+
+    assert!(pid_is_alive(child_id), "child should start alive");
+
+    let connection = Connection {
+        id: next_connection_id(),
+        child: Some(child),
+        client,
+        handler_tasks: Vec::new(),
+    };
+
+    let mut manager = Manager::default();
+    manager.connections.insert(
+        ServerName::parse("srv").expect("server name"),
+        CachedConnection::new(connection),
+    );
+
+    assert!(manager.disconnect("srv"));
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while pid_is_alive(child_id) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "disconnect should reap child promptly without requiring a Tokio runtime"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[tokio::test]
 async fn connection_wait_with_timeout_uses_single_deadline_budget() {
     let (client_stream, _server_stream) = tokio::io::duplex(256);

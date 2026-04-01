@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit` 现在把 `allow_localhost` 的语义完整传递到 untrusted `dns_check` 路径：`localhost` / `localhost.localdomain` / `*.localhost` 在显式允许后不再因为 loopback DNS 结果被二次打回，但 `allow_private_ips` 仍只放开真正的私网地址，不会顺带允许 loopback。
 - `mcp-kit`：`Config::load*` 现在对 `thread_root` fail-closed 要求绝对路径；相对 root 不再被加载阶段默默接受，从而避免 `unix_path`、`stdout_log.path` 和连接身份继续受进程 `current_dir()` 漂移影响。
 - `mcp-kit` 现在显式标记 `publish = false`，因为它当前直接依赖同 workspace 的 `config-kit`，发布契约收口为 Git / monorepo 复用而不是暗示可独立 crates.io 发布。
 - `mcp-kit`：`stdout_log.path` 的默认 root-boundary 现在固定按 `Config::load` / `--root` 的配置根判断，而不是错误地退化成连接 `cwd`；这样当 server 进程需要在其他工作目录启动时，仍能按文档承诺允许写入 config root 下的 stdout 日志。

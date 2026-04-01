@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：`streamable_http` 的 SSE 桥接现在只接受 JSON-RPC object / batch array payload；单行垃圾文本或 JSON 标量会在 transport 边界直接 fail-closed，而不会再被写进内部 line-delimited JSON-RPC 通道。
 - `mcp-jsonrpc`：`Client::close_in_background_once(...)` 现在会像显式关闭路径一样先 abort reader/transport tasks，并接管 child 的 best-effort kill/reap；`mcp-kit::Session::notify` 超时不再把后台任务和子进程留到 `Client::drop` 才收尾。
 - `mcp-jsonrpc`：放宽 `streamable_http_reconnects_after_graceful_sse_eof` 回归测试的阶段等待窗口，避免完整 workspace 门禁负载下把 SSE 重连语义的真通过误判成超时假失败；不改变产品逻辑。
 - `mcp-jsonrpc`：已有 Tokio runtime 的 dropped-request direct writeback 现在也带有单独的 1 秒收敛超时；如果底层 writer 永久 pending，连接会发布明确关闭原因并 fail-closed，而不是留下悬挂的 best-effort 写任务。

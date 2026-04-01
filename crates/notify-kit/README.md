@@ -89,23 +89,16 @@
 - 可扩展：后续追加 email/discord/slack/tgbot/桌宠…只需要新增 sink
 - 不阻塞：通知发送失败/超时不会卡住主流程（每个 sink 有超时）
 
-## 安装
+## 接入方式
 
-如果你通过 crates.io 使用：
-
-```toml
-[dependencies]
-notify-kit = "0.1"
-```
-
-如果你通过 Git / monorepo 引用（本仓库 workspace 内）：
+`notify-kit` 当前还不是独立的 crates.io 发布契约。它依赖的 foundation crate 仍按 workspace 一起演进，因此当前只支持 Git / monorepo 方式接入：
 
 ```toml
 [dependencies]
 notify-kit = { path = "crates/notify-kit" }
 ```
 
-> 以上版本与路径仅为示例；请按你的项目实际情况调整。
+如果你是跨仓复用，优先直接依赖对应 Git 仓库 revision，而不是假设 crates.io 版本已经可用。
 
 ## Features
 

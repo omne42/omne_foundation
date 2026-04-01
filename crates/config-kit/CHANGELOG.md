@@ -6,6 +6,9 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ## [Unreleased]
 
+### Changed
+- `config-kit` 现在明确标记为 `publish = false`。在它依赖的 workspace/runtime foundation crate 形成独立 crates.io 发布链之前，本 crate 只承诺 Git / monorepo 复用边界，不再让 manifest 隐含“当前可直接单独发布”的错误信号。
+
 ### Added
 - `config-kit` crate: shared config foundation for bounded file loading, format detection, rooted path checks, `${ENV_VAR}` interpolation, and layered object merge.
 - `SchemaConfigLoader`, `SchemaFileLayerOptions`, `LoadedSchemaConfig<T>`, and `LoadedSchemaLayer` for typed business-schema loading on top of the shared config boundary.

@@ -213,8 +213,8 @@ impl Hub {
         }
 
         match self.try_notify_spawn(handle, event) {
-            Ok(()) => Ok(()),
-            Err(_) => Err(TryNotifyError::Overloaded),
+            None => Ok(()),
+            Some(_) => Err(TryNotifyError::Overloaded),
         }
     }
 
@@ -269,17 +269,16 @@ impl Hub {
 
     // Keep returning the original event on backpressure so callers can
     // preserve existing retry/drop behavior without reconstructing it.
-    #[allow(clippy::result_large_err)]
     fn try_notify_spawn(
         &self,
         handle: tokio::runtime::Handle,
         event: Event,
-    ) -> std::result::Result<(), Event> {
+    ) -> Option<Event> {
         let inner = self.inner.clone();
 
         let permit = match inner.inflight.clone().try_acquire_owned() {
             Ok(permit) => permit,
-            Err(_) => return Err(event),
+            Err(_) => return Some(event),
         };
 
         handle.spawn(async move {
@@ -288,7 +287,7 @@ impl Hub {
                 warn_hub_notify_failed(event.kind.as_str(), &err.to_string());
             }
         });
-        Ok(())
+        None
     }
 }
 

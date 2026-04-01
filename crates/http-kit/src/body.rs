@@ -159,10 +159,10 @@ pub fn body_preview_text(body: &[u8], max_bytes: usize) -> Option<String> {
 }
 
 async fn try_drain_response_body_for_reuse(mut resp: reqwest::Response) {
-    let Some(content_length) = resp.content_length() else {
+    if matches!(resp.content_length(), Some(0)) {
         return;
-    };
-    if content_length == 0 || content_length > RESPONSE_BODY_DRAIN_LIMIT_BYTES as u64 {
+    }
+    if resp.content_length() > Some(RESPONSE_BODY_DRAIN_LIMIT_BYTES as u64) {
         return;
     }
     drain_response_body_limited(&mut resp, RESPONSE_BODY_DRAIN_LIMIT_BYTES).await;
@@ -323,6 +323,24 @@ fn truncate_chars(input: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .expect("set read timeout");
+        let mut buf = [0u8; 1024];
+        let mut request = Vec::new();
+        loop {
+            let read = stream.read(&mut buf).expect("read request");
+            assert!(read > 0, "connection closed before full request");
+            request.extend_from_slice(&buf[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        String::from_utf8(request).expect("request should be utf-8")
+    }
 
     #[test]
     fn decode_text_body_lossy_reuses_valid_utf8_buffer() {
@@ -492,6 +510,84 @@ mod tests {
                 .await
                 .expect("write body");
             assert_eq!(out, b"hello");
+        });
+
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn ensure_http_success_drains_small_chunked_response_for_connection_reuse() {
+        let listener = match std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)) {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "skipping ensure_http_success_drains_small_chunked_response_for_connection_reuse: loopback bind not permitted in this environment: {err}"
+                );
+                return;
+            }
+            Err(err) => panic!("bind listener: {err}"),
+        };
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            drop(listener);
+
+            let first_request = read_http_request(&mut stream);
+            assert!(first_request.starts_with("GET /first HTTP/1.1\r\n"));
+            let first_response = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Transfer-Encoding: chunked\r\n",
+                "Connection: keep-alive\r\n",
+                "\r\n",
+                "5\r\nhello\r\n",
+                "0\r\n\r\n"
+            );
+            stream
+                .write_all(first_response.as_bytes())
+                .expect("write chunked response");
+            stream.flush().expect("flush chunked response");
+
+            let second_request = read_http_request(&mut stream);
+            assert!(second_request.starts_with("GET /second HTTP/1.1\r\n"));
+            let second_response = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Length: 2\r\n",
+                "Connection: close\r\n",
+                "\r\n",
+                "ok"
+            );
+            stream
+                .write_all(second_response.as_bytes())
+                .expect("write second response");
+            stream.flush().expect("flush second response");
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let client = reqwest::Client::builder().build().expect("build client");
+            let first = client
+                .get(format!("http://{addr}/first"))
+                .send()
+                .await
+                .expect("send first request");
+            ensure_http_success(first, "chunked reuse")
+                .await
+                .expect("first success");
+
+            let second = client
+                .get(format!("http://{addr}/second"))
+                .send()
+                .await
+                .expect("send second request");
+            let body = read_text_body_limited(second, 16)
+                .await
+                .expect("read second body");
+            assert_eq!(body, "ok");
         });
 
         server.join().expect("server thread");

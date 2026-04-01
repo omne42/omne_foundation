@@ -19,6 +19,7 @@ use crate::{
 mod connect;
 mod handlers;
 mod lifecycle;
+mod path_identity;
 mod placeholders;
 mod streamable_http_validation;
 
@@ -41,6 +42,7 @@ use streamable_http_validation::validate_streamable_http_url_untrusted_dns;
 
 pub(crate) use connect::{ConnectContext, connect_transport};
 pub(crate) use handlers::{is_in_manager_handler_scope, scope_manager_handler_call};
+use path_identity::{canonicalize_existing_prefix, normalize_path_lexically};
 pub(crate) use streamable_http_validation::should_disconnect_after_jsonrpc_error;
 
 static NEXT_MANAGER_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
@@ -129,60 +131,8 @@ pub(crate) async fn resolve_connection_cwd_with_base_async(
 }
 
 fn stable_connection_cwd_identity(path: &Path) -> anyhow::Result<PathBuf> {
-    let fallback = normalize_connection_path(path);
-    let mut existing = path;
-    let mut missing_components = Vec::new();
-
-    loop {
-        match std::fs::symlink_metadata(existing) {
-            Ok(_) => break,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                let Some(component) = existing.file_name() else {
-                    return Ok(fallback);
-                };
-                missing_components.push(component.to_os_string());
-                let Some(parent) = existing.parent() else {
-                    return Ok(fallback);
-                };
-                existing = parent;
-            }
-            Err(err) => {
-                return Err(err).with_context(|| {
-                    format!(
-                        "inspect existing path prefix for MCP cwd identity: {}",
-                        path.display()
-                    )
-                });
-            }
-        }
-    }
-
-    let mut canonical = std::fs::canonicalize(existing).with_context(|| {
-        format!(
-            "canonicalize existing path prefix for MCP cwd identity: {}",
-            existing.display()
-        )
-    })?;
-    for component in missing_components.iter().rev() {
-        canonical.push(component);
-    }
-    Ok(canonical)
-}
-
-fn normalize_connection_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            std::path::Component::RootDir => normalized.push(component.as_os_str()),
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                normalized.pop();
-            }
-            std::path::Component::Normal(part) => normalized.push(part),
-        }
-    }
-    normalized
+    let fallback = normalize_path_lexically(path);
+    Ok(canonicalize_existing_prefix(path, "MCP cwd identity")?.unwrap_or(fallback))
 }
 
 pub(crate) fn contains_wait_timeout(err: &anyhow::Error) -> bool {

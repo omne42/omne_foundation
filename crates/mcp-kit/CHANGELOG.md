@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：`cwd` identity 与 `stdout_log.path` root-boundary 检查现在复用同一套私有路径归一化/已存在前缀 canonicalize helper，减少后续边界修补时两处逻辑漂移的风险，同时保持现有 fail-open/fail-closed 语义不变。
 - `mcp-kit`：`SharedManager::{request_connected,notify_connected}` 现在会把 same-server 读门禁一直持有到对应 JSON-RPC I/O 完成，避免并发 `disconnect("srv")` 在 in-flight connected request/notify 中途拆掉底层连接。
 - `mcp-kit`：`Config::load*` 在候选 `mcp.json` 探测前会先验证 config root 本身存在；缺失/失效 root 不再被静默当成“没有配置文件”并回退为空配置，而是 fail-closed 返回真实文件系统错误。
 - `mcp-kit`：`transport=unix` 的 `unix_path` 现在和 `stdout_log.path` 一样 fail-closed 拒绝 `..` segment；相对 socket 路径仍按 `--root` 解析，但不再允许通过 `../` 静默逃逸 root 边界。

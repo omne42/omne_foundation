@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -11,6 +11,7 @@ use crate::protocol::{
 };
 use crate::{ServerConfig, Transport, TrustMode, UntrustedStreamableHttpPolicy};
 
+use super::path_identity::{canonicalize_existing_prefix, normalize_path_lexically};
 use super::placeholders::{
     apply_stdio_baseline_env, expand_placeholders_trusted, expand_placeholders_trusted_os,
 };
@@ -362,63 +363,6 @@ pub(super) fn absolutize_with_base(path: &Path, base: &Path) -> PathBuf {
     base.join(path)
 }
 
-fn normalize_path_for_prefix_check(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(component.as_os_str()),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            Component::Normal(part) => normalized.push(part),
-        }
-    }
-    normalized
-}
-
-fn canonicalize_existing_prefix(path: &Path) -> anyhow::Result<Option<PathBuf>> {
-    let normalized = normalize_path_for_prefix_check(path);
-    let mut existing = normalized.as_path();
-    let mut missing_components = Vec::new();
-
-    loop {
-        match std::fs::symlink_metadata(existing) {
-            Ok(_) => break,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                let Some(component) = existing.file_name() else {
-                    return Ok(None);
-                };
-                missing_components.push(component.to_os_string());
-                let Some(parent) = existing.parent() else {
-                    return Ok(None);
-                };
-                existing = parent;
-            }
-            Err(err) => {
-                return Err(err).with_context(|| {
-                    format!(
-                        "inspect existing path prefix for root-boundary check: {}",
-                        normalized.display()
-                    )
-                });
-            }
-        }
-    }
-
-    let mut resolved = std::fs::canonicalize(existing).with_context(|| {
-        format!(
-            "canonicalize existing path prefix for root-boundary check: {}",
-            existing.display()
-        )
-    })?;
-    for component in missing_components.iter().rev() {
-        resolved.push(component);
-    }
-    Ok(Some(resolved))
-}
-
 pub(super) fn stdout_log_path_within_root(
     stdout_log_path: &Path,
     root: &Path,
@@ -428,10 +372,15 @@ pub(super) fn stdout_log_path_within_root(
     }
 
     let resolved_stdout_log_path = absolutize_with_base(stdout_log_path, root);
-    let Some(resolved_root) = canonicalize_existing_prefix(root)? else {
+    let normalized_root = normalize_path_lexically(root);
+    let normalized_stdout_log_path = normalize_path_lexically(&resolved_stdout_log_path);
+    let Some(resolved_root) =
+        canonicalize_existing_prefix(&normalized_root, "root-boundary check")?
+    else {
         return Ok(false);
     };
-    let Some(resolved_stdout_log_path) = canonicalize_existing_prefix(&resolved_stdout_log_path)?
+    let Some(resolved_stdout_log_path) =
+        canonicalize_existing_prefix(&normalized_stdout_log_path, "root-boundary check")?
     else {
         return Ok(false);
     };

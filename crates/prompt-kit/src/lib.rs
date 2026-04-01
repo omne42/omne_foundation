@@ -5,6 +5,7 @@ pub mod prompts;
     since = "0.1.0",
     note = "LazyPromptDirectory blocks threads during first initialization; prefer bootstrap_prompt_directory(...) plus PromptDirectoryHandle for runtime use."
 )]
+#[allow(deprecated)]
 pub use prompts::LazyPromptDirectory;
 pub use prompts::{
     PromptBootstrapCleanupError, PromptDirectoryError, PromptDirectoryHandle,

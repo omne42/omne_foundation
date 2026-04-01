@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- Clarified the `Event` structured-text contract: built-in sinks pass freeform text through verbatim but only stringify non-freeform `StructuredText` via a stable fallback; locale-aware rendering remains an upper-layer responsibility.
 - `notify-kit` 现在明确标记为 `publish = false`，并把 README 的接入说明收口到 Git / monorepo 复用边界；在依赖的 foundation crate 形成独立 crates.io 发布链之前，不再暗示当前可以直接走 crates.io 安装。
 - `Hub::try_notify_spawn(...)` 改为用 `Option<Event>` 表达“过载时返还原始事件”，移除了局部 `#[allow(clippy::result_large_err)]`，同时保持现有的丢弃/重试语义不变。
 - `notify-kit`：同步把 `Hub::try_notify_spawn(...)` 的内部 helper 签名格式化到 rustfmt 输出，避免后续 hook/PR 留下无意义的工作树脏改动。

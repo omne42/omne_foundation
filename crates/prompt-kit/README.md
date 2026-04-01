@@ -54,7 +54,7 @@
 ## 当前定位
 
 - 代码上它本质是建立在 [`text-assets-kit`](../text-assets-kit/README.md) 之上的薄封装。
-- `PromptDirectoryHandle` 是当前推荐的 runtime-facing 共享句柄；`LazyPromptDirectory` 仅保留为阻塞式兼容层。
+- `PromptDirectoryHandle` 是当前推荐的 runtime-facing 共享句柄；`LazyPromptDirectory` 仅保留为已废弃的阻塞式兼容层。
 - 当前跨仓库已证明的 prompt 复用面，并不主要是“prompt 目录加载”。
 - 因此当前不应该继续往 `prompt-kit` 塞入模板 DSL、版本管理、schema 绑定、fingerprint 或 cache-key 语义。
 

@@ -133,6 +133,10 @@ impl Default for PromptDirectoryHandle {
 /// path uses a blocking `Condvar`-based primitive, it is best kept out of
 /// async runtime-facing boundaries; prefer `PromptDirectoryHandle` plus eager
 /// load/bootstrap when the directory must be shared at runtime.
+#[deprecated(
+    since = "0.1.0",
+    note = "LazyPromptDirectory is a blocking compatibility shim; prefer PromptDirectoryHandle plus eager load/bootstrap for runtime-facing prompt access"
+)]
 pub struct LazyPromptDirectory {
     inner: LazyValue<TextDirectory, io::Error>,
     initializer: Box<dyn Fn() -> Result<TextDirectory, io::Error> + Send + Sync>,
@@ -165,7 +169,9 @@ impl std::error::Error for PromptDirectoryError {
     }
 }
 
+#[allow(deprecated)]
 impl LazyPromptDirectory {
+    #[allow(deprecated)]
     pub fn new<I>(initializer: I) -> Self
     where
         I: Fn() -> Result<TextDirectory, io::Error> + Send + Sync + 'static,
@@ -176,6 +182,7 @@ impl LazyPromptDirectory {
         }
     }
 
+    #[allow(deprecated)]
     pub fn get(&self, key: &str) -> Result<Option<Arc<str>>, PromptDirectoryError> {
         let directory = self
             .inner
@@ -207,6 +214,7 @@ fn write_unpoisoned<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use std::error::Error as _;

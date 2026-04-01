@@ -978,6 +978,7 @@ impl Manager {
             .validate()
             .with_context(|| format!("invalid mcp server config (server={server_name_key})"))?;
 
+        let stdout_log_root = config.thread_root().unwrap_or(cwd.as_path()).to_path_buf();
         Ok(Some(PreparedTransportConnect {
             server_name: server_name.to_string(),
             server_name_key,
@@ -987,6 +988,7 @@ impl Manager {
                 trust_mode: self.trust_mode,
                 untrusted_streamable_http_policy: self.untrusted_streamable_http_policy.clone(),
                 allow_stdout_log_outside_root: self.allow_stdout_log_outside_root,
+                stdout_log_root,
                 protocol_version: self.protocol_version.clone(),
                 request_timeout: self.request_timeout,
             },
@@ -1060,10 +1062,12 @@ impl Manager {
             .validate()
             .with_context(|| format!("invalid mcp server config (server={server_name_key})"))?;
 
+        let stdout_log_root = cwd_base.unwrap_or(cwd.as_path()).to_path_buf();
         let ctx = ConnectContext {
             trust_mode: self.trust_mode,
             untrusted_streamable_http_policy: self.untrusted_streamable_http_policy.clone(),
             allow_stdout_log_outside_root: self.allow_stdout_log_outside_root,
+            stdout_log_root,
             protocol_version: self.protocol_version.clone(),
             request_timeout: self.request_timeout,
         };

@@ -24,6 +24,7 @@ pub(crate) struct ConnectContext {
     pub(crate) trust_mode: TrustMode,
     pub(crate) untrusted_streamable_http_policy: UntrustedStreamableHttpPolicy,
     pub(crate) allow_stdout_log_outside_root: bool,
+    pub(crate) stdout_log_root: PathBuf,
     pub(crate) protocol_version: String,
     pub(crate) request_timeout: Duration,
 }
@@ -98,7 +99,8 @@ async fn connect_stdio_transport(
     let stdout_log = server_cfg.stdout_log().map(|log| {
         let resolved_log_path = absolutize_with_base(&log.path, &cwd);
         if !ctx.allow_stdout_log_outside_root
-            && !stdout_log_path_within_root(&resolved_log_path, &cwd).with_context(|| {
+            && !stdout_log_path_within_root(&resolved_log_path, &ctx.stdout_log_root)
+                .with_context(|| {
                 format!(
                     "check stdout_log.path root boundary for server {server_name}: {}",
                     log.path.display()
@@ -397,6 +399,7 @@ mod tests {
             trust_mode: TrustMode::Trusted,
             untrusted_streamable_http_policy: UntrustedStreamableHttpPolicy::default(),
             allow_stdout_log_outside_root: false,
+            stdout_log_root: PathBuf::from("/"),
             protocol_version: MCP_PROTOCOL_VERSION.to_string(),
             request_timeout: Duration::from_secs(5),
         }

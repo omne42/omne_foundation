@@ -16,12 +16,18 @@ use crate::{resolve_locale_from_argv, resolve_locale_from_cli_args};
 /// not block on other threads or tasks that might re-enter the same catalog.
 /// Because this path uses a blocking `Condvar`-based primitive, async runtime
 /// boundaries should prefer eager load/bootstrap plus `GlobalCatalog`.
+#[deprecated(
+    since = "0.1.0",
+    note = "LazyCatalog is a blocking compatibility shim; prefer GlobalCatalog plus eager load/bootstrap for runtime-facing catalog access"
+)]
 pub struct LazyCatalog {
     inner: LazyValue<dyn Catalog, CatalogInitError>,
     initializer: Box<dyn Fn() -> Result<Arc<dyn Catalog>, CatalogInitError> + Send + Sync>,
 }
 
+#[allow(deprecated)]
 impl LazyCatalog {
+    #[allow(deprecated)]
     pub fn new<I>(initializer: I) -> Self
     where
         I: Fn() -> Result<Arc<dyn Catalog>, CatalogInitError> + Send + Sync + 'static,
@@ -44,12 +50,14 @@ impl LazyCatalog {
         self.inner.set(Arc::new(catalog));
     }
 
+    #[allow(deprecated)]
     pub fn resolve_locale(&self, requested: Option<&str>) -> Result<Locale, CatalogLocaleError> {
         self.with_catalog(|catalog| catalog.try_resolve_locale(requested))
             .map_err(CatalogLocaleError::Initialization)?
             .map_err(CatalogLocaleError::Resolve)
     }
 
+    #[allow(deprecated)]
     pub fn resolve_locale_from_cli_args(
         &self,
         args: Vec<String>,
@@ -60,6 +68,7 @@ impl LazyCatalog {
             .map_err(CatalogLocaleError::Cli)
     }
 
+    #[allow(deprecated)]
     pub fn resolve_locale_from_argv(
         &self,
         argv: Vec<String>,
@@ -70,10 +79,12 @@ impl LazyCatalog {
             .map_err(CatalogLocaleError::Cli)
     }
 
+    #[allow(deprecated)]
     pub fn initialize(&self) -> Result<(), CatalogInitError> {
         self.with_catalog(|_| ())
     }
 
+    #[allow(deprecated)]
     pub fn try_render(
         &self,
         locale: Locale,
@@ -83,6 +94,7 @@ impl LazyCatalog {
         self.with_catalog(|catalog| catalog.render_text(locale, key, args))
     }
 
+    #[allow(deprecated)]
     pub fn with_catalog<T>(
         &self,
         f: impl FnOnce(&dyn Catalog) -> T,
@@ -116,6 +128,7 @@ impl Display for ReentrantCatalogInitialization {
 impl StdError for ReentrantCatalogInitialization {}
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use i18n_kit::{ResolveLocaleError, TranslationCatalog, TranslationResolution};

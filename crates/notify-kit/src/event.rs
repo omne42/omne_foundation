@@ -11,6 +11,15 @@ pub enum Severity {
     Error,
 }
 
+/// Canonical notification event payload.
+///
+/// `Event` keeps a single `StructuredText` source of truth for title/body/tags.
+/// Built-in sinks only guarantee that freeform text is emitted verbatim. When
+/// a field carries catalog-backed `StructuredText`, the sink-facing string
+/// projection falls back to a stable diagnostic-style string and does not
+/// perform locale-aware rendering. Callers that need user-visible final text
+/// should render it before constructing the event with `new(...)`,
+/// `with_body(...)`, or `with_tag(...)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {
     pub kind: String,
@@ -21,6 +30,7 @@ pub struct Event {
 }
 
 impl Event {
+    /// Creates an event whose title is already final user-visible freeform text.
     pub fn new(kind: impl Into<String>, severity: Severity, title: impl Into<String>) -> Self {
         Self {
             kind: kind.into(),
@@ -31,6 +41,10 @@ impl Event {
         }
     }
 
+    /// Creates an event that keeps the original `StructuredText` title.
+    ///
+    /// Built-in sinks still stringify non-freeform text through the stable
+    /// fallback described on [`Event`]; they do not render catalog entries.
     pub fn new_structured(
         kind: impl Into<String>,
         severity: Severity,
@@ -52,12 +66,18 @@ impl Event {
     }
 
     #[must_use]
+    /// Replaces the title with structured text while preserving the original
+    /// structured payload for callers that inspect it.
     pub fn with_title_text(mut self, title_text: StructuredText) -> Self {
         self.title = title_text;
         self
     }
 
     #[must_use]
+    /// Sets the body to structured text.
+    ///
+    /// Built-in sinks stringify non-freeform text through the stable fallback
+    /// described on [`Event`]; they do not render catalog entries.
     pub fn with_body_text(mut self, body_text: StructuredText) -> Self {
         self.body = Some(body_text);
         self
@@ -71,11 +91,19 @@ impl Event {
     }
 
     #[must_use]
+    /// Sets a tag value to structured text.
+    ///
+    /// Built-in sinks stringify non-freeform text through the stable fallback
+    /// described on [`Event`]; they do not render catalog entries.
     pub fn with_tag_text(mut self, key: impl Into<String>, value: StructuredText) -> Self {
         self.tags.insert(key.into(), value);
         self
     }
 
+    /// Returns the sink-facing title projection.
+    ///
+    /// Freeform text is borrowed directly. Non-freeform text is converted to a
+    /// stable fallback string and returned as owned data.
     pub fn title(&self) -> Cow<'_, str> {
         structured_text_to_cow(&self.title)
     }
@@ -84,6 +112,10 @@ impl Event {
         &self.title
     }
 
+    /// Returns the sink-facing body projection.
+    ///
+    /// Freeform text is borrowed directly. Non-freeform text is converted to a
+    /// stable fallback string and returned as owned data.
     pub fn body(&self) -> Option<Cow<'_, str>> {
         self.body.as_ref().map(structured_text_to_cow)
     }
@@ -92,12 +124,20 @@ impl Event {
         self.body.as_ref()
     }
 
+    /// Returns sink-facing tag projections.
+    ///
+    /// Freeform text is borrowed directly. Non-freeform text is converted to a
+    /// stable fallback string and returned as owned data.
     pub fn tags(&self) -> impl Iterator<Item = (&str, Cow<'_, str>)> + '_ {
         self.tags
             .iter()
             .map(|(key, value)| (key.as_str(), structured_text_to_cow(value)))
     }
 
+    /// Returns a single sink-facing tag projection.
+    ///
+    /// Freeform text is borrowed directly. Non-freeform text is converted to a
+    /// stable fallback string and returned as owned data.
     pub fn tag(&self, key: &str) -> Option<Cow<'_, str>> {
         self.tags.get(key).map(structured_text_to_cow)
     }

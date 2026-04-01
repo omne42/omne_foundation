@@ -30,6 +30,15 @@
 - 对关键通知：把 `hub.send(event).await?` 当作必须成功的步骤（失败则上报/重试）
 - 对非关键通知：记录 warning 并继续主流程（例如 `tracing::warn!(...)`）
 
+## `Event` 里的 `StructuredText` 为什么没有自动本地化？
+
+`notify-kit` 允许 `Event` 保留 `StructuredText`，但内置 sinks 不负责 locale-aware 渲染：
+
+- freeform 文本会原样输出
+- catalog-backed `StructuredText` 只会降级成稳定字符串
+
+如果你需要最终用户可见的本地化文案，请先在上层用自己的 catalog/runtime 渲染成普通文本，再交给 `Event::new(...)` / `with_body(...)` / `with_tag(...)`。
+
 ## Feishu webhook 报 host is not allowed？
 
 本库只允许 `open.feishu.cn` / `open.larksuite.com`：

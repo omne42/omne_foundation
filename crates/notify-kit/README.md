@@ -42,6 +42,7 @@
 - 强投递保证
 - 消息幂等与审计
 - 高吞吐有序通知系统
+- locale-aware structured-text 渲染
 
 ## 结构设计
 
@@ -61,6 +62,16 @@
   - convenience helper 的兼容 shim；不属于核心协议边界
 - `bots/`
   - 上层集成示例，不是核心 Rust API
+
+## StructuredText Contract
+
+`Event` 可以携带 `StructuredText`，但这不等于内置 sinks 会负责做 locale-aware 渲染。
+
+- freeform 文本会按原文透传到 sink
+- 非 freeform `StructuredText` 会在 sink-facing 投影里降级成稳定字符串
+- 如果你需要最终用户可见的本地化文案，应先在上层完成渲染，再传给 `Event::new(...)` / `with_body(...)` / `with_tag(...)`
+
+这条边界是刻意保持窄的：`notify-kit` 负责通知分发，不接管 `i18n-kit` 的目录语义或 runtime 渲染策略
 
 ## 与其他 crate 的关系
 

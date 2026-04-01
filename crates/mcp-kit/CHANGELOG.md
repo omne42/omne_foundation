@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：server request handler 在响应写回失败时不再吞掉错误继续复用 dispatch loop；现在会立即停掉该 request handler 任务，让 `Manager` 的连接存活性检查把这条坏 session fail-closed 清理掉，并补充回归测试锁住该语义。
 - `mcp-kit`：server request/notification handler 的 panic 隔离边界现在改为 fail-closed。单次 panic 仍会被收口成结构化错误，但对应的 handler dispatch loop 会立即停用，后续消息不再继续复用一个可能已半更新状态的 handler。
 - `mcp-kit`：补充 notification handler panic 后停止后续 dispatch 的回归测试，锁住 request/notification 两条 handler 路径都 fail-closed 的语义。
 - `mcp-kit`：读取或修改进程级 `current_dir()` 的测试现在统一走同一把 cwd guard，并把“恢复原 cwd”收口到单一 RAII helper，避免 `cargo test` 并跑时把不相关用例炸掉。

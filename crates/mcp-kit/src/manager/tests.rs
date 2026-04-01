@@ -1316,6 +1316,94 @@ async fn server_request_handler_async_panic_disables_future_dispatch() {
 }
 
 #[tokio::test]
+async fn server_request_handler_response_write_failure_disables_cached_connection() {
+    let (client_stream, server_stream) = tokio::io::duplex(2048);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+    let respond_after_read_closed = Arc::new(tokio::sync::Notify::new());
+
+    let server_task = tokio::spawn({
+        let respond_after_read_closed = Arc::clone(&respond_after_read_closed);
+        async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            assert_eq!(init_value["jsonrpc"], "2.0");
+            assert_eq!(init_value["method"], "initialize");
+            let id = init_value["id"].clone();
+
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "hello": "world" },
+            });
+            let mut response_line = serde_json::to_string(&response).unwrap();
+            response_line.push('\n');
+            server_write
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let note_line = lines.next_line().await.unwrap().unwrap();
+            let note_value: Value = serde_json::from_str(&note_line).unwrap();
+            assert_eq!(note_value["jsonrpc"], "2.0");
+            assert_eq!(note_value["method"], "notifications/initialized");
+
+            let request = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 46,
+                "method": "demo/ok",
+                "params": { "x": 4 },
+            });
+            let mut request_line = serde_json::to_string(&request).unwrap();
+            request_line.push('\n');
+            server_write
+                .write_all(request_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            drop(lines);
+            respond_after_read_closed.notify_one();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+
+    let handler: ServerRequestHandler = Arc::new({
+        let respond_after_read_closed = Arc::clone(&respond_after_read_closed);
+        move |ctx| {
+            let respond_after_read_closed = Arc::clone(&respond_after_read_closed);
+            Box::pin(async move {
+                assert_eq!(ctx.method, "demo/ok");
+                respond_after_read_closed.notified().await;
+                ServerRequestOutcome::Ok(serde_json::json!({ "ok": true }))
+            })
+        }
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .with_server_request_handler(handler);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while manager.is_connected("srv") {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("request handler write failure should stop the dispatch task");
+
+    assert!(manager.take_connection("srv").is_none());
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
 async fn server_notification_handler_panic_stops_future_dispatch() {
     let (client_stream, server_stream) = tokio::io::duplex(2048);
     let (client_read, client_write) = tokio::io::split(client_stream);

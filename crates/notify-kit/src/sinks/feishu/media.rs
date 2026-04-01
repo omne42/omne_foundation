@@ -3,6 +3,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
+use secret_kit::SecretString;
 
 use crate::NotifySecret;
 use crate::log::{warn_feishu_image_load_failed, warn_feishu_image_upload_failed};
@@ -11,9 +12,8 @@ use http_kit::{
     DEFAULT_MAX_RESPONSE_BODY_BYTES, http_status_text_error, parse_and_validate_https_url_basic,
     read_json_body_limited, read_text_body_limited, response_body_read_error, send_reqwest,
 };
-use secret_kit::SecretString;
 
-use super::FeishuWebhookSink;
+use super::FeishuWebhookMediaSupport;
 
 #[derive(Debug, Clone)]
 pub(super) struct FeishuAppCredentials {
@@ -32,6 +32,25 @@ pub(super) struct LoadedImage {
     pub(super) bytes: Vec<u8>,
     pub(super) file_name: String,
     pub(super) content_type: String,
+}
+
+impl std::fmt::Debug for FeishuWebhookMediaSupport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FeishuWebhookMediaSupport")
+            .field("webhook_url", &http_kit::redact_url(&self.webhook_url))
+            .field("enforce_public_ip", &self.enforce_public_ip)
+            .field("allow_remote_image_urls", &self.allow_remote_image_urls)
+            .field("allow_local_image_files", &self.allow_local_image_files)
+            .field("local_image_roots", &self.local_image_roots)
+            .field("local_image_base_dir", &self.local_image_base_dir)
+            .field("image_upload_max_bytes", &self.image_upload_max_bytes)
+            .field(
+                "app_credentials",
+                &self.app_credentials.as_ref().map(|_| "<redacted>"),
+            )
+            .field("tenant_access_token", &"<internal-cache>")
+            .finish()
+    }
 }
 
 struct TenantAccessTokenRefreshGuard {
@@ -95,11 +114,10 @@ fn tenant_access_token_refresh_waiter(
     }
 }
 
-impl FeishuWebhookSink {
+impl FeishuWebhookMediaSupport {
     pub(super) async fn resolve_single_image_key(&self, src: &str) -> Option<String> {
-        let media = self.media.as_ref()?;
-        media.app_credentials.as_ref()?;
-        if src.starts_with("https://") && !media.allow_remote_image_urls {
+        self.app_credentials.as_ref()?;
+        if src.starts_with("https://") && !self.allow_remote_image_urls {
             return None;
         }
 
@@ -121,11 +139,8 @@ impl FeishuWebhookSink {
     }
 
     pub(super) async fn load_image(&self, src: &str) -> crate::Result<LoadedImage> {
-        let Some(media) = self.media.as_ref() else {
-            return Err(anyhow::anyhow!("feishu media support is disabled").into());
-        };
         if src.starts_with("https://") {
-            if !media.allow_remote_image_urls {
+            if !self.allow_remote_image_urls {
                 return Err(anyhow::anyhow!("remote image urls are disabled").into());
             }
             return self.load_remote_image(src).await;
@@ -135,21 +150,21 @@ impl FeishuWebhookSink {
             return Err(anyhow::anyhow!("unsupported image url scheme").into());
         }
 
-        if !media.allow_local_image_files {
+        if !self.allow_local_image_files {
             return Err(anyhow::anyhow!("local image files are disabled").into());
         }
 
         let resolved_path = resolve_allowed_local_image_path(
             src,
-            &media.local_image_roots,
-            media.local_image_base_dir.as_deref(),
+            &self.local_image_roots,
+            self.local_image_base_dir.as_deref(),
         )?;
         let bytes =
-            read_local_image_file(resolved_path.clone(), media.image_upload_max_bytes).await?;
+            read_local_image_file(resolved_path.clone(), self.image_upload_max_bytes).await?;
         if bytes.is_empty() {
             return Err(anyhow::anyhow!("image file is empty").into());
         }
-        if bytes.len() > media.image_upload_max_bytes {
+        if bytes.len() > self.image_upload_max_bytes {
             return Err(anyhow::anyhow!("image file too large for upload").into());
         }
 
@@ -170,9 +185,6 @@ impl FeishuWebhookSink {
     }
 
     pub(super) async fn load_remote_image(&self, src: &str) -> crate::Result<LoadedImage> {
-        let Some(media) = self.media.as_ref() else {
-            return Err(anyhow::anyhow!("feishu media support is disabled").into());
-        };
         let url = parse_and_validate_https_url_basic(src)?;
         let client = self.http.select_for_url(&url, true).await?;
 
@@ -199,7 +211,7 @@ impl FeishuWebhookSink {
                 guess_image_mime(Path::new(url.path()).extension().and_then(|v| v.to_str()))
             });
 
-        let bytes = read_bytes_body_limited(resp, media.image_upload_max_bytes).await?;
+        let bytes = read_bytes_body_limited(resp, self.image_upload_max_bytes).await?;
         if bytes.is_empty() {
             return Err(anyhow::anyhow!("downloaded image is empty").into());
         }
@@ -274,10 +286,7 @@ impl FeishuWebhookSink {
     }
 
     async fn invalidate_tenant_access_token(&self, token: &SecretString) {
-        let Some(media) = self.media.as_ref() else {
-            return;
-        };
-        let mut guard = media.tenant_access_token.lock().await;
+        let mut guard = self.tenant_access_token.lock().await;
         if matches!(
             &*guard,
             super::TenantAccessTokenState::Ready(cached)
@@ -288,13 +297,7 @@ impl FeishuWebhookSink {
     }
 
     pub(super) async fn ensure_tenant_access_token(&self) -> crate::Result<SecretString> {
-        let Some(media) = self.media.as_ref() else {
-            return Err(anyhow::anyhow!(
-                "feishu app credentials are required for markdown image upload"
-            )
-            .into());
-        };
-        let Some(credentials) = media.app_credentials.as_ref().cloned() else {
+        let Some(credentials) = self.app_credentials.as_ref().cloned() else {
             return Err(anyhow::anyhow!(
                 "feishu app credentials are required for markdown image upload"
             )
@@ -302,7 +305,7 @@ impl FeishuWebhookSink {
         };
 
         loop {
-            let guard = media.tenant_access_token.lock().await;
+            let guard = self.tenant_access_token.lock().await;
             match &*guard {
                 super::TenantAccessTokenState::Ready(cached)
                     if cached.expires_at > Instant::now() =>
@@ -321,7 +324,7 @@ impl FeishuWebhookSink {
                     drop(guard);
 
                     {
-                        let mut guard = media.tenant_access_token.lock().await;
+                        let mut guard = self.tenant_access_token.lock().await;
                         match &*guard {
                             super::TenantAccessTokenState::Ready(cached)
                                 if cached.expires_at > Instant::now() =>
@@ -345,11 +348,11 @@ impl FeishuWebhookSink {
                     }
 
                     let mut refresh_guard = TenantAccessTokenRefreshGuard::new(
-                        std::sync::Arc::clone(&media.tenant_access_token),
+                        std::sync::Arc::clone(&self.tenant_access_token),
                         std::sync::Arc::clone(&notify),
                     );
                     let result = self.fetch_tenant_access_token(&credentials).await;
-                    let mut guard = media.tenant_access_token.lock().await;
+                    let mut guard = self.tenant_access_token.lock().await;
                     if matches!(
                         &*guard,
                         super::TenantAccessTokenState::Refreshing(current)

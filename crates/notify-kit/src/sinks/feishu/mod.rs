@@ -254,8 +254,11 @@ impl FeishuWebhookConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct FeishuWebhookMediaSupport {
+    webhook_url: reqwest::Url,
+    http: HttpClientProfile,
+    enforce_public_ip: bool,
     allow_remote_image_urls: bool,
     allow_local_image_files: bool,
     local_image_roots: Vec<PathBuf>,
@@ -284,6 +287,9 @@ enum TenantAccessTokenState {
 
 fn normalize_media_support(
     config: Option<FeishuWebhookMediaConfig>,
+    http: &HttpClientProfile,
+    webhook_url: &reqwest::Url,
+    enforce_public_ip: bool,
 ) -> crate::Result<Option<FeishuWebhookMediaSupport>> {
     let Some(config) = config else {
         return Ok(None);
@@ -306,6 +312,9 @@ fn normalize_media_support(
     }
 
     Ok(Some(FeishuWebhookMediaSupport {
+        webhook_url: webhook_url.clone(),
+        http: http.clone(),
+        enforce_public_ip,
         allow_remote_image_urls: config.allow_remote_image_urls,
         allow_local_image_files: config.allow_local_image_files,
         local_image_roots,
@@ -334,6 +343,10 @@ impl FeishuWebhookSink {
         Self::new_internal(config, None, false)
     }
 
+    #[deprecated(
+        since = "0.1.0",
+        note = "new_strict is a blocking compatibility constructor. Prefer new_strict_async for construction-time network validation."
+    )]
     pub fn new_strict(config: FeishuWebhookConfig) -> crate::Result<Self> {
         Self::new_internal(config, None, true)
     }
@@ -350,6 +363,10 @@ impl FeishuWebhookSink {
         Self::new_internal(config, Some(secret), false)
     }
 
+    #[deprecated(
+        since = "0.1.0",
+        note = "new_with_secret_strict is a blocking compatibility constructor. Prefer new_with_secret_strict_async for construction-time network validation."
+    )]
     pub fn new_with_secret_strict(
         config: FeishuWebhookConfig,
         secret: impl Into<NotifySecret>,
@@ -376,7 +393,6 @@ impl FeishuWebhookSink {
             return Err(anyhow::anyhow!("feishu strict mode requires public ip check").into());
         }
 
-        let media = normalize_media_support(config.media.clone())?;
         let webhook_url = parse_and_validate_https_url(
             &config.webhook_url,
             &["open.feishu.cn", "open.larksuite.com"],
@@ -386,6 +402,8 @@ impl FeishuWebhookSink {
             timeout: Some(config.timeout),
             ..Default::default()
         })?;
+        let media =
+            normalize_media_support(config.media.clone(), &http, &webhook_url, enforce_public_ip)?;
         if validate_public_ip_at_construction {
             if tokio::runtime::Handle::try_current().is_ok() {
                 return Err(anyhow::anyhow!(
@@ -417,7 +435,6 @@ impl FeishuWebhookSink {
             return Err(anyhow::anyhow!("feishu strict mode requires public ip check").into());
         }
 
-        let media = normalize_media_support(config.media.clone())?;
         let webhook_url = parse_and_validate_https_url(
             &config.webhook_url,
             &["open.feishu.cn", "open.larksuite.com"],
@@ -427,6 +444,8 @@ impl FeishuWebhookSink {
             timeout: Some(config.timeout),
             ..Default::default()
         })?;
+        let media =
+            normalize_media_support(config.media.clone(), &http, &webhook_url, enforce_public_ip)?;
         if validate_public_ip_at_construction {
             http.select_for_url(&webhook_url, true).await.map(|_| ())?;
         }
@@ -474,6 +493,46 @@ impl FeishuWebhookSink {
     }
 }
 
+#[cfg(test)]
+impl FeishuWebhookSink {
+    fn override_webhook_transport_for_test(
+        &mut self,
+        webhook_url: reqwest::Url,
+        enforce_public_ip: bool,
+    ) {
+        self.webhook_url = webhook_url.clone();
+        self.enforce_public_ip = enforce_public_ip;
+        if let Some(media) = self.media.as_mut() {
+            media.webhook_url = webhook_url;
+            media.enforce_public_ip = enforce_public_ip;
+        }
+    }
+
+    async fn load_image(&self, src: &str) -> crate::Result<media::LoadedImage> {
+        let media = self
+            .media
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("feishu media support is disabled"))?;
+        media.load_image(src).await
+    }
+
+    async fn upload_image(&self, image: media::LoadedImage) -> crate::Result<String> {
+        let media = self
+            .media
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("feishu media support is disabled"))?;
+        media.upload_image(image).await
+    }
+
+    async fn ensure_tenant_access_token(&self) -> crate::Result<SecretString> {
+        let media = self
+            .media
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("feishu media support is disabled"))?;
+        media.ensure_tenant_access_token().await
+    }
+}
+
 impl Sink for FeishuWebhookSink {
     fn name(&self) -> &'static str {
         "feishu"
@@ -518,6 +577,7 @@ impl Sink for FeishuWebhookSink {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -1209,10 +1269,11 @@ mod tests {
                     .with_app_credentials("app_id", "app_secret"),
             )
             .expect("build sink");
-            sink.webhook_url =
+            sink.override_webhook_transport_for_test(
                 reqwest::Url::parse(&format!("http://{addr}/open-apis/bot/v2/hook/x"))
-                    .expect("parse local webhook url");
-            sink.enforce_public_ip = false;
+                    .expect("parse local webhook url"),
+                false,
+            );
 
             let sink = Arc::new(sink);
             let mut tasks = Vec::new();
@@ -1273,10 +1334,11 @@ mod tests {
                     .with_app_credentials("app_id", "app_secret"),
             )
             .expect("build sink");
-            sink.webhook_url =
+            sink.override_webhook_transport_for_test(
                 reqwest::Url::parse(&format!("http://{addr}/open-apis/bot/v2/hook/x"))
-                    .expect("parse local webhook url");
-            sink.enforce_public_ip = false;
+                    .expect("parse local webhook url"),
+                false,
+            );
 
             let sink = Arc::new(sink);
             let refresh_task = tokio::spawn({
@@ -1416,10 +1478,11 @@ mod tests {
                     .with_app_credentials("app_id", "app_secret"),
             )
             .expect("build sink");
-            sink.webhook_url =
+            sink.override_webhook_transport_for_test(
                 reqwest::Url::parse(&format!("http://{addr}/open-apis/bot/v2/hook/x"))
-                    .expect("parse local webhook url");
-            sink.enforce_public_ip = false;
+                    .expect("parse local webhook url"),
+                false,
+            );
 
             let image = LoadedImage {
                 bytes: b"png".to_vec(),

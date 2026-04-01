@@ -79,7 +79,10 @@ impl FeishuWebhookSink {
             ));
         }
 
-        let image_keys = self.resolve_image_keys(&markdown_lines).await;
+        let image_keys = match self.media.as_ref() {
+            Some(media) => Self::resolve_image_keys(media, &markdown_lines).await,
+            None => HashMap::new(),
+        };
 
         let mut content_rows: Vec<serde_json::Value> = Vec::new();
         let mut remaining = self.max_chars;
@@ -210,7 +213,7 @@ impl FeishuWebhookSink {
     }
 
     pub(super) async fn resolve_image_keys(
-        &self,
+        media: &super::FeishuWebhookMediaSupport,
         markdown_lines: &[MarkdownLine],
     ) -> HashMap<String, Option<String>> {
         let mut urls = BTreeSet::new();
@@ -224,7 +227,7 @@ impl FeishuWebhookSink {
 
         let mut out = HashMap::with_capacity(urls.len());
         for src in urls {
-            let key = self.resolve_single_image_key(&src).await;
+            let key = media.resolve_single_image_key(&src).await;
             out.insert(src, key);
         }
         out

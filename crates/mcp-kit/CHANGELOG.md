@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：`streamable_http` 的认证 secret 入口现在收口到 `secret-kit` canonical 语义：新增 `bearer_token_secret` / `secret_http_headers`，legacy `bearer_token_env_var` / `env_http_headers` 仅作为兼容别名读取后立即规范化成 `secret://env/...`；同时 Trusted 模式下 transport URL/header placeholder 只再允许 `${MCP_ROOT}` / `${CLAUDE_PLUGIN_ROOT}`，不再允许 `${ENV}` 把 ambient secret 直接注入 transport 配置。
 - `mcp-kit`：`ServerConfig::{argv,inherit_env,env,http_headers,env_http_headers}` 现在只在匹配 transport 时返回值；不再为错误 transport 伪造空集合或 `true` 这类默认值。`mcpctl list-servers` 同步改为输出 `null` 而不是把这些伪默认值误序列化成真实配置。
 - `mcp-kit`: attach-style `Manager::connect_io*` / `connect_jsonrpc*` APIs now reject duplicate same-name connections instead of silently returning `Ok(())`; built-in `roots/list` handling now runs before user handlers, and `SharedManager` fail-fast semantics extend to handler-spawned child tasks that would otherwise wait behind active handler contention.
 - `mcp-kit`: aligned the duplicate-attach fail-fast diagnostics with Rust `1.88.0` clippy's format-string requirements so the cross-platform `mcp-cross-platform` / workspace clippy gates stay green on CI.

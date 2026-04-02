@@ -16,7 +16,7 @@
 
 ## Q：Untrusted 下可以用 token/auth 吗？
 
-不可以。`bearer_token_env_var` 和 `env_http_headers` 会读取本地环境变量（secrets），在 Untrusted 下会被拒绝。
+不可以。`bearer_token_secret` 和 `secret_http_headers` 会触发本地 secret 解析；legacy `bearer_token_env_var` / `env_http_headers` 也会先规范化成 `secret://env/...`。在 Untrusted 下这些路径都会被拒绝。
 
 如果你确实要用认证 header：
 

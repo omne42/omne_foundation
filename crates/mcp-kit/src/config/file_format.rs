@@ -43,7 +43,11 @@ pub(super) struct ServerConfigFile {
     #[serde(default)]
     pub(super) http_url: Option<String>,
     #[serde(default)]
+    pub(super) bearer_token_secret: Option<String>,
+    #[serde(default)]
     pub(super) bearer_token_env_var: Option<String>,
+    #[serde(default)]
+    pub(super) secret_http_headers: BTreeMap<String, String>,
     #[serde(default)]
     pub(super) http_headers: BTreeMap<String, String>,
     #[serde(default)]

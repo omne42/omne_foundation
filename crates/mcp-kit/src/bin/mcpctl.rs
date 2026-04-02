@@ -315,7 +315,7 @@ async fn main() -> anyhow::Result<()> {
                     let argv = cfg.argv();
                     let env = cfg.env();
                     let http_headers = cfg.http_headers();
-                    let env_http_headers = cfg.env_http_headers();
+                    let secret_http_headers = cfg.secret_http_headers();
                     let mut server = serde_json::json!({
                         "name": name,
                         "transport": cfg.transport(),
@@ -326,10 +326,10 @@ async fn main() -> anyhow::Result<()> {
                         "url": cfg.url(),
                         "sse_url": cfg.sse_url(),
                         "http_url": cfg.http_url(),
-                        "bearer_token_env_var": cfg.bearer_token_env_var(),
+                        "has_bearer_token_secret": cfg.bearer_token_secret().is_some(),
                         "env_keys": env.map(|env| env.keys().cloned().collect::<Vec<_>>()),
                         "http_header_keys": http_headers.map(|headers| headers.keys().cloned().collect::<Vec<_>>()),
-                        "env_http_header_keys": env_http_headers.map(|headers| headers.keys().cloned().collect::<Vec<_>>()),
+                        "secret_http_header_keys": secret_http_headers.map(|headers| headers.keys().cloned().collect::<Vec<_>>()),
                         "stdout_log": cfg.stdout_log().map(|log| serde_json::json!({
                             "path": log.path.display().to_string(),
                             "max_bytes_per_part": log.max_bytes_per_part,

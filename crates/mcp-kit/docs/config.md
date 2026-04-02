@@ -120,8 +120,8 @@ stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)
   "transport": "streamable_http",
   "url": "https://example.com/mcp",
   "http_headers": { "X-Client": "my-app" },
-  "bearer_token_env_var": "MCP_TOKEN",
-  "env_http_headers": { "X-Api-Key": "MCP_API_KEY" }
+  "bearer_token_secret": "secret://env/MCP_TOKEN",
+  "secret_http_headers": { "X-Api-Key": "secret://env/MCP_API_KEY" }
 }
 ```
 
@@ -130,18 +130,24 @@ stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)
 - `url`（可选）：远程 MCP server URL（同时用于 SSE 与 POST）
 - `sse_url` + `http_url`（可选）：分离的 SSE URL 与 POST URL（两者必须同时设置；不能与 `url` 同时出现）
 - `http_headers`（可选）：静态 header
-- `bearer_token_env_var`（可选）：从 env 读取 token，注入 `Authorization: Bearer ...`
-- `env_http_headers`（可选）：从 env 读取 header 值
+- `bearer_token_secret`（可选）：通过 `secret-kit` 解析 secret spec，并注入 `Authorization: Bearer ...`
+- `secret_http_headers`（可选）：通过 `secret-kit` 解析每个 header 的 secret spec
+
+兼容性：
+
+- 仍接受 legacy `bearer_token_env_var` / `env_http_headers`
+- 加载后会自动规范化成 `secret://env/...` 的 canonical secret spec 语义
 
 约束：
 
 - 不支持 `argv/unix_path/env/stdout_log`
+- Trusted 模式下，`url` / `sse_url` / `http_url` / `http_headers` 只允许 `${MCP_ROOT}` / `${CLAUDE_PLUGIN_ROOT}` 两种 root placeholder；不再允许 `${ENV}` 直接注入 transport 配置
 
 安全（默认 Untrusted）：
 
 - 允许连接远程 `https` 且 host 看起来是公网域名的 `url`（默认拒绝 `localhost` / `localhost.localdomain` / `*.localhost`、`*.local` / `*.localdomain`、**单标签 host**、私网/loopback IP 字面量，以及 DNS 解析到非公网 IP 的 hostname）
 - 拒绝发送敏感 header：`Authorization/Cookie/Proxy-Authorization`
-- 拒绝读取 `bearer_token_env_var` / `env_http_headers`（env secrets）
+- 拒绝解析 `bearer_token_secret` / `secret_http_headers`（包括 legacy env aliases）
 
 详见 [`安全模型`](security.md)。
 

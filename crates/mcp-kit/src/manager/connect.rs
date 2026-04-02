@@ -4,6 +4,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::Context;
+use secret_kit::runtime::{SecretCommandRuntime, SecretEnvironment};
+use secret_kit::{SecretString, spec};
 use tokio::process::{Child, Command};
 
 use crate::protocol::{
@@ -13,7 +15,7 @@ use crate::{ServerConfig, Transport, TrustMode, UntrustedStreamableHttpPolicy};
 
 use super::path_identity::{canonicalize_existing_prefix, normalize_path_lexically};
 use super::placeholders::{
-    apply_stdio_baseline_env, expand_placeholders_trusted, expand_placeholders_trusted_os,
+    apply_stdio_baseline_env, expand_placeholders_trusted_os, expand_root_placeholders_trusted,
 };
 use super::streamable_http_validation::{
     validate_streamable_http_config, validate_streamable_http_url_untrusted_dns,
@@ -36,6 +38,20 @@ struct ResolvedStreamableHttpUrls {
     sse_url_field: &'static str,
     post_url_field: &'static str,
 }
+
+#[derive(Debug, Default, Clone, Copy)]
+struct AmbientStreamableHttpSecretContext;
+
+impl SecretEnvironment for AmbientStreamableHttpSecretContext {
+    fn get_secret(&self, key: &str) -> Option<SecretString> {
+        std::env::var(key).ok().map(SecretString::new)
+    }
+}
+
+impl SecretCommandRuntime for AmbientStreamableHttpSecretContext {}
+
+static AMBIENT_STREAMABLE_HTTP_SECRET_CONTEXT: AmbientStreamableHttpSecretContext =
+    AmbientStreamableHttpSecretContext;
 
 pub(super) fn should_enforce_streamable_http_public_ip_pinning(
     trust_mode: TrustMode,
@@ -226,17 +242,17 @@ async fn connect_streamable_http_transport(
     }
 
     if ctx.trust_mode != TrustMode::Trusted {
-        if server_cfg.bearer_token_env_var().is_some() {
+        if server_cfg.bearer_token_secret().is_some() {
             anyhow::bail!(
-                "refusing to read bearer token env var in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
+                "refusing to resolve bearer token secret in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
             );
         }
         if server_cfg
-            .env_http_headers()
+            .secret_http_headers()
             .is_some_and(|headers| !headers.is_empty())
         {
             anyhow::bail!(
-                "refusing to read http header env vars in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
+                "refusing to resolve secret-backed http headers in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
             );
         }
 
@@ -258,7 +274,7 @@ async fn connect_streamable_http_transport(
         }
     }
 
-    let headers = build_streamable_http_headers(ctx, server_name, server_cfg, cwd)?;
+    let headers = build_streamable_http_headers(ctx, server_name, server_cfg, cwd).await?;
     let enforce_public_ip = should_enforce_streamable_http_public_ip_pinning(
         ctx.trust_mode,
         &ctx.untrusted_streamable_http_policy,
@@ -325,7 +341,7 @@ fn resolve_streamable_http_urls(
     };
 
     let sse_url = if ctx.trust_mode == TrustMode::Trusted {
-        expand_placeholders_trusted(sse_url_raw, cwd).with_context(|| {
+        expand_root_placeholders_trusted(sse_url_raw, cwd).with_context(|| {
             format!(
                 "expand url placeholder (server={server_name} field={sse_url_field}) (url redacted)"
             )
@@ -334,7 +350,7 @@ fn resolve_streamable_http_urls(
         sse_url_raw.to_string()
     };
     let post_url = if ctx.trust_mode == TrustMode::Trusted {
-        expand_placeholders_trusted(post_url_raw, cwd).with_context(|| {
+        expand_root_placeholders_trusted(post_url_raw, cwd).with_context(|| {
             format!(
                 "expand url placeholder (server={server_name} field={post_url_field}) (url redacted)"
             )
@@ -351,7 +367,7 @@ fn resolve_streamable_http_urls(
     })
 }
 
-fn build_streamable_http_headers(
+async fn build_streamable_http_headers(
     ctx: &ConnectContext,
     server_name: &str,
     server_cfg: &ServerConfig,
@@ -361,8 +377,8 @@ fn build_streamable_http_headers(
         .http_headers_required()
         .len()
         .saturating_add(1)
-        .saturating_add(usize::from(server_cfg.bearer_token_env_var().is_some()))
-        .saturating_add(server_cfg.env_http_headers_required().len());
+        .saturating_add(usize::from(server_cfg.bearer_token_secret().is_some()))
+        .saturating_add(server_cfg.secret_http_headers_required().len());
     let mut headers = HashMap::with_capacity(capacity);
 
     for (key, value) in server_cfg.http_headers_required() {
@@ -370,7 +386,7 @@ fn build_streamable_http_headers(
             anyhow::bail!("mcp server {server_name}: http header is reserved by transport: {key}");
         }
         let value = if ctx.trust_mode == TrustMode::Trusted {
-            expand_placeholders_trusted(value, cwd).with_context(|| {
+            expand_root_placeholders_trusted(value, cwd).with_context(|| {
                 format!("expand http_header placeholder: {server_name} header={key}")
             })?
         } else {
@@ -383,24 +399,35 @@ fn build_streamable_http_headers(
         ctx.protocol_version.clone(),
     );
 
-    if let Some(env_var) = server_cfg.bearer_token_env_var() {
+    if let Some(secret_spec) = server_cfg.bearer_token_secret() {
         debug_assert_eq!(ctx.trust_mode, TrustMode::Trusted);
-        let token = std::env::var(env_var)
-            .with_context(|| format!("read bearer token env var: {env_var}"))?;
-        headers.insert(AUTHORIZATION_HEADER.to_string(), format!("Bearer {token}"));
+        let token = spec::resolve_secret(secret_spec, &AMBIENT_STREAMABLE_HTTP_SECRET_CONTEXT)
+            .await
+            .with_context(|| {
+                format!("resolve bearer token secret (server={server_name}) (spec redacted)")
+            })?;
+        headers.insert(
+            AUTHORIZATION_HEADER.to_string(),
+            format!("Bearer {}", token.expose_secret()),
+        );
     }
 
-    if !server_cfg.env_http_headers_required().is_empty() {
+    if !server_cfg.secret_http_headers_required().is_empty() {
         debug_assert_eq!(ctx.trust_mode, TrustMode::Trusted);
-        for (header, env_var) in server_cfg.env_http_headers_required().iter() {
+        for (header, secret_spec) in server_cfg.secret_http_headers_required().iter() {
             if is_reserved_streamable_http_env_header(header) {
                 anyhow::bail!(
-                    "mcp server {server_name}: http header env var targets a reserved transport header: {header}"
+                    "mcp server {server_name}: secret-backed http header targets a reserved transport header: {header}"
                 );
             }
-            let value = std::env::var(env_var)
-                .with_context(|| format!("read http header env var: {env_var}"))?;
-            headers.insert(header.to_string(), value);
+            let value = spec::resolve_secret(secret_spec, &AMBIENT_STREAMABLE_HTTP_SECRET_CONTEXT)
+                .await
+                .with_context(|| {
+                    format!(
+                        "resolve secret-backed http header: {server_name} header={header} (spec redacted)"
+                    )
+                })?;
+            headers.insert(header.to_string(), value.expose_secret().to_owned());
         }
     }
 
@@ -462,36 +489,38 @@ mod tests {
         }
     }
 
-    #[test]
-    fn env_http_headers_cannot_override_authorization() {
+    #[tokio::test]
+    async fn secret_http_headers_cannot_override_authorization() {
         let ctx = trusted_connect_context();
         let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
-        server_cfg
-            .env_http_headers_mut()
-            .unwrap()
-            .insert(AUTHORIZATION_HEADER.to_string(), "MCP_TOKEN".to_string());
+        server_cfg.secret_http_headers_mut().unwrap().insert(
+            AUTHORIZATION_HEADER.to_string(),
+            "secret://env/MCP_TOKEN".to_string(),
+        );
 
         let err = build_streamable_http_headers(&ctx, "srv", &server_cfg, Path::new("."))
+            .await
             .expect_err("reserved Authorization env header should be rejected");
         assert!(
             err.to_string()
-                .contains("http header env var targets a reserved transport header"),
+                .contains("secret-backed http header targets a reserved transport header"),
             "{err:#}"
         );
     }
 
-    #[test]
-    fn bearer_token_env_var_still_populates_authorization_header() {
+    #[tokio::test]
+    async fn bearer_token_secret_still_populates_authorization_header() {
         let ctx = trusted_connect_context();
         let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
         let env_var = "PATH";
         server_cfg
-            .set_bearer_token_env_var(Some(env_var.to_string()))
+            .set_bearer_token_secret(Some(format!("secret://env/{env_var}")))
             .unwrap();
         let token = std::env::var(env_var).expect("PATH should be present in test environment");
 
         let headers = build_streamable_http_headers(&ctx, "srv", &server_cfg, Path::new("."))
-            .expect("bearer token env var should remain supported");
+            .await
+            .expect("bearer token secret should remain supported");
         let expected_authorization = format!("Bearer {token}");
 
         assert_eq!(
@@ -504,8 +533,26 @@ mod tests {
         );
     }
 
-    #[test]
-    fn http_headers_cannot_override_transport_owned_headers() {
+    #[tokio::test]
+    async fn static_http_headers_reject_env_placeholders() {
+        let ctx = trusted_connect_context();
+        let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+        server_cfg
+            .http_headers_mut()
+            .unwrap()
+            .insert("X-Test".to_string(), "${PATH}".to_string());
+
+        let err = build_streamable_http_headers(&ctx, "srv", &server_cfg, Path::new("."))
+            .await
+            .expect_err("transport http headers should reject env placeholders");
+        assert!(
+            format!("{err:#}").contains("placeholder `PATH` is not allowed"),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_headers_cannot_override_transport_owned_headers() {
         let ctx = trusted_connect_context();
         for header in ["Accept", "Content-Type", "mcp-session-id"] {
             let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
@@ -515,6 +562,7 @@ mod tests {
                 .insert(header.to_string(), "override".to_string());
 
             let err = build_streamable_http_headers(&ctx, "srv", &server_cfg, Path::new("."))
+                .await
                 .expect_err("transport-owned static header should be rejected");
             assert!(
                 err.to_string()
@@ -524,21 +572,22 @@ mod tests {
         }
     }
 
-    #[test]
-    fn env_http_headers_cannot_override_transport_owned_headers() {
+    #[tokio::test]
+    async fn secret_http_headers_cannot_override_transport_owned_headers() {
         let ctx = trusted_connect_context();
         for header in ["Accept", "Content-Type", "mcp-session-id"] {
             let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
             server_cfg
-                .env_http_headers_mut()
+                .secret_http_headers_mut()
                 .unwrap()
-                .insert(header.to_string(), "MCP_TOKEN".to_string());
+                .insert(header.to_string(), "secret://env/MCP_TOKEN".to_string());
 
             let err = build_streamable_http_headers(&ctx, "srv", &server_cfg, Path::new("."))
+                .await
                 .expect_err("transport-owned env header should be rejected");
             assert!(
                 err.to_string()
-                    .contains("http header env var targets a reserved transport header"),
+                    .contains("secret-backed http header targets a reserved transport header"),
                 "header={header} err={err:#}"
             );
         }

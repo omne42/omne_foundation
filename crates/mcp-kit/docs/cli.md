@@ -58,7 +58,7 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- list-servers
 说明：
 
 - 为了避免意外打印 secrets，`list-servers` 默认不输出 stdio `argv` 明文；如需查看，显式加 `--show-argv`。
-- 同样地，`list-servers` 对 `env/http_headers/env_http_headers` 只输出 key 列表（`env_keys/http_header_keys/env_http_header_keys`），不输出具体值。
+- 同样地，`list-servers` 对 `env/http_headers/secret_http_headers` 只输出 key 列表（`env_keys/http_header_keys/secret_http_header_keys`），不输出具体值；bearer auth 只暴露 `has_bearer_token_secret` 布尔位。
 
 ### list-tools / list-resources / list-prompts
 

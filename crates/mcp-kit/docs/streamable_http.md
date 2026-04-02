@@ -103,6 +103,6 @@ data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}
 - 只允许 `https://`（除非显式放开）
 - 拒绝 localhost/私网 IP 字面量（除非显式放开）
 - 拒绝敏感 header（Authorization/Cookie/Proxy-Authorization）
-- 拒绝读取 env secrets（`bearer_token_env_var` / `env_http_headers`）
+- 拒绝解析 secret-backed auth（`bearer_token_secret` / `secret_http_headers`，以及 legacy env aliases）
 
 详见 [`安全模型`](security.md) 与 [`配置`](config.md)。

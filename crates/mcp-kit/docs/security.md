@@ -56,10 +56,10 @@ CLI 对应：
 
 在 `streamable_http` 配置中：
 
-- `bearer_token_env_var`
-- `env_http_headers`
+- `bearer_token_secret`
+- `secret_http_headers`
 
-这两类会从本地环境变量读取 secrets。在 `Untrusted` 下会直接拒绝读取。
+这两类会触发本地 secret 解析（包括 legacy `bearer_token_env_var` / `env_http_headers` 转换成的 `secret://env/...`）。在 `Untrusted` 下会直接拒绝解析。
 
 ## 如何放开：三种层级
 
@@ -87,7 +87,8 @@ CLI 对应：
 当你需要认证（Bearer token / API key / Cookie 等）时，推荐做法是：
 
 - 不要把 secrets 写进 `mcp.json`
-- 用环境变量保存 secrets，再通过 `bearer_token_env_var` / `env_http_headers` 注入
+- 用 `secret-kit` 支持的 secret spec 保存引用，再通过 `bearer_token_secret` / `secret_http_headers` 注入
+- 如果只是把 env 迁移进来，使用 `secret://env/NAME`
 
 但请注意：为了防止“不可信仓库借配置外带本机 secrets”，上述两项在 `Untrusted` 下会被拒绝读取，因此需要：
 

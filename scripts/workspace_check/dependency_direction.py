@@ -16,7 +16,14 @@ ALLOWED_INTERNAL_DEPS: dict[str, set[str]] = {
     "i18n-runtime-kit": {"i18n-kit", "structured-text-kit", "text-assets-kit"},
     "log-kit": {"structured-text-kit"},
     "mcp-jsonrpc": {"error-kit", "http-kit", "structured-text-kit"},
-    "mcp-kit": {"config-kit", "error-kit", "http-kit", "mcp-jsonrpc", "structured-text-kit"},
+    "mcp-kit": {
+        "config-kit",
+        "error-kit",
+        "http-kit",
+        "mcp-jsonrpc",
+        "secret-kit",
+        "structured-text-kit",
+    },
     "notify-kit": {
         "error-kit",
         "github-kit",

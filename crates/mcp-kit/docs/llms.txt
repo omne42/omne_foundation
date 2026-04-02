@@ -483,8 +483,8 @@ stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)
   "transport": "streamable_http",
   "url": "https://example.com/mcp",
   "http_headers": { "X-Client": "my-app" },
-  "bearer_token_env_var": "MCP_TOKEN",
-  "env_http_headers": { "X-Api-Key": "MCP_API_KEY" }
+  "bearer_token_secret": "secret://env/MCP_TOKEN",
+  "secret_http_headers": { "X-Api-Key": "secret://env/MCP_API_KEY" }
 }
 ```
 
@@ -493,18 +493,24 @@ stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)
 - `url`（可选）：远程 MCP server URL（同时用于 SSE 与 POST）
 - `sse_url` + `http_url`（可选）：分离的 SSE URL 与 POST URL（两者必须同时设置；不能与 `url` 同时出现）
 - `http_headers`（可选）：静态 header
-- `bearer_token_env_var`（可选）：从 env 读取 token，注入 `Authorization: Bearer ...`
-- `env_http_headers`（可选）：从 env 读取 header 值
+- `bearer_token_secret`（可选）：通过 `secret-kit` 解析 secret spec，并注入 `Authorization: Bearer ...`
+- `secret_http_headers`（可选）：通过 `secret-kit` 解析每个 header 的 secret spec
+
+兼容性：
+
+- 仍接受 legacy `bearer_token_env_var` / `env_http_headers`
+- 加载后会自动规范化成 `secret://env/...` 的 canonical secret spec 语义
 
 约束：
 
 - 不支持 `argv/unix_path/env/stdout_log`
+- Trusted 模式下，`url` / `sse_url` / `http_url` / `http_headers` 只允许 `${MCP_ROOT}` / `${CLAUDE_PLUGIN_ROOT}` 两种 root placeholder；不再允许 `${ENV}` 直接注入 transport 配置
 
 安全（默认 Untrusted）：
 
 - 允许连接远程 `https` 且 host 看起来是公网域名的 `url`（默认拒绝 `localhost` / `localhost.localdomain` / `*.localhost`、`*.local` / `*.localdomain`、**单标签 host**、私网/loopback IP 字面量，以及 DNS 解析到非公网 IP 的 hostname）
 - 拒绝发送敏感 header：`Authorization/Cookie/Proxy-Authorization`
-- 拒绝读取 `bearer_token_env_var` / `env_http_headers`（env secrets）
+- 拒绝解析 `bearer_token_secret` / `secret_http_headers`（包括 legacy env aliases）
 
 详见 [`安全模型`](security.md)。
 
@@ -594,7 +600,7 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- list-servers
 说明：
 
 - 为了避免意外打印 secrets，`list-servers` 默认不输出 stdio `argv` 明文；如需查看，显式加 `--show-argv`。
-- 同样地，`list-servers` 对 `env/http_headers/env_http_headers` 只输出 key 列表（`env_keys/http_header_keys/env_http_header_keys`），不输出具体值。
+- 同样地，`list-servers` 对 `env/http_headers/secret_http_headers` 只输出 key 列表（`env_keys/http_header_keys/secret_http_header_keys`），不输出具体值；bearer auth 只暴露 `has_bearer_token_secret` 布尔位。
 
 ### list-tools / list-resources / list-prompts
 
@@ -894,10 +900,10 @@ CLI 对应：
 
 在 `streamable_http` 配置中：
 
-- `bearer_token_env_var`
-- `env_http_headers`
+- `bearer_token_secret`
+- `secret_http_headers`
 
-这两类会从本地环境变量读取 secrets。在 `Untrusted` 下会直接拒绝读取。
+这两类会触发本地 secret 解析（包括 legacy `bearer_token_env_var` / `env_http_headers` 转换成的 `secret://env/...`）。在 `Untrusted` 下会直接拒绝解析。
 
 ## 如何放开：三种层级
 
@@ -925,7 +931,8 @@ CLI 对应：
 当你需要认证（Bearer token / API key / Cookie 等）时，推荐做法是：
 
 - 不要把 secrets 写进 `mcp.json`
-- 用环境变量保存 secrets，再通过 `bearer_token_env_var` / `env_http_headers` 注入
+- 用 `secret-kit` 支持的 secret spec 保存引用，再通过 `bearer_token_secret` / `secret_http_headers` 注入
+- 如果只是把 env 迁移进来，使用 `secret://env/NAME`
 
 但请注意：为了防止“不可信仓库借配置外带本机 secrets”，上述两项在 `Untrusted` 下会被拒绝读取，因此需要：
 
@@ -1056,14 +1063,16 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 - `url`（可选）：例如 `https://example.com/mcp`（同时用于 SSE 与 POST）
 - `sse_url` + `http_url`（可选）：分离的 SSE 与 POST URL（两者必须同时设置；不能与 `url` 同时出现）
 - `http_headers`（可选）：静态 header（不涉及 secrets 时可在 Untrusted 下使用）
-- `bearer_token_env_var`（可选）：从 env 读取 token 并注入 `Authorization: Bearer ...`（Untrusted 下拒绝）
-- `env_http_headers`（可选）：从 env 读取 header 值（Untrusted 下拒绝）
+- `bearer_token_secret`（可选）：通过 `secret-kit` 解析 secret spec 并注入 `Authorization: Bearer ...`（Untrusted 下拒绝）
+- `secret_http_headers`（可选）：通过 `secret-kit` 解析 header secret spec（Untrusted 下拒绝）
+- legacy `bearer_token_env_var` / `env_http_headers` 仍可读取，但会先规范化成 `secret://env/...`
 
 行为要点：
 
 - 会自动添加 header：`MCP-Protocol-Version: <protocol_version>`
 - 默认不跟随 redirects（减少 SSRF 风险；可在 `mcp-jsonrpc` 里 opt-in）
 - `mcp-kit` 会把自己的 per-request timeout 设置到 `mcp-jsonrpc` 的 HTTP request timeout
+- Trusted 模式下 transport URL/header placeholder 只支持 `${MCP_ROOT}` / `${CLAUDE_PLUGIN_ROOT}`，不再支持 `${ENV}`
 
 更完整的实现细节（SSE 数据格式、`mcp-session-id`、POST 回包形态、timeout 语义）见 [`streamable_http 传输详解`](streamable_http.md) 与 [`调优与限制`](tuning.md)。
 
@@ -1206,7 +1215,7 @@ data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}
 - 只允许 `https://`（除非显式放开）
 - 拒绝 localhost/私网 IP 字面量（除非显式放开）
 - 拒绝敏感 header（Authorization/Cookie/Proxy-Authorization）
-- 拒绝读取 env secrets（`bearer_token_env_var` / `env_http_headers`）
+- 拒绝解析 secret-backed auth（`bearer_token_secret` / `secret_http_headers`，以及 legacy env aliases）
 
 详见 [`安全模型`](security.md) 与 [`配置`](config.md)。
 
@@ -1939,7 +1948,7 @@ manager = manager.with_server_request_handler(handler);
 
 ## Q：Untrusted 下可以用 token/auth 吗？
 
-不可以。`bearer_token_env_var` 和 `env_http_headers` 会读取本地环境变量（secrets），在 Untrusted 下会被拒绝。
+不可以。`bearer_token_secret` 和 `secret_http_headers` 会触发本地 secret 解析；legacy `bearer_token_env_var` / `env_http_headers` 也会先规范化成 `secret://env/...`。在 Untrusted 下这些路径都会被拒绝。
 
 如果你确实要用认证 header：
 

@@ -63,14 +63,16 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 - `url`（可选）：例如 `https://example.com/mcp`（同时用于 SSE 与 POST）
 - `sse_url` + `http_url`（可选）：分离的 SSE 与 POST URL（两者必须同时设置；不能与 `url` 同时出现）
 - `http_headers`（可选）：静态 header（不涉及 secrets 时可在 Untrusted 下使用）
-- `bearer_token_env_var`（可选）：从 env 读取 token 并注入 `Authorization: Bearer ...`（Untrusted 下拒绝）
-- `env_http_headers`（可选）：从 env 读取 header 值（Untrusted 下拒绝）
+- `bearer_token_secret`（可选）：通过 `secret-kit` 解析 secret spec 并注入 `Authorization: Bearer ...`（Untrusted 下拒绝）
+- `secret_http_headers`（可选）：通过 `secret-kit` 解析 header secret spec（Untrusted 下拒绝）
+- legacy `bearer_token_env_var` / `env_http_headers` 仍可读取，但会先规范化成 `secret://env/...`
 
 行为要点：
 
 - 会自动添加 header：`MCP-Protocol-Version: <protocol_version>`
 - 默认不跟随 redirects（减少 SSRF 风险；可在 `mcp-jsonrpc` 里 opt-in）
 - `mcp-kit` 会把自己的 per-request timeout 设置到 `mcp-jsonrpc` 的 HTTP request timeout
+- Trusted 模式下 transport URL/header placeholder 只支持 `${MCP_ROOT}` / `${CLAUDE_PLUGIN_ROOT}`，不再支持 `${ENV}`
 
 更完整的实现细节（SSE 数据格式、`mcp-session-id`、POST 回包形态、timeout 语义）见 [`streamable_http 传输详解`](streamable_http.md) 与 [`调优与限制`](tuning.md)。
 

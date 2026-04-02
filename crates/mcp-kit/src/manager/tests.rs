@@ -351,10 +351,10 @@ fn with_capabilities_rejects_non_object() {
 #[test]
 fn try_from_config_rejects_invalid_server_config() {
     let mut server = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
-    server
-        .env_http_headers_mut()
-        .unwrap()
-        .insert("MCP-Protocol-Version".to_string(), "MCP_TOKEN".to_string());
+    server.secret_http_headers_mut().unwrap().insert(
+        "MCP-Protocol-Version".to_string(),
+        "secret://env/MCP_TOKEN".to_string(),
+    );
 
     let mut servers = std::collections::BTreeMap::new();
     servers.insert(ServerName::parse("srv").unwrap(), server);
@@ -365,7 +365,7 @@ fn try_from_config_rejects_invalid_server_config() {
             Ok(_) => panic!("expected error"),
             Err(err) => err,
         };
-    let msg = err.to_string();
+    let msg = format!("{err:#}");
     assert!(msg.contains("server=srv"), "err={err:#}");
     assert!(msg.contains("invalid mcp server config"), "err={err:#}");
     assert!(msg.contains("reserved by transport"), "err={err:#}");
@@ -3926,14 +3926,14 @@ async fn untrusted_manager_refuses_streamable_http_env_secrets() {
 
     let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
     server_cfg
-        .set_bearer_token_env_var(Some("MCP_TOKEN".to_string()))
+        .set_bearer_token_secret(Some("secret://env/MCP_TOKEN".to_string()))
         .unwrap();
 
     let err = manager
         .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("bearer token env var"));
+    assert!(err.to_string().contains("bearer token secret"));
 }
 
 #[tokio::test]
@@ -3942,16 +3942,16 @@ async fn untrusted_manager_refuses_streamable_http_env_header_secrets() {
     assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
 
     let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
-    server_cfg
-        .env_http_headers_mut()
-        .unwrap()
-        .insert("x-api-key".to_string(), "MCP_API_KEY".to_string());
+    server_cfg.secret_http_headers_mut().unwrap().insert(
+        "x-api-key".to_string(),
+        "secret://env/MCP_API_KEY".to_string(),
+    );
 
     let err = manager
         .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("http header env vars"));
+    assert!(err.to_string().contains("secret-backed http headers"));
 }
 
 #[tokio::test]
@@ -4148,10 +4148,10 @@ async fn untrusted_manager_refuses_streamable_http_localhost_without_allow_local
 #[test]
 fn streamable_http_validate_rejects_reserved_authorization_env_header() {
     let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
-    server_cfg
-        .env_http_headers_mut()
-        .unwrap()
-        .insert("Authorization".to_string(), "MCP_TOKEN".to_string());
+    server_cfg.secret_http_headers_mut().unwrap().insert(
+        "Authorization".to_string(),
+        "secret://env/MCP_TOKEN".to_string(),
+    );
 
     let err = server_cfg.validate().unwrap_err();
     assert!(err.to_string().contains("reserved by transport"));
@@ -4452,7 +4452,7 @@ async fn argv_placeholder_errors_do_not_leak_plain_argv() {
         .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
-    let msg = err.to_string();
+    let msg = format!("{err:#}");
     assert!(
         msg.contains("expand argv placeholder"),
         "expected redacted argv context; err={err:#}"
@@ -4474,7 +4474,7 @@ fn url_validation_errors_do_not_leak_plain_url() {
         "https://user:pass@example.com/mcp?token=SECRET_TOKEN",
     )
     .unwrap_err();
-    let msg = err.to_string();
+    let msg = format!("{err:#}");
     assert!(
         msg.contains("url credentials"),
         "expected url credential error; err={err:#}"
@@ -4495,21 +4495,72 @@ async fn url_placeholder_errors_do_not_leak_plain_url() {
         .with_trust_mode(TrustMode::Trusted);
 
     let server_cfg =
-        ServerConfig::streamable_http("https://example.com/mcp?token=SECRET_TOKEN_${BAD-NAME}")
+        ServerConfig::streamable_http("https://example.com/mcp?token=SECRET_TOKEN_${PATH}")
             .unwrap();
 
     let err = manager
         .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
         .await
         .unwrap_err();
-    let msg = err.to_string();
+    let msg = format!("{err:#}");
     assert!(
         msg.contains("expand url placeholder"),
         "expected redacted url context; err={err:#}"
     );
     assert!(
+        msg.contains("is not allowed in this transport field"),
+        "expected transport placeholder boundary; err={err:#}"
+    );
+    assert!(
         !msg.contains("SECRET_TOKEN"),
         "url secret leaked in error chain; err={err:#}"
+    );
+}
+
+#[tokio::test]
+async fn trusted_streamable_http_urls_reject_env_placeholders() {
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+
+    let server_cfg = ServerConfig::streamable_http("https://example.com/${PATH}").unwrap();
+
+    let err = manager
+        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("placeholder `PATH` is not allowed"),
+        "err={err:#}"
+    );
+}
+
+#[tokio::test]
+async fn http_header_placeholders_reject_env_vars_without_leaking_values() {
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+
+    let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+    server_cfg
+        .http_headers_mut()
+        .unwrap()
+        .insert("x-api-key".to_string(), "SECRET_TOKEN_${PATH}".to_string());
+
+    let err = manager
+        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
+        .await
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("expand http_header placeholder"),
+        "expected redacted header context; err={err:#}"
+    );
+    assert!(
+        msg.contains("is not allowed in this transport field"),
+        "expected transport placeholder boundary; err={err:#}"
+    );
+    assert!(
+        !msg.contains("SECRET_TOKEN"),
+        "header secret leaked in error chain; err={err:#}"
     );
 }
 

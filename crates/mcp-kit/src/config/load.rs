@@ -251,6 +251,47 @@ fn ensure_http_headers_auth_only_for_streamable_http(
     Ok(())
 }
 
+fn env_secret_spec(env_var: String) -> String {
+    format!("secret://env/{env_var}")
+}
+
+fn coalesce_bearer_token_secret(
+    name: &str,
+    bearer_token_secret: Option<String>,
+    bearer_token_env_var: Option<String>,
+) -> anyhow::Result<Option<String>> {
+    match (bearer_token_secret, bearer_token_env_var) {
+        (Some(_), Some(_)) => anyhow::bail!(
+            "mcp server {name}: set either bearer_token_secret or legacy bearer_token_env_var, not both"
+        ),
+        (Some(secret), None) => Ok(Some(secret)),
+        (None, Some(env_var)) => Ok(Some(env_secret_spec(env_var))),
+        (None, None) => Ok(None),
+    }
+}
+
+fn coalesce_secret_http_headers(
+    name: &str,
+    secret_http_headers: BTreeMap<String, String>,
+    env_http_headers: BTreeMap<String, String>,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    let mut merged = secret_http_headers;
+    for (header, env_var) in env_http_headers {
+        match merged.entry(header) {
+            Entry::Occupied(entry) => {
+                anyhow::bail!(
+                    "mcp server {name}: set either secret_http_headers[{0}] or legacy env_http_headers[{0}], not both",
+                    entry.key()
+                );
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(env_secret_spec(env_var));
+            }
+        }
+    }
+    Ok(merged)
+}
+
 fn ensure_env_empty(name: &str, transport: Transport, env_nonempty: bool) -> anyhow::Result<()> {
     if !env_nonempty {
         return Ok(());
@@ -394,8 +435,10 @@ fn build_v1_config(
                 let has_url_fields =
                     server.url.is_some() || server.sse_url.is_some() || server.http_url.is_some();
                 ensure_url_fields_only_for_streamable_http(&name, has_url_fields)?;
-                let has_auth_fields = server.bearer_token_env_var.is_some()
+                let has_auth_fields = server.bearer_token_secret.is_some()
+                    || server.bearer_token_env_var.is_some()
                     || !server.http_headers.is_empty()
+                    || !server.secret_http_headers.is_empty()
                     || !server.env_http_headers.is_empty();
                 ensure_http_headers_auth_only_for_streamable_http(&name, has_auth_fields)?;
 
@@ -411,8 +454,10 @@ fn build_v1_config(
                 ensure_url_fields_only_for_streamable_http(&name, has_url_fields)?;
                 let env_nonempty = !server.env.is_empty();
                 ensure_env_empty(&name, Transport::Unix, env_nonempty)?;
-                let has_auth_fields = server.bearer_token_env_var.is_some()
+                let has_auth_fields = server.bearer_token_secret.is_some()
+                    || server.bearer_token_env_var.is_some()
                     || !server.http_headers.is_empty()
+                    || !server.secret_http_headers.is_empty()
                     || !server.env_http_headers.is_empty();
                 ensure_http_headers_auth_only_for_streamable_http(&name, has_auth_fields)?;
 
@@ -441,9 +486,17 @@ fn build_v1_config(
                         anyhow::bail!("mcp server {name}: sse_url and http_url must both be set")
                     }
                 };
-                server_cfg.set_bearer_token_env_var(server.bearer_token_env_var)?;
+                server_cfg.set_bearer_token_secret(coalesce_bearer_token_secret(
+                    &name,
+                    server.bearer_token_secret,
+                    server.bearer_token_env_var,
+                )?)?;
                 *server_cfg.http_headers_mut()? = server.http_headers;
-                *server_cfg.env_http_headers_mut()? = server.env_http_headers;
+                *server_cfg.secret_http_headers_mut()? = coalesce_secret_http_headers(
+                    &name,
+                    server.secret_http_headers,
+                    server.env_http_headers,
+                )?;
                 server_cfg
             }
         };

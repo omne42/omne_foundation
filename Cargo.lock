@@ -996,6 +996,7 @@ dependencies = [
  "mcp-jsonrpc",
  "predicates",
  "reqwest",
+ "secret-kit",
  "serde",
  "serde_json",
  "structured-text-kit",

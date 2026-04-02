@@ -235,7 +235,7 @@ async fn load_denies_stdio_env_with_empty_value() {
 fn server_config_validate_rejects_stdio_http_auth_fields() {
     let mut cfg = ServerConfig::stdio(vec!["mcp-a".to_string()]).unwrap();
     assert!(
-        cfg.set_bearer_token_env_var(Some("MCP_TOKEN".to_string()))
+        cfg.set_bearer_token_secret(Some("secret://env/MCP_TOKEN".to_string()))
             .is_err()
     );
 }
@@ -615,11 +615,105 @@ async fn load_parses_streamable_http_transport() {
     assert_eq!(server.url(), Some("https://example.com/mcp"));
     assert!(server.sse_url().is_none());
     assert!(server.http_url().is_none());
-    assert!(server.bearer_token_env_var().is_none());
+    assert!(server.bearer_token_secret().is_none());
     assert!(server.http_headers().is_some_and(BTreeMap::is_empty));
-    assert!(server.env_http_headers().is_some_and(BTreeMap::is_empty));
+    assert!(server.secret_http_headers().is_some_and(BTreeMap::is_empty));
     assert_eq!(server.env(), None);
     assert!(server.stdout_log().is_none());
+}
+
+#[tokio::test]
+async fn load_normalizes_legacy_env_auth_fields_to_secret_specs() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{
+  "version": 1,
+  "servers": {
+    "remote": {
+      "transport": "streamable_http",
+      "url": "https://example.com/mcp",
+      "bearer_token_env_var": "MCP_TOKEN",
+      "env_http_headers": { "X-Api-Key": "MCP_API_KEY" }
+    }
+  }
+}"#,
+    )
+    .await
+    .unwrap();
+
+    let cfg = Config::load(dir.path(), None).await.unwrap();
+    let server = cfg.servers().get("remote").unwrap();
+    assert_eq!(server.bearer_token_secret(), Some("secret://env/MCP_TOKEN"));
+    assert_eq!(
+        server
+            .secret_http_headers()
+            .and_then(|headers| headers.get("X-Api-Key").map(String::as_str)),
+        Some("secret://env/MCP_API_KEY")
+    );
+}
+
+#[tokio::test]
+async fn load_coalesces_legacy_env_auth_fields_into_secret_specs() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{
+  "version": 1,
+  "servers": {
+    "remote": {
+      "transport": "streamable_http",
+      "url": "https://example.com/mcp",
+      "bearer_token_env_var": "MCP_TOKEN",
+      "env_http_headers": {
+        "X-Api-Key": "MCP_API_KEY"
+      }
+    }
+  }
+}"#,
+    )
+    .await
+    .unwrap();
+
+    let cfg = Config::load(dir.path(), None).await.unwrap();
+    let server = cfg.servers().get("remote").unwrap();
+
+    assert_eq!(server.bearer_token_secret(), Some("secret://env/MCP_TOKEN"));
+    assert_eq!(
+        server
+            .secret_http_headers()
+            .and_then(|headers| headers.get("X-Api-Key"))
+            .map(String::as_str),
+        Some("secret://env/MCP_API_KEY")
+    );
+}
+
+#[tokio::test]
+async fn load_rejects_mixing_secret_and_legacy_bearer_token_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{
+  "version": 1,
+  "servers": {
+    "remote": {
+      "transport": "streamable_http",
+      "url": "https://example.com/mcp",
+      "bearer_token_secret": "secret://env/NEW_TOKEN",
+      "bearer_token_env_var": "OLD_TOKEN"
+    }
+  }
+}"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("set either bearer_token_secret or legacy bearer_token_env_var"),
+        "err={err:#}"
+    );
 }
 
 #[tokio::test]
@@ -861,7 +955,7 @@ async fn load_denies_streamable_http_with_invalid_env_http_header_name() {
 
     let err = Config::load(dir.path(), None).await.unwrap_err();
     assert!(
-        err.to_string().contains("invalid env_http_headers key"),
+        err.to_string().contains("invalid secret_http_headers key"),
         "err={err:#}"
     );
 }
@@ -946,7 +1040,7 @@ async fn load_denies_streamable_http_with_reserved_env_http_header_name() {
     let err = Config::load(dir.path(), None).await.unwrap_err();
     assert!(
         err.to_string()
-            .contains("env_http_headers key is reserved by transport"),
+            .contains("secret_http_headers key is reserved by transport"),
         "err={err:#}"
     );
 }
@@ -973,7 +1067,7 @@ async fn load_denies_streamable_http_with_reserved_authorization_env_header_name
     let err = Config::load(dir.path(), None).await.unwrap_err();
     assert!(
         err.to_string()
-            .contains("env_http_headers key is reserved by transport"),
+            .contains("secret_http_headers key is reserved by transport"),
         "err={err:#}"
     );
 }
@@ -1003,7 +1097,7 @@ async fn load_denies_streamable_http_with_transport_owned_env_http_headers() {
         let err = Config::load(dir.path(), None).await.unwrap_err();
         assert!(
             err.to_string()
-                .contains("env_http_headers key is reserved by transport"),
+                .contains("secret_http_headers key is reserved by transport"),
             "header={header} err={err:#}"
         );
     }

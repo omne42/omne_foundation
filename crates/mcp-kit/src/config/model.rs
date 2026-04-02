@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use reqwest::header::{HeaderName, HeaderValue};
+use secret_kit::spec::SecretSpec;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -132,9 +133,9 @@ pub struct UnixServerConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamableHttpServerConfig {
     urls: StreamableHttpUrls,
-    bearer_token_env_var: Option<String>,
+    bearer_token_secret: Option<String>,
     http_headers: BTreeMap<String, String>,
-    env_http_headers: BTreeMap<String, String>,
+    secret_http_headers: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +167,13 @@ fn validate_streamable_http_url_syntax(url_field: &'static str, url: &str) -> cr
     if parsed.host_str().is_none() {
         public_bail!("mcp server transport=streamable_http: {url_field} must include a host");
     }
+    Ok(())
+}
+
+fn validate_streamable_http_secret_spec(field: &str, spec: &str) -> crate::Result<()> {
+    SecretSpec::parse(spec).map_err(|err| {
+        anyhow::anyhow!("mcp server transport=streamable_http: invalid {field}: {err}")
+    })?;
     Ok(())
 }
 
@@ -201,9 +209,9 @@ impl ServerConfig {
         validate_streamable_http_url_syntax("url", &url)?;
         Ok(Self::StreamableHttp(StreamableHttpServerConfig {
             urls: StreamableHttpUrls::Single { url },
-            bearer_token_env_var: None,
+            bearer_token_secret: None,
             http_headers: BTreeMap::new(),
-            env_http_headers: BTreeMap::new(),
+            secret_http_headers: BTreeMap::new(),
         }))
     }
 
@@ -223,9 +231,9 @@ impl ServerConfig {
         validate_streamable_http_url_syntax("http_url", &http_url)?;
         Ok(Self::StreamableHttp(StreamableHttpServerConfig {
             urls: StreamableHttpUrls::Split { sse_url, http_url },
-            bearer_token_env_var: None,
+            bearer_token_secret: None,
             http_headers: BTreeMap::new(),
-            env_http_headers: BTreeMap::new(),
+            secret_http_headers: BTreeMap::new(),
         }))
     }
 
@@ -293,12 +301,13 @@ impl ServerConfig {
                     }
                 }
 
-                if let Some(env_var) = cfg.bearer_token_env_var.as_deref() {
-                    if env_var.trim().is_empty() {
+                if let Some(secret_spec) = cfg.bearer_token_secret.as_deref() {
+                    if secret_spec.trim().is_empty() {
                         public_bail!(
-                            "mcp server transport=streamable_http: bearer_token_env_var must not be empty"
+                            "mcp server transport=streamable_http: bearer_token_secret must not be empty"
                         );
                     }
+                    validate_streamable_http_secret_spec("bearer_token_secret", secret_spec)?;
                 }
 
                 for (header, value) in cfg.http_headers.iter() {
@@ -328,27 +337,31 @@ impl ServerConfig {
                         )
                     })?;
                 }
-                for (header, env_var) in cfg.env_http_headers.iter() {
+                for (header, secret_spec) in cfg.secret_http_headers.iter() {
                     if header.trim().is_empty() {
                         public_bail!(
-                            "mcp server transport=streamable_http: env_http_headers key must not be empty"
+                            "mcp server transport=streamable_http: secret_http_headers key must not be empty"
                         );
                     }
                     let header_name = HeaderName::from_bytes(header.as_bytes()).map_err(|_| {
                         anyhow::anyhow!(
-                            "mcp server transport=streamable_http: invalid env_http_headers key: {header}"
+                            "mcp server transport=streamable_http: invalid secret_http_headers key: {header}"
                         )
                     })?;
                     if is_reserved_streamable_http_env_header(&header_name) {
                         public_bail!(
-                            "mcp server transport=streamable_http: env_http_headers key is reserved by transport: {header}"
+                            "mcp server transport=streamable_http: secret_http_headers key is reserved by transport: {header}"
                         );
                     }
-                    if env_var.trim().is_empty() {
+                    if secret_spec.trim().is_empty() {
                         public_bail!(
-                            "mcp server transport=streamable_http: env_http_headers[{header}] must not be empty"
+                            "mcp server transport=streamable_http: secret_http_headers[{header}] must not be empty"
                         );
                     }
+                    validate_streamable_http_secret_spec(
+                        &format!("secret_http_headers[{header}]"),
+                        secret_spec,
+                    )?;
                 }
             }
         };
@@ -428,9 +441,9 @@ impl ServerConfig {
         }
     }
 
-    pub fn bearer_token_env_var(&self) -> Option<&str> {
+    pub fn bearer_token_secret(&self) -> Option<&str> {
         match self {
-            Self::StreamableHttp(cfg) => cfg.bearer_token_env_var.as_deref(),
+            Self::StreamableHttp(cfg) => cfg.bearer_token_secret.as_deref(),
             _ => None,
         }
     }
@@ -449,17 +462,21 @@ impl ServerConfig {
         }
     }
 
-    pub fn env_http_headers(&self) -> Option<&BTreeMap<String, String>> {
+    pub fn secret_http_headers(&self) -> Option<&BTreeMap<String, String>> {
         match self {
-            Self::StreamableHttp(cfg) => Some(&cfg.env_http_headers),
+            Self::StreamableHttp(cfg) => Some(&cfg.secret_http_headers),
             _ => None,
         }
     }
 
-    pub(crate) fn env_http_headers_required(&self) -> &BTreeMap<String, String> {
+    pub(crate) fn secret_http_headers_required(&self) -> &BTreeMap<String, String> {
         match self {
-            Self::StreamableHttp(cfg) => &cfg.env_http_headers,
-            _ => unreachable!("env_http_headers_required called for non-streamable_http transport"),
+            Self::StreamableHttp(cfg) => &cfg.secret_http_headers,
+            _ => {
+                unreachable!(
+                    "secret_http_headers_required called for non-streamable_http transport"
+                )
+            }
         }
     }
 
@@ -503,19 +520,19 @@ impl ServerConfig {
         Ok(())
     }
 
-    pub fn set_bearer_token_env_var(
+    pub fn set_bearer_token_secret(
         &mut self,
-        bearer_token_env_var: Option<String>,
+        bearer_token_secret: Option<String>,
     ) -> crate::Result<()> {
         match self {
             Self::StreamableHttp(cfg) => {
-                cfg.bearer_token_env_var = bearer_token_env_var;
+                cfg.bearer_token_secret = bearer_token_secret;
                 Ok(())
             }
             _ => {
-                if bearer_token_env_var.is_some() {
+                if bearer_token_secret.is_some() {
                     public_bail!(
-                        "mcp server transport={}: bearer_token_env_var is not allowed",
+                        "mcp server transport={}: bearer_token_secret is not allowed",
                         transport_tag(self.transport())
                     );
                 }
@@ -544,11 +561,11 @@ impl ServerConfig {
         }
     }
 
-    pub fn env_http_headers_mut(&mut self) -> crate::Result<&mut BTreeMap<String, String>> {
+    pub fn secret_http_headers_mut(&mut self) -> crate::Result<&mut BTreeMap<String, String>> {
         match self {
-            Self::StreamableHttp(cfg) => Ok(&mut cfg.env_http_headers),
+            Self::StreamableHttp(cfg) => Ok(&mut cfg.secret_http_headers),
             _ => public_bail!(
-                "mcp server transport={}: env_http_headers are not allowed",
+                "mcp server transport={}: secret_http_headers are not allowed",
                 transport_tag(self.transport())
             ),
         }

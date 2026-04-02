@@ -131,7 +131,7 @@
 //! - **空值语义**：解析器保留空字符串，调用方自行决定空秘密是否可接受
 //! - **秘密所有权**：默认 API 返回 `SecretString`；`SecretString::into_inner` 只在独占时交出底层字符串，避免偷偷复制明文
 //! - **明文导出责任**：`SecretString::expose_secret` 和 `SecretString::into_owned` 会把明文交给调用方；一旦调用方复制或长期持有这些值，zeroize 保障就只剩当前容器，不会替外部副本擦屁股
-//! - **内建 CLI 发现**：内建 provider 默认只信任 ambient allowlist 里的绝对 `PATH` 快照项来找 `vault`/`aws`/`gcloud`/`az`；显式 command env 不能重写这个搜索，生产环境优先提供绝对路径 override
+//! - **内建 CLI 发现**：内建 provider 默认只信任 ambient allowlist 里的系统级 `PATH` 目录来找 `vault`/`aws`/`gcloud`/`az`；workspace、用户目录、`/tmp` 等绝对路径不会因为“是绝对路径”就自动变成可信搜索入口，生产环境优先提供绝对路径 override
 //! - **命令失败诊断**：CLI provider 失败时只返回退出状态、`stderr` 字节数和粗粒度 `stderr_hint`；不会回显原始 `stderr` 明文，且 `stderr_hint` 仅供排障，不是稳定协议
 //! - **缓存分区**：`CachingSecretResolver` 只会为显式提供非空 `secret_cache_partition()` 的环境复用缓存；runtime-sensitive secret 还需要稳定的 `SecretCommandRuntime::secret_cache_partition()`。相同分区必须表示相同的非秘密解析上下文，空分区会被当成未分区处理
 //! - **文件路径**：`secret://file` 只接受绝对路径，避免把当前工作目录偷偷变成配置输入

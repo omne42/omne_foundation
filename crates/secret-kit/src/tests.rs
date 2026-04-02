@@ -1443,21 +1443,39 @@ async fn secret_command_runner_retries_text_file_busy_spawn() -> Result<()> {
 
 #[cfg(unix)]
 #[test]
-fn resolve_program_on_path_returns_absolute_match() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("vault");
-    write_executable_script(&path, "#!/bin/sh\nexit 0\n").expect("write executable");
+fn resolve_program_on_path_accepts_trusted_system_directory() {
+    let search_path = std::env::join_paths([
+        std::path::Path::new("/bin"),
+        std::path::Path::new("/usr/bin"),
+    ])
+    .expect("join search path");
+    let resolved = resolve_program_on_path_for_test("sh", search_path.as_os_str())
+        .expect("resolver should accept trusted system directories");
 
-    let resolved = resolve_program_on_path_for_test("vault", dir.path().as_os_str())
-        .expect("program should resolve from explicit PATH fragment");
-
-    assert_eq!(resolved, path);
     assert!(resolved.is_absolute());
+    assert_eq!(
+        resolved.file_name().and_then(std::ffi::OsStr::to_str),
+        Some("sh")
+    );
 }
 
 #[cfg(unix)]
 #[test]
-fn resolve_program_on_path_preserves_non_utf8_absolute_match() {
+fn resolve_program_on_path_rejects_untrusted_absolute_match() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("vault");
+    write_executable_script(&path, "#!/bin/sh\nexit 0\n").expect("write executable");
+
+    let resolved = resolve_program_on_path_for_test("vault", dir.path().as_os_str());
+    assert_eq!(
+        resolved, None,
+        "tempdir should not be trusted for builtin lookup"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn resolve_program_on_path_ignores_untrusted_non_utf8_absolute_match() {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt as _;
 
@@ -1472,15 +1490,16 @@ fn resolve_program_on_path_preserves_non_utf8_absolute_match() {
     let path = non_utf8_dir.join("vault");
     write_executable_script(&path, "#!/bin/sh\nexit 0\n").expect("write executable");
 
-    let resolved = resolve_program_on_path_for_test("vault", non_utf8_dir.as_os_str())
-        .expect("program should resolve from non-utf8 PATH fragment");
-
-    assert_eq!(resolved, path);
+    let resolved = resolve_program_on_path_for_test("vault", non_utf8_dir.as_os_str());
+    assert_eq!(
+        resolved, None,
+        "non-system non-utf8 directories should still be rejected for builtin lookup"
+    );
 }
 
 #[cfg(unix)]
 #[test]
-fn resolve_program_on_path_ignores_relative_search_entries() {
+fn resolve_program_on_path_ignores_relative_and_untrusted_absolute_search_entries() {
     let cwd = std::env::current_dir().expect("cwd");
     let relative_dir = tempfile::Builder::new()
         .prefix("secret-kit-relative-path-")
@@ -1503,15 +1522,16 @@ fn resolve_program_on_path_ignores_relative_search_entries() {
         absolute_dir.path(),
     ])
     .expect("join search path");
-    let resolved = resolve_program_on_path_for_test("vault", search_path.as_os_str())
-        .expect("resolver should ignore relative PATH entries");
-
-    assert_eq!(resolved, absolute_program);
+    let resolved = resolve_program_on_path_for_test("vault", search_path.as_os_str());
+    assert_eq!(
+        resolved, None,
+        "after ignoring relative entries, remaining untrusted absolute paths must still be rejected"
+    );
 }
 
 #[cfg(unix)]
 #[test]
-fn resolve_program_on_path_skips_non_executable_match() {
+fn resolve_program_on_path_rejects_untrusted_absolute_fallback_even_if_executable() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let first_dir = tempfile::tempdir().expect("tempdir");
@@ -1530,10 +1550,11 @@ fn resolve_program_on_path_skips_non_executable_match() {
 
     let search_path =
         std::env::join_paths([first_dir.path(), second_dir.path()]).expect("join search path");
-    let resolved = resolve_program_on_path_for_test("vault", search_path.as_os_str())
-        .expect("resolver should skip non-executable candidate");
-
-    assert_eq!(resolved, executable);
+    let resolved = resolve_program_on_path_for_test("vault", search_path.as_os_str());
+    assert_eq!(
+        resolved, None,
+        "builtin lookup must not fall through to an untrusted executable directory"
+    );
 }
 
 #[cfg(windows)]
@@ -1563,7 +1584,8 @@ fn resolve_program_on_path_uses_snapshot_pathext() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn resolve_secret_uses_ambient_snapshot_path_for_builtin_resolution() -> Result<()> {
+async fn resolve_secret_rejects_untrusted_ambient_snapshot_path_for_builtin_resolution()
+-> Result<()> {
     use std::ffi::OsString;
 
     struct AmbientPathEnv {
@@ -1593,15 +1615,20 @@ async fn resolve_secret_uses_ambient_snapshot_path_for_builtin_resolution() -> R
         path: dir.path().as_os_str().to_os_string(),
     };
 
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    let value = resolve_secret_text("secret://vault/secret/demo?field=token", &env).await?;
-    assert_eq!(value, "resolved-from-snapshot");
+    let err = resolve_secret_text("secret://vault/secret/demo?field=token", &env)
+        .await
+        .expect_err("untrusted ambient PATH entry should not resolve builtin providers");
+    let SecretError::Command(text) = err else {
+        panic!("expected secret command error");
+    };
+    assert_catalog_code(&text, "error_detail.secret.command_spawn_failed");
     Ok(())
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn resolve_secret_uses_non_utf8_ambient_snapshot_path_for_builtin_resolution() -> Result<()> {
+async fn resolve_secret_rejects_untrusted_non_utf8_ambient_snapshot_path_for_builtin_resolution()
+-> Result<()> {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt as _;
 
@@ -1642,8 +1669,13 @@ async fn resolve_secret_uses_non_utf8_ambient_snapshot_path_for_builtin_resoluti
         path: non_utf8_dir.as_os_str().to_os_string(),
     };
 
-    let value = resolve_secret_text("secret://vault/secret/demo?field=token", &env).await?;
-    assert_eq!(value, "resolved-from-non-utf8-snapshot");
+    let err = resolve_secret_text("secret://vault/secret/demo?field=token", &env)
+        .await
+        .expect_err("non-utf8 untrusted ambient PATH entry should be rejected");
+    let SecretError::Command(text) = err else {
+        panic!("expected secret command error");
+    };
+    assert_catalog_code(&text, "error_detail.secret.command_spawn_failed");
     Ok(())
 }
 

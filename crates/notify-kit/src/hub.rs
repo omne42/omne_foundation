@@ -137,7 +137,7 @@ impl HubSink {
             Err(_) => Self {
                 sink,
                 name: None,
-                poisoned: AtomicBool::new(true),
+                poisoned: AtomicBool::new(false),
             },
         }
     }
@@ -296,13 +296,7 @@ impl HubInner {
     ) -> (usize, &'static str, crate::Result<()>) {
         const UNKNOWN_SINK_NAME: &str = "<unknown>";
 
-        let Some(name) = sink.name else {
-            return (
-                idx,
-                UNKNOWN_SINK_NAME,
-                Err(anyhow::anyhow!("sink panicked and was disabled").into()),
-            );
-        };
+        let name = sink.name.unwrap_or(UNKNOWN_SINK_NAME);
         if sink.is_poisoned() {
             return (
                 idx,
@@ -746,13 +740,9 @@ mod tests {
             );
             let event = Event::new("kind", Severity::Info, "title");
 
-            let err = hub.send(event).await.expect_err("expected panic failure");
-            assert_eq!(err.kind(), crate::ErrorKind::SinkFailures);
-            let msg = err.to_string();
-            assert!(
-                msg.contains("- <unknown>: sink panicked and was disabled"),
-                "{msg}"
-            );
+            hub.send(event)
+                .await
+                .expect("sink name panic should stay in diagnostics and not disable the sink");
         });
     }
 

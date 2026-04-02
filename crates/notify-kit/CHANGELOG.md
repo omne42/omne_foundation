@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `Hub` 不再把 `Sink::name()` 当成投递控制面的 fail-closed 开关；name lookup panic 现在只降级成 `"<unknown>"` 诊断名，健康 sink 仍可继续发送，而 `send()` panic 依旧会把对应 sink 标记为 disabled。
 - `notify-kit::Error` 现在提供稳定的 `error-kit::ErrorRecord` 映射；调用方可以按 machine-readable error code/category/retry metadata 判断 runtime-unavailable、聚合 sink failure 等公开错误语义，而不必继续解析显示文案。
 - `notify_kit::builtin::env` 现在被明确为标准 `NOTIFY_*` bootstrap helper 的 canonical 入口；crate root 下的 `notify_kit::env` 仅继续作为隐藏的兼容出口保留，避免 integration helper 继续占据核心命名空间。
 - 收紧 `README.md` 到 crate 级地图与边界说明，把更窄的 features、helper、示例和专题细节收口到 `docs/`，以保持 crate 文档符合仓库的渐进披露规则。

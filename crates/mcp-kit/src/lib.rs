@@ -62,6 +62,7 @@
 //! - Background reconnect policy/daemonization
 
 mod config;
+mod convenience;
 mod error;
 mod manager;
 pub mod mcp;

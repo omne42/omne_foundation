@@ -1,7 +1,10 @@
 #[cfg(feature = "cli")]
 mod cli_tests {
+    use std::fs;
+
     use assert_cmd::cargo::cargo_bin_cmd;
     use predicates::prelude::*;
+    use serde_json::Value;
 
     #[test]
     fn trust_requires_yes_trust() {
@@ -56,5 +59,54 @@ mod cli_tests {
         cmd.assert()
             .failure()
             .stderr(predicate::str::contains("--config must be within --root"));
+    }
+
+    #[test]
+    fn list_servers_omits_pseudo_defaults_for_non_matching_transports() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("mcp.json"),
+            r#"
+{
+  "version": 1,
+  "servers": {
+    "stdio": { "transport": "stdio", "argv": ["stdio-server"], "env": { "NO_COLOR": "1" } },
+    "unix": { "transport": "unix", "unix_path": "/tmp/mcp.sock" },
+    "http": { "transport": "streamable_http", "url": "https://example.com/mcp" }
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        let mut cmd = cargo_bin_cmd!("mcpctl");
+        let output = cmd
+            .arg("--root")
+            .arg(root.path())
+            .arg("list-servers")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+
+        let body: Value = serde_json::from_slice(&output).unwrap();
+        let servers = body["servers"].as_array().unwrap();
+        let unix = servers
+            .iter()
+            .find(|server| server["name"] == "unix")
+            .expect("unix server");
+        assert!(unix["argv_program"].is_null());
+        assert!(unix["inherit_env"].is_null());
+        assert!(unix["env_keys"].is_null());
+
+        let http = servers
+            .iter()
+            .find(|server| server["name"] == "http")
+            .expect("http server");
+        assert!(http["argv_program"].is_null());
+        assert!(http["inherit_env"].is_null());
+        assert!(http["env_keys"].is_null());
+        assert!(http["http_header_keys"].is_array());
     }
 }

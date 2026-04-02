@@ -11,6 +11,7 @@ use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::Child;
 
+use crate::convenience;
 use crate::{
     Config, MCP_PROTOCOL_VERSION, McpNotification, McpRequest, Root, ServerConfig, ServerName,
     Session, TrustMode, UntrustedStreamableHttpPolicy,
@@ -588,7 +589,7 @@ impl Manager {
         client_version: impl Into<String>,
         timeout: Duration,
     ) -> Self {
-        debug_assert!(
+        assert!(
             config.client().validate().is_ok(),
             "Manager::from_config requires a validated Config::client() (use try_from_config)"
         );
@@ -1699,8 +1700,14 @@ impl Manager {
         server_name: &str,
         cwd: &Path,
     ) -> crate::Result<Value> {
-        self.request(config, server_name, "tools/list", None, cwd)
-            .await
+        self.request(
+            config,
+            server_name,
+            convenience::TOOLS_LIST_METHOD,
+            None,
+            cwd,
+        )
+        .await
     }
 
     pub async fn list_resources(
@@ -1709,8 +1716,14 @@ impl Manager {
         server_name: &str,
         cwd: &Path,
     ) -> crate::Result<Value> {
-        self.request(config, server_name, "resources/list", None, cwd)
-            .await
+        self.request(
+            config,
+            server_name,
+            convenience::RESOURCES_LIST_METHOD,
+            None,
+            cwd,
+        )
+        .await
     }
 
     pub async fn list_resource_templates(
@@ -1719,8 +1732,14 @@ impl Manager {
         server_name: &str,
         cwd: &Path,
     ) -> crate::Result<Value> {
-        self.request(config, server_name, "resources/templates/list", None, cwd)
-            .await
+        self.request(
+            config,
+            server_name,
+            convenience::RESOURCES_TEMPLATES_LIST_METHOD,
+            None,
+            cwd,
+        )
+        .await
     }
 
     pub async fn read_resource(
@@ -1730,9 +1749,14 @@ impl Manager {
         uri: &str,
         cwd: &Path,
     ) -> crate::Result<Value> {
-        let params = serde_json::json!({ "uri": uri });
-        self.request(config, server_name, "resources/read", Some(params), cwd)
-            .await
+        self.request(
+            config,
+            server_name,
+            convenience::RESOURCES_READ_METHOD,
+            Some(convenience::uri_params(uri)),
+            cwd,
+        )
+        .await
     }
 
     pub async fn subscribe_resource(
@@ -1742,12 +1766,11 @@ impl Manager {
         uri: &str,
         cwd: &Path,
     ) -> crate::Result<Value> {
-        let params = serde_json::json!({ "uri": uri });
         self.request(
             config,
             server_name,
-            "resources/subscribe",
-            Some(params),
+            convenience::RESOURCES_SUBSCRIBE_METHOD,
+            Some(convenience::uri_params(uri)),
             cwd,
         )
         .await
@@ -1760,12 +1783,11 @@ impl Manager {
         uri: &str,
         cwd: &Path,
     ) -> crate::Result<Value> {
-        let params = serde_json::json!({ "uri": uri });
         self.request(
             config,
             server_name,
-            "resources/unsubscribe",
-            Some(params),
+            convenience::RESOURCES_UNSUBSCRIBE_METHOD,
+            Some(convenience::uri_params(uri)),
             cwd,
         )
         .await
@@ -1777,8 +1799,14 @@ impl Manager {
         server_name: &str,
         cwd: &Path,
     ) -> crate::Result<Value> {
-        self.request(config, server_name, "prompts/list", None, cwd)
-            .await
+        self.request(
+            config,
+            server_name,
+            convenience::PROMPTS_LIST_METHOD,
+            None,
+            cwd,
+        )
+        .await
     }
 
     pub async fn get_prompt(
@@ -1789,12 +1817,14 @@ impl Manager {
         arguments: Option<Value>,
         cwd: &Path,
     ) -> crate::Result<Value> {
-        let mut params = serde_json::json!({ "name": prompt });
-        if let Some(arguments) = arguments {
-            params["arguments"] = arguments;
-        }
-        self.request(config, server_name, "prompts/get", Some(params), cwd)
-            .await
+        self.request(
+            config,
+            server_name,
+            convenience::PROMPTS_GET_METHOD,
+            Some(convenience::prompt_get_params(prompt, arguments)),
+            cwd,
+        )
+        .await
     }
 
     pub async fn call_tool(
@@ -1805,12 +1835,14 @@ impl Manager {
         arguments: Option<Value>,
         cwd: &Path,
     ) -> crate::Result<Value> {
-        let mut params = serde_json::json!({ "name": tool });
-        if let Some(arguments) = arguments {
-            params["arguments"] = arguments;
-        }
-        self.request(config, server_name, "tools/call", Some(params), cwd)
-            .await
+        self.request(
+            config,
+            server_name,
+            convenience::TOOLS_CALL_METHOD,
+            Some(convenience::tool_call_params(tool, arguments)),
+            cwd,
+        )
+        .await
     }
 
     pub async fn ping(
@@ -1819,7 +1851,8 @@ impl Manager {
         server_name: &str,
         cwd: &Path,
     ) -> crate::Result<Value> {
-        self.request(config, server_name, "ping", None, cwd).await
+        self.request(config, server_name, convenience::PING_METHOD, None, cwd)
+            .await
     }
 
     pub async fn set_logging_level(
@@ -1829,9 +1862,14 @@ impl Manager {
         level: &str,
         cwd: &Path,
     ) -> crate::Result<Value> {
-        let params = serde_json::json!({ "level": level });
-        self.request(config, server_name, "logging/setLevel", Some(params), cwd)
-            .await
+        self.request(
+            config,
+            server_name,
+            convenience::LOGGING_SET_LEVEL_METHOD,
+            Some(convenience::logging_level_params(level)),
+            cwd,
+        )
+        .await
     }
 
     pub async fn complete(
@@ -1844,7 +1882,7 @@ impl Manager {
         self.request(
             config,
             server_name,
-            "completion/complete",
+            convenience::COMPLETION_COMPLETE_METHOD,
             Some(params),
             cwd,
         )
@@ -1852,12 +1890,12 @@ impl Manager {
     }
 
     pub async fn list_tools_connected(&mut self, server_name: &str) -> crate::Result<Value> {
-        self.request_connected(server_name, "tools/list", None)
+        self.request_connected(server_name, convenience::TOOLS_LIST_METHOD, None)
             .await
     }
 
     pub async fn list_resources_connected(&mut self, server_name: &str) -> crate::Result<Value> {
-        self.request_connected(server_name, "resources/list", None)
+        self.request_connected(server_name, convenience::RESOURCES_LIST_METHOD, None)
             .await
     }
 
@@ -1865,8 +1903,12 @@ impl Manager {
         &mut self,
         server_name: &str,
     ) -> crate::Result<Value> {
-        self.request_connected(server_name, "resources/templates/list", None)
-            .await
+        self.request_connected(
+            server_name,
+            convenience::RESOURCES_TEMPLATES_LIST_METHOD,
+            None,
+        )
+        .await
     }
 
     pub async fn read_resource_connected(
@@ -1874,9 +1916,12 @@ impl Manager {
         server_name: &str,
         uri: &str,
     ) -> crate::Result<Value> {
-        let params = serde_json::json!({ "uri": uri });
-        self.request_connected(server_name, "resources/read", Some(params))
-            .await
+        self.request_connected(
+            server_name,
+            convenience::RESOURCES_READ_METHOD,
+            Some(convenience::uri_params(uri)),
+        )
+        .await
     }
 
     pub async fn subscribe_resource_connected(
@@ -1884,9 +1929,12 @@ impl Manager {
         server_name: &str,
         uri: &str,
     ) -> crate::Result<Value> {
-        let params = serde_json::json!({ "uri": uri });
-        self.request_connected(server_name, "resources/subscribe", Some(params))
-            .await
+        self.request_connected(
+            server_name,
+            convenience::RESOURCES_SUBSCRIBE_METHOD,
+            Some(convenience::uri_params(uri)),
+        )
+        .await
     }
 
     pub async fn unsubscribe_resource_connected(
@@ -1894,13 +1942,16 @@ impl Manager {
         server_name: &str,
         uri: &str,
     ) -> crate::Result<Value> {
-        let params = serde_json::json!({ "uri": uri });
-        self.request_connected(server_name, "resources/unsubscribe", Some(params))
-            .await
+        self.request_connected(
+            server_name,
+            convenience::RESOURCES_UNSUBSCRIBE_METHOD,
+            Some(convenience::uri_params(uri)),
+        )
+        .await
     }
 
     pub async fn list_prompts_connected(&mut self, server_name: &str) -> crate::Result<Value> {
-        self.request_connected(server_name, "prompts/list", None)
+        self.request_connected(server_name, convenience::PROMPTS_LIST_METHOD, None)
             .await
     }
 
@@ -1910,16 +1961,17 @@ impl Manager {
         prompt: &str,
         arguments: Option<Value>,
     ) -> crate::Result<Value> {
-        let mut params = serde_json::json!({ "name": prompt });
-        if let Some(arguments) = arguments {
-            params["arguments"] = arguments;
-        }
-        self.request_connected(server_name, "prompts/get", Some(params))
-            .await
+        self.request_connected(
+            server_name,
+            convenience::PROMPTS_GET_METHOD,
+            Some(convenience::prompt_get_params(prompt, arguments)),
+        )
+        .await
     }
 
     pub async fn ping_connected(&mut self, server_name: &str) -> crate::Result<Value> {
-        self.request_connected(server_name, "ping", None).await
+        self.request_connected(server_name, convenience::PING_METHOD, None)
+            .await
     }
 
     pub async fn set_logging_level_connected(
@@ -1927,9 +1979,12 @@ impl Manager {
         server_name: &str,
         level: &str,
     ) -> crate::Result<Value> {
-        let params = serde_json::json!({ "level": level });
-        self.request_connected(server_name, "logging/setLevel", Some(params))
-            .await
+        self.request_connected(
+            server_name,
+            convenience::LOGGING_SET_LEVEL_METHOD,
+            Some(convenience::logging_level_params(level)),
+        )
+        .await
     }
 
     pub async fn complete_connected(
@@ -1937,8 +1992,12 @@ impl Manager {
         server_name: &str,
         params: Value,
     ) -> crate::Result<Value> {
-        self.request_connected(server_name, "completion/complete", Some(params))
-            .await
+        self.request_connected(
+            server_name,
+            convenience::COMPLETION_COMPLETE_METHOD,
+            Some(params),
+        )
+        .await
     }
 
     pub async fn request_connected(

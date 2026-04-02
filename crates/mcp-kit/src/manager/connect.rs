@@ -111,7 +111,7 @@ async fn connect_stdio_transport(
     }
 
     let expanded_argv = server_cfg
-        .argv()
+        .argv_required()
         .iter()
         .enumerate()
         .map(|(idx, arg)| {
@@ -129,11 +129,11 @@ async fn connect_stdio_transport(
     // Library callers own stderr routing. Default to /dev/null instead of leaking server logs or
     // secrets into the host process boundary.
     cmd.stderr(Stdio::null());
-    if !server_cfg.inherit_env() {
+    if !server_cfg.inherit_env_required() {
         cmd.env_clear();
         apply_stdio_baseline_env(&mut cmd);
     }
-    for (key, value) in server_cfg.env().iter() {
+    for (key, value) in server_cfg.env_required().iter() {
         let value = expand_placeholders_trusted_os(value, &cwd)
             .with_context(|| format!("expand env placeholder: {key}"))?;
         cmd.env(key, value);
@@ -174,7 +174,7 @@ async fn connect_stdio_transport(
     .with_context(|| {
         format!(
             "spawn mcp server (server={server_name}) argv redacted (argc={})",
-            server_cfg.argv().len()
+            server_cfg.argv_required().len()
         )
     })?;
     let child = client.take_child();
@@ -231,7 +231,10 @@ async fn connect_streamable_http_transport(
                 "refusing to read bearer token env var in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
             );
         }
-        if !server_cfg.env_http_headers().is_empty() {
+        if server_cfg
+            .env_http_headers()
+            .is_some_and(|headers| !headers.is_empty())
+        {
             anyhow::bail!(
                 "refusing to read http header env vars in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
             );
@@ -355,14 +358,14 @@ fn build_streamable_http_headers(
     cwd: &Path,
 ) -> anyhow::Result<HashMap<String, String>> {
     let capacity = server_cfg
-        .http_headers()
+        .http_headers_required()
         .len()
         .saturating_add(1)
         .saturating_add(usize::from(server_cfg.bearer_token_env_var().is_some()))
-        .saturating_add(server_cfg.env_http_headers().len());
+        .saturating_add(server_cfg.env_http_headers_required().len());
     let mut headers = HashMap::with_capacity(capacity);
 
-    for (key, value) in server_cfg.http_headers() {
+    for (key, value) in server_cfg.http_headers_required() {
         if is_reserved_streamable_http_header(key) {
             anyhow::bail!("mcp server {server_name}: http header is reserved by transport: {key}");
         }
@@ -387,9 +390,9 @@ fn build_streamable_http_headers(
         headers.insert(AUTHORIZATION_HEADER.to_string(), format!("Bearer {token}"));
     }
 
-    if !server_cfg.env_http_headers().is_empty() {
+    if !server_cfg.env_http_headers_required().is_empty() {
         debug_assert_eq!(ctx.trust_mode, TrustMode::Trusted);
-        for (header, env_var) in server_cfg.env_http_headers().iter() {
+        for (header, env_var) in server_cfg.env_http_headers_required().iter() {
             if is_reserved_streamable_http_env_header(header) {
                 anyhow::bail!(
                     "mcp server {server_name}: http header env var targets a reserved transport header: {header}"

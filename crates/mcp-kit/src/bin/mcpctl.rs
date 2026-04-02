@@ -225,7 +225,9 @@ async fn main() -> anyhow::Result<()> {
         let risky_stdio = config
             .servers()
             .iter()
-            .filter(|(_, cfg)| cfg.transport() == mcp_kit::Transport::Stdio && cfg.inherit_env())
+            .filter(|(_, cfg)| {
+                cfg.transport() == mcp_kit::Transport::Stdio && cfg.inherit_env() == Some(true)
+            })
             .map(|(name, _)| name.as_str())
             .collect::<Vec<_>>();
         if !risky_stdio.is_empty() {
@@ -310,20 +312,24 @@ async fn main() -> anyhow::Result<()> {
                 .servers()
                 .iter()
                 .map(|(name, cfg)| {
+                    let argv = cfg.argv();
+                    let env = cfg.env();
+                    let http_headers = cfg.http_headers();
+                    let env_http_headers = cfg.env_http_headers();
                     let mut server = serde_json::json!({
                         "name": name,
                         "transport": cfg.transport(),
-                        "argv_program": cfg.argv().first(),
-                        "argv_argc": cfg.argv().len(),
+                        "argv_program": argv.and_then(|argv| argv.first()),
+                        "argv_argc": argv.map_or(0, |argv| argv.len()),
                         "inherit_env": cfg.inherit_env(),
                         "unix_path": cfg.unix_path().map(|p| p.display().to_string()),
                         "url": cfg.url(),
                         "sse_url": cfg.sse_url(),
                         "http_url": cfg.http_url(),
                         "bearer_token_env_var": cfg.bearer_token_env_var(),
-                        "env_keys": cfg.env().keys().cloned().collect::<Vec<_>>(),
-                        "http_header_keys": cfg.http_headers().keys().cloned().collect::<Vec<_>>(),
-                        "env_http_header_keys": cfg.env_http_headers().keys().cloned().collect::<Vec<_>>(),
+                        "env_keys": env.map(|env| env.keys().cloned().collect::<Vec<_>>()),
+                        "http_header_keys": http_headers.map(|headers| headers.keys().cloned().collect::<Vec<_>>()),
+                        "env_http_header_keys": env_http_headers.map(|headers| headers.keys().cloned().collect::<Vec<_>>()),
                         "stdout_log": cfg.stdout_log().map(|log| serde_json::json!({
                             "path": log.path.display().to_string(),
                             "max_bytes_per_part": log.max_bytes_per_part,
@@ -331,7 +337,7 @@ async fn main() -> anyhow::Result<()> {
                         })),
                     });
                     if cli.show_argv {
-                        server["argv"] = serde_json::json!(cfg.argv());
+                        server["argv"] = serde_json::json!(argv);
                     }
                     server
                 })

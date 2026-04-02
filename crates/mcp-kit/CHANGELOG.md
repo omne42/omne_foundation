@@ -10,12 +10,15 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：`ServerConfig::{argv,inherit_env,env,http_headers,env_http_headers}` 现在只在匹配 transport 时返回值；不再为错误 transport 伪造空集合或 `true` 这类默认值。`mcpctl list-servers` 同步改为输出 `null` 而不是把这些伪默认值误序列化成真实配置。
 - `mcp-kit`: attach-style `Manager::connect_io*` / `connect_jsonrpc*` APIs now reject duplicate same-name connections instead of silently returning `Ok(())`; built-in `roots/list` handling now runs before user handlers, and `SharedManager` fail-fast semantics extend to handler-spawned child tasks that would otherwise wait behind active handler contention.
 - `mcp-kit`: aligned the duplicate-attach fail-fast diagnostics with Rust `1.88.0` clippy's format-string requirements so the cross-platform `mcp-cross-platform` / workspace clippy gates stay green on CI.
 - `mcp-kit::Error` 现在提供稳定的 `error-kit::ErrorRecord` 映射；下游可以按 `ErrorKind` 对齐到 machine-readable code/category/retry metadata，而不必继续依赖 `anyhow` 文案猜测语义。
 - `mcp-kit`: `Manager::with_server_handler_concurrency(0)` no longer silently clamps to `1`; it now fails fast at construction time so invalid handler settings do not survive until runtime.
+- `mcp-kit`: `Manager::from_config(...)` 现在在所有 build 模式下都要求 `Config::client()` 先通过校验；非法 `client.roots` / `protocol_version` / `capabilities` 不再只靠 debug-only 断言或首次 initialize 才暴露。
 - `mcp-kit`：`Manager` / `SharedManager` 现在显式区分“纯缓存查询”和“带 liveness refresh 的查询”：新增 `is_connected_cached(...)` / `connected_server_names_cached(...)`，而现有 `is_connected(...)` / `connected_server_names(...)` 文档同步说明它们会在返回前顺手 prune 已死亡连接与 side state，避免把读路径的生命周期副作用继续藏在名字里。
 - `mcp-kit`：config 驱动的 `Manager::get_or_connect*` 路径现在复用与 `SharedManager` 同一套 `prepare_transport_connect_resolved(...)` + prepared transport connect/install helper；冷启动建连不再在 direct/shared 两层各自重写一份配置查找、cwd 解析和 transport-install 编排骨架，降低后续生命周期修补时的双写漂移风险。
+- `mcp-kit`：补充私有 convenience helper，统一 `Session` / `Manager` 常用 MCP method 名称和参数拼装，减少 `ping`、`prompts/get`、`tools/call`、资源类请求在多层 API 面重复手写时的漂移风险（行为不变）。
 - `mcp-kit`：`Manager::disconnect()` / `Connection::drop` 的 best-effort child reaping 现在在 sync/no-runtime 路径也会继续轮询 `try_wait()` 到短超时收口；不再只有已有 Tokio runtime 时才真正 wait，因此 Linux 等平台不会把被 kill 的 child 留成 zombie 到更晚的 runtime/drop 阶段。
 - `mcp-kit`：untrusted `streamable_http` 连接的 transport-level public-IP pinning 现在会和 `allow_private_ips` / `allow_localhost` 语义保持一致；显式放开私网或 localhost 目标后，不再在实际建连时被 `mcp-jsonrpc` 的 public-only socket 选择路径二次打回。
 - `mcp-kit`：仅供 Unix 回归测试使用的 `Manager` 测试 helper 现在按平台条件裁剪，避免 Windows 的 `-D warnings` / all-targets 质量门禁把未使用测试入口误判成构建失败；不改变产品行为。

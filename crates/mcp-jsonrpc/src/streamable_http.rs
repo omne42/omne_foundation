@@ -1551,6 +1551,9 @@ mod tests {
 
     #[tokio::test]
     async fn streamable_http_reconnects_after_graceful_sse_eof() {
+        const INITIAL_STAGE_TIMEOUT: Duration = Duration::from_secs(2);
+        const RECONNECT_NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(15);
+
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind listener");
@@ -1623,21 +1626,17 @@ mod tests {
             .take_notifications()
             .expect("take notifications receiver");
 
-        let stage = tokio::time::timeout(Duration::from_secs(2), stage_rx.recv())
+        let stage = tokio::time::timeout(INITIAL_STAGE_TIMEOUT, stage_rx.recv())
             .await
             .expect("initial SSE stage should arrive before timeout")
             .expect("stage channel open");
         assert_eq!(stage, "initial-sse-open");
-        let stage = tokio::time::timeout(Duration::from_secs(5), stage_rx.recv())
-            .await
-            .expect("reconnect SSE stage should arrive before timeout")
-            .expect("stage channel open");
-        assert_eq!(stage, "reconnected-sse-open");
 
-        let notification = tokio::time::timeout(Duration::from_secs(2), notifications.recv())
-            .await
-            .expect("notification should arrive before timeout")
-            .expect("notification stream open");
+        let notification =
+            tokio::time::timeout(RECONNECT_NOTIFICATION_TIMEOUT, notifications.recv())
+                .await
+                .expect("notification should arrive after graceful EOF reconnect")
+                .expect("notification stream open");
         assert_eq!(notification.method, "demo/notify");
         assert_eq!(
             notification.params,

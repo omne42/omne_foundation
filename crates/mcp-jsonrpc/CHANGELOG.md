@@ -7,7 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
-- `mcp-jsonrpc`：放宽 graceful SSE EOF 重连回归测试里等待第二次 SSE 建连的超时预算，降低慢速 CI runner 上的时序抖动假阴性，同时继续锁住“EOF 后必须重连”这条契约。
+- `mcp-jsonrpc`：graceful SSE EOF 重连回归测试现在直接等待恢复后的 server notification，并放宽慢速 CI runner 的超时预算，避免把 macOS 上的传输时序抖动误判成“EOF 后未重连”。
 - `mcp-jsonrpc`：`streamable_http` 的独立 SSE 读侧现在会在正常 EOF 后自动重连，而不是把整个 transport 直接关闭；会 idle-close/轮换 SSE 的服务端不会再把客户端无谓打死。
 - `mcp-jsonrpc`：`streamable_http` 的 SSE 唤醒信号改为无丢失传递，`SessionChanged` 不会再被排队中的 `Connect` 挤掉，活跃 SSE 在 session rollover 后会可靠切到新会话。
 - `mcp-jsonrpc`：入站 server notification 在本地通知队列过载或接收端已关闭时不再静默丢弃；transport 现在会记录 stats 并主动关闭连接，把数据丢失显式暴露给调用方。

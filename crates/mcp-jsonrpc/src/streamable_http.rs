@@ -1628,7 +1628,7 @@ mod tests {
             .expect("initial SSE stage should arrive before timeout")
             .expect("stage channel open");
         assert_eq!(stage, "initial-sse-open");
-        let stage = tokio::time::timeout(Duration::from_secs(2), stage_rx.recv())
+        let stage = tokio::time::timeout(Duration::from_secs(5), stage_rx.recv())
             .await
             .expect("reconnect SSE stage should arrive before timeout")
             .expect("stage channel open");

@@ -278,7 +278,11 @@ pub(crate) async fn prune_rotating_log_parts(
 
     let remove = parts.len().saturating_sub(keep);
     for (_part, path) in parts.into_iter().take(remove) {
-        let _ = tokio::fs::remove_file(path).await;
+        #[cfg(test)]
+        if let Some(err) = take_injected_remove_file_error() {
+            return Err(err);
+        }
+        tokio::fs::remove_file(&path).await?;
     }
 
     Ok(())
@@ -294,6 +298,12 @@ async fn enforce_max_parts_limit(base_path: &Path, max_parts: u32) -> Result<(),
 
 #[cfg(test)]
 fn injected_prune_error_slot() -> &'static Mutex<Option<std::io::ErrorKind>> {
+    static SLOT: OnceLock<Mutex<Option<std::io::ErrorKind>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+fn injected_remove_file_error_slot() -> &'static Mutex<Option<std::io::ErrorKind>> {
     static SLOT: OnceLock<Mutex<Option<std::io::ErrorKind>>> = OnceLock::new();
     SLOT.get_or_init(|| Mutex::new(None))
 }
@@ -319,6 +329,23 @@ fn take_injected_prune_error() -> Option<std::io::Error> {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     slot.take()
         .map(|kind| std::io::Error::new(kind, "injected stdout_log prune failure"))
+}
+
+#[cfg(test)]
+fn inject_remove_file_error(kind: std::io::ErrorKind) {
+    let mut slot = injected_remove_file_error_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *slot = Some(kind);
+}
+
+#[cfg(test)]
+fn take_injected_remove_file_error() -> Option<std::io::Error> {
+    let mut slot = injected_remove_file_error_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    slot.take()
+        .map(|kind| std::io::Error::new(kind, "injected stdout_log remove_file failure"))
 }
 
 #[cfg(test)]
@@ -393,6 +420,30 @@ mod tests {
             .write_line_bytes(b"b")
             .await
             .expect_err("rotation should fail when prune cannot enforce max_parts");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn prune_rotating_log_parts_propagates_remove_file_failure() {
+        let _guard = prune_test_mutex()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("server.stdout.log");
+        for part in 1..=2u32 {
+            let path = dir
+                .path()
+                .join(format!("server.stdout.segment-{part:04}.log"));
+            tokio::fs::write(path, format!("part-{part}\n"))
+                .await
+                .unwrap();
+        }
+
+        inject_remove_file_error(std::io::ErrorKind::PermissionDenied);
+        let err = prune_rotating_log_parts(&base, 1)
+            .await
+            .expect_err("prune should fail when an old part cannot be removed");
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
     }
 

@@ -138,7 +138,12 @@ fn start_process_tree_cleanup(cleanup: ProcessTreeCleanup) {
             // Successful commands can still leave helpers alive briefly while `/proc` catches up
             // to the leader exit. Reuse a single worker thread for the retry window instead of
             // spawning one long-lived thread per command invocation.
-            let _ = linux_cleanup_dispatcher().send(cleanup);
+            if let Err(cleanup) = linux_cleanup_dispatcher().send(cleanup) {
+                cleanup.kill_tree();
+                report_linux_cleanup_dispatch_warning(
+                    "async retry dispatch unavailable; leaving cleanup at the synchronous best-effort pass",
+                );
+            }
         }
     }
 
@@ -245,6 +250,18 @@ fn report_linux_cleanup_warning(err: &std::io::Error) {
         *storage
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(err.to_string());
+    }
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn report_linux_cleanup_dispatch_warning(message: &str) {
+    eprintln!("secret-kit: linux cleanup retry unavailable: {message}");
+    #[cfg(test)]
+    {
+        let storage = LINUX_CLEANUP_LAST_WARNING.get_or_init(|| std::sync::Mutex::new(None));
+        *storage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(message.to_string());
     }
 }
 
@@ -751,6 +768,43 @@ mod retry_tests {
             "the first post-poison recovery should start exactly one worker"
         );
     }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[test]
+    fn start_process_tree_cleanup_reports_when_retry_dispatch_is_unavailable() {
+        let _guard = linux_cleanup_test_lock()
+            .lock()
+            .expect("linux cleanup test mutex poisoned");
+        linux_cleanup_dispatcher().reset_for_test();
+        force_linux_cleanup_worker_spawn_failures(1);
+        let _ = take_linux_cleanup_warning_for_test();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime");
+        let mut child = runtime
+            .block_on(async {
+                let mut command = tokio::process::Command::new("sh");
+                command.arg("-c").arg("exec sleep 5");
+                configure_command_for_process_tree(&mut command);
+                command.spawn()
+            })
+            .expect("spawn child");
+        let cleanup = ProcessTreeCleanup::new(&child).expect("capture cleanup");
+
+        start_process_tree_cleanup(cleanup);
+        runtime
+            .block_on(async { child.wait().await })
+            .expect("wait child after cleanup");
+
+        let warning = take_linux_cleanup_warning_for_test()
+            .expect("dispatch failure should emit an explicit warning");
+        assert!(
+            warning.contains("async retry dispatch unavailable"),
+            "{warning}"
+        );
+    }
 }
 
 fn apply_command_env(
@@ -1164,7 +1218,39 @@ fn resolve_program_on_path(program: &str, path: &OsStr) -> Option<PathBuf> {
 }
 
 fn trusted_command_search_directory(directory: PathBuf) -> Option<PathBuf> {
-    directory.is_absolute().then_some(directory)
+    if !directory.is_absolute() {
+        return None;
+    }
+
+    let canonical = std::fs::canonicalize(directory).ok()?;
+    is_trusted_command_search_directory(canonical.as_path()).then_some(canonical)
+}
+
+#[cfg(not(windows))]
+fn is_trusted_command_search_directory(directory: &Path) -> bool {
+    const TRUSTED_DIRECTORIES: &[&str] = &[
+        "/bin",
+        "/sbin",
+        "/usr/bin",
+        "/usr/sbin",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/opt/local/bin",
+        "/opt/local/sbin",
+        "/nix/var/nix/profiles/default/bin",
+        "/run/current-system/sw/bin",
+    ];
+
+    TRUSTED_DIRECTORIES
+        .iter()
+        .any(|candidate| directory == Path::new(candidate))
+}
+
+#[cfg(windows)]
+fn is_trusted_command_search_directory(directory: &Path) -> bool {
+    directory.is_absolute()
 }
 
 #[cfg(windows)]

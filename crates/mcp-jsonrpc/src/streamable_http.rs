@@ -1551,6 +1551,8 @@ mod tests {
 
     #[tokio::test]
     async fn streamable_http_reconnects_after_graceful_sse_eof() {
+        const TEST_STAGE_TIMEOUT: Duration = Duration::from_secs(10);
+
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind listener");
@@ -1575,6 +1577,9 @@ mod tests {
             .await
             .expect("write initial SSE headers");
             stage_tx.send("initial-sse-open").expect("send stage");
+            write_chunk(&mut initial_sse, b": heartbeat\n\n")
+                .await
+                .expect("write initial SSE comment");
             finish_chunked_response(&mut initial_sse)
                 .await
                 .expect("finish initial SSE response");
@@ -1623,18 +1628,18 @@ mod tests {
             .take_notifications()
             .expect("take notifications receiver");
 
-        let stage = tokio::time::timeout(Duration::from_secs(2), stage_rx.recv())
+        let stage = tokio::time::timeout(TEST_STAGE_TIMEOUT, stage_rx.recv())
             .await
             .expect("initial SSE stage should arrive before timeout")
             .expect("stage channel open");
         assert_eq!(stage, "initial-sse-open");
-        let stage = tokio::time::timeout(Duration::from_secs(5), stage_rx.recv())
+        let stage = tokio::time::timeout(TEST_STAGE_TIMEOUT, stage_rx.recv())
             .await
             .expect("reconnect SSE stage should arrive before timeout")
             .expect("stage channel open");
         assert_eq!(stage, "reconnected-sse-open");
 
-        let notification = tokio::time::timeout(Duration::from_secs(2), notifications.recv())
+        let notification = tokio::time::timeout(TEST_STAGE_TIMEOUT, notifications.recv())
             .await
             .expect("notification should arrive before timeout")
             .expect("notification stream open");

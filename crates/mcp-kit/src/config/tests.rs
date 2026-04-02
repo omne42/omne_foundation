@@ -1,5 +1,6 @@
 use super::*;
 use crate::ServerName;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[tokio::test]
@@ -189,9 +190,9 @@ async fn load_parses_valid_file() {
     let server = cfg.servers().get("rg").unwrap();
     assert_eq!(
         server.argv(),
-        &["mcp-rg".to_string(), "--stdio".to_string()]
+        Some(&["mcp-rg".to_string(), "--stdio".to_string()][..])
     );
-    assert!(server.env().contains_key("NO_COLOR"));
+    assert!(server.env().is_some_and(|env| env.contains_key("NO_COLOR")));
     assert!(server.stdout_log().is_none());
     assert!(server.unix_path().is_none());
 }
@@ -397,7 +398,7 @@ async fn load_parses_stdio_inherit_env() {
 
     let cfg = Config::load(dir.path(), None).await.unwrap();
     let server = cfg.servers().get("a").unwrap();
-    assert!(!server.inherit_env());
+    assert_eq!(server.inherit_env(), Some(false));
 }
 
 #[tokio::test]
@@ -572,7 +573,7 @@ async fn load_parses_unix_transport_and_resolves_relative_path() {
     let cfg = Config::load(dir.path(), None).await.unwrap();
     let server = cfg.servers().get("sock").unwrap();
     assert_eq!(server.transport(), Transport::Unix);
-    assert!(server.argv().is_empty());
+    assert_eq!(server.argv(), None);
     assert_eq!(
         server.unix_path().as_ref().unwrap(),
         &dir.path().join("./sock/mcp.sock")
@@ -609,15 +610,15 @@ async fn load_parses_streamable_http_transport() {
     let cfg = Config::load(dir.path(), None).await.unwrap();
     let server = cfg.servers().get("remote").unwrap();
     assert_eq!(server.transport(), Transport::StreamableHttp);
-    assert!(server.argv().is_empty());
+    assert_eq!(server.argv(), None);
     assert!(server.unix_path().is_none());
     assert_eq!(server.url(), Some("https://example.com/mcp"));
     assert!(server.sse_url().is_none());
     assert!(server.http_url().is_none());
     assert!(server.bearer_token_env_var().is_none());
-    assert!(server.http_headers().is_empty());
-    assert!(server.env_http_headers().is_empty());
-    assert!(server.env().is_empty());
+    assert!(server.http_headers().is_some_and(BTreeMap::is_empty));
+    assert!(server.env_http_headers().is_some_and(BTreeMap::is_empty));
+    assert_eq!(server.env(), None);
     assert!(server.stdout_log().is_none());
 }
 
@@ -651,7 +652,7 @@ async fn load_parses_streamable_http_transport_with_split_urls() {
     let cfg = Config::load(dir.path(), None).await.unwrap();
     let server = cfg.servers().get("remote").unwrap();
     assert_eq!(server.transport(), Transport::StreamableHttp);
-    assert!(server.argv().is_empty());
+    assert_eq!(server.argv(), None);
     assert!(server.unix_path().is_none());
     assert!(server.url().is_none());
     assert_eq!(server.sse_url(), Some("https://example.com/sse"));

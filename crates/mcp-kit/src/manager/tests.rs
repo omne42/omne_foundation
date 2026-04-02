@@ -2949,6 +2949,30 @@ async fn protocol_version_mismatch_is_cleared_after_matching_reconnect() {
     }
 }
 
+#[test]
+#[should_panic(expected = "server handler concurrency must be greater than zero")]
+fn with_server_handler_concurrency_rejects_zero() {
+    let _ = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_server_handler_concurrency(0);
+}
+
+#[test]
+#[should_panic(expected = "Manager::from_config requires a validated Config::client()")]
+fn from_config_rejects_invalid_client_config_in_all_builds() {
+    let config = Config::new(
+        crate::ClientConfig {
+            roots: Some(vec![crate::Root {
+                uri: String::new(),
+                name: Some("workspace".to_string()),
+            }]),
+            ..Default::default()
+        },
+        std::collections::BTreeMap::new(),
+    );
+
+    let _ = Manager::from_config(&config, "test-client", "0.0.0", Duration::from_secs(5));
+}
+
 #[tokio::test]
 async fn protocol_version_mismatch_is_cleared_when_reconnect_omits_protocol_version() {
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))

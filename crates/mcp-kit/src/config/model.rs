@@ -143,11 +143,6 @@ enum StreamableHttpUrls {
     Split { sse_url: String, http_url: String },
 }
 
-fn empty_kv_map() -> &'static BTreeMap<String, String> {
-    static EMPTY: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
-    EMPTY.get_or_init(BTreeMap::new)
-}
-
 fn is_reserved_streamable_http_header(header: &HeaderName) -> bool {
     is_reserved_streamable_http_transport_header(header.as_str())
 }
@@ -361,17 +356,31 @@ impl ServerConfig {
         Ok(())
     }
 
-    pub fn argv(&self) -> &[String] {
+    pub fn argv(&self) -> Option<&[String]> {
         match self {
-            Self::Stdio(cfg) => &cfg.argv,
-            _ => &[],
+            Self::Stdio(cfg) => Some(&cfg.argv),
+            _ => None,
         }
     }
 
-    pub fn inherit_env(&self) -> bool {
+    pub(crate) fn argv_required(&self) -> &[String] {
+        match self {
+            Self::Stdio(cfg) => &cfg.argv,
+            _ => unreachable!("argv_required called for non-stdio transport"),
+        }
+    }
+
+    pub fn inherit_env(&self) -> Option<bool> {
+        match self {
+            Self::Stdio(cfg) => Some(cfg.inherit_env),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn inherit_env_required(&self) -> bool {
         match self {
             Self::Stdio(cfg) => cfg.inherit_env,
-            _ => true,
+            _ => unreachable!("inherit_env_required called for non-stdio transport"),
         }
     }
 
@@ -426,24 +435,45 @@ impl ServerConfig {
         }
     }
 
-    pub fn http_headers(&self) -> &BTreeMap<String, String> {
+    pub fn http_headers(&self) -> Option<&BTreeMap<String, String>> {
+        match self {
+            Self::StreamableHttp(cfg) => Some(&cfg.http_headers),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn http_headers_required(&self) -> &BTreeMap<String, String> {
         match self {
             Self::StreamableHttp(cfg) => &cfg.http_headers,
-            _ => empty_kv_map(),
+            _ => unreachable!("http_headers_required called for non-streamable_http transport"),
         }
     }
 
-    pub fn env_http_headers(&self) -> &BTreeMap<String, String> {
+    pub fn env_http_headers(&self) -> Option<&BTreeMap<String, String>> {
+        match self {
+            Self::StreamableHttp(cfg) => Some(&cfg.env_http_headers),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn env_http_headers_required(&self) -> &BTreeMap<String, String> {
         match self {
             Self::StreamableHttp(cfg) => &cfg.env_http_headers,
-            _ => empty_kv_map(),
+            _ => unreachable!("env_http_headers_required called for non-streamable_http transport"),
         }
     }
 
-    pub fn env(&self) -> &BTreeMap<String, String> {
+    pub fn env(&self) -> Option<&BTreeMap<String, String>> {
+        match self {
+            Self::Stdio(cfg) => Some(&cfg.env),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn env_required(&self) -> &BTreeMap<String, String> {
         match self {
             Self::Stdio(cfg) => &cfg.env,
-            _ => empty_kv_map(),
+            _ => unreachable!("env_required called for non-stdio transport"),
         }
     }
 

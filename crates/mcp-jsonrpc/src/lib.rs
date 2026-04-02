@@ -511,7 +511,7 @@ impl ClientHandle {
     }
 
     pub(crate) async fn close_with_error(&self, reason: impl Into<String>, err: Error) {
-        self.close_with_error_priority(reason, err, CloseReasonPriority::Primary)
+        self.close_with_error_priority(reason, err, CloseReasonPriority::Diagnostic)
             .await;
     }
 
@@ -3353,6 +3353,25 @@ mod background_close_tests {
 
         handle.close_reason.set_for_test(
             CloseReasonPriority::Primary,
+            "streamable http notification failed: http error: 500",
+        );
+
+        assert_eq!(
+            handle.close_reason(),
+            Some("streamable http notification failed: http error: 500".to_string())
+        );
+    }
+
+    #[test]
+    fn diagnostic_close_reason_overrides_primary_reason() {
+        let handle = test_handle(false);
+        handle.close_reason.set_for_test(
+            CloseReasonPriority::Primary,
+            "request timed out after 5s while writing",
+        );
+
+        handle.close_reason.set_for_test(
+            CloseReasonPriority::Diagnostic,
             "streamable http notification failed: http error: 500",
         );
 

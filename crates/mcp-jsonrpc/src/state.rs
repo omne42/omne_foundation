@@ -8,6 +8,7 @@ use crate::{DiagnosticsOptions, Id};
 pub(crate) enum CloseReasonPriority {
     Fallback,
     Primary,
+    Diagnostic,
 }
 
 #[derive(Debug, Default)]

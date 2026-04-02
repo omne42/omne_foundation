@@ -437,7 +437,6 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(windows))]
     use std::path::PathBuf;
     #[cfg(not(windows))]
     use std::process::Command;

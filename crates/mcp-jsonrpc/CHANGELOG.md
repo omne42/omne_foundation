@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：`streamable_http` 的 graceful SSE EOF 重连现在带最小间隔、轻量抖动并按连续 EOF 指数回退，避免 flap 端点触发紧密重连风暴；session rollover 触发的主动 SSE 切换仍保持立即重连。
 - `mcp-jsonrpc`：移除了与当前 `streamable_http.request_timeout` 契约相反的旧回归测试，避免把“POST->SSE 可慢启动但不应被误判超时”的修复再次锁回错误行为。
 - `mcp-jsonrpc`：`streamable_http` 的 `request_timeout` 不再把 POST 响应头等待阶段当成超时边界；合法但启动较慢的 POST->SSE MCP 服务不会在返回 `text/event-stream` 之前被误判为 wait-timeout，而普通 JSON/error body 读取仍保持超时约束。
 - `mcp-jsonrpc`：`streamable_http` 的 SSE 桥接现在只接受 JSON-RPC object / batch array payload；单行垃圾文本或 JSON 标量会在 transport 边界直接 fail-closed，而不会再被写进内部 line-delimited JSON-RPC 通道。

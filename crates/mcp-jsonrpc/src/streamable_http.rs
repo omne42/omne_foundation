@@ -610,29 +610,11 @@ impl HttpPostBridge {
                 }
             }
 
-            // `req.send()` resolves once the HTTP response head arrives. Keeping the timeout here
-            // bounds POST setup and header arrival without truncating a long-lived SSE body after
-            // `text/event-stream` has been negotiated.
-            let send = req.send();
-            let resp = match request_timeout {
-                Some(timeout) => match tokio::time::timeout(timeout, send).await {
-                    Ok(resp) => resp,
-                    Err(_) => {
-                        if !emit_wait_timeout_from_line(
-                            &writer,
-                            &handle,
-                            line.as_ref(),
-                            "http request timed out".to_string(),
-                        )
-                        .await
-                        {
-                            return;
-                        }
-                        continue;
-                    }
-                },
-                None => send.await,
-            };
+            // Do not bound the initial POST response headers with `request_timeout`:
+            // a legitimate POST->SSE MCP server may take time before it can commit to
+            // `text/event-stream`, and once it does, that response is intentionally
+            // long-lived. We still bound non-SSE body reads below.
+            let resp = req.send().await;
             let resp = match resp {
                 Ok(resp) => resp,
                 Err(err) => {

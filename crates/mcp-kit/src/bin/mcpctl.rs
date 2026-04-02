@@ -168,6 +168,46 @@ fn resolve_cli_root(root: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     )
 }
 
+fn server_summary_json(name: &str, cfg: &mcp_kit::ServerConfig, show_argv: bool) -> Value {
+    let mut server = serde_json::json!({
+        "name": name,
+        "transport": cfg.transport(),
+    });
+
+    match cfg {
+        mcp_kit::ServerConfig::Stdio(stdio) => {
+            server["argv_program"] = serde_json::json!(stdio.argv().first());
+            server["argv_argc"] = serde_json::json!(stdio.argv().len());
+            server["inherit_env"] = serde_json::json!(stdio.inherit_env());
+            server["env_keys"] = serde_json::json!(stdio.env().keys().cloned().collect::<Vec<_>>());
+            server["stdout_log"] =
+                serde_json::json!(stdio.stdout_log().map(|log| serde_json::json!({
+                    "path": log.path.display().to_string(),
+                    "max_bytes_per_part": log.max_bytes_per_part,
+                    "max_parts": log.max_parts,
+                })));
+            if show_argv {
+                server["argv"] = serde_json::json!(stdio.argv());
+            }
+        }
+        mcp_kit::ServerConfig::Unix(unix) => {
+            server["unix_path"] = serde_json::json!(unix.unix_path().display().to_string());
+        }
+        mcp_kit::ServerConfig::StreamableHttp(http) => {
+            server["url"] = serde_json::json!(http.url());
+            server["sse_url"] = serde_json::json!(http.sse_url());
+            server["http_url"] = serde_json::json!(http.http_url());
+            server["bearer_token_env_var"] = serde_json::json!(http.bearer_token_env_var());
+            server["http_header_keys"] =
+                serde_json::json!(http.http_headers().keys().cloned().collect::<Vec<_>>());
+            server["env_http_header_keys"] =
+                serde_json::json!(http.env_http_headers().keys().cloned().collect::<Vec<_>>());
+        }
+    }
+
+    server
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -225,7 +265,9 @@ async fn main() -> anyhow::Result<()> {
         let risky_stdio = config
             .servers()
             .iter()
-            .filter(|(_, cfg)| cfg.transport() == mcp_kit::Transport::Stdio && cfg.inherit_env())
+            .filter(|(_, cfg)| {
+                cfg.transport() == mcp_kit::Transport::Stdio && cfg.inherit_env() == Some(true)
+            })
             .map(|(name, _)| name.as_str())
             .collect::<Vec<_>>();
         if !risky_stdio.is_empty() {
@@ -309,32 +351,7 @@ async fn main() -> anyhow::Result<()> {
             let servers = config
                 .servers()
                 .iter()
-                .map(|(name, cfg)| {
-                    let mut server = serde_json::json!({
-                        "name": name,
-                        "transport": cfg.transport(),
-                        "argv_program": cfg.argv().first(),
-                        "argv_argc": cfg.argv().len(),
-                        "inherit_env": cfg.inherit_env(),
-                        "unix_path": cfg.unix_path().map(|p| p.display().to_string()),
-                        "url": cfg.url(),
-                        "sse_url": cfg.sse_url(),
-                        "http_url": cfg.http_url(),
-                        "bearer_token_env_var": cfg.bearer_token_env_var(),
-                        "env_keys": cfg.env().keys().cloned().collect::<Vec<_>>(),
-                        "http_header_keys": cfg.http_headers().keys().cloned().collect::<Vec<_>>(),
-                        "env_http_header_keys": cfg.env_http_headers().keys().cloned().collect::<Vec<_>>(),
-                        "stdout_log": cfg.stdout_log().map(|log| serde_json::json!({
-                            "path": log.path.display().to_string(),
-                            "max_bytes_per_part": log.max_bytes_per_part,
-                            "max_parts": log.max_parts,
-                        })),
-                    });
-                    if cli.show_argv {
-                        server["argv"] = serde_json::json!(cfg.argv());
-                    }
-                    server
-                })
+                .map(|(name, cfg)| server_summary_json(name.as_str(), cfg, cli.show_argv))
                 .collect::<Vec<_>>();
 
             serde_json::json!({
@@ -431,6 +448,7 @@ mod tests {
     use super::resolve_cli_root;
     #[cfg(not(windows))]
     use anyhow::Result;
+    use serde_json::json;
 
     #[cfg(not(windows))]
     const CWD_UNAVAILABLE_HELPER_ENV: &str = "MCPCTL_CWD_UNAVAILABLE_HELPER";
@@ -516,5 +534,26 @@ mod tests {
                 .is_some_and(|io| io.kind() == std::io::ErrorKind::NotADirectory)
         }));
         Ok(())
+    }
+
+    #[test]
+    fn list_servers_summary_omits_unrelated_transport_defaults() {
+        let unix_cfg = mcp_kit::ServerConfig::unix(PathBuf::from("/tmp/mcp.sock"))
+            .expect("unix config should build");
+        let unix_summary = super::server_summary_json("unix", &unix_cfg, true);
+        assert_eq!(unix_summary["transport"], json!("unix"));
+        assert_eq!(unix_summary["unix_path"], json!("/tmp/mcp.sock"));
+        assert!(unix_summary.get("argv_argc").is_none());
+        assert!(unix_summary.get("inherit_env").is_none());
+        assert!(unix_summary.get("http_header_keys").is_none());
+
+        let http_cfg = mcp_kit::ServerConfig::streamable_http("https://example.com/mcp")
+            .expect("streamable http config should build");
+        let http_summary = super::server_summary_json("http", &http_cfg, true);
+        assert_eq!(http_summary["transport"], json!("streamable_http"));
+        assert_eq!(http_summary["url"], json!("https://example.com/mcp"));
+        assert!(http_summary.get("argv_argc").is_none());
+        assert!(http_summary.get("inherit_env").is_none());
+        assert!(http_summary.get("unix_path").is_none());
     }
 }

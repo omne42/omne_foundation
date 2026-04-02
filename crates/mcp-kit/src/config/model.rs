@@ -143,11 +143,6 @@ enum StreamableHttpUrls {
     Split { sse_url: String, http_url: String },
 }
 
-fn empty_kv_map() -> &'static BTreeMap<String, String> {
-    static EMPTY: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
-    EMPTY.get_or_init(BTreeMap::new)
-}
-
 fn is_reserved_streamable_http_header(header: &HeaderName) -> bool {
     is_reserved_streamable_http_transport_header(header.as_str())
 }
@@ -175,6 +170,30 @@ fn validate_streamable_http_url_syntax(url_field: &'static str, url: &str) -> cr
 }
 
 impl ServerConfig {
+    #[must_use]
+    pub fn stdio_config(&self) -> Option<&StdioServerConfig> {
+        match self {
+            Self::Stdio(cfg) => Some(cfg),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn unix_config(&self) -> Option<&UnixServerConfig> {
+        match self {
+            Self::Unix(cfg) => Some(cfg),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn streamable_http_config(&self) -> Option<&StreamableHttpServerConfig> {
+        match self {
+            Self::StreamableHttp(cfg) => Some(cfg),
+            _ => None,
+        }
+    }
+
     pub fn stdio(argv: Vec<String>) -> crate::Result<Self> {
         validate_argv(Transport::Stdio, &argv)?;
         Ok(Self::Stdio(StdioServerConfig {
@@ -361,17 +380,31 @@ impl ServerConfig {
         Ok(())
     }
 
-    pub fn argv(&self) -> &[String] {
+    pub fn argv(&self) -> Option<&[String]> {
         match self {
-            Self::Stdio(cfg) => &cfg.argv,
-            _ => &[],
+            Self::Stdio(cfg) => Some(&cfg.argv),
+            _ => None,
         }
     }
 
-    pub fn inherit_env(&self) -> bool {
+    pub(crate) fn argv_required(&self) -> &[String] {
+        match self {
+            Self::Stdio(cfg) => &cfg.argv,
+            _ => unreachable!("argv_required called for non-stdio transport"),
+        }
+    }
+
+    pub fn inherit_env(&self) -> Option<bool> {
+        match self {
+            Self::Stdio(cfg) => Some(cfg.inherit_env),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn inherit_env_required(&self) -> bool {
         match self {
             Self::Stdio(cfg) => cfg.inherit_env,
-            _ => true,
+            _ => unreachable!("inherit_env_required called for non-stdio transport"),
         }
     }
 
@@ -426,24 +459,45 @@ impl ServerConfig {
         }
     }
 
-    pub fn http_headers(&self) -> &BTreeMap<String, String> {
+    pub fn http_headers(&self) -> Option<&BTreeMap<String, String>> {
+        match self {
+            Self::StreamableHttp(cfg) => Some(&cfg.http_headers),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn http_headers_required(&self) -> &BTreeMap<String, String> {
         match self {
             Self::StreamableHttp(cfg) => &cfg.http_headers,
-            _ => empty_kv_map(),
+            _ => unreachable!("http_headers_required called for non-streamable_http transport"),
         }
     }
 
-    pub fn env_http_headers(&self) -> &BTreeMap<String, String> {
+    pub fn env_http_headers(&self) -> Option<&BTreeMap<String, String>> {
+        match self {
+            Self::StreamableHttp(cfg) => Some(&cfg.env_http_headers),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn env_http_headers_required(&self) -> &BTreeMap<String, String> {
         match self {
             Self::StreamableHttp(cfg) => &cfg.env_http_headers,
-            _ => empty_kv_map(),
+            _ => unreachable!("env_http_headers_required called for non-streamable_http transport"),
         }
     }
 
-    pub fn env(&self) -> &BTreeMap<String, String> {
+    pub fn env(&self) -> Option<&BTreeMap<String, String>> {
+        match self {
+            Self::Stdio(cfg) => Some(&cfg.env),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn env_required(&self) -> &BTreeMap<String, String> {
         match self {
             Self::Stdio(cfg) => &cfg.env,
-            _ => empty_kv_map(),
+            _ => unreachable!("env_required called for non-stdio transport"),
         }
     }
 
@@ -540,6 +594,76 @@ impl ServerConfig {
                 Ok(())
             }
         }
+    }
+}
+
+impl StdioServerConfig {
+    #[must_use]
+    pub fn argv(&self) -> &[String] {
+        &self.argv
+    }
+
+    #[must_use]
+    pub fn inherit_env(&self) -> bool {
+        self.inherit_env
+    }
+
+    #[must_use]
+    pub fn env(&self) -> &BTreeMap<String, String> {
+        &self.env
+    }
+
+    #[must_use]
+    pub fn stdout_log(&self) -> Option<&StdoutLogConfig> {
+        self.stdout_log.as_ref()
+    }
+}
+
+impl UnixServerConfig {
+    #[must_use]
+    pub fn unix_path(&self) -> &Path {
+        self.unix_path.as_path()
+    }
+}
+
+impl StreamableHttpServerConfig {
+    #[must_use]
+    pub fn url(&self) -> Option<&str> {
+        match &self.urls {
+            StreamableHttpUrls::Single { url } => Some(url.as_str()),
+            StreamableHttpUrls::Split { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn sse_url(&self) -> Option<&str> {
+        match &self.urls {
+            StreamableHttpUrls::Single { .. } => None,
+            StreamableHttpUrls::Split { sse_url, .. } => Some(sse_url.as_str()),
+        }
+    }
+
+    #[must_use]
+    pub fn http_url(&self) -> Option<&str> {
+        match &self.urls {
+            StreamableHttpUrls::Single { .. } => None,
+            StreamableHttpUrls::Split { http_url, .. } => Some(http_url.as_str()),
+        }
+    }
+
+    #[must_use]
+    pub fn bearer_token_env_var(&self) -> Option<&str> {
+        self.bearer_token_env_var.as_deref()
+    }
+
+    #[must_use]
+    pub fn http_headers(&self) -> &BTreeMap<String, String> {
+        &self.http_headers
+    }
+
+    #[must_use]
+    pub fn env_http_headers(&self) -> &BTreeMap<String, String> {
+        &self.env_http_headers
     }
 }
 

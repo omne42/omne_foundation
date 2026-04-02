@@ -16,7 +16,7 @@ pub(super) fn validate_streamable_http_config(
 
     validate_streamable_http_url_untrusted(policy, server_name, url_field, url)?;
 
-    for header in server_cfg.http_headers().keys() {
+    for header in server_cfg.http_headers_required().keys() {
         if is_untrusted_sensitive_http_header(header) {
             anyhow::bail!(
                 "refusing to send sensitive http header in untrusted mode: {server_name} header={header} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"

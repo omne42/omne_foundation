@@ -2,15 +2,11 @@
 
 ## Unreleased
 
-- Expose `http-kit::Error` as a stable `error-kit::ErrorRecord` mapping so callers can key off machine-readable error metadata instead of `anyhow` display text.
-- Make `allow_localhost=true` consistent across syntax and DNS validation by continuing to allow localhost-style DNS answers for `localhost`/`localhost.localdomain`/`*.localhost` (including host-local `0.0.0.0/8` answers used by some resolvers), while keeping `allow_private_ips=true` scoped to actual private-address ranges instead of also opening loopback or other non-private special-use targets.
-- Drain small successful responses even when `Content-Length` is missing, so chunked/unknown-length 2xx bodies still get a bounded best-effort connection-reuse path instead of forcing avoidable socket churn.
-- Keep untrusted outbound DNS checks fail-closed for hostname targets even when `allow_private_ips=true`, so DNS answers that land on always-disallowed addresses (for example `0.0.0.0`) are still rejected instead of bypassing the hostname path.
-- Break `select_http_client_with_options(...)` by removing the unused `base_client` parameter, so the public API no longer pretends to preserve opaque `reqwest::Client` state that it must rebuild from `HttpClientOptions` anyway.
 - Remove the dead default pinned-client cache/expiry branch and keep only per-key build locking plus DNS re-resolution, so the public-IP pinned path now matches its actual always-rebuild behavior without carrying misleading cache state.
 - Replace process-global pinned-client cache/build-lock/DNS state with explicit per-`HttpClientProfile` shared state, and keep `select_http_client_with_options(...)` isolated so unrelated callers no longer contend through hidden process-wide HTTP state.
 - Rejoin `http-kit` to workspace dependency/lint governance via workspace-managed dependencies and `[lints] workspace = true`.
-- Fix `select_http_client_with_options(...)` so `enforce_public_ip=false` still rebuilds the unpinned client from `HttpClientOptions` instead of silently discarding the documented option set in favor of the caller's opaque base client.
+- Fix `select_http_client_with_options(...)` so `enforce_public_ip=false` reuses the caller-provided `base_client` instead of silently discarding it and honoring a different contract than the function signature advertises.
+- Fix `validate_untrusted_outbound_url_dns(...)` so `allow_private_ips=true` still rejects loopback and always-disallowed resolved addresses instead of short-circuiting DNS validation entirely.
 - Narrow `allow_localhost` so it only exempts loopback-style hostnames (`localhost`, `localhost.localdomain`, `*.localhost`) instead of also allowing `*.local`, `*.localdomain`, or single-label hosts.
 - Require exact IP-literal matches in `allowed_hosts` so malformed suffix entries such as `2.3.4` can no longer allow `1.2.3.4`.
 - Re-resolve DNS on every public-IP-pinned client selection instead of reusing a cross-request pinned client cache entry, so DNS failover or rebinding cannot keep routing traffic to a stale address set after connection errors.

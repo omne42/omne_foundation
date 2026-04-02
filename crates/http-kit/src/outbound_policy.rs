@@ -74,12 +74,12 @@ pub fn validate_untrusted_outbound_url(
         });
     }
 
-    if let Ok(ip) = host_for_ip.parse::<IpAddr>()
-        && is_ip_disallowed_for_host(policy, host, ip)
-    {
-        return Err(UntrustedOutboundError::NonGlobalIpNotAllowed {
-            host: host.to_string(),
-        });
+    if let Ok(ip) = host_for_ip.parse::<IpAddr>() {
+        if is_ip_disallowed_for_host(policy, host, ip) {
+            return Err(UntrustedOutboundError::NonGlobalIpNotAllowed {
+                host: host.to_string(),
+            });
+        }
     }
 
     Ok(())
@@ -129,9 +129,7 @@ pub async fn validate_untrusted_outbound_url_dns(
         }
     };
 
-    validate_resolved_addrs(policy, host, addrs)?;
-
-    Ok(())
+    validate_resolved_addrs(policy, host, addrs)
 }
 
 fn validate_resolved_addrs(
@@ -153,8 +151,10 @@ fn validate_resolved_addrs(
 }
 
 fn is_ip_disallowed_for_host(policy: &UntrustedOutboundPolicy, host: &str, ip: IpAddr) -> bool {
+    let _ = host;
+
     if is_localhost_resolution_ip(ip) {
-        return !(policy.allow_localhost && is_loopback_hostname(host));
+        return true;
     }
 
     if is_always_disallowed_ip(ip) {
@@ -342,52 +342,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dns_check_allows_loopback_localhost_when_explicitly_enabled() {
+    async fn dns_check_blocks_localhost_without_private_ip_override() {
         let policy = UntrustedOutboundPolicy {
             allow_localhost: true,
             dns_check: true,
             ..Default::default()
         };
         let url = reqwest::Url::parse("https://localhost/mcp").expect("parse url");
-        validate_untrusted_outbound_url_dns(&policy, &url)
+        let err = validate_untrusted_outbound_url_dns(&policy, &url)
             .await
-            .expect("loopback localhost should remain allowed after dns validation");
-    }
-
-    #[test]
-    fn allow_localhost_does_not_allow_non_loopback_dns_results() {
-        let policy = UntrustedOutboundPolicy {
-            allow_localhost: true,
-            ..Default::default()
-        };
-
-        let err = validate_resolved_addrs(
-            &policy,
-            "localhost",
-            [std::net::SocketAddr::from(([192, 168, 1, 10], 443))],
-        )
-        .expect_err("localhost should only allow loopback dns results");
-
+            .expect_err("expected dns rejection");
         assert!(matches!(
             err,
-            UntrustedOutboundError::ResolvedToNonGlobalIp { ip, .. }
-                if ip == IpAddr::from([192, 168, 1, 10])
+            UntrustedOutboundError::ResolvedToNonGlobalIp { .. }
         ));
-    }
-
-    #[test]
-    fn allow_localhost_allows_host_local_ipv4_dns_results() {
-        let policy = UntrustedOutboundPolicy {
-            allow_localhost: true,
-            ..Default::default()
-        };
-
-        validate_resolved_addrs(
-            &policy,
-            "localhost",
-            [std::net::SocketAddr::from(([0, 0, 0, 1], 443))],
-        )
-        .expect("localhost should allow host-local 0.0.0.0/8 answers used by some resolvers");
     }
 
     #[tokio::test]
@@ -404,9 +372,8 @@ mod tests {
             .expect("fail-open dns policy");
     }
 
-    #[tokio::test]
-    async fn dns_check_with_private_ip_override_still_rejects_loopback_results_for_non_localhost_hosts()
-     {
+    #[test]
+    fn dns_results_with_private_ip_override_still_reject_loopback_for_non_localhost_hosts() {
         let policy = UntrustedOutboundPolicy {
             allow_private_ips: true,
             ..Default::default()
@@ -418,6 +385,27 @@ mod tests {
             [std::net::SocketAddr::from(([127, 0, 0, 1], 443))],
         )
         .expect_err("private-ip override must not allow loopback dns results");
+
+        assert!(matches!(
+            err,
+            UntrustedOutboundError::ResolvedToNonGlobalIp { ip, .. }
+                if ip == IpAddr::from([127, 0, 0, 1])
+        ));
+    }
+
+    #[test]
+    fn dns_results_reject_loopback_even_for_localhost_hosts() {
+        let policy = UntrustedOutboundPolicy {
+            allow_localhost: true,
+            ..Default::default()
+        };
+
+        let err = validate_resolved_addrs(
+            &policy,
+            "localhost",
+            [std::net::SocketAddr::from(([127, 0, 0, 1], 443))],
+        )
+        .expect_err("dns validation must still reject loopback answers");
 
         assert!(matches!(
             err,

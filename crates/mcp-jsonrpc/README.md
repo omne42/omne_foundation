@@ -35,7 +35,6 @@
 - stdout 日志旋转落盘
 - streamable HTTP 的 SSE + POST 桥接
 - transport 级公开错误的稳定语义映射
-- 明确的 fail-closed 关闭语义；无 Tokio runtime 的异常收尾不会偷偷拉后台 runtime
 
 不覆盖：
 
@@ -46,11 +45,11 @@
 ## 结构设计
 
 - `src/lib.rs`
-  - client 主体、消息收发循环和组合根
-- `src/transport.rs`
-  - transport 选项、limits、stdout log 配置
-- `src/error.rs`
-  - JSON-RPC transport 公开错误边界与稳定分类
+  - client 主体
+  - transport 选项
+  - limits
+  - 错误类型
+  - 核心读写循环
 - `src/stdout_log.rs`
   - stdout 分段日志
 - `src/streamable_http.rs`

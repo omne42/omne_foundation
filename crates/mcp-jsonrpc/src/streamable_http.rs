@@ -18,18 +18,10 @@ use tokio_util::io::StreamReader;
 
 use crate::{Client, ClientHandle, Error, ProtocolErrorKind, SpawnOptions, StreamableHttpOptions};
 
-const MCP_SESSION_ID_HEADER: &str = "mcp-session-id";
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SseWakeReason {
     Connect,
     SessionChanged,
-}
-
-fn is_reserved_streamable_http_header(header: &reqwest::header::HeaderName) -> bool {
-    header == reqwest::header::ACCEPT
-        || header == reqwest::header::CONTENT_TYPE
-        || header.as_str().eq_ignore_ascii_case(MCP_SESSION_ID_HEADER)
 }
 
 fn ends_with_ignore_ascii_case(haystack: &str, suffix: &str) -> bool {
@@ -141,57 +133,6 @@ fn jsonrpc_request_id_from_line(line: &[u8]) -> Result<Option<crate::Id>, serde_
 const SSE_EVENT_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 const HTTP_RESPONSE_INITIAL_CAP_BYTES: usize = 64 * 1024;
 const HTTP_RESPONSE_UNKNOWN_LENGTH_INITIAL_CAP_BYTES: usize = 4 * 1024;
-const SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS: u64 = 100;
-const SSE_GRACEFUL_EOF_RECONNECT_MAX_DELAY_MS: u64 = 1_000;
-const SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS: u64 = 25;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SseReconnectReason {
-    GracefulEof,
-    SessionChanged,
-}
-
-#[derive(Default)]
-struct SseReconnectBackoff {
-    graceful_eof_streak: u32,
-}
-
-impl SseReconnectBackoff {
-    fn delay_for(&mut self, reason: SseReconnectReason) -> Option<Duration> {
-        match reason {
-            SseReconnectReason::SessionChanged => {
-                self.graceful_eof_streak = 0;
-                None
-            }
-            SseReconnectReason::GracefulEof => {
-                let shift = self.graceful_eof_streak.min(4);
-                self.graceful_eof_streak = self.graceful_eof_streak.saturating_add(1);
-                let base_delay = (SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS << shift)
-                    .min(SSE_GRACEFUL_EOF_RECONNECT_MAX_DELAY_MS);
-                let jitter = sse_reconnect_jitter_millis();
-                Some(Duration::from_millis(
-                    base_delay
-                        .saturating_add(jitter)
-                        .min(SSE_GRACEFUL_EOF_RECONNECT_MAX_DELAY_MS),
-                ))
-            }
-        }
-    }
-}
-
-fn sse_reconnect_jitter_millis() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    if SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS == 0 {
-        return 0;
-    }
-
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| u64::from(duration.subsec_nanos()))
-        .unwrap_or(0);
-    nanos % (SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS + 1)
-}
 
 impl Client {
     pub async fn connect_streamable_http(url: &str) -> Result<Self, Error> {
@@ -306,9 +247,6 @@ impl Client {
         if connect_timeout.is_some() || request_timeout.is_some() {
             crate::ensure_tokio_time_driver("Client::connect_streamable_http*_with_options")?;
         }
-        crate::ensure_tokio_time_driver(
-            "Client::connect_streamable_http*_with_options SSE reconnect backoff",
-        )?;
 
         let mut headers = reqwest::header::HeaderMap::new();
         for (key, value) in http_options.headers {
@@ -318,15 +256,6 @@ impl Client {
                     format!("invalid http header name: {key}"),
                 )
             })?;
-            if is_reserved_streamable_http_header(&name) {
-                return Err(Error::protocol(
-                    ProtocolErrorKind::InvalidInput,
-                    format!(
-                        "http header is reserved by streamable_http transport: {}",
-                        name.as_str()
-                    ),
-                ));
-            }
             let value = reqwest::header::HeaderValue::from_str(&value).map_err(|_| {
                 Error::protocol(
                     ProtocolErrorKind::InvalidInput,
@@ -422,7 +351,6 @@ impl Client {
         let sse_task = tokio::spawn(async move {
             let mut wake_rx = sse_wake_rx;
             let mut current_resp = sse_resp;
-            let mut reconnect_backoff = SseReconnectBackoff::default();
 
             loop {
                 let resp = match current_resp.take() {
@@ -469,7 +397,7 @@ impl Client {
                     }
                 };
 
-                let reconnect_reason = {
+                let reconnect = {
                     let writer = writer_sse.clone();
                     let mut pump_fut =
                         std::pin::pin!(pump_sse_response(resp, writer, max_message_bytes));
@@ -480,7 +408,7 @@ impl Client {
                                 Ok(()) => {
                                     // Treat graceful SSE EOF as a recoverable read-side event:
                                     // reconnect instead of tearing down the whole transport.
-                                    break Some(SseReconnectReason::GracefulEof);
+                                    break true;
                                 }
                                 Err(err) => {
                                     close_post_bridge(
@@ -497,7 +425,7 @@ impl Client {
                                     Some(SseWakeReason::SessionChanged) => {
                                         // Exiting this scope drops the stale SSE pump before the
                                         // reconnect path selects a new socket.
-                                        break Some(SseReconnectReason::SessionChanged);
+                                        break true;
                                     }
                                     Some(SseWakeReason::Connect) => {}
                                     None => {
@@ -527,11 +455,8 @@ impl Client {
                     }
                 };
 
-                let Some(reconnect_reason) = reconnect_reason else {
+                if !reconnect {
                     continue;
-                };
-                if let Some(delay) = reconnect_backoff.delay_for(reconnect_reason) {
-                    tokio::time::sleep(delay).await;
                 }
 
                 let sse_client = match http_client_profile_sse
@@ -668,11 +593,26 @@ impl HttpPostBridge {
                 }
             }
 
-            // Do not bound the initial POST response headers with `request_timeout`:
-            // a legitimate POST->SSE MCP server may take time before it can commit to
-            // `text/event-stream`, and once it does, that response is intentionally
-            // long-lived. We still bound non-SSE body reads below.
-            let resp = req.send().await;
+            let send = req.send();
+            let resp = match request_timeout {
+                Some(timeout) => match tokio::time::timeout(timeout, send).await {
+                    Ok(resp) => resp,
+                    Err(_) => {
+                        if !emit_wait_timeout_from_line(
+                            &writer,
+                            &handle,
+                            line.as_ref(),
+                            "http request timed out".to_string(),
+                        )
+                        .await
+                        {
+                            return;
+                        }
+                        continue;
+                    }
+                },
+                None => send.await,
+            };
             let resp = match resp {
                 Ok(resp) => resp,
                 Err(err) => {
@@ -1039,13 +979,7 @@ async fn close_post_bridge(
     handle: &ClientHandle,
     reason: impl Into<String>,
 ) {
-    let reason = reason.into();
-    handle
-        .close_with_error(
-            reason.clone(),
-            crate::Error::protocol(crate::ProtocolErrorKind::Closed, reason),
-        )
-        .await;
+    handle.close_with_reason(reason.into()).await;
     let mut writer = writer.lock().await;
     let _ = writer.shutdown().await; // pre-commit: allow-let-underscore
     drop(writer);
@@ -1202,25 +1136,18 @@ async fn flush_sse_event_data(
 }
 
 fn normalize_sse_event_data_for_json_line(data: &[u8]) -> Result<Vec<u8>, io::Error> {
-    let value = serde_json::from_slice::<Value>(data).map_err(|err| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("sse event payload is not valid json: {err}"),
-        )
-    })?;
-    if !matches!(value, Value::Object(_) | Value::Array(_)) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "sse event payload must be a json-rpc object or batch array",
-        ));
+    if data.iter().any(|byte| matches!(byte, b'\n' | b'\r')) {
+        if let Ok(value) = serde_json::from_slice::<Value>(data) {
+            return serde_json::to_vec(&value).map_err(|err| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("serialize sse event payload failed: {err}"),
+                )
+            });
+        }
     }
 
-    serde_json::to_vec(&value).map_err(|err| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("serialize sse event payload failed: {err}"),
-        )
-    })
+    Ok(data.to_vec())
 }
 
 async fn write_json_line(
@@ -1309,39 +1236,6 @@ mod tests {
         assert!(missing.is_none());
     }
 
-    #[tokio::test]
-    async fn connect_streamable_http_rejects_transport_reserved_headers() {
-        for header in ["accept", "content-type", "mcp-session-id"] {
-            let mut options = StreamableHttpOptions::default();
-            options
-                .headers
-                .insert(header.to_string(), "override".to_string());
-
-            let err = match Client::connect_streamable_http_with_options(
-                "https://example.com/mcp",
-                options,
-                SpawnOptions::default(),
-            )
-            .await
-            {
-                Ok(_) => panic!("reserved transport header should be rejected"),
-                Err(err) => err,
-            };
-            assert!(matches!(
-                err,
-                Error::Protocol(crate::ProtocolError {
-                    kind: ProtocolErrorKind::InvalidInput,
-                    ..
-                })
-            ));
-            assert!(
-                err.to_string()
-                    .contains("http header is reserved by streamable_http transport"),
-                "{err}"
-            );
-        }
-    }
-
     #[test]
     fn jsonrpc_request_id_accepts_large_unsigned_numeric_ids() {
         let payload = format!(r#"{{"jsonrpc":"2.0","id":{}}}"#, u64::MAX);
@@ -1382,65 +1276,6 @@ mod tests {
     fn body_preview_json_returns_none_for_zero_limit() {
         let body = b"{\"large\":true}";
         assert!(body_preview_json(body, 0).is_none());
-    }
-
-    #[test]
-    fn sse_reconnect_backoff_applies_min_interval_jitter_and_reset() {
-        let mut backoff = SseReconnectBackoff::default();
-
-        let first = backoff
-            .delay_for(SseReconnectReason::GracefulEof)
-            .expect("graceful eof should reconnect");
-        assert!(
-            first >= Duration::from_millis(SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS),
-            "first reconnect delay should honor the minimum interval: {first:?}"
-        );
-        assert!(
-            first
-                <= Duration::from_millis(
-                    SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS
-                        + SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS
-                ),
-            "first reconnect delay should stay within the jitter window: {first:?}"
-        );
-
-        let second = backoff
-            .delay_for(SseReconnectReason::GracefulEof)
-            .expect("second graceful eof should reconnect");
-        assert!(
-            second >= Duration::from_millis(SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS * 2),
-            "second reconnect delay should back off exponentially: {second:?}"
-        );
-        assert!(
-            second
-                <= Duration::from_millis(
-                    (SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS * 2)
-                        + SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS
-                ),
-            "second reconnect delay should stay within the jitter window: {second:?}"
-        );
-
-        let session_change = backoff.delay_for(SseReconnectReason::SessionChanged);
-        assert_eq!(
-            session_change, None,
-            "session rollover reconnect should stay immediate"
-        );
-
-        let reset = backoff
-            .delay_for(SseReconnectReason::GracefulEof)
-            .expect("graceful eof after session rollover should reconnect");
-        assert!(
-            reset >= Duration::from_millis(SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS),
-            "session rollover should reset the EOF streak: {reset:?}"
-        );
-        assert!(
-            reset
-                <= Duration::from_millis(
-                    SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS
-                        + SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS
-                ),
-            "reset reconnect delay should return to the base jitter window: {reset:?}"
-        );
     }
 
     #[tokio::test]
@@ -1496,22 +1331,6 @@ mod tests {
             normalized,
             br#"{"id":1,"jsonrpc":"2.0","result":{"ok":true}}"#
         );
-    }
-
-    #[test]
-    fn normalize_sse_event_data_rejects_non_json_payloads() {
-        let err = normalize_sse_event_data_for_json_line(b"not-json")
-            .expect_err("non-json sse payload should be rejected");
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(err.to_string().contains("not valid json"));
-    }
-
-    #[test]
-    fn normalize_sse_event_data_rejects_json_scalars() {
-        let err = normalize_sse_event_data_for_json_line(br#""still-not-jsonrpc""#)
-            .expect_err("json scalar sse payload should be rejected");
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(err.to_string().contains("json-rpc object or batch array"));
     }
 
     #[tokio::test]
@@ -1588,7 +1407,7 @@ mod tests {
 
         let mut out = Vec::new();
         capture_side.read_to_end(&mut out).await?;
-        assert_eq!(out, b"{\"jsonrpc\":\"2.0\",\"method\":\"demo/notify\"}\n");
+        assert_eq!(out, b" {\"jsonrpc\":\"2.0\",\"method\":\"demo/notify\"}\n");
         Ok(())
     }
 
@@ -1732,9 +1551,6 @@ mod tests {
 
     #[tokio::test]
     async fn streamable_http_reconnects_after_graceful_sse_eof() {
-        const TEST_STAGE_TIMEOUT: Duration = Duration::from_secs(10);
-        const MIN_RECONNECT_DELAY: Duration = Duration::from_millis(80);
-
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind listener");
@@ -1759,21 +1575,12 @@ mod tests {
             .await
             .expect("write initial SSE headers");
             stage_tx.send("initial-sse-open").expect("send stage");
-            write_chunk(&mut initial_sse, b": heartbeat\n\n")
-                .await
-                .expect("write initial SSE comment");
-            let eof_closed_at = std::time::Instant::now();
             finish_chunked_response(&mut initial_sse)
                 .await
                 .expect("finish initial SSE response");
             drop(initial_sse);
 
             let (mut reconnected_sse, _) = listener.accept().await.expect("accept reconnect SSE");
-            assert!(
-                eof_closed_at.elapsed() >= MIN_RECONNECT_DELAY,
-                "graceful EOF reconnect happened too quickly: {:?}",
-                eof_closed_at.elapsed()
-            );
             let reconnect_request = read_http_request(&mut reconnected_sse)
                 .await
                 .expect("read reconnect GET");
@@ -1816,18 +1623,18 @@ mod tests {
             .take_notifications()
             .expect("take notifications receiver");
 
-        let stage = tokio::time::timeout(TEST_STAGE_TIMEOUT, stage_rx.recv())
+        let stage = tokio::time::timeout(Duration::from_secs(2), stage_rx.recv())
             .await
             .expect("initial SSE stage should arrive before timeout")
             .expect("stage channel open");
         assert_eq!(stage, "initial-sse-open");
-        let stage = tokio::time::timeout(TEST_STAGE_TIMEOUT, stage_rx.recv())
+        let stage = tokio::time::timeout(Duration::from_secs(2), stage_rx.recv())
             .await
             .expect("reconnect SSE stage should arrive before timeout")
             .expect("stage channel open");
         assert_eq!(stage, "reconnected-sse-open");
 
-        let notification = tokio::time::timeout(TEST_STAGE_TIMEOUT, notifications.recv())
+        let notification = tokio::time::timeout(Duration::from_secs(2), notifications.recv())
             .await
             .expect("notification should arrive before timeout")
             .expect("notification stream open");

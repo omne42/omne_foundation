@@ -1406,6 +1406,101 @@ async fn streamable_http_post_sse_is_not_bounded_by_request_timeout() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streamable_http_post_sse_still_requires_headers_before_request_timeout() {
+    let Some(listener) = bind_loopback_listener_or_skip().await else {
+        return;
+    };
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => return,
+            };
+            tokio::spawn(async move {
+                let Some((req, body)) = read_http_request(&mut socket).await else {
+                    return;
+                };
+
+                match (req.method.as_str(), req.path.as_str()) {
+                    ("GET", "/mcp") => {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                    }
+                    ("POST", "/mcp") => {
+                        let parsed: serde_json::Value = match serde_json::from_slice(&body) {
+                            Ok(v) => v,
+                            Err(_) => return,
+                        };
+                        let id = parsed.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                        let response = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": { "ok": true },
+                        });
+                        let response = serde_json::to_vec(&response).unwrap();
+
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                        let _ = socket.flush().await;
+
+                        let mut sse = Vec::new();
+                        sse.extend_from_slice(b"data: ");
+                        sse.extend_from_slice(&response);
+                        sse.extend_from_slice(b"\n\n");
+                        sse.extend_from_slice(b"data: [DONE]\n\n");
+                        let _ = socket.write_all(&sse).await;
+                        let _ = socket.flush().await;
+                    }
+                    _ => {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                    }
+                }
+            });
+        }
+    });
+
+    let url = format!("http://{addr}/mcp");
+    let client = mcp_jsonrpc::Client::connect_streamable_http_with_options(
+        &url,
+        mcp_jsonrpc::StreamableHttpOptions {
+            request_timeout: Some(Duration::from_millis(50)),
+            ..Default::default()
+        },
+        mcp_jsonrpc::SpawnOptions::default(),
+    )
+    .await
+    .expect("connect streamable http");
+
+    let err = client
+        .request("ping", serde_json::json!({}))
+        .await
+        .expect_err("request should time out before SSE headers arrive");
+    match err {
+        mcp_jsonrpc::Error::Protocol(protocol) => {
+            assert_eq!(protocol.kind, mcp_jsonrpc::ProtocolErrorKind::WaitTimeout);
+            assert!(protocol.message.contains("timed out"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    drop(client);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn streamable_http_bridges_unexpected_content_type_to_jsonrpc_error() {
     let Some(listener) = bind_loopback_listener_or_skip().await else {
         return;

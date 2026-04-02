@@ -49,6 +49,11 @@ pub struct StreamableHttpOptions {
     pub headers: HashMap<String, String>,
     pub enforce_public_ip: bool,
     pub connect_timeout: Option<Duration>,
+    /// Bounds POST request setup, waiting for the initial HTTP response, and non-SSE body reads.
+    ///
+    /// Once a POST has successfully returned `text/event-stream` response headers, the remaining
+    /// SSE body is pumped without this timeout. Use a different upper bound if callers need to cap
+    /// total end-to-end streaming duration.
     pub request_timeout: Option<Duration>,
     pub follow_redirects: bool,
     pub error_body_preview_bytes: usize,

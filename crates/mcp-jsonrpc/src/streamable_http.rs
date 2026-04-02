@@ -610,6 +610,9 @@ impl HttpPostBridge {
                 }
             }
 
+            // `req.send()` resolves once the HTTP response head arrives. Keeping the timeout here
+            // bounds POST setup and header arrival without truncating a long-lived SSE body after
+            // `text/event-stream` has been negotiated.
             let send = req.send();
             let resp = match request_timeout {
                 Some(timeout) => match tokio::time::timeout(timeout, send).await {

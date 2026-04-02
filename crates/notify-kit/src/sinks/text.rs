@@ -147,15 +147,14 @@ fn format_event_text_parts_limited(
     }
 
     if include_title {
-        let rendered_title = event.title();
-        let title = truncate_chars_cow(rendered_title.as_ref(), limits.max_title_chars);
+        let title = truncate_chars_cow(&event.title, limits.max_title_chars);
         out.push_str(title.as_ref());
         if out.is_full() {
             return out.finish();
         }
     }
 
-    if let Some(body) = event.body() {
+    if let Some(body) = event.body.as_deref() {
         let body = body.trim();
         if !body.is_empty() {
             if !out.is_empty() {
@@ -176,7 +175,7 @@ fn format_event_text_parts_limited(
         }
     }
 
-    for (idx, (k, v)) in event.tags().enumerate() {
+    for (idx, (k, v)) in event.tags.iter().enumerate() {
         if idx >= limits.max_tags || out.is_full() {
             break;
         }
@@ -199,35 +198,17 @@ fn format_event_text_parts_limited(
         if out.is_full() {
             break;
         }
-        let value = truncate_chars_cow(v.as_ref(), limits.max_tag_value_chars);
+        let value = truncate_chars_cow(v, limits.max_tag_value_chars);
         out.push_str(value.as_ref());
     }
 
     out.finish()
 }
 
-#[cfg(any(
-    test,
-    feature = "all-sinks",
-    feature = "dingtalk",
-    feature = "discord",
-    feature = "feishu",
-    feature = "generic-webhook",
-    feature = "github",
-    feature = "slack",
-    feature = "telegram",
-    feature = "wecom"
-))]
 pub(crate) fn format_event_text_limited(event: &Event, limits: TextLimits) -> String {
     format_event_text_parts_limited(event, limits, true)
 }
 
-#[cfg(any(
-    feature = "all-sinks",
-    feature = "bark",
-    feature = "pushplus",
-    feature = "serverchan"
-))]
 pub(crate) fn format_event_body_and_tags_limited(event: &Event, limits: TextLimits) -> String {
     format_event_text_parts_limited(event, limits, false)
 }
@@ -288,16 +269,6 @@ fn truncate_chars_cow(input: &str, max_chars: usize) -> Cow<'_, str> {
     Cow::Borrowed(&input[..end])
 }
 
-#[cfg(any(
-    test,
-    feature = "all-sinks",
-    feature = "bark",
-    feature = "feishu",
-    feature = "pushplus",
-    feature = "serverchan",
-    feature = "slack",
-    feature = "telegram"
-))]
 pub(crate) fn truncate_chars(input: &str, max_chars: usize) -> String {
     truncate_chars_cow(input, max_chars).into_owned()
 }

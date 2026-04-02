@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::Event;
-use crate::NotifySecret;
+use crate::SecretString;
 use crate::sinks::text::{TextLimits, format_event_body_and_tags_limited, truncate_chars};
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
@@ -9,14 +9,13 @@ use http_kit::{
     parse_and_validate_https_url_basic, read_json_body_after_http_success, redact_url,
     send_reqwest, validate_url_path_prefix,
 };
-use secret_kit::SecretString;
 
 const SERVERCHAN_TURBO_ALLOWED_HOSTS: [&str; 1] = ["sctapi.ftqq.com"];
 
 #[non_exhaustive]
 #[derive(Clone)]
 pub struct ServerChanConfig {
-    pub send_key: NotifySecret,
+    pub send_key: SecretString,
     pub timeout: Duration,
     pub max_chars: usize,
     pub enforce_public_ip: bool,
@@ -34,7 +33,7 @@ impl std::fmt::Debug for ServerChanConfig {
 }
 
 impl ServerChanConfig {
-    pub fn new(send_key: impl Into<NotifySecret>) -> Self {
+    pub fn new(send_key: impl Into<SecretString>) -> Self {
         Self {
             send_key: send_key.into(),
             timeout: Duration::from_secs(2),
@@ -125,7 +124,7 @@ impl ServerChanSink {
     }
 
     fn build_payload(event: &Event, max_chars: usize) -> serde_json::Value {
-        let title = truncate_chars(event.title().as_ref(), 256);
+        let title = truncate_chars(&event.title, 256);
         let desp = format_event_body_and_tags_limited(event, TextLimits::new(max_chars));
         serde_json::json!({ "title": title, "desp": desp })
     }
@@ -167,8 +166,8 @@ impl ServerChanSink {
     }
 }
 
-fn normalize_serverchan_send_key(send_key: &str) -> crate::Result<&str> {
-    let send_key = send_key.trim();
+fn normalize_serverchan_send_key(send_key: &SecretString) -> crate::Result<&str> {
+    let send_key = send_key.expose_secret().trim();
     if send_key.is_empty() {
         return Err(anyhow::anyhow!("serverchan send_key must not be empty").into());
     }
@@ -178,8 +177,8 @@ fn normalize_serverchan_send_key(send_key: &str) -> crate::Result<&str> {
     Ok(send_key)
 }
 
-fn normalize_send_key(send_key: NotifySecret) -> crate::Result<SecretString> {
-    let send_key = normalize_serverchan_send_key(send_key.expose_secret())?;
+fn normalize_send_key(send_key: SecretString) -> crate::Result<SecretString> {
+    let send_key = normalize_serverchan_send_key(&send_key)?;
     Ok(SecretString::new(send_key))
 }
 
@@ -214,7 +213,7 @@ fn build_serverchan_base_url(send_key: &str) -> crate::Result<(ServerChanKind, r
 }
 
 #[cfg(test)]
-fn build_serverchan_url(send_key: &NotifySecret) -> crate::Result<(ServerChanKind, reqwest::Url)> {
+fn build_serverchan_url(send_key: &SecretString) -> crate::Result<(ServerChanKind, reqwest::Url)> {
     let send_key = normalize_send_key(send_key.clone())?;
     let (kind, base_url) = build_serverchan_base_url(send_key.expose_secret())?;
     let url = ServerChanSink::build_api_url(kind, &base_url, &send_key)?;
@@ -265,13 +264,13 @@ mod tests {
 
     #[test]
     fn build_url_supports_turbo_and_sc3() {
-        let turbo_key = NotifySecret::from("SCT123tABC");
+        let turbo_key = SecretString::from("SCT123tABC");
         let (kind, url) = build_serverchan_url(&turbo_key).expect("turbo url");
         assert_eq!(kind, ServerChanKind::Turbo);
         assert_eq!(url.host_str().unwrap_or(""), "sctapi.ftqq.com");
         assert!(url.path().ends_with(".send"));
 
-        let sc3_key = NotifySecret::from("sctp123tABC");
+        let sc3_key = SecretString::from("sctp123tABC");
         let (kind, url) = build_serverchan_url(&sc3_key).expect("sc3 url");
         assert_eq!(kind, ServerChanKind::Sc3);
         assert_eq!(url.host_str().unwrap_or(""), "123.push.ft07.com");

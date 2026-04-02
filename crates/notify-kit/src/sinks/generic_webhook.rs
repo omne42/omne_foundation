@@ -274,15 +274,20 @@ fn validate_security_requirements(
     mode: GenericWebhookValidationMode,
 ) -> crate::Result<()> {
     if !enforce_public_ip {
-        if allowed_hosts.is_empty() {
+        if mode == GenericWebhookValidationMode::Strict {
+            return Err(
+                anyhow::anyhow!("generic webhook strict mode requires public ip check").into(),
+            );
+        }
+        if mode == GenericWebhookValidationMode::StrictByDefault {
             return Err(anyhow::anyhow!(
-                "generic webhook disabling public ip check requires allowed_hosts"
+                "generic webhook default constructor requires public ip check"
             )
             .into());
         }
-        if path_prefix.is_none() {
+        if allowed_hosts.is_empty() {
             return Err(anyhow::anyhow!(
-                "generic webhook disabling public ip check requires path_prefix"
+                "generic webhook disabling public ip check requires allowed_hosts"
             )
             .into());
         }
@@ -352,7 +357,9 @@ impl Sink for GenericWebhookSink {
                 .http
                 .select_for_url(&self.url, self.enforce_public_ip)
                 .await?;
+
             let payload = Self::build_payload(event, &self.payload_field, self.max_chars);
+
             let resp = send_reqwest(
                 client.post(self.url.as_str()).json(&payload),
                 "generic webhook",
@@ -404,13 +411,11 @@ mod tests {
     }
 
     #[test]
-    fn disabling_public_ip_check_keeps_default_host_and_path_guards() {
+    fn disabling_public_ip_check_requires_allowed_hosts() {
         let cfg =
             GenericWebhookConfig::new("https://example.com/webhook").with_public_ip_check(false);
-        let sink = GenericWebhookSink::new(cfg).expect("default guards should still apply");
-        assert_eq!(sink.url.host_str().unwrap_or(""), "example.com");
-        assert_eq!(sink.url.path(), "/webhook");
-        assert!(!sink.enforce_public_ip);
+        let err = GenericWebhookSink::new(cfg).expect_err("expected invalid config");
+        assert!(err.to_string().contains("public ip"), "{err:#}");
     }
 
     #[test]
@@ -434,16 +439,15 @@ mod tests {
     }
 
     #[test]
-    fn strict_accepts_disabled_public_ip_check_when_scope_is_explicit() {
+    fn strict_rejects_disabled_public_ip_check() {
         let cfg = GenericWebhookConfig::new_strict(
             "https://example.com/hooks/notify",
             "/hooks/",
             vec!["example.com".to_string()],
         )
         .with_public_ip_check(false);
-        let sink = GenericWebhookSink::new_strict(cfg).expect("strict scope should still apply");
-        assert_eq!(sink.url.host_str().unwrap_or(""), "example.com");
-        assert!(!sink.enforce_public_ip);
+        let err = GenericWebhookSink::new_strict(cfg).expect_err("expected strict validation");
+        assert!(err.to_string().contains("public ip"), "{err:#}");
     }
 
     #[test]

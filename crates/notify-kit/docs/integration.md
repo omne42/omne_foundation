@@ -4,11 +4,11 @@
 
 如果你只想快速接线，库里也提供了：
 
-- `notify_kit::builtin::env::build_hub_from_standard_env(...)`
-- `notify_kit::builtin::env::StandardEnvHubOptions`
+- `notify_kit::env::build_hub_from_standard_env(...)`
+- `notify_kit::env::StandardEnvHubOptions`
 
 它们是 convenience helper，不是强制协议，也不改变推荐分层。
-公开文档入口固定为 `notify_kit::builtin::env::...`；旧的 `notify_kit::env::...` 仅为兼容保留。
+公开入口固定为 `notify_kit::env::...`。
 
 ## 一个推荐的配置层结构
 
@@ -84,7 +84,7 @@ fn build_hub_from_env() -> notify_kit::Result<Hub> {
 }
 ```
 
-如果你采用库自带的 env helper，建议通过 `notify_kit::builtin::env::build_hub_from_standard_env(...)` 访问，并把它当成 bootstrap helper：能减少样板代码，但不妨碍你在自己的 integration layer 继续包装、替换或扩展。
+如果你采用库自带的 env helper，建议通过 `notify_kit::env::build_hub_from_standard_env(...)` 访问，并把它当成 bootstrap helper：能减少样板代码，但不妨碍你在自己的 integration layer 继续包装、替换或扩展。
 它使用一套中性的 `NOTIFY_*` 约定，而不是业务前缀协议。
 
 ## 标准 helper 示例

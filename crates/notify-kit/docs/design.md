@@ -14,9 +14,9 @@
 
 补充说明：
 
-- 库中提供的 `notify_kit::builtin::env::build_hub_from_standard_env(...)` / `notify_kit::builtin::env::StandardEnvHubOptions` 只是 convenience helper，用于快速接线或复用一套简单约定。
+- 库中提供的 `notify_kit::env::build_hub_from_standard_env(...)` / `notify_kit::env::StandardEnvHubOptions` 只是 convenience helper，用于快速接线或复用一套简单约定。
 - 它们不改变整体分层：配置协议依然属于 integration layer，而不是 `notify-kit` 的核心职责。
-- 公开文档入口统一使用 `notify_kit::builtin::env::...` 路径；`notify_kit::env::...` 仅作为兼容出口保留。
+- 公开入口统一使用 `notify_kit::env::...` 路径，不在 crate root 再叠兼容入口。
 
 ## 并发模型
 

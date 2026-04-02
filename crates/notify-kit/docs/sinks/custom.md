@@ -27,7 +27,7 @@ impl Sink for StderrSink {
         event: &'a Event,
     ) -> Pin<Box<dyn Future<Output = notify_kit::Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            eprintln!("[{}] {}", event.kind, event.title());
+            eprintln!("[{}] {}", event.kind, event.title);
             Ok(())
         })
     }

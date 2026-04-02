@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
@@ -25,16 +25,19 @@ const REENTRANT_HANDLER_ERROR: &str = "SharedManager async operations cannot be 
 /// underneath it while sibling request/notify operations can still overlap. Lifecycle and
 /// inspection operations still execute under the shared lock.
 ///
-/// Reentrant fail-fast is scoped to the current manager handler task, not to global handler
-/// activity. If some other handler for the same `Manager` is active elsewhere, external callers
-/// still wait normally for the shared lock or connect gate.
+/// Reentrant fail-fast applies whenever a manager handler is active and a `SharedManager`
+/// operation would otherwise have to wait on the shared lock or a same-server gate. This is
+/// intentionally conservative: it makes bare `tokio::spawn(...)` child tasks fail fast while the
+/// parent handler is still active, instead of silently waiting behind the in-flight operation and
+/// risking deadlock. External callers that race a contended handler path can therefore also see
+/// the same fail-fast error until the handler scope exits.
 ///
 /// This is not an actor or fully concurrent manager:
 /// - lifecycle-changing operations still serialize on the shared manager lock
 /// - connected request/notify operations can overlap with each other while still blocking
 ///   same-server disconnect until their I/O finishes
-/// - operations that still need the shared lock return an error on reentrant calls from
-///   `Manager` server request/notification handlers instead of waiting forever
+/// - operations that still need the shared lock or same-server gate return an error when a
+///   handler-active path would otherwise wait, instead of risking deadlock
 /// - connect/disconnect lifecycle changes for the same server share a single gate, and
 ///   `disconnect_and_wait` keeps that gate until its wait finishes so a slow teardown cannot race
 ///   with a replacement cold start
@@ -86,11 +89,16 @@ impl SharedManager {
         crate::manager::is_in_manager_handler_scope(self.manager_id)
     }
 
+    fn has_active_handler_scope(&self) -> bool {
+        self.active_handler_scopes.load(Ordering::Relaxed) > 0
+    }
+
     /// Spawn a task that preserves the current manager handler scope.
     ///
-    /// Tokio `spawn` does not inherit `task_local!` state automatically, so a
-    /// handler child task that wants `SharedManager` reentrant fail-fast
-    /// semantics must use this helper instead of bare `tokio::spawn(...)`.
+    /// Tokio `spawn` does not inherit `task_local!` state automatically. Bare
+    /// child tasks now still fail fast while the parent handler scope remains
+    /// active, but this helper preserves handler scope semantics even if the
+    /// child outlives the parent task or runs after the parent handler returns.
     pub fn spawn_inheriting_handler_scope<F>(&self, fut: F) -> tokio::task::JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
@@ -115,9 +123,10 @@ impl SharedManager {
         operation: &'static str,
         try_acquire: impl FnOnce() -> Result<T, tokio::sync::TryLockError>,
     ) -> anyhow::Result<Option<T>> {
-        // Only the current task-local manager handler scope gets fail-fast behavior. Other
-        // unrelated handler activity must not cause external callers to spuriously error.
-        if !self.is_reentrant_handler_call() {
+        // Fail fast whenever a manager handler is active and this operation would have to wait
+        // behind an in-flight shared-manager lock/gate acquisition. That keeps bare spawned child
+        // tasks from silently parking behind their own parent handler path.
+        if !self.is_reentrant_handler_call() && !self.has_active_handler_scope() {
             return Ok(None);
         }
 
@@ -1474,7 +1483,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_manager_plain_spawn_from_handler_waits_without_inherited_scope() {
+    async fn shared_manager_plain_spawn_from_handler_fails_fast_while_parent_scope_is_active() {
         let (client_stream, server_stream) = tokio::io::duplex(1024);
         let (client_read, client_write) = tokio::io::split(client_stream);
         let (server_read, mut server_write) = tokio::io::split(server_stream);
@@ -1569,21 +1578,16 @@ mod tests {
         let held_lock = shared.lock_for_async_op("held_lock").await.unwrap();
         send_notification_tx.send(()).unwrap();
 
-        let mut handler_result_rx = handler_result_rx;
+        let result = tokio::time::timeout(Duration::from_secs(1), handler_result_rx)
+            .await
+            .expect("spawned handler task should fail fast without waiting")
+            .unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut handler_result_rx)
-                .await
-                .is_err(),
-            "spawned task should still be waiting on the shared lock"
+            result.contains(super::REENTRANT_HANDLER_ERROR) && result.contains("inspect"),
+            "unexpected result: {result}"
         );
 
         drop(held_lock);
-
-        let result = tokio::time::timeout(Duration::from_secs(1), handler_result_rx)
-            .await
-            .expect("spawned handler task should finish after lock release")
-            .unwrap();
-        assert!(result.contains("succeeded"), "unexpected result: {result}");
         shared_slot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1712,7 +1716,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_manager_external_call_waits_even_if_other_handler_scope_is_active() {
+    async fn shared_manager_external_call_fails_fast_if_other_handler_scope_is_active() {
         let manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
             .with_trust_mode(TrustMode::Trusted);
         let active_handler_scopes = manager.active_handler_scopes();
@@ -1736,20 +1740,24 @@ mod tests {
             async move { shared.inspect(|_| ()).await }
         });
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let err = tokio::time::timeout(Duration::from_secs(1), inspect)
+            .await
+            .expect("external call should fail fast")
+            .unwrap()
+            .expect_err("external call should not wait behind handler-active lock");
         assert!(
-            !inspect.is_finished(),
-            "external call should wait instead of failing fast"
+            err.to_string().contains(super::REENTRANT_HANDLER_ERROR)
+                && err.to_string().contains("inspect"),
+            "{err:#}"
         );
 
         release_tx.send(()).unwrap();
         held_lock.await.unwrap();
-        inspect.await.unwrap().unwrap();
         active_handler_scopes.fetch_sub(1, Ordering::Relaxed);
     }
 
     #[tokio::test]
-    async fn shared_manager_external_connect_gate_waits_even_if_other_handler_scope_is_active() {
+    async fn shared_manager_external_connect_gate_fails_fast_if_other_handler_scope_is_active() {
         let manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
             .with_trust_mode(TrustMode::Trusted);
         let active_handler_scopes = manager.active_handler_scopes();
@@ -1776,15 +1784,19 @@ mod tests {
             async move { shared.lock_connect_gate_write("second_gate", "srv").await }
         });
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let err = tokio::time::timeout(Duration::from_secs(1), wait_for_gate)
+            .await
+            .expect("gate acquisition should fail fast")
+            .unwrap()
+            .expect_err("gate acquisition should not wait behind handler-active gate");
         assert!(
-            !wait_for_gate.is_finished(),
-            "external call should wait on the server gate instead of failing fast"
+            err.to_string().contains(super::REENTRANT_HANDLER_ERROR)
+                && err.to_string().contains("second_gate"),
+            "{err:#}"
         );
 
         release_tx.send(()).unwrap();
         held_gate.await.unwrap();
-        drop(wait_for_gate.await.unwrap().unwrap());
         active_handler_scopes.fetch_sub(1, Ordering::Relaxed);
     }
 
@@ -2111,7 +2123,8 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn shared_manager_disconnect_and_wait_blocks_same_server_reconnect_until_wait_finishes() {
+    async fn shared_manager_disconnect_and_wait_fail_fast_blocks_same_server_reconnect_until_wait_finishes()
+     {
         use tokio::sync::oneshot;
 
         let socket_path = unique_socket_path("disconnect-wait-gate");
@@ -2263,18 +2276,30 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         let reconnect_shared = shared.clone();
+        let reconnect_config = config.clone();
         let reconnect_task = tokio::spawn(async move {
             reconnect_shared
-                .request(&config, "srv", "ping", None::<Value>, Path::new("/"))
+                .request(
+                    &reconnect_config,
+                    "srv",
+                    "ping",
+                    None::<Value>,
+                    Path::new("/"),
+                )
                 .await
         });
 
-        let mut second_accept_seen_rx = second_accept_seen_rx;
+        let reconnect_err = tokio::time::timeout(Duration::from_secs(1), reconnect_task)
+            .await
+            .expect("same-server reconnect should fail fast")
+            .unwrap()
+            .expect_err("same-server reconnect should not wait behind disconnect_and_wait");
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut second_accept_seen_rx)
-                .await
-                .is_err(),
-            "same-server reconnect should stay blocked until disconnect_and_wait returns"
+            reconnect_err
+                .to_string()
+                .contains(super::REENTRANT_HANDLER_ERROR)
+                && reconnect_err.to_string().contains("request"),
+            "{reconnect_err:#}"
         );
 
         let disconnect_err = disconnect_task.await.unwrap().unwrap_err();
@@ -2284,12 +2309,17 @@ mod tests {
             "{disconnect_err_chain}"
         );
 
-        second_accept_seen_rx.await.unwrap();
-        let reconnect_result = tokio::time::timeout(Duration::from_secs(1), reconnect_task)
-            .await
-            .expect("reconnect request should finish after disconnect_and_wait returns")
-            .unwrap()
-            .unwrap();
+        let second_accept_seen_rx = second_accept_seen_rx;
+        let reconnect_result = tokio::time::timeout(Duration::from_secs(1), async {
+            let result = shared
+                .request(&config, "srv", "ping", None::<Value>, Path::new("/"))
+                .await?;
+            second_accept_seen_rx.await.unwrap();
+            Ok::<Value, crate::Error>(result)
+        })
+        .await
+        .expect("reconnect request should finish after disconnect_and_wait returns")
+        .unwrap();
         assert_eq!(reconnect_result, serde_json::json!({ "ok": true }));
 
         assert!(shared.disconnect("srv").await.unwrap());

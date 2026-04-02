@@ -1434,6 +1434,92 @@ async fn server_request_handler_async_panic_disables_future_dispatch() {
 }
 
 #[tokio::test]
+async fn built_in_roots_list_takes_precedence_over_user_handler() {
+    let (client_stream, server_stream) = tokio::io::duplex(2048);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 71,
+            "method": "roots/list",
+        });
+        let mut request_line = serde_json::to_string(&request).unwrap();
+        request_line.push('\n');
+        server_write
+            .write_all(request_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let response_line = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let response: Value = serde_json::from_str(&response_line).unwrap();
+        assert_eq!(response["id"], 71);
+        assert_eq!(
+            response["result"],
+            serde_json::json!({
+                "roots": [{ "uri": "file:///workspace", "name": "workspace" }]
+            })
+        );
+    });
+
+    let handler: ServerRequestHandler = Arc::new(|ctx| {
+        Box::pin(async move {
+            if ctx.method == "roots/list" {
+                return ServerRequestOutcome::Ok(serde_json::json!({
+                    "roots": [{ "uri": "file:///shadowed", "name": "shadowed" }]
+                }));
+            }
+            ServerRequestOutcome::MethodNotFound
+        })
+    });
+
+    let roots = vec![Root {
+        uri: "file:///workspace".to_string(),
+        name: Some("workspace".to_string()),
+    }];
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .with_roots(roots)
+        .with_server_request_handler(handler);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+
+    server_task.await.unwrap();
+    assert!(manager.take_connection("srv").is_some());
+}
+
+#[tokio::test]
 async fn server_request_handler_response_write_failure_disables_cached_connection() {
     let (client_stream, server_stream) = tokio::io::duplex(2048);
     let (client_read, client_write) = tokio::io::split(client_stream);
@@ -3592,20 +3678,138 @@ async fn connect_io_with_spaced_name_does_not_replace_existing_connection() {
         true
     });
 
-    manager
+    let err = manager
         .connect_io(" srv ", client_read2, client_write2)
         .await
-        .unwrap();
-
-    // The second connect should no-op against the existing normalized name.
-    assert_eq!(
-        manager.initialize_result("srv").unwrap()["marker"],
-        serde_json::json!(1)
+        .expect_err("duplicate attach should be rejected");
+    assert!(
+        err.to_string().contains("already connected")
+            && err.to_string().contains("disconnect first"),
+        "{err:#}"
     );
     let saw_second_initialize = server2_task.await.unwrap();
     assert!(
         !saw_second_initialize,
-        "second connection should not send initialize when normalized name is already connected"
+        "duplicate attach should not send initialize when normalized name is already connected"
+    );
+    assert_eq!(
+        manager.initialize_result("srv").unwrap()["marker"],
+        serde_json::json!(1)
+    );
+
+    let status = manager
+        .disconnect_and_wait(
+            "srv",
+            Duration::from_secs(1),
+            mcp_jsonrpc::WaitOnTimeout::ReturnError,
+        )
+        .await
+        .unwrap();
+    assert!(status.is_none());
+    server1_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn connect_jsonrpc_rejects_duplicate_attached_connection() {
+    let (client_stream1, server_stream1) = tokio::io::duplex(1024);
+    let (client_read1, client_write1) = tokio::io::split(client_stream1);
+    let (server_read1, mut server_write1) = tokio::io::split(server_stream1);
+
+    let server1_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read1).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let id = init_value["id"].clone();
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "marker": 1 },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write1
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write1.flush().await.unwrap();
+
+        let note_line = lines.next_line().await.unwrap().unwrap();
+        let note_value: Value = serde_json::from_str(&note_line).unwrap();
+        assert_eq!(note_value["method"], "notifications/initialized");
+
+        let eof = lines.next_line().await.unwrap();
+        assert!(eof.is_none(), "expected EOF after disconnect");
+    });
+
+    let client1 = mcp_jsonrpc::Client::connect_io(client_read1, client_write1)
+        .await
+        .unwrap();
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    manager.connect_jsonrpc("srv", client1).await.unwrap();
+    assert_eq!(
+        manager.initialize_result("srv").unwrap()["marker"],
+        serde_json::json!(1)
+    );
+
+    let (client_stream2, server_stream2) = tokio::io::duplex(1024);
+    let (client_read2, client_write2) = tokio::io::split(client_stream2);
+    let (server_read2, mut server_write2) = tokio::io::split(server_stream2);
+
+    let server2_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read2).lines();
+        let next = tokio::time::timeout(Duration::from_millis(500), lines.next_line()).await;
+        let Ok(Ok(Some(init_line))) = next else {
+            return false;
+        };
+
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        if init_value["method"] != "initialize" {
+            return false;
+        }
+        let id = init_value["id"].clone();
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "marker": 2 },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write2
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write2.flush().await.unwrap();
+
+        let note_line = lines.next_line().await.unwrap().unwrap();
+        let note_value: Value = serde_json::from_str(&note_line).unwrap();
+        assert_eq!(note_value["method"], "notifications/initialized");
+        true
+    });
+
+    let client2 = mcp_jsonrpc::Client::connect_io(client_read2, client_write2)
+        .await
+        .unwrap();
+    let err = manager
+        .connect_jsonrpc("srv", client2)
+        .await
+        .expect_err("duplicate attached jsonrpc client should be rejected");
+    assert!(
+        err.to_string().contains("already connected")
+            && err.to_string().contains("disconnect first"),
+        "{err:#}"
+    );
+
+    let saw_second_initialize = server2_task.await.unwrap();
+    assert!(
+        !saw_second_initialize,
+        "duplicate attached jsonrpc client should not send initialize"
+    );
+    assert_eq!(
+        manager.initialize_result("srv").unwrap()["marker"],
+        serde_json::json!(1)
     );
 
     let status = manager

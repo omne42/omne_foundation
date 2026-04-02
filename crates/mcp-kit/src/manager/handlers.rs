@@ -252,13 +252,19 @@ impl Manager {
 
                         let mut req = req;
                         let method = std::mem::take(&mut req.method);
+                        if let Some(result) = try_handle_built_in_request(&method, roots.as_ref()) {
+                            if req.respond_ok(result).await.is_err() {
+                                return HandlerTaskStatus::Stop;
+                            }
+                            return HandlerTaskStatus::Continue;
+                        }
                         let ctx = ServerRequestContext {
                             server_name: server_name.clone(),
                             method: method.clone(),
                             params: req.params.take(),
                         };
 
-                        let (mut outcome, status) = match run_handler_with_timeout(
+                        let (outcome, status) = match run_handler_with_timeout(
                             handler_timeout,
                             &timeout_counter,
                             || {
@@ -293,14 +299,6 @@ impl Manager {
                                 HandlerTaskStatus::Continue,
                             ),
                         };
-
-                        if matches!(outcome, ServerRequestOutcome::MethodNotFound) {
-                            if let Some(result) =
-                                try_handle_built_in_request(&method, roots.as_ref())
-                            {
-                                outcome = ServerRequestOutcome::Ok(result);
-                            }
-                        }
 
                         let response = match outcome {
                             ServerRequestOutcome::Ok(result) => {

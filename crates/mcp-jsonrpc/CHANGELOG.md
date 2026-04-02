@@ -27,6 +27,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `mcp-jsonrpc`：入站 server notification 在本地通知队列过载或接收端已关闭时不再静默丢弃；transport 现在会记录 stats 并主动关闭连接，把数据丢失显式暴露给调用方。
 - `mcp-jsonrpc`：reader 现在对非法 JSON 和非法 JSON-RPC 帧 fail-closed；在记录诊断/返回 `invalid request` 后会立即关闭连接并清空 pending request，避免把协议损坏伪装成后续超时。
 - `mcp-jsonrpc`：`streamable_http` 现在把 `server closed connection` 当作 generic EOF fallback；如果 SSE 先 EOF、随后 notify/POST 再暴露更具体的 HTTP 失败，公开 `close_reason()` 会升级到真实 transport 根因而不是卡在泛化原因上。
+- `mcp-jsonrpc`：`streamable_http` 的 POST bridge 失败现在按 diagnostic close-reason 发布，能覆盖更早到达的普通关闭原因；`close_reason()` 不再被同级 generic close 抢先锁死，诊断会稳定保留真实 transport 根因。
 - `mcp-jsonrpc`：`request_optional_with_timeout` 与 `wait_with_timeout` 现在会在进入 `tokio::time` 前预检 time driver，把错误配置从 panic 收敛成稳定 `ProtocolError`，并在 API 文档中写明前提。
 - `mcp-jsonrpc`：把 close-reason、cancelled-request bookkeeping、stats/diagnostics 等共享状态辅助逻辑下沉到内部 `state.rs`，让 `lib.rs` 更聚焦在 client 生命周期与消息循环，而不改变公开 API。
 - Established crate-local changelog ownership now that `omne_foundation` tracks release notes per crate instead of at the repository root.

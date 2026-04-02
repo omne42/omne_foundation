@@ -981,7 +981,13 @@ async fn close_post_bridge(
     handle: &ClientHandle,
     reason: impl Into<String>,
 ) {
-    handle.close_with_reason(reason.into()).await;
+    let reason = reason.into();
+    handle
+        .close_with_error(
+            reason.clone(),
+            crate::Error::protocol(crate::ProtocolErrorKind::Closed, reason),
+        )
+        .await;
     let mut writer = writer.lock().await;
     let _ = writer.shutdown().await; // pre-commit: allow-let-underscore
     drop(writer);

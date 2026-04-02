@@ -1202,7 +1202,10 @@ impl Manager {
     {
         let server_name_key = build_server_name()?;
         if self.is_connected_and_alive(server_name_key.as_str()) {
-            return Ok(());
+            anyhow::bail!(
+                "mcp server {} is already connected and attach-style connect APIs cannot replace an existing connection (disconnect first)",
+                server_name_key
+            );
         }
 
         let child = client.take_child();
@@ -1251,7 +1254,13 @@ impl Manager {
     {
         let server_name_key = parse_server_name_anyhow(server_name)?;
         if self.is_connected_and_alive(server_name_key.as_str()) {
-            return Ok(());
+            return Err(crate::error::tagged_message(
+                crate::error::ErrorKind::ManagerState,
+                format!(
+                    "mcp server {server_name_key} is already connected and attach-style connect APIs cannot replace an existing connection (disconnect first)"
+                ),
+            )
+            .into());
         }
 
         let client = mcp_jsonrpc::Client::connect_io(read, write)

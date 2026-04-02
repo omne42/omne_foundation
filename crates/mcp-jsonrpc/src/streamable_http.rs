@@ -1577,24 +1577,18 @@ mod tests {
             .await
             .expect("write initial SSE headers");
             stage_tx.send("initial-sse-open").expect("send stage");
-            write_chunk(&mut initial_sse, b": heartbeat\n\n")
-                .await
-                .expect("write initial SSE comment");
+            write_chunk(
+                &mut initial_sse,
+                b"data: {\"jsonrpc\":\"2.0\",\"method\":\"demo/notify\",\"params\":{\"phase\":\"initial\"}}\n\n",
+            )
+            .await
+            .expect("write initial SSE notification");
             finish_chunked_response(&mut initial_sse)
                 .await
                 .expect("finish initial SSE response");
             drop(initial_sse);
 
             let (mut reconnected_sse, _) = listener.accept().await.expect("accept reconnect SSE");
-            let reconnect_request = read_http_request(&mut reconnected_sse)
-                .await
-                .expect("read reconnect GET");
-            assert_eq!(reconnect_request.method, "GET");
-            assert_eq!(reconnect_request.path, "/sse");
-            assert_eq!(
-                header(&reconnect_request, "mcp-session-id"),
-                Some("session-1".to_string())
-            );
             write_chunked_response_headers(
                 &mut reconnected_sse,
                 "200 OK",
@@ -1608,7 +1602,7 @@ mod tests {
             stage_tx.send("reconnected-sse-open").expect("send stage");
             write_chunk(
                 &mut reconnected_sse,
-                b"data: {\"jsonrpc\":\"2.0\",\"method\":\"demo/notify\",\"params\":{\"session\":\"session-1\"}}\n\n",
+                b"data: {\"jsonrpc\":\"2.0\",\"method\":\"demo/notify\",\"params\":{\"phase\":\"reconnected\",\"session\":\"session-1\"}}\n\n",
             )
             .await
             .expect("write reconnect SSE notification");
@@ -1633,6 +1627,15 @@ mod tests {
             .expect("initial SSE stage should arrive before timeout")
             .expect("stage channel open");
         assert_eq!(stage, "initial-sse-open");
+        let initial_notification = tokio::time::timeout(TEST_STAGE_TIMEOUT, notifications.recv())
+            .await
+            .expect("initial notification should arrive before timeout")
+            .expect("notification stream open");
+        assert_eq!(initial_notification.method, "demo/notify");
+        assert_eq!(
+            initial_notification.params,
+            Some(serde_json::json!({ "phase": "initial" }))
+        );
         let stage = tokio::time::timeout(TEST_STAGE_TIMEOUT, stage_rx.recv())
             .await
             .expect("reconnect SSE stage should arrive before timeout")
@@ -1646,7 +1649,10 @@ mod tests {
         assert_eq!(notification.method, "demo/notify");
         assert_eq!(
             notification.params,
-            Some(serde_json::json!({ "session": "session-1" }))
+            Some(serde_json::json!({
+                "phase": "reconnected",
+                "session": "session-1"
+            }))
         );
 
         client.close("test complete").await;

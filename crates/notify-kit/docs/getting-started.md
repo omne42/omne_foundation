@@ -22,7 +22,7 @@ notify-kit = { path = "/path/to/omne_foundation/crates/notify-kit" }
 
 ## 一个可运行的 `main.rs` 示例
 
-`Hub::notify` 需要在 **Tokio runtime** 中调用；如果当前没有 Tokio runtime 或 Hub 已过载，它会返回显式错误，而不是静默丢弃。
+`Hub::notify` 需要在 **Tokio runtime** 中调用（否则会丢弃并 `tracing::warn!`）。
 
 ```rust,no_run,edition2024
 # extern crate notify_kit;
@@ -59,18 +59,18 @@ fn main() -> notify_kit::Result<()> {
         .expect("build tokio runtime");
 
     rt.block_on(async {
-        // fire-and-forget（只负责入队，不等待 sink 完成）
-        hub.notify(Event::new("turn_completed", Severity::Success, "done"))?;
+        // fire-and-forget（不关心结果）
+        hub.notify(Event::new("turn_completed", Severity::Success, "done"));
 
         // 可观测结果（等待所有 sinks）
         hub.send(Event::new("turn_completed", Severity::Success, "done (awaited)"))
             .await?;
 
-        // `try_notify` 仍保留为显式命名别名；当你更喜欢 "try_*" 语义时可以继续用它。
+        // 如果你处在“不确定是否有 Tokio runtime”的代码路径中：
         match hub.try_notify(Event::new("turn_completed", Severity::Success, "done (try_notify)")) {
             Ok(()) => {}
             Err(TryNotifyError::NoTokioRuntime) => {
-                // 这里不要 panic：通知通常只是附加能力。
+                // 这里不要 panic：notify 只是附加能力。
                 // 你可以选择：记录日志、降级为 stdout、暂存到队列里、或忽略。
                 tracing::debug!("no tokio runtime; notification skipped");
             }
@@ -107,9 +107,8 @@ let hub = Hub::new_with_limits(
 
 ## 我该用 `notify` 还是 `send`？
 
-- `notify(event) -> Result<(), TryNotifyError>`: fire-and-forget，只保证事件成功入队
-- `notify_lossy(event)`: 明确选择“尽力而为 + warning 日志 + 失败时丢弃”
-- `try_notify(event) -> Result<(), TryNotifyError>`: `notify` 的显式别名
+- `notify(event)`: fire-and-forget（spawn 后台任务并立即返回）
+- `try_notify(event) -> Result<(), TryNotifyError>`: 同 `notify`，但可检测「缺少 Tokio runtime」
 - `send(event).await -> notify_kit::Result<()>`: 等待所有 sinks 完成/超时，并聚合错误信息
 
 ## 常见模式

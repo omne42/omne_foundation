@@ -56,9 +56,9 @@ impl FeishuWebhookSink {
         }
 
         let Some(body) = event
-            .body()
-            .map(|value| value.into_owned())
-            .map(|value| value.trim().to_owned())
+            .body
+            .as_deref()
+            .map(str::trim)
             .filter(|value| !value.is_empty())
         else {
             return Ok(Self::build_text_payload(
@@ -69,7 +69,7 @@ impl FeishuWebhookSink {
             ));
         };
 
-        let markdown_lines = parse_markdown_lines(&body);
+        let markdown_lines = parse_markdown_lines(body);
         if markdown_lines.is_empty() {
             return Ok(Self::build_text_payload(
                 event,
@@ -79,10 +79,7 @@ impl FeishuWebhookSink {
             ));
         }
 
-        let image_keys = match self.media.as_ref() {
-            Some(media) => Self::resolve_image_keys(media, &markdown_lines).await,
-            None => HashMap::new(),
-        };
+        let image_keys = self.resolve_image_keys(&markdown_lines).await;
 
         let mut content_rows: Vec<serde_json::Value> = Vec::new();
         let mut remaining = self.max_chars;
@@ -153,7 +150,7 @@ impl FeishuWebhookSink {
             }
         }
 
-        for (key, value) in event.tags() {
+        for (key, value) in &event.tags {
             if remaining == 0 {
                 break;
             }
@@ -179,7 +176,7 @@ impl FeishuWebhookSink {
             ));
         }
 
-        let title = truncate_chars(event.title().trim(), 256);
+        let title = truncate_chars(event.title.trim(), 256);
         let mut obj = Self::base_payload(timestamp, sign);
         obj.insert("msg_type".to_string(), serde_json::json!("post"));
         obj.insert(
@@ -213,7 +210,7 @@ impl FeishuWebhookSink {
     }
 
     pub(super) async fn resolve_image_keys(
-        media: &super::FeishuWebhookMediaSupport,
+        &self,
         markdown_lines: &[MarkdownLine],
     ) -> HashMap<String, Option<String>> {
         let mut urls = BTreeSet::new();
@@ -227,7 +224,7 @@ impl FeishuWebhookSink {
 
         let mut out = HashMap::with_capacity(urls.len());
         for src in urls {
-            let key = media.resolve_single_image_key(&src).await;
+            let key = self.resolve_single_image_key(&src).await;
             out.insert(src, key);
         }
         out

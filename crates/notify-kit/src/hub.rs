@@ -1,7 +1,6 @@
 use std::collections::{BTreeSet, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures_util::FutureExt;
@@ -123,32 +122,6 @@ struct HubInner {
 struct HubSink {
     sink: Arc<dyn Sink>,
     name: Option<&'static str>,
-    poisoned: AtomicBool,
-}
-
-impl HubSink {
-    fn new(sink: Arc<dyn Sink>) -> Self {
-        match std::panic::catch_unwind(AssertUnwindSafe(|| sink.name())) {
-            Ok(name) => Self {
-                sink,
-                name: Some(name),
-                poisoned: AtomicBool::new(false),
-            },
-            Err(_) => Self {
-                sink,
-                name: None,
-                poisoned: AtomicBool::new(false),
-            },
-        }
-    }
-
-    fn is_poisoned(&self) -> bool {
-        self.poisoned.load(Ordering::Acquire)
-    }
-
-    fn poison(&self) {
-        self.poisoned.store(true, Ordering::Release);
-    }
 }
 
 impl Hub {
@@ -176,7 +149,13 @@ impl Hub {
         let limits = HubLimits::default()
             .with_max_inflight_events(limits.max_inflight_events)
             .with_max_sink_sends_in_parallel(limits.max_sink_sends_in_parallel);
-        let sinks = sinks.into_iter().map(HubSink::new).collect();
+        let sinks = sinks
+            .into_iter()
+            .map(|sink| HubSink {
+                name: std::panic::catch_unwind(AssertUnwindSafe(|| sink.name())).ok(),
+                sink,
+            })
+            .collect();
         let inner = HubInner {
             enabled_kinds: config
                 .enabled_kinds
@@ -193,11 +172,38 @@ impl Hub {
 
     /// Fire-and-forget notification.
     ///
+    /// - Requires a Tokio runtime with the time driver enabled; otherwise the notification is
+    ///   dropped and a warning is logged.
+    /// - Concurrency is bounded; if overloaded, notifications are dropped (with a warning).
+    pub fn notify(&self, event: Event) {
+        if self.inner.sinks.is_empty() {
+            return;
+        }
+        if !self.is_kind_enabled(event.kind.as_str()) {
+            return;
+        }
+
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            warn_hub_notify_dropped(event.kind.as_str(), "no_tokio_runtime");
+            return;
+        };
+        if !has_tokio_time_driver() {
+            warn_hub_notify_dropped(event.kind.as_str(), "no_tokio_time_driver");
+            return;
+        }
+
+        if let Err(event) = self.try_notify_spawn(handle, event) {
+            warn_hub_notify_dropped(event.kind.as_str(), "overloaded");
+        }
+    }
+
+    /// Attempt to enqueue a fire-and-forget notification.
+    ///
     /// Returns:
     /// - `Err(TryNotifyError::NoTokioRuntime)` if called outside a Tokio runtime or without the
     ///   Tokio time driver enabled.
     /// - `Err(TryNotifyError::Overloaded)` when Hub inflight capacity is full.
-    pub fn notify(&self, event: Event) -> Result<(), TryNotifyError> {
+    pub fn try_notify(&self, event: Event) -> Result<(), TryNotifyError> {
         if self.inner.sinks.is_empty() {
             return Ok(());
         }
@@ -213,29 +219,9 @@ impl Hub {
         }
 
         match self.try_notify_spawn(handle, event) {
-            None => Ok(()),
-            Some(_) => Err(TryNotifyError::Overloaded),
+            Ok(()) => Ok(()),
+            Err(_) => Err(TryNotifyError::Overloaded),
         }
-    }
-
-    /// Lossy fire-and-forget notification.
-    ///
-    /// This preserves the historical "best effort + warning log" behavior when callers explicitly
-    /// prefer dropping notifications over handling enqueue failures programmatically.
-    pub fn notify_lossy(&self, event: Event) {
-        let kind = event.kind.clone();
-        if let Err(err) = self.notify(event) {
-            let reason = match err {
-                TryNotifyError::NoTokioRuntime => "no_tokio_runtime",
-                TryNotifyError::Overloaded => "overloaded",
-            };
-            warn_hub_notify_dropped(kind.as_str(), reason);
-        }
-    }
-
-    /// Alias retained for callers that still prefer the explicit "try_*" naming.
-    pub fn try_notify(&self, event: Event) -> Result<(), TryNotifyError> {
-        self.notify(event)
     }
 
     pub async fn send(&self, event: Event) -> crate::Result<()> {
@@ -269,12 +255,17 @@ impl Hub {
 
     // Keep returning the original event on backpressure so callers can
     // preserve existing retry/drop behavior without reconstructing it.
-    fn try_notify_spawn(&self, handle: tokio::runtime::Handle, event: Event) -> Option<Event> {
+    #[allow(clippy::result_large_err)]
+    fn try_notify_spawn(
+        &self,
+        handle: tokio::runtime::Handle,
+        event: Event,
+    ) -> std::result::Result<(), Event> {
         let inner = self.inner.clone();
 
         let permit = match inner.inflight.clone().try_acquire_owned() {
             Ok(permit) => permit,
-            Err(_) => return Some(event),
+            Err(_) => return Err(event),
         };
 
         handle.spawn(async move {
@@ -283,7 +274,7 @@ impl Hub {
                 warn_hub_notify_failed(event.kind.as_str(), &err.to_string());
             }
         });
-        None
+        Ok(())
     }
 }
 
@@ -296,29 +287,21 @@ impl HubInner {
     ) -> (usize, &'static str, crate::Result<()>) {
         const UNKNOWN_SINK_NAME: &str = "<unknown>";
 
-        let name = sink.name.unwrap_or(UNKNOWN_SINK_NAME);
-        if sink.is_poisoned() {
+        let Some(name) = sink.name else {
             return (
                 idx,
-                name,
-                Err(anyhow::anyhow!("sink previously panicked and was disabled").into()),
+                UNKNOWN_SINK_NAME,
+                Err(anyhow::anyhow!("sink panicked").into()),
             );
-        }
-
+        };
         let result = AssertUnwindSafe(async move {
             tokio::time::timeout(timeout, sink.sink.send(event))
                 .await
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("timeout after {timeout:?}").into()))
         })
         .catch_unwind()
-        .await;
-        let result = match result {
-            Ok(result) => result,
-            Err(_) => {
-                sink.poison();
-                Err(anyhow::anyhow!("sink panicked and was disabled").into())
-            }
-        };
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("sink panicked").into()));
         (idx, name, result)
     }
 
@@ -414,7 +397,6 @@ mod tests {
     struct TestSink {
         name: &'static str,
         behavior: TestSinkBehavior,
-        send_count: AtomicUsize,
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -424,7 +406,6 @@ mod tests {
         Sleep(Duration),
         PanicName,
         Panic,
-        PanicOnce,
     }
 
     impl Sink for TestSink {
@@ -437,7 +418,6 @@ mod tests {
 
         fn send<'a>(&'a self, _event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
             Box::pin(async move {
-                self.send_count.fetch_add(1, Ordering::SeqCst);
                 match self.behavior {
                     TestSinkBehavior::Ok => Ok(()),
                     TestSinkBehavior::Err => Err(anyhow::anyhow!("boom").into()),
@@ -447,35 +427,16 @@ mod tests {
                     }
                     TestSinkBehavior::PanicName => Ok(()),
                     TestSinkBehavior::Panic => panic!("boom"),
-                    TestSinkBehavior::PanicOnce => {
-                        if self.send_count.load(Ordering::SeqCst) == 1 {
-                            panic!("boom");
-                        }
-                        Ok(())
-                    }
                 }
             })
         }
     }
 
     #[test]
-    fn notify_errors_without_tokio_runtime() {
+    fn try_notify_errors_without_tokio_runtime() {
         let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
             name: "ok",
             behavior: TestSinkBehavior::Ok,
-            send_count: AtomicUsize::new(0),
-        })];
-        let hub = Hub::new(HubConfig::default(), sinks);
-        let event = Event::new("kind", Severity::Info, "title");
-        assert_eq!(hub.notify(event), Err(TryNotifyError::NoTokioRuntime));
-    }
-
-    #[test]
-    fn try_notify_alias_matches_notify() {
-        let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
-            name: "ok",
-            behavior: TestSinkBehavior::Ok,
-            send_count: AtomicUsize::new(0),
         })];
         let hub = Hub::new(HubConfig::default(), sinks);
         let event = Event::new("kind", Severity::Info, "title");
@@ -530,12 +491,10 @@ mod tests {
                 Arc::new(TestSink {
                     name: "ok",
                     behavior: TestSinkBehavior::Ok,
-                    send_count: AtomicUsize::new(0),
                 }),
                 Arc::new(TestSink {
                     name: "bad",
                     behavior: TestSinkBehavior::Err,
-                    send_count: AtomicUsize::new(0),
                 }),
             ];
 
@@ -572,7 +531,6 @@ mod tests {
             let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
                 name: "slow",
                 behavior: TestSinkBehavior::Sleep(Duration::from_millis(50)),
-                send_count: AtomicUsize::new(0),
             })];
 
             let hub = Hub::new(
@@ -657,7 +615,6 @@ mod tests {
             let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
                 name: "panic",
                 behavior: TestSinkBehavior::Panic,
-                send_count: AtomicUsize::new(0),
             })];
 
             let hub = Hub::new(
@@ -673,47 +630,6 @@ mod tests {
             assert_eq!(err.kind(), crate::ErrorKind::SinkFailures);
             let msg = err.to_string();
             assert!(msg.contains("- panic:"), "{msg}");
-            assert!(msg.contains("sink panicked and was disabled"), "{msg}");
-        });
-    }
-
-    #[test]
-    fn send_disables_sink_after_panic() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .expect("build tokio runtime");
-
-        rt.block_on(async {
-            let sink = Arc::new(TestSink {
-                name: "panic-once",
-                behavior: TestSinkBehavior::PanicOnce,
-                send_count: AtomicUsize::new(0),
-            });
-            let hub = Hub::new(
-                HubConfig {
-                    enabled_kinds: None,
-                    per_sink_timeout: Duration::from_secs(1),
-                },
-                vec![sink.clone()],
-            );
-
-            let first = hub
-                .send(Event::new("kind", Severity::Info, "title"))
-                .await
-                .expect_err("first send should record the panic");
-            let second = hub
-                .send(Event::new("kind", Severity::Info, "title"))
-                .await
-                .expect_err("second send should fail closed");
-
-            assert_eq!(sink.send_count.load(Ordering::SeqCst), 1);
-            assert!(first.to_string().contains("sink panicked and was disabled"));
-            assert!(
-                second
-                    .to_string()
-                    .contains("sink previously panicked and was disabled")
-            );
         });
     }
 
@@ -728,7 +644,6 @@ mod tests {
             let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
                 name: "ignored",
                 behavior: TestSinkBehavior::PanicName,
-                send_count: AtomicUsize::new(0),
             })];
 
             let hub = Hub::new(
@@ -740,9 +655,10 @@ mod tests {
             );
             let event = Event::new("kind", Severity::Info, "title");
 
-            hub.send(event)
-                .await
-                .expect("sink name panic should stay in diagnostics and not disable the sink");
+            let err = hub.send(event).await.expect_err("expected panic failure");
+            assert_eq!(err.kind(), crate::ErrorKind::SinkFailures);
+            let msg = err.to_string();
+            assert!(msg.contains("- <unknown>: sink panicked"), "{msg}");
         });
     }
 
@@ -872,7 +788,6 @@ mod tests {
             let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
                 name: "ok",
                 behavior: TestSinkBehavior::Ok,
-                send_count: AtomicUsize::new(0),
             })];
             let hub = Hub::new(HubConfig::default(), sinks);
 
@@ -896,7 +811,6 @@ mod tests {
             let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
                 name: "ok",
                 behavior: TestSinkBehavior::Ok,
-                send_count: AtomicUsize::new(0),
             })];
             let hub = Hub::new(HubConfig::default(), sinks);
 

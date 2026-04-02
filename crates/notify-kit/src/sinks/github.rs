@@ -1,18 +1,17 @@
 use std::time::Duration;
 
 use crate::Event;
-use crate::NotifySecret;
+use crate::SecretString;
 use crate::sinks::text::{TextLimits, format_event_text_limited};
 use crate::sinks::{BoxFuture, Sink};
 use github_kit::{
     DEFAULT_GITHUB_API_BASE, GitHubApiRequestOptions, apply_github_api_headers,
-    build_github_api_url, validate_github_api_request_url,
+    build_github_api_url,
 };
 use http_kit::{
     HttpClientOptions, HttpClientProfile, build_http_client_profile, ensure_http_success,
-    redact_url, redact_url_str, send_reqwest,
+    redact_url, send_reqwest,
 };
-use secret_kit::SecretString;
 
 #[non_exhaustive]
 #[derive(Clone)]
@@ -21,17 +20,16 @@ pub struct GitHubCommentConfig {
     pub owner: String,
     pub repo: String,
     pub issue_number: u64,
-    pub token: NotifySecret,
+    pub token: SecretString,
     pub timeout: Duration,
     pub max_chars: usize,
     pub enforce_public_ip: bool,
-    pub allow_custom_api_base_with_token: bool,
 }
 
 impl std::fmt::Debug for GitHubCommentConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GitHubCommentConfig")
-            .field("api_base", &redact_url_str(&self.api_base))
+            .field("api_base", &self.api_base)
             .field("owner", &self.owner)
             .field("repo", &self.repo)
             .field("issue_number", &self.issue_number)
@@ -39,10 +37,6 @@ impl std::fmt::Debug for GitHubCommentConfig {
             .field("timeout", &self.timeout)
             .field("max_chars", &self.max_chars)
             .field("enforce_public_ip", &self.enforce_public_ip)
-            .field(
-                "allow_custom_api_base_with_token",
-                &self.allow_custom_api_base_with_token,
-            )
             .finish()
     }
 }
@@ -52,7 +46,7 @@ impl GitHubCommentConfig {
         owner: impl Into<String>,
         repo: impl Into<String>,
         issue_number: u64,
-        token: impl Into<NotifySecret>,
+        token: impl Into<SecretString>,
     ) -> Self {
         Self {
             api_base: DEFAULT_GITHUB_API_BASE.to_string(),
@@ -63,7 +57,6 @@ impl GitHubCommentConfig {
             timeout: Duration::from_secs(2),
             max_chars: 65000,
             enforce_public_ip: true,
-            allow_custom_api_base_with_token: false,
         }
     }
 
@@ -90,22 +83,6 @@ impl GitHubCommentConfig {
         self.enforce_public_ip = enforce_public_ip;
         self
     }
-
-    /// Bearer-token GitHub comment requests always require public-IP pinning.
-    ///
-    /// `GitHubCommentSink` carries a GitHub token on every request, so
-    /// disabling the public-IP check is treated as invalid configuration and
-    /// `GitHubCommentSink::new(...)` will fail closed.
-    /// Trust a custom HTTPS GitHub API base for token-bearing comment requests.
-    ///
-    /// By default, `GitHubCommentSink` only sends bearer tokens to
-    /// `https://api.github.com`. GitHub Enterprise or proxy API bases must opt
-    /// in explicitly.
-    #[must_use]
-    pub fn with_allow_custom_api_base_with_token(mut self, allow: bool) -> Self {
-        self.allow_custom_api_base_with_token = allow;
-        self
-    }
 }
 
 pub struct GitHubCommentSink {
@@ -117,7 +94,6 @@ pub struct GitHubCommentSink {
     http: HttpClientProfile,
     max_chars: usize,
     enforce_public_ip: bool,
-    allow_custom_api_base_with_token: bool,
 }
 
 impl std::fmt::Debug for GitHubCommentSink {
@@ -130,22 +106,12 @@ impl std::fmt::Debug for GitHubCommentSink {
             .field("token", &"<redacted>")
             .field("max_chars", &self.max_chars)
             .field("enforce_public_ip", &self.enforce_public_ip)
-            .field(
-                "allow_custom_api_base_with_token",
-                &self.allow_custom_api_base_with_token,
-            )
             .finish_non_exhaustive()
     }
 }
 
 impl GitHubCommentSink {
     pub fn new(config: GitHubCommentConfig) -> crate::Result<Self> {
-        if !config.enforce_public_ip {
-            return Err(anyhow::anyhow!(
-                "github token-bearing requests require public_ip_check=true"
-            )
-            .into());
-        }
         let owner = normalize_github_identifier("owner", &config.owner)?;
         let repo = normalize_github_identifier("repo", &config.repo)?;
         if config.issue_number == 0 {
@@ -154,13 +120,6 @@ impl GitHubCommentSink {
         let token = normalize_secret(config.token, "token")?;
 
         let api_url = build_issue_comment_url(&config.api_base, owner, repo, config.issue_number)?;
-        validate_github_api_request_url(
-            &api_url,
-            GitHubApiRequestOptions::new()
-                .with_bearer_token(Some(token.expose_secret()))
-                .with_allow_custom_bearer_api_base(config.allow_custom_api_base_with_token),
-        )
-        .map_err(anyhow::Error::new)?;
         let http = build_http_client_profile(&HttpClientOptions {
             timeout: Some(config.timeout),
             ..Default::default()
@@ -175,7 +134,6 @@ impl GitHubCommentSink {
             http,
             max_chars: config.max_chars,
             enforce_public_ip: config.enforce_public_ip,
-            allow_custom_api_base_with_token: config.allow_custom_api_base_with_token,
         })
     }
 
@@ -230,18 +188,16 @@ impl Sink for GitHubCommentSink {
 
     fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
-            let request_options = GitHubApiRequestOptions::new()
-                .with_user_agent("notify-kit")
-                .with_bearer_token(Some(self.token.expose_secret()))
-                .with_allow_custom_bearer_api_base(self.allow_custom_api_base_with_token);
             let client = self
                 .http
-                .select_for_url(&self.api_url, request_options.requires_public_ip_pinning())
+                .select_for_url(&self.api_url, self.enforce_public_ip)
                 .await?;
             let payload = Self::build_payload(event, self.max_chars);
             let request = apply_github_api_headers(
                 client.post(self.api_url.as_str()).json(&payload),
-                request_options,
+                GitHubApiRequestOptions::new()
+                    .with_user_agent("notify-kit")
+                    .with_bearer_token(Some(self.token.expose_secret())),
             );
 
             let resp = send_reqwest(request, "github comment").await?;
@@ -250,7 +206,7 @@ impl Sink for GitHubCommentSink {
     }
 }
 
-fn normalize_secret(secret: NotifySecret, field: &str) -> crate::Result<SecretString> {
+fn normalize_secret(secret: SecretString, field: &str) -> crate::Result<SecretString> {
     let secret = secret.expose_secret().trim();
     if secret.is_empty() {
         return Err(anyhow::anyhow!("github {field} must not be empty").into());
@@ -299,18 +255,12 @@ mod tests {
 
     #[test]
     fn debug_redacts_token() {
-        let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok_secret")
-            .with_api_base("https://github.example.com/api/v3?token=top");
+        let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok_secret");
         let cfg_dbg = format!("{cfg:?}");
         assert!(!cfg_dbg.contains("tok_secret"), "{cfg_dbg}");
-        assert!(!cfg_dbg.contains("api/v3"), "{cfg_dbg}");
-        assert!(!cfg_dbg.contains("top"), "{cfg_dbg}");
-        assert!(cfg_dbg.contains("github.example.com"), "{cfg_dbg}");
         assert!(cfg_dbg.contains("<redacted>"), "{cfg_dbg}");
 
-        let sink =
-            GitHubCommentSink::new(GitHubCommentConfig::new("owner", "repo", 1, "tok_secret"))
-                .expect("build sink");
+        let sink = GitHubCommentSink::new(cfg).expect("build sink");
         let sink_dbg = format!("{sink:?}");
         assert!(!sink_dbg.contains("tok_secret"), "{sink_dbg}");
         assert!(sink_dbg.contains("api.github.com"), "{sink_dbg}");
@@ -330,51 +280,10 @@ mod tests {
     fn preserves_custom_api_base_path() {
         let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok")
             .with_api_base("https://github.example.com/api/v3/");
-        let err = GitHubCommentSink::new(cfg).expect_err("custom api base should require opt-in");
-        assert!(
-            err.to_string().contains("canonical GitHub API base"),
-            "{err:#}"
-        );
-    }
-
-    #[test]
-    fn preserves_custom_api_base_path_after_explicit_opt_in() {
-        let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok")
-            .with_api_base("https://github.example.com/api/v3/")
-            .with_allow_custom_api_base_with_token(true);
         let sink = GitHubCommentSink::new(cfg).expect("build sink");
         assert_eq!(
             sink.api_url.as_str(),
             "https://github.example.com/api/v3/repos/owner/repo/issues/1/comments"
         );
-    }
-
-    #[test]
-    fn allows_private_custom_api_base_with_explicit_opt_in_when_public_ip_check_disabled() {
-        let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok")
-            .with_api_base("https://10.0.0.5/api/v3/")
-            .with_allow_custom_api_base_with_token(true)
-            .with_public_ip_check(false);
-        let err = GitHubCommentSink::new(cfg).expect_err("private token target must fail closed");
-        assert!(err.to_string().contains("public_ip_check=true"), "{err:#}");
-    }
-
-    #[test]
-    fn rejects_disabling_public_ip_check_even_for_canonical_api_base() {
-        let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok").with_public_ip_check(false);
-        let err =
-            GitHubCommentSink::new(cfg).expect_err("token-bearing canonical target must pin IPs");
-        assert!(err.to_string().contains("public_ip_check=true"), "{err:#}");
-    }
-
-    #[test]
-    fn rejects_trusted_localhost_api_base_even_with_public_ip_check_enabled() {
-        let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok")
-            .with_api_base("https://localhost/api/v3/")
-            .with_allow_custom_api_base_with_token(true);
-        let err = GitHubCommentSink::new(cfg)
-            .expect_err("localhost token target should be rejected before send");
-        assert!(err.to_string().contains("localhost"), "{err:#}");
-        assert!(err.to_string().contains("not allowed"), "{err:#}");
     }
 }

@@ -42,69 +42,140 @@
 - 强投递保证
 - 消息幂等与审计
 - 高吞吐有序通知系统
-- locale-aware structured-text 渲染
 
 ## 结构设计
 
-- `notify_kit::core`
-  - canonical 的窄通知边界；包含 `Hub`、`Event`、`Error` 和 `Sink`
-- `notify_kit::builtin`
-  - 内置 provider sinks 的适配层；crate root 继续保留 re-export 仅为兼容
-- `notify_kit::builtin::env`
-  - 标准 `NOTIFY_*` bootstrap helper 的 canonical 入口；`notify_kit::env` 仅保留为兼容出口，并建议迁移到这里
 - `src/event.rs`
   - 统一事件模型
 - `src/hub.rs`
   - hub 配置、限制、并发发送与错误聚合
 - `src/sinks/mod.rs`
-  - sink trait、条件导出和 selective feature 入口
-- `src/sinks/feishu/`
-  - Feishu webhook 适配内部再按 webhook send、payload 和 media support 拆开；图片加载、tenant token cache 与上传编排属于内部 media 子组件，不继续平铺在 sink 本体
+  - sink trait 与各实现导出
+- `src/sinks/http/`
+  - webhook 类 sink 的共享 HTTP 逻辑
 - `src/env.rs`
-  - convenience helper 的兼容 shim；不属于核心协议边界
+  - convenience helper，不是核心协议边界
 - `bots/`
   - 上层集成示例，不是核心 Rust API
-
-## StructuredText Contract
-
-`Event` 可以携带 `StructuredText`，但这不等于内置 sinks 会负责做 locale-aware 渲染。
-
-- freeform 文本会按原文透传到 sink
-- 非 freeform `StructuredText` 会在 sink-facing 投影里降级成稳定字符串
-- 如果你需要最终用户可见的本地化文案，应先在上层完成渲染，再传给 `Event::new(...)` / `with_body(...)` / `with_tag(...)`
-
-这条边界是刻意保持窄的：`notify-kit` 负责通知分发，不接管 `i18n-kit` 的目录语义或 runtime 渲染策略
 
 ## 与其他 crate 的关系
 
 - 依赖 `log-kit` 统一关键 warning 的稳定日志 code 与字段
 - 详细用法和 sink 专题文档放在 crate 自己的 `docs/`
 
-## Feishu Boundary
+一个轻量的通知 Hub（Rust），用于把任意事件推送到多个通知渠道（sinks）。
 
-- `FeishuWebhookSink` 的 canonical 责任仍是 webhook 发送、签名和 payload 组装。
-- markdown image upload 需要的远程下载、本地文件白名单、tenant token cache 与上传编排，已经收口到内部 media support 子组件，而不是继续扩张 `Sink` trait。
-- 如果需要 construction-time 的公网 IP 预检，优先使用 async strict constructor；sync strict constructor 仅保留为兼容入口。
+当前实现：
 
-## 接入边界
+- `sound`：终端 bell（默认）或自定义播放命令
+- `feishu`：飞书群机器人 webhook（text 消息，可选签名）
+- `github`：GitHub Issues/PR 评论（text）
+- `slack`：Slack Incoming Webhook（text 消息）
+- `discord`：Discord webhook（text 消息）
+- `telegram`：Telegram Bot API（sendMessage）
+- `serverchan`：Server酱（ServerChan）推送（text）
+- `pushplus`：PushPlus 推送（text）
+- `bark`：Bark 推送（text）
+- `webhook`：通用 JSON webhook（`{text: ...}` 或自定义字段）
+- `dingtalk`：钉钉群机器人 webhook（text 消息，可选签名）
+- `wecom`：企业微信群机器人 webhook（text 消息）
 
-`notify-kit` 当前不是独立的 crates.io 发布契约。它依赖的 foundation crate 仍按 workspace 一起演进，因此当前接入方式以 Git / monorepo 为准，不应假设 crates.io 依赖链已经稳定。
+设计目标：
 
-如果你要跨仓复用，优先依赖对应 Git revision；如果你在 monorepo 内接入，直接使用 workspace path 即可。
+- 可扩展：后续追加 email/discord/slack/tgbot/桌宠…只需要新增 sink
+- 不阻塞：通知发送失败/超时不会卡住主流程（每个 sink 有超时）
 
-默认 feature 仍继续启用 `all-sinks` 以保持兼容；如果调用方想主动缩小依赖面，可以显式关闭默认 feature 再按需开启具体 sink feature。
+## 安装
 
-## 进一步阅读
+如果你通过 crates.io 使用：
 
-- 入门与最小示例：[`docs/README.md`](./docs/README.md)、[`docs/getting-started.md`](./docs/getting-started.md)
-- 设计与并发/错误边界：[`docs/design.md`](./docs/design.md)
-- integration layer、`NOTIFY_*` helper 与配置建议：[`docs/integration.md`](./docs/integration.md)
-- features、timeout、StructuredText 与常见排错：[`docs/faq.md`](./docs/faq.md)
-- sink 专题与安全说明：[`docs/sinks/README.md`](./docs/sinks/README.md)、[`docs/security.md`](./docs/security.md)
-- bots 与上层集成示例：[`bots/README.md`](./bots/README.md)
+```toml
+[dependencies]
+notify-kit = "0.1"
+```
+
+如果你通过 Git / monorepo 引用（本仓库 workspace 内）：
+
+```toml
+[dependencies]
+notify-kit = { path = "crates/notify-kit" }
+```
+
+> 以上版本与路径仅为示例；请按你的项目实际情况调整。
+
+## 文档
+
+- mdBook：`docs/README.md`（目录：`docs/SUMMARY.md`）
+- 本地预览（含搜索）：`./scripts/docs.sh serve`（需要先 `cargo install mdbook --locked`）
 - Rustdoc：`cargo doc -p notify-kit --open`
+- LLM 友好入口：`llms.txt`（由 `./scripts/build-llms-txt.sh` 生成）
 
-## 开发检查
+## Bots（上层集成示例）
+
+本仓库的核心是 Rust 通知库（`Hub` + `sinks`）。另外也提供少量“上层 bot/集成示例”：
+
+- `bots/`（见 `bots/README.md`）
+
+## 用法
+
+`Hub::notify` 是 fire-and-forget：在 **Tokio runtime** 中 spawn 后台任务并立即返回。
+
+- 如果当前没有 Tokio runtime：`notify` 会丢弃通知并 `tracing::warn!`；可用 `Hub::try_notify` 检测。
+- 如果需要可观测结果：用 `Hub::send(event).await`（会等待所有 sinks 完成/超时）。
+- 注意：`HubConfig.per_sink_timeout` 是 Hub 对每个 sink 的兜底超时；如果你把某个 sink 的 `timeout` 调大，也需要把 `per_sink_timeout` 调到 >= 该值，否则 Hub 可能会先超时。
+- 运行时限制（例如 `max_inflight_events`、`max_sink_sends_in_parallel`）放在 `HubLimits`，避免把执行期背压策略混进 `HubConfig` 的语义配置里。
+
+如果你需要显式控制这些限制，可用 `Hub::new_with_limits(...)` 搭配 `HubLimits::default().with_max_inflight_events(...).with_max_sink_sends_in_parallel(...)`。
+
+最小示例（需要在 Tokio runtime 中调用）：
+
+```rust
+use std::sync::Arc;
+
+use notify_kit::{Event, Hub, HubConfig, Severity, SoundConfig, SoundSink};
+
+let hub = Hub::new(
+    HubConfig::default(),
+    vec![Arc::new(SoundSink::new(SoundConfig { command_argv: None }))],
+);
+
+hub.notify(Event::new("turn_completed", Severity::Success, "done"));
+```
+
+## 安全提示
+
+- `SoundConfig.command_argv` 会执行外部命令（需要启用 `notify-kit/sound-command`）；应视为 **受信任/本机配置**。
+- `FeishuWebhookSink` 会校验 webhook URL：仅允许 `https` + `open.feishu.cn` / `open.larksuite.com`，且不会在 `Debug`/错误信息中输出完整 URL。
+- `FeishuWebhookSink` 默认不会因为 Markdown 正文里出现远程图片 URL 就主动发起下载；远程图片上传必须显式 `with_remote_image_urls(true)`，本地图片也必须显式 `with_local_image_files(true)`，且在无法安全 no-follow 打开的平台上会直接拒绝。
+
+## 配置（环境变量）
+
+本库不规定统一的环境变量协议；配置应由上层应用负责（比如 integration 层解析 env，然后构造 sinks + Hub）。
+
+如果你需要库自带的快捷接线方式，推荐使用：
+
+- `notify_kit::env::build_hub_from_standard_env(...)`
+- `notify_kit::env::StandardEnvHubOptions`
+
+它们只是 convenience helper，适合快速接线或共享一套简单约定；不是强制协议，也不是核心架构边界。
+这套 helper 自带的中性约定是 `NOTIFY_*`，例如 `NOTIFY_SOUND`、`NOTIFY_WEBHOOK_URL`、`NOTIFY_TIMEOUT_MS`、`NOTIFY_EVENTS`。
+公开入口就是 `notify_kit::env::...`；不要在 crate root 上再叠一层快捷别名。
+
+## 标准 helper 示例
+
+上层应用也可以直接沿用这套中性约定；如果需要产品专属前缀或额外字段，建议在应用侧单独封装 integration crate。示例：
+
+```bash
+export NOTIFY_SOUND=1
+# export NOTIFY_FEISHU_WEBHOOK_URL="..."
+# export NOTIFY_EVENTS="turn_completed,approval_requested,message_received"
+
+cargo run -p your-app
+```
+
+## 开发
+
+离线检查：
 
 ```bash
 CARGO_NET_OFFLINE=true ./scripts/gate.sh

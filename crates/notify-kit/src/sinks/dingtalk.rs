@@ -1,13 +1,15 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::Event;
-use crate::NotifySecret;
+use crate::SecretString;
 use crate::sinks::crypto::hmac_sha256_base64;
 use crate::sinks::text::{TextLimits, format_event_text_limited};
-use crate::sinks::webhook_common::JsonWebhookEndpoint;
 use crate::sinks::{BoxFuture, Sink};
-use http_kit::{read_json_body_after_http_success, redact_url, redact_url_str};
-use secret_kit::SecretString;
+use http_kit::{
+    HttpClientOptions, HttpClientProfile, build_http_client_profile, parse_and_validate_https_url,
+    read_json_body_after_http_success, redact_url, redact_url_str, send_reqwest,
+    validate_url_path_prefix,
+};
 
 const DINGTALK_ALLOWED_HOSTS: [&str; 1] = ["oapi.dingtalk.com"];
 
@@ -15,7 +17,7 @@ const DINGTALK_ALLOWED_HOSTS: [&str; 1] = ["oapi.dingtalk.com"];
 #[derive(Clone)]
 pub struct DingTalkWebhookConfig {
     pub webhook_url: String,
-    pub secret: Option<NotifySecret>,
+    pub secret: Option<SecretString>,
     pub timeout: Duration,
     pub max_chars: usize,
     pub enforce_public_ip: bool,
@@ -45,7 +47,7 @@ impl DingTalkWebhookConfig {
     }
 
     #[must_use]
-    pub fn with_secret(mut self, secret: impl Into<NotifySecret>) -> Self {
+    pub fn with_secret(mut self, secret: impl Into<SecretString>) -> Self {
         self.secret = Some(secret.into());
         self
     }
@@ -70,15 +72,17 @@ impl DingTalkWebhookConfig {
 }
 
 pub struct DingTalkWebhookSink {
-    endpoint: JsonWebhookEndpoint,
+    webhook_url: reqwest::Url,
     secret: Option<SecretString>,
+    http: HttpClientProfile,
     max_chars: usize,
+    enforce_public_ip: bool,
 }
 
 impl std::fmt::Debug for DingTalkWebhookSink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DingTalkWebhookSink")
-            .field("webhook_url", &redact_url(self.endpoint.url()))
+            .field("webhook_url", &redact_url(&self.webhook_url))
             .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
             .field("max_chars", &self.max_chars)
             .finish_non_exhaustive()
@@ -95,24 +99,25 @@ impl DingTalkWebhookSink {
             enforce_public_ip,
         } = config;
 
-        let mut endpoint = JsonWebhookEndpoint::new_validated_https(
-            &webhook_url,
-            &DINGTALK_ALLOWED_HOSTS,
-            "/robot/send",
-            timeout,
-            enforce_public_ip,
-        )?;
+        let mut webhook_url = parse_and_validate_https_url(&webhook_url, &DINGTALK_ALLOWED_HOSTS)?;
+        validate_url_path_prefix(&webhook_url, "/robot/send")?;
+        let http = build_http_client_profile(&HttpClientOptions {
+            timeout: Some(timeout),
+            ..Default::default()
+        })?;
 
         let secret = normalize_optional_trimmed(secret)?;
 
         if secret.is_some() {
-            remove_query_pairs(endpoint.url_mut(), &["timestamp", "sign"]);
+            remove_query_pairs(&mut webhook_url, &["timestamp", "sign"]);
         }
 
         Ok(Self {
-            endpoint,
+            webhook_url,
             secret,
+            http,
             max_chars,
+            enforce_public_ip,
         })
     }
 
@@ -126,7 +131,7 @@ impl DingTalkWebhookSink {
 
     fn webhook_url_with_signature(&self) -> crate::Result<reqwest::Url> {
         let Some(secret) = self.secret.as_ref() else {
-            return Ok(self.endpoint.url().clone());
+            return Ok(self.webhook_url.clone());
         };
 
         let timestamp = SystemTime::now()
@@ -139,7 +144,7 @@ impl DingTalkWebhookSink {
         let string_to_sign = format!("{timestamp}\n{secret}");
         let sign = hmac_sha256_base64(secret, &string_to_sign)?;
 
-        let mut url = self.endpoint.url().clone();
+        let mut url = self.webhook_url.clone();
         {
             let mut query = url.query_pairs_mut();
             query.append_pair("timestamp", &timestamp);
@@ -149,7 +154,7 @@ impl DingTalkWebhookSink {
     }
 }
 
-fn normalize_optional_trimmed(value: Option<NotifySecret>) -> crate::Result<Option<SecretString>> {
+fn normalize_optional_trimmed(value: Option<SecretString>) -> crate::Result<Option<SecretString>> {
     match value {
         Some(value) => {
             let value = value.expose_secret().trim();
@@ -191,11 +196,13 @@ impl Sink for DingTalkWebhookSink {
     fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
             let url = self.webhook_url_with_signature()?;
-            let payload = Self::build_payload(event, self.max_chars);
-            let resp = self
-                .endpoint
-                .post_json_to(&url, &payload, "dingtalk webhook")
+            let client = self
+                .http
+                .select_for_url(&url, self.enforce_public_ip)
                 .await?;
+            let payload = Self::build_payload(event, self.max_chars);
+
+            let resp = send_reqwest(client.post(url).json(&payload), "dingtalk webhook").await?;
             let body = read_json_body_after_http_success(resp, "dingtalk webhook").await?;
             let errcode = body["errcode"].as_i64().unwrap_or(-1);
             if errcode == 0 {

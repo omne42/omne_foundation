@@ -3,9 +3,8 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use secret_kit::SecretString;
 
-use crate::NotifySecret;
+use crate::SecretString;
 use crate::log::{warn_feishu_image_load_failed, warn_feishu_image_upload_failed};
 use crate::sinks::BoxFuture;
 use http_kit::{
@@ -13,7 +12,7 @@ use http_kit::{
     read_json_body_limited, read_text_body_limited, response_body_read_error, send_reqwest,
 };
 
-use super::FeishuWebhookMediaSupport;
+use super::FeishuWebhookSink;
 
 #[derive(Debug, Clone)]
 pub(super) struct FeishuAppCredentials {
@@ -32,25 +31,6 @@ pub(super) struct LoadedImage {
     pub(super) bytes: Vec<u8>,
     pub(super) file_name: String,
     pub(super) content_type: String,
-}
-
-impl std::fmt::Debug for FeishuWebhookMediaSupport {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FeishuWebhookMediaSupport")
-            .field("webhook_url", &http_kit::redact_url(&self.webhook_url))
-            .field("enforce_public_ip", &self.enforce_public_ip)
-            .field("allow_remote_image_urls", &self.allow_remote_image_urls)
-            .field("allow_local_image_files", &self.allow_local_image_files)
-            .field("local_image_roots", &self.local_image_roots)
-            .field("local_image_base_dir", &self.local_image_base_dir)
-            .field("image_upload_max_bytes", &self.image_upload_max_bytes)
-            .field(
-                "app_credentials",
-                &self.app_credentials.as_ref().map(|_| "<redacted>"),
-            )
-            .field("tenant_access_token", &"<internal-cache>")
-            .finish()
-    }
 }
 
 struct TenantAccessTokenRefreshGuard {
@@ -97,7 +77,19 @@ impl Drop for TenantAccessTokenRefreshGuard {
                 drop(guard);
                 notify.notify_waiters();
             }));
+            return;
         }
+
+        let mut guard = state.blocking_lock();
+        if matches!(
+            &*guard,
+            super::TenantAccessTokenState::Refreshing(current)
+                if std::sync::Arc::ptr_eq(current, &notify)
+        ) {
+            *guard = super::TenantAccessTokenState::Empty;
+        }
+        drop(guard);
+        notify.notify_waiters();
     }
 }
 
@@ -114,7 +106,7 @@ fn tenant_access_token_refresh_waiter(
     }
 }
 
-impl FeishuWebhookMediaSupport {
+impl FeishuWebhookSink {
     pub(super) async fn resolve_single_image_key(&self, src: &str) -> Option<String> {
         self.app_credentials.as_ref()?;
         if src.starts_with("https://") && !self.allow_remote_image_urls {
@@ -437,40 +429,17 @@ pub(super) fn normalize_local_image_roots(
     allow_local_image_files: bool,
     roots: Vec<PathBuf>,
 ) -> crate::Result<Vec<PathBuf>> {
-    if !allow_local_image_files {
-        return Ok(Vec::new());
-    }
-    ensure_local_image_files_supported()?;
-
     let normalized = roots
         .into_iter()
         .map(normalize_local_image_root)
         .collect::<crate::Result<Vec<_>>>()?;
-    if normalized.is_empty() {
+    if allow_local_image_files && normalized.is_empty() {
         return Err(anyhow::anyhow!(
             "local image files require at least one configured local image root"
         )
         .into());
     }
     Ok(normalized)
-}
-
-pub(super) fn validate_local_image_platform_support(
-    allow_local_image_files: bool,
-) -> crate::Result<()> {
-    if !allow_local_image_files {
-        return Ok(());
-    }
-
-    #[cfg(not(unix))]
-    {
-        return Err(anyhow::anyhow!("local image files are not supported on this platform").into());
-    }
-
-    #[cfg(unix)]
-    {
-        Ok(())
-    }
 }
 
 pub(super) fn normalize_local_image_base_dir(
@@ -480,21 +449,8 @@ pub(super) fn normalize_local_image_base_dir(
     if !allow_local_image_files {
         return Ok(None);
     }
-    ensure_local_image_files_supported()?;
 
     base_dir.map(normalize_local_image_root).transpose()
-}
-
-fn ensure_local_image_files_supported() -> crate::Result<()> {
-    #[cfg(unix)]
-    {
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    {
-        Err(anyhow::anyhow!("local image files are not supported on this platform").into())
-    }
 }
 
 fn normalize_local_image_root(root: PathBuf) -> crate::Result<PathBuf> {
@@ -718,7 +674,7 @@ pub(super) fn guess_image_mime(ext: Option<&str>) -> String {
     .to_string()
 }
 
-pub(super) fn normalize_secret(secret: impl Into<NotifySecret>) -> crate::Result<SecretString> {
+pub(super) fn normalize_secret(secret: impl Into<SecretString>) -> crate::Result<SecretString> {
     let secret = secret.into();
     let secret = secret.expose_secret().trim();
     if secret.is_empty() {
@@ -729,7 +685,7 @@ pub(super) fn normalize_secret(secret: impl Into<NotifySecret>) -> crate::Result
 
 pub(super) fn normalize_app_credentials(
     app_id: Option<String>,
-    app_secret: Option<NotifySecret>,
+    app_secret: Option<SecretString>,
 ) -> crate::Result<Option<FeishuAppCredentials>> {
     let app_id = normalize_optional_trimmed(app_id, "app_id")?;
     let app_secret = normalize_optional_secret(app_secret, "app_secret")?;
@@ -758,7 +714,7 @@ fn normalize_optional_trimmed(value: Option<String>, field: &str) -> crate::Resu
 }
 
 fn normalize_optional_secret(
-    value: Option<NotifySecret>,
+    value: Option<SecretString>,
     field: &str,
 ) -> crate::Result<Option<SecretString>> {
     match value {
@@ -780,10 +736,10 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        ensure_local_image_path_has_no_symlink_components, normalize_local_image_base_dir,
-        normalize_local_image_roots, resolve_local_image_path, resolve_local_image_path_with_base,
-        tenant_access_token_cache_ttl, tenant_access_token_refresh_waiter,
-        validate_local_image_platform_support,
+        TenantAccessTokenRefreshGuard, ensure_local_image_path_has_no_symlink_components,
+        normalize_local_image_base_dir, normalize_local_image_roots, resolve_local_image_path,
+        resolve_local_image_path_with_base, tenant_access_token_cache_ttl,
+        tenant_access_token_refresh_waiter,
     };
 
     #[tokio::test]
@@ -803,6 +759,34 @@ mod tests {
         assert_eq!(tenant_access_token_cache_ttl(30), Duration::ZERO);
         assert_eq!(tenant_access_token_cache_ttl(120), Duration::from_secs(60));
         assert_eq!(tenant_access_token_cache_ttl(-1), Duration::ZERO);
+    }
+
+    #[test]
+    fn refresh_guard_drop_without_runtime_resets_refreshing_state() {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let state = Arc::new(tokio::sync::Mutex::new(
+            super::super::TenantAccessTokenState::Refreshing(Arc::clone(&notify)),
+        ));
+        let wait = tenant_access_token_refresh_waiter(Arc::clone(&notify));
+
+        let refresh_guard =
+            TenantAccessTokenRefreshGuard::new(Arc::clone(&state), Arc::clone(&notify));
+        drop(refresh_guard);
+
+        assert!(matches!(
+            &*state.blocking_lock(),
+            super::super::TenantAccessTokenState::Empty
+        ));
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        runtime.block_on(async {
+            tokio::time::timeout(Duration::from_millis(50), wait)
+                .await
+                .expect("refresh guard should notify waiters even without current runtime");
+        });
     }
 
     #[test]
@@ -832,41 +816,16 @@ mod tests {
     }
 
     #[test]
-    fn normalize_local_image_roots_ignores_roots_when_local_files_are_disabled() {
-        let roots = normalize_local_image_roots(false, vec![PathBuf::from("relative-root")])
-            .expect("disabled local files should ignore configured roots");
-        assert!(roots.is_empty());
-    }
-
-    #[test]
     fn normalize_local_image_base_dir_ignores_base_dir_when_local_files_are_disabled() {
         let base_dir = normalize_local_image_base_dir(false, Some(PathBuf::from("relative-root")))
-            .expect("disabled local files should ignore configured base dir");
+            .expect("disabled local files should ignore base dir");
         assert!(base_dir.is_none());
-    }
-
-    #[cfg(not(unix))]
-    #[test]
-    fn local_image_platform_support_fails_closed_when_enabled() {
-        let err = validate_local_image_platform_support(true)
-            .expect_err("non-unix platforms should reject local image files at config time");
-        assert!(
-            err.to_string().contains("not supported on this platform"),
-            "{err:#}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn local_image_platform_support_allows_unix_safe_open_path() {
-        validate_local_image_platform_support(true)
-            .expect("unix platforms should allow local image files when enabled");
     }
 
     #[test]
     fn resolve_local_image_path_requires_explicit_base_dir_for_relative_paths() {
         let err = resolve_local_image_path(Path::new("image.png"), None)
-            .expect_err("relative path without base dir should fail closed");
+            .expect_err("relative path without base dir should fail");
         assert!(
             err.to_string()
                 .contains("relative local image paths require explicit base dir"),

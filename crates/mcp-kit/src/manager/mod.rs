@@ -762,7 +762,11 @@ impl Manager {
     ///
     /// Default: 1 (sequential handling).
     pub fn with_server_handler_concurrency(mut self, concurrency: usize) -> Self {
-        self.server_handler_concurrency = concurrency.max(1);
+        assert!(
+            concurrency > 0,
+            "server handler concurrency must be greater than zero"
+        );
+        self.server_handler_concurrency = concurrency;
         self
     }
 

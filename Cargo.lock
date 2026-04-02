@@ -635,7 +635,6 @@ name = "http-kit"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "error-kit",
  "reqwest",
  "serde",
  "serde_json",

@@ -346,14 +346,14 @@ pub async fn select_http_client_from_profile(
 }
 
 pub async fn select_http_client_with_options(
+    base_client: &reqwest::Client,
     options: &HttpClientOptions,
     url: &reqwest::Url,
     enforce_public_ip: bool,
 ) -> crate::Result<reqwest::Client> {
     if !enforce_public_ip {
-        // `reqwest::Client` keeps its builder state opaque, so callers must pass the reusable
-        // configuration explicitly instead of relying on an unrelated base client.
-        return build_http_client_with_options(options);
+        let _ = options;
+        return Ok(base_client.clone());
     }
 
     // `reqwest::Client` does not expose a safe way to clone its opaque builder state while
@@ -529,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn select_http_client_with_options_preserves_options_on_unpinned_path() {
+    fn select_http_client_with_options_preserves_base_client_on_unpinned_path() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let addr = listener.local_addr().expect("listener addr");
         let server = thread::spawn(move || {
@@ -538,8 +538,8 @@ mod tests {
             let read = stream.read(&mut buf).expect("read request");
             let request = String::from_utf8_lossy(&buf[..read]);
             assert!(
-                request.contains("x-test-header: options\r\n"),
-                "request should keep options headers instead of cloning the base client: {request}"
+                request.contains("x-test-header: base-client\r\n"),
+                "request should reuse the caller's base client on the unpinned path: {request}"
             );
 
             stream
@@ -552,6 +552,17 @@ mod tests {
             .build()
             .expect("build tokio runtime");
         rt.block_on(async {
+            let mut base_headers = reqwest::header::HeaderMap::new();
+            base_headers.insert(
+                "x-test-header",
+                reqwest::header::HeaderValue::from_static("base-client"),
+            );
+            let base_client = build_http_client_with_options(&HttpClientOptions {
+                timeout: Some(Duration::from_secs(1)),
+                default_headers: base_headers,
+                ..Default::default()
+            })
+            .expect("build base client");
             let mut default_headers = reqwest::header::HeaderMap::new();
             default_headers.insert(
                 "x-test-header",
@@ -565,7 +576,7 @@ mod tests {
             let url = reqwest::Url::parse(&format!("http://127.0.0.1:{}/hook", addr.port()))
                 .expect("parse url");
 
-            let response = select_http_client_with_options(&options, &url, false)
+            let response = select_http_client_with_options(&base_client, &options, &url, false)
                 .await
                 .expect("select unpinned client from options")
                 .get(url)

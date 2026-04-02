@@ -13,13 +13,10 @@
 负责：
 
 - GitHub API 请求头默认值与可选 bearer token 注入
-- bearer token 的目标校验：默认只允许 `https://api.github.com`，自定义 GitHub API base 必须显式 trust opt-in，且 localhost / 单标签主机 / 私网 IP literal 仍然会被拒绝
 - `owner/repo` 形式的 repository 标识校验
 - latest release endpoint URL 构造
 - latest release metadata DTO 与获取
 - 多个 GitHub API base 的顺序回退
-- 基于 `http-kit::HttpClientProfile` 的显式 HTTP 边界复用
-- bearer token 请求走 public-IP pinned client，而不是依赖不透明 `reqwest::Client`
 
 不负责：
 
@@ -51,7 +48,6 @@
   - GitHub API 请求头默认值与 request options
 - `src/release.rs`
   - latest release DTO、repository/base URL 归一化与获取
-  - bearer token 场景下的 public-IP pinned HTTP client 选择
 - `src/error.rs`
   - 稳定错误类型
 

@@ -80,7 +80,7 @@ data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}
 `StreamableHttpOptions`：
 
 - `connect_timeout`：只用于建立 SSE/HTTP 连接（默认 10s）
-- `request_timeout`：用于单次 POST 的建连、首个 HTTP response 以及非 SSE JSON body 读取；如果 POST 成功返回 `text/event-stream`，后续持续产出的 SSE 响应流不再受这个超时上限约束。不要用于限制主 SSE（GET）长连接
+- `request_timeout`：用于单次 POST 的非 SSE JSON body / error body 读取；如果 POST 最终返回 `text/event-stream`，等待这次 SSE 响应头以及后续持续产出的 SSE 流都不受这个超时上限约束。不要用于限制主 SSE（GET）长连接
 
 请求级别行为：
 

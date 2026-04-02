@@ -1183,7 +1183,7 @@ data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}
 `StreamableHttpOptions`：
 
 - `connect_timeout`：只用于建立 SSE/HTTP 连接（默认 10s）
-- `request_timeout`：用于单次 POST 的建连、首个 HTTP response 以及非 SSE JSON body 读取；如果 POST 成功返回 `text/event-stream`，后续持续产出的 SSE 响应流不再受这个超时上限约束。不要用于限制主 SSE（GET）长连接
+- `request_timeout`：用于单次 POST 的非 SSE JSON body / error body 读取；如果 POST 最终返回 `text/event-stream`，等待这次 SSE 响应头以及后续持续产出的 SSE 流都不受这个超时上限约束。不要用于限制主 SSE（GET）长连接
 
 请求级别行为：
 
@@ -1356,7 +1356,7 @@ stdout_log 是 best-effort：
 这会影响：
 
 - `Manager::request/*` / `Session::request/*`：等待 JSON-RPC response 的最长时间
-- `transport=streamable_http` 下：POST 请求的超时（`mcp_jsonrpc::StreamableHttpOptions.request_timeout`）
+- `transport=streamable_http` 下：POST 的非 SSE JSON/error body 读取超时（`mcp_jsonrpc::StreamableHttpOptions.request_timeout`）
 
 建议：
 
@@ -1586,7 +1586,7 @@ if let Some(status) = status {
 
 - `headers`：额外 header
 - `connect_timeout`：建立连接超时（默认 10s）
-- `request_timeout`：用于单次 POST 的建连、首个 HTTP response 以及非 SSE JSON body 读取；如果 POST 成功返回 `text/event-stream`，后续持续产出的 SSE 响应流不再受这个超时上限约束。不要用于限制主 SSE（GET）长连接
+- `request_timeout`：用于单次 POST 的非 SSE JSON body / error body 读取；如果 POST 最终返回 `text/event-stream`，等待这次 SSE 响应头以及后续持续产出的 SSE 流都不受这个超时上限约束。不要用于限制主 SSE（GET）长连接
 - `follow_redirects`：是否跟随 HTTP redirects（默认 `false`，减少 SSRF 风险）
 - `error_body_preview_bytes`：HTTP 错误/非 JSON 响应时，桥接到 JSON-RPC error data 的 body 预览最大字节数（默认 `0`，避免意外泄露）
 

@@ -12,7 +12,7 @@
 这会影响：
 
 - `Manager::request/*` / `Session::request/*`：等待 JSON-RPC response 的最长时间
-- `transport=streamable_http` 下：POST 请求的超时（`mcp_jsonrpc::StreamableHttpOptions.request_timeout`）
+- `transport=streamable_http` 下：POST 的非 SSE JSON/error body 读取超时（`mcp_jsonrpc::StreamableHttpOptions.request_timeout`）
 
 建议：
 

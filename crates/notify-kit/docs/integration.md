@@ -29,6 +29,7 @@ your-app
 
 - `HubConfig` 放过滤、超时这类语义配置
 - `HubLimits` 放 inflight 上限、sink fan-out 并行度这类执行期限制
+- 如果某个 sink 自己也有 HTTP timeout，`HubConfig.per_sink_timeout` 最好比它更大，并留一点 DNS / preflight slack；否则外层 `Hub` 可能会先超时
 
 ## 一个参考的 env/CLI 协议（示例）
 
@@ -53,6 +54,13 @@ use notify_kit::{
 };
 
 fn build_hub_from_env() -> notify_kit::Result<Hub> {
+    let http_timeout = std::env::var("MYAPP_NOTIFY_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(5));
+    let per_sink_timeout = http_timeout + Duration::from_millis(500);
+
     let mut sinks: Vec<Arc<dyn Sink>> = Vec::new();
 
     if std::env::var("MYAPP_NOTIFY_SOUND").ok().as_deref() == Some("1") {
@@ -60,18 +68,13 @@ fn build_hub_from_env() -> notify_kit::Result<Hub> {
     }
 
     if let Ok(url) = std::env::var("MYAPP_NOTIFY_FEISHU_WEBHOOK_URL") {
-        sinks.push(Arc::new(FeishuWebhookSink::new(FeishuWebhookConfig::new(url))?));
+        let cfg = FeishuWebhookConfig::new(url).with_timeout(http_timeout);
+        sinks.push(Arc::new(FeishuWebhookSink::new(cfg)?));
     }
 
     let enabled_kinds = std::env::var("MYAPP_NOTIFY_EVENTS")
         .ok()
         .map(|s| s.split(',').filter(|x| !x.trim().is_empty()).map(|x| x.trim().to_string()).collect::<BTreeSet<_>>());
-
-    let per_sink_timeout = std::env::var("MYAPP_NOTIFY_TIMEOUT_MS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(Duration::from_millis)
-        .unwrap_or(Duration::from_secs(5));
 
     Ok(Hub::new_with_limits(
         HubConfig {
@@ -83,6 +86,10 @@ fn build_hub_from_env() -> notify_kit::Result<Hub> {
     ))
 }
 ```
+
+如果你采用库自带的 `notify_kit::env::build_hub_from_standard_env(...)` helper，`NOTIFY_TIMEOUT_MS` 会先作为各 HTTP sink 的内部 timeout，再自动为 `HubConfig.per_sink_timeout` 留一段额外 slack，避免外层 `Hub` 比内层 HTTP request 更早超时。
+
+如果你在 integration layer 里接 `FeishuWebhookSink` 且正文会出现相对本地图片路径，记得同时显式配置绝对 `with_local_image_root(...)` 和绝对 `with_local_image_base_dir(...)`；`notify-kit` 不会再退回进程 `current_dir()` 解释这类路径。
 
 如果你采用库自带的 env helper，建议通过 `notify_kit::env::build_hub_from_standard_env(...)` 访问，并把它当成 bootstrap helper：能减少样板代码，但不妨碍你在自己的 integration layer 继续包装、替换或扩展。
 它使用一套中性的 `NOTIFY_*` 约定，而不是业务前缀协议。

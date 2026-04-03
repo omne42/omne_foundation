@@ -14,10 +14,20 @@ use crate::{
     HubConfig, HubLimits, Sink, SlackWebhookConfig, SlackWebhookSink, SoundConfig, SoundSink,
 };
 
+const DEFAULT_NOTIFY_TIMEOUT_MS: u64 = 5000;
+const MIN_HUB_TIMEOUT_SLACK_MS: u64 = 250;
+const MAX_HUB_TIMEOUT_SLACK_MS: u64 = 1000;
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StandardEnvHubOptions {
     pub default_sound_enabled: bool,
     pub require_sink: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimeoutConfig {
+    sink_timeout: Duration,
+    hub_timeout: Duration,
 }
 
 fn parse_bool_env_value(raw: &str) -> Option<bool> {
@@ -44,15 +54,28 @@ where
         .filter(|value| !value.is_empty())
 }
 
-fn parse_timeout_ms_env<F>(key: &str, get: &F) -> anyhow::Result<Duration>
+fn hub_timeout_slack(timeout: Duration) -> Duration {
+    let timeout_ms = timeout.as_millis();
+    let proportional_slack_ms = (timeout_ms / 5) as u64;
+    Duration::from_millis(
+        proportional_slack_ms.clamp(MIN_HUB_TIMEOUT_SLACK_MS, MAX_HUB_TIMEOUT_SLACK_MS),
+    )
+}
+
+fn parse_timeout_ms_env<F>(key: &str, get: &F) -> anyhow::Result<TimeoutConfig>
 where
     F: Fn(&str) -> Option<String>,
 {
     let timeout = env_nonempty(key, get)
         .map(|value| value.parse::<u64>())
         .transpose()?
-        .unwrap_or(5000);
-    Ok(Duration::from_millis(timeout.max(1)))
+        .unwrap_or(DEFAULT_NOTIFY_TIMEOUT_MS)
+        .max(1);
+    let sink_timeout = Duration::from_millis(timeout);
+    Ok(TimeoutConfig {
+        sink_timeout,
+        hub_timeout: sink_timeout.saturating_add(hub_timeout_slack(sink_timeout)),
+    })
 }
 
 pub fn build_hub_from_standard_env(options: StandardEnvHubOptions) -> anyhow::Result<Option<Hub>> {
@@ -72,7 +95,7 @@ where
     const NOTIFY_EVENTS_ENV: &str = "NOTIFY_EVENTS";
 
     let sound_enabled = env_bool(NOTIFY_SOUND_ENV, get).unwrap_or(options.default_sound_enabled);
-    let timeout = parse_timeout_ms_env(NOTIFY_TIMEOUT_MS_ENV, get)
+    let timeouts = parse_timeout_ms_env(NOTIFY_TIMEOUT_MS_ENV, get)
         .with_context(|| format!("invalid {NOTIFY_TIMEOUT_MS_ENV}"))?;
 
     let mut sinks: Vec<Arc<dyn Sink>> = Vec::new();
@@ -81,7 +104,7 @@ where
     }
 
     if let Some(url) = env_nonempty(NOTIFY_WEBHOOK_URL_ENV, get) {
-        let mut cfg = GenericWebhookConfig::new(url).with_timeout(timeout);
+        let mut cfg = GenericWebhookConfig::new(url).with_timeout(timeouts.sink_timeout);
         if let Some(field) = env_nonempty(NOTIFY_WEBHOOK_FIELD_ENV, get) {
             cfg = cfg.with_payload_field(field);
         }
@@ -91,14 +114,14 @@ where
     }
 
     if let Some(url) = env_nonempty(NOTIFY_FEISHU_WEBHOOK_URL_ENV, get) {
-        let cfg = FeishuWebhookConfig::new(url).with_timeout(timeout);
+        let cfg = FeishuWebhookConfig::new(url).with_timeout(timeouts.sink_timeout);
         sinks.push(Arc::new(
             FeishuWebhookSink::new(cfg).context("build feishu sink")?,
         ));
     }
 
     if let Some(url) = env_nonempty(NOTIFY_SLACK_WEBHOOK_URL_ENV, get) {
-        let cfg = SlackWebhookConfig::new(url).with_timeout(timeout);
+        let cfg = SlackWebhookConfig::new(url).with_timeout(timeouts.sink_timeout);
         sinks.push(Arc::new(
             SlackWebhookSink::new(cfg).context("build slack sink")?,
         ));
@@ -126,7 +149,7 @@ where
     Ok(Some(Hub::new_with_limits(
         HubConfig {
             enabled_kinds,
-            per_sink_timeout: timeout,
+            per_sink_timeout: timeouts.hub_timeout,
         },
         sinks,
         HubLimits::default(),
@@ -170,5 +193,30 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("no notification sinks configured"));
+    }
+
+    #[test]
+    fn parse_timeout_ms_env_uses_default_timeout_and_hub_slack() {
+        let env = HashMap::<String, String>::new();
+
+        let cfg = parse_timeout_ms_env("NOTIFY_TIMEOUT_MS", &|key| env.get(key).cloned())
+            .expect("parse timeout");
+        assert_eq!(
+            cfg,
+            TimeoutConfig {
+                sink_timeout: Duration::from_secs(5),
+                hub_timeout: Duration::from_secs(6),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_timeout_ms_env_clamps_hub_slack_for_small_values() {
+        let env = HashMap::from([(String::from("NOTIFY_TIMEOUT_MS"), String::from("2000"))]);
+
+        let cfg = parse_timeout_ms_env("NOTIFY_TIMEOUT_MS", &|key| env.get(key).cloned())
+            .expect("parse timeout");
+        assert_eq!(cfg.sink_timeout, Duration::from_millis(2000));
+        assert_eq!(cfg.hub_timeout, Duration::from_millis(2400));
     }
 }

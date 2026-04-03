@@ -69,8 +69,10 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `FeishuWebhookSink`：租户 token 刷新状态机现在具备取消安全，刷新 future 被取消时会回退到 `Empty` 并唤醒 waiters，避免一次超时后永久卡在 `Refreshing`；并补充重试恢复回归测试。
 - `FeishuWebhookSink`：租户 token 刷新守卫在没有当前 Tokio runtime 的 drop 路径下也会同步回退到 `Empty` 并唤醒 waiters，避免状态永久卡在 `Refreshing`。
 - `FeishuWebhookSink`：本地图片相对路径现在必须显式配置 `local_image_base_dir`，不再隐式依赖进程 `current_dir()` 解析 foundation 级路径语义。
+- `notify_kit::env::build_hub_from_standard_env(...)`：`NOTIFY_TIMEOUT_MS` 现在优先驱动各 HTTP sink 的内部 timeout，并自动给 `HubConfig.per_sink_timeout` 留额外 slack，避免外层 `Hub` 在 DNS / preflight 或请求收尾前伪超时。
 - env helper: 公开路径统一为 `notify_kit::env::build_hub_from_standard_env(...)` / `notify_kit::env::StandardEnvHubOptions`，不再保留 crate root 兼容 re-export。
 - docs: 明确 env helper 是 convenience helper，而不是库级强制 env 协议。
+- docs: 补充 `FeishuWebhookSink` 本地图片相对路径示例，明确相对路径必须显式配置绝对 `local_image_base_dir`，不会退回 ambient `current_dir()`.
 - Webhook/API sinks: `select_http_client` 在命中过期 `pinned client` 条目时会先清理再进入刷新流程，减少失败重建场景下的无效缓存驻留与后续冗余检查。
 - `DiscordWebhookSink` / `GenericWebhookSink` / `GitHubCommentSink`：在成功响应路径增加“有界响应体排空”（仅在可判定小响应体时），提升 HTTP 连接复用率并减少高频发送场景下的额外建连开销。
 - `Hub`：内部 `enabled_kinds` 索引从 `BTreeSet` 查找切换为 `HashSet`（保持对外配置类型不变），降低高频 `notify/send` kind 过滤路径的查找复杂度。

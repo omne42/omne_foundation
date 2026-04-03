@@ -171,7 +171,25 @@ let sink = FeishuWebhookSink::new(cfg)?;
 # }
 ```
 
+- `local_image_root(s)` 只是 allowlist，不负责给相对路径选基准目录；如果 Markdown 里写的是相对图片路径（例如 `![img](./exported-images/a.png)`），还必须显式配置绝对 `local_image_base_dir`
+
+```rust,no_run,edition2024
+# extern crate notify_kit;
+# fn main() -> notify_kit::Result<()> {
+use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+
+let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx")
+    .with_app_credentials("cli_xxx", "app_secret_xxx")
+    .with_local_image_files(true)
+    .with_local_image_root("/abs/path/to/project/exported-images")
+    .with_local_image_base_dir("/abs/path/to/project");
+let sink = FeishuWebhookSink::new(cfg)?;
+# Ok(())
+# }
+```
+
 - 只会读取显式 `local_image_root(s)` 之下的文件；超出 root、`..` 逃逸、symlink 组件和其他特殊路径都会 fail closed
+- 未配置 `local_image_base_dir` 时，相对图片路径会直接报错，而不是退回进程 `current_dir()`
 - 非 Unix 平台如果无法提供安全的 no-follow 打开语义，会直接拒绝本地图片读取，而不是退化成跟随 symlink/reparse point
 - 上传失败时不会中断整条消息，自动回退为文本链接表示
 

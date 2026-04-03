@@ -103,6 +103,29 @@ notify-kit = { path = "crates/notify-kit" }
 
 > 以上版本与路径仅为示例；请按你的项目实际情况调整。
 
+如果你只需要核心 `Hub` / `Event` / `Sink` 抽象，而不想连带编译内置 vendor sinks，可以关闭默认 features：
+
+```toml
+[dependencies]
+notify-kit = { path = "crates/notify-kit", default-features = false }
+```
+
+默认 features 仍会保留当前内置 sinks；若只想按需打开某几个 sink，可在关闭默认 features 后显式启用：
+
+```toml
+[dependencies]
+notify-kit = { path = "crates/notify-kit", default-features = false, features = ["sink-sound", "sink-slack"] }
+```
+
+当前主要 feature 边界：
+
+- `sink-*`
+  - 分别启用对应 vendor sink，例如 `sink-github`、`sink-feishu`、`sink-telegram`
+- `standard-env`
+  - 启用 `notify_kit::env` 以及它依赖的标准 sinks（`sink-sound`、`sink-generic-webhook`、`sink-feishu`、`sink-slack`）
+- `sound-command`
+  - 允许 `SoundSink` 执行外部命令，并自动依赖 `sink-sound`
+
 ## 文档
 
 - mdBook：`docs/README.md`（目录：`docs/SUMMARY.md`）
@@ -158,7 +181,9 @@ hub.notify(Event::new("turn_completed", Severity::Success, "done"));
 - `notify_kit::env::StandardEnvHubOptions`
 
 它们只是 convenience helper，适合快速接线或共享一套简单约定；不是强制协议，也不是核心架构边界。
+同时，这组 helper 现在也显式属于 `standard-env` feature；如果你关闭了默认 features，需要手动启用它。
 这套 helper 自带的中性约定是 `NOTIFY_*`，例如 `NOTIFY_SOUND`、`NOTIFY_WEBHOOK_URL`、`NOTIFY_TIMEOUT_MS`、`NOTIFY_EVENTS`。
+如果显式提供 `NOTIFY_SOUND`，它现在必须是合法布尔值（`1/0/true/false/yes/no/on/off`）；非法值会直接报错，而不是静默降级。
 公开入口就是 `notify_kit::env::...`；不要在 crate root 上再叠一层快捷别名。
 
 ## 标准 helper 示例

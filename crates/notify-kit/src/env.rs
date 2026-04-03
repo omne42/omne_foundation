@@ -38,11 +38,16 @@ fn parse_bool_env_value(raw: &str) -> Option<bool> {
     }
 }
 
-fn env_bool<F>(key: &str, get: &F) -> Option<bool>
+fn required_env_bool<F>(key: &str, get: &F) -> anyhow::Result<Option<bool>>
 where
     F: Fn(&str) -> Option<String>,
 {
-    get(key).and_then(|value| parse_bool_env_value(&value))
+    match get(key) {
+        Some(value) => parse_bool_env_value(&value).map(Some).ok_or_else(|| {
+            anyhow::anyhow!("{key} must be a boolean (1/0/true/false/yes/no/on/off)")
+        }),
+        None => Ok(None),
+    }
 }
 
 fn env_nonempty<F>(key: &str, get: &F) -> Option<String>
@@ -94,7 +99,8 @@ where
     const NOTIFY_TIMEOUT_MS_ENV: &str = "NOTIFY_TIMEOUT_MS";
     const NOTIFY_EVENTS_ENV: &str = "NOTIFY_EVENTS";
 
-    let sound_enabled = env_bool(NOTIFY_SOUND_ENV, get).unwrap_or(options.default_sound_enabled);
+    let sound_enabled =
+        required_env_bool(NOTIFY_SOUND_ENV, get)?.unwrap_or(options.default_sound_enabled);
     let timeouts = parse_timeout_ms_env(NOTIFY_TIMEOUT_MS_ENV, get)
         .with_context(|| format!("invalid {NOTIFY_TIMEOUT_MS_ENV}"))?;
 
@@ -193,6 +199,23 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("no notification sinks configured"));
+    }
+
+    #[test]
+    fn build_hub_from_standard_env_rejects_invalid_notify_sound() {
+        let env = HashMap::from([(String::from("NOTIFY_SOUND"), String::from("maybe"))]);
+
+        let result = build_hub_from_env(StandardEnvHubOptions::default(), &|key| {
+            env.get(key).cloned()
+        });
+        let err = match result {
+            Ok(_) => panic!("invalid notify sound should fail"),
+            Err(err) => err,
+        };
+
+        let message = err.to_string();
+        assert!(message.contains("NOTIFY_SOUND"), "{message}");
+        assert!(message.contains("boolean"), "{message}");
     }
 
     #[test]

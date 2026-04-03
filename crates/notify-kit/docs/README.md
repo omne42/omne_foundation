@@ -28,6 +28,8 @@
 - `dingtalk`：钉钉群机器人 webhook（text，可选签名）
 - `wecom`：企业微信群机器人 webhook（text）
 
+这些内置 sinks 仍然包含在默认 features 里；如果你只想依赖核心 `Hub` / `Event` / `Sink` 抽象，可以用 `default-features = false` 关闭它们，再按需启用 `sink-*` features。
+
 ## 适用场景
 
 - CLI 工具：任务完成/失败时提示音 + 群通知

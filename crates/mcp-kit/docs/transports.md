@@ -40,7 +40,7 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 
 配置字段（仅 unix 支持）：
 
-- `unix_path`（必填）：socket 路径（相对路径会按 `--root` 解析，且不能通过 `..` 静默逃逸 root）
+- `unix_path`（必填）：socket 路径（相对路径会按当前 config 文件所在目录解析；默认发现的 config 位于 `--root` 下时，与“相对 `--root`”等价，且不能通过 `..` 静默逃逸该目录）
 
 约束：
 

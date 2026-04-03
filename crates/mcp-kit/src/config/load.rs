@@ -351,6 +351,10 @@ fn build_v1_config(
     path: Option<PathBuf>,
     cfg: ConfigFile,
 ) -> anyhow::Result<Config> {
+    let server_path_base = path
+        .as_deref()
+        .and_then(Path::parent)
+        .unwrap_or(thread_root);
     if cfg.version != MCP_CONFIG_VERSION {
         anyhow::bail!(
             "unsupported mcp.json version {} (expected {})",
@@ -396,7 +400,7 @@ fn build_v1_config(
         let stdout_log = match server.transport {
             Transport::Stdio => server
                 .stdout_log
-                .map(|log| parse_stdout_log_config(thread_root, &name, log))
+                .map(|log| parse_stdout_log_config(server_path_base, &name, log))
                 .transpose()?,
             Transport::Unix => {
                 ensure_stdout_log_supported(&name, Transport::Unix, server.stdout_log.is_some())?;
@@ -423,7 +427,7 @@ fn build_v1_config(
                 if unix_path.is_absolute() {
                     unix_path
                 } else {
-                    thread_root.join(unix_path)
+                    server_path_base.join(unix_path)
                 }
             }),
             _ => server.unix_path,

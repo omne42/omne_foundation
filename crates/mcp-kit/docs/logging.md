@@ -51,8 +51,8 @@
 约束：
 
 - 仅 `transport=stdio` 支持
-- `path` 可为相对路径（相对 `--root` 解析）
-- 默认要求 `stdout_log.path` 位于 `--root` 之下；如需写到 `--root` 外，需显式开启（CLI：`--allow-stdout-log-outside-root`；代码：`Manager::with_allow_stdout_log_outside_root(true)`）
+- `path` 可为相对路径（相对当前 config 文件所在目录解析；默认发现的 config 位于 `--root` 下时，与“相对 `--root`”等价）
+- 默认要求 `stdout_log.path` 位于当前 config 文件所在目录之下；如需写到该目录外，需显式开启（CLI：`--allow-stdout-log-outside-root`；代码：`Manager::with_allow_stdout_log_outside_root(true)`）
 - 出于安全考虑，`stdout_log.path` 不允许包含任何 symlink 路径组件（含父目录/目标文件）
 - best-effort：在 unix 下新建 log 文件会尝试使用 `0600` 权限（避免默认 world-readable）
 - best-effort：在 Windows 下会尽量避免写入 reparse point，但无法可靠保证文件 ACL；请把日志写到你信任/可控的目录，并视其为敏感数据

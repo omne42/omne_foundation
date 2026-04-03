@@ -175,6 +175,105 @@ async fn load_discovers_mcp_json_when_dot_mcp_json_missing() {
 }
 
 #[tokio::test]
+async fn load_override_outside_root_resolves_relative_server_paths_from_config_dir() {
+    let root = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let config_path = external.path().join("mcp.json");
+    tokio::fs::write(
+        &config_path,
+        r#"
+        {
+          "version": 1,
+          "servers": {
+            "stdio": {
+              "transport": "stdio",
+              "argv": ["mcp-stdio"],
+              "stdout_log": { "path": "logs/stdout.log" }
+            },
+            "unix": {
+              "transport": "unix",
+              "unix_path": "sockets/mcp.sock"
+            }
+          }
+        }
+        "#,
+    )
+    .await
+    .unwrap();
+
+    let expected_stdout_log = external.path().join("logs/stdout.log");
+    let expected_unix_path = external.path().join("sockets/mcp.sock");
+    let cfg = Config::load_with_policy(
+        root.path(),
+        Some(config_path.clone()),
+        ConfigLoadPolicy::default().allow_override_outside_root(true),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(cfg.path(), Some(config_path.as_path()));
+    assert_eq!(cfg.thread_root(), Some(external.path()));
+    assert_eq!(
+        cfg.server("stdio")
+            .and_then(ServerConfig::stdout_log)
+            .map(|log| log.path.as_path()),
+        Some(expected_stdout_log.as_path())
+    );
+    assert_eq!(
+        cfg.server("unix").and_then(ServerConfig::unix_path),
+        Some(expected_unix_path.as_path())
+    );
+}
+
+#[tokio::test]
+async fn load_override_inside_root_resolves_relative_server_paths_from_nested_config_dir() {
+    let root = tempfile::tempdir().unwrap();
+    let nested = root.path().join("nested");
+    tokio::fs::create_dir_all(&nested).await.unwrap();
+    let config_path = nested.join("custom-mcp.json");
+    tokio::fs::write(
+        &config_path,
+        r#"
+        {
+          "version": 1,
+          "servers": {
+            "stdio": {
+              "transport": "stdio",
+              "argv": ["mcp-stdio"],
+              "stdout_log": { "path": "logs/stdout.log" }
+            },
+            "unix": {
+              "transport": "unix",
+              "unix_path": "sockets/mcp.sock"
+            }
+          }
+        }
+        "#,
+    )
+    .await
+    .unwrap();
+
+    let expected_stdout_log = nested.join("logs/stdout.log");
+    let expected_unix_path = nested.join("sockets/mcp.sock");
+    let cfg = Config::load(root.path(), Some(PathBuf::from("nested/custom-mcp.json")))
+        .await
+        .unwrap();
+
+    assert_eq!(cfg.path(), Some(config_path.as_path()));
+    assert_eq!(cfg.thread_root(), Some(nested.as_path()));
+    assert_eq!(
+        cfg.server("stdio")
+            .and_then(ServerConfig::stdout_log)
+            .map(|log| log.path.as_path()),
+        Some(expected_stdout_log.as_path())
+    );
+    assert_eq!(
+        cfg.server("unix").and_then(ServerConfig::unix_path),
+        Some(expected_unix_path.as_path())
+    );
+}
+
+#[tokio::test]
 async fn load_parses_valid_file() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(

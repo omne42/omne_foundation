@@ -15,6 +15,13 @@
 
 CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 
+当 `--config`（或库层 override path）最终指向了一个具体配置文件后，文件内 server 级相对路径会按“该 config 文件所在目录”解析：
+
+- `servers.<name>.unix_path`
+- `servers.<name>.stdout_log.path`
+
+默认发现到的 `.mcp.json` / `mcp.json` 就位于 `--root` 下，所以常见场景里它和“相对 `--root`”等价；只有显式加载嵌套目录或 `--root` 外部的 config 时，这个区别才会体现出来。
+
 > 保护性限制：为避免异常/恶意配置导致内存放大，`mcp.json`（以及 `.mcp.json`）文件大小上限为 **4MiB**；超过会 fail-closed 报错。
 >
 > 同时，出于安全考虑，配置文件必须是普通文件（regular file）：如果是 symlink/目录/特殊文件，会被拒绝加载。
@@ -81,9 +88,9 @@ CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
   - 兼容性提示：如果你的 server 依赖其它变量（如 `LANG/LC_*`、`XDG_*`、证书/代理相关变量等），请显式写入 `servers.<name>.env`（或保持 `inherit_env=true`）
 - `env`（可选）：KV 字典，注入到 child process
 - `stdout_log`（可选）：stdout 旋转落盘（便于排查协议输出）
-  - `path`（必填）：可为相对路径（相对 `--root` 解析）
+  - `path`（必填）：可为相对路径（相对当前 config 文件所在目录解析；默认发现的 config 位于 `--root` 下时，与“相对 `--root`”等价）
     - 额外约束：`path` 不允许包含 `..` 段（防止路径穿越）
-    - 额外约束：默认要求 `path` 位于 `--root` 之下（需要写到 root 外时，CLI：`--allow-stdout-log-outside-root`；代码：`Manager::with_allow_stdout_log_outside_root(true)`）
+    - 额外约束：默认要求 `path` 位于当前 config 文件所在目录之下（需要写到该目录外时，CLI：`--allow-stdout-log-outside-root`；代码：`Manager::with_allow_stdout_log_outside_root(true)`）
     - 额外约束：出于安全考虑，`path` 不允许包含任何 symlink 路径组件（含父目录/目标文件）
   - `max_bytes_per_part`（可选，默认 1MiB，最小 1）
   - `max_parts`（可选，默认 32，最小 1；`0` 表示不做保留上限：无限保留；手动构造 Rust `StdoutLogConfig` 时也接受 `Some(0)`，并按 unlimited 处理）
@@ -102,11 +109,11 @@ stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)
 
 字段：
 
-- `unix_path`（必填）：可为相对路径（相对 `--root` 解析）
+- `unix_path`（必填）：可为相对路径（相对当前 config 文件所在目录解析；默认发现的 config 位于 `--root` 下时，与“相对 `--root`”等价）
 
 约束：
 
-- `unix_path` 不能包含 `..` path segment；相对路径只能落在 `--root` 内部，不允许静默逃逸到 root 外
+- `unix_path` 不能包含 `..` path segment；相对路径只能落在当前 config 文件所在目录内部，不允许静默逃逸到该目录外
 - 不支持 `argv/env/stdout_log`（仅用于连接已存在的 unix socket）
 
 安全：

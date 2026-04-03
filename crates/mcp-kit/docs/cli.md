@@ -23,6 +23,7 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- --help
 
 - `--root <path>`：workspace root；用于相对路径解析，并作为 stdio server 的工作目录
 - `--config <path>`：覆盖配置文件路径（绝对或相对 `--root`；默认要求位于 `--root` 内）
+  - 一旦定位到具体 config 文件，文件内相对 `unix_path` / `stdout_log.path` 会按该 config 文件所在目录解析；默认发现到的是 `--root` 下的 `mcp.json`，所以常见场景里两者等价
 - `--json`：输出紧凑 JSON（默认 pretty JSON）
 - `--timeout-ms <ms>`：per-request 超时（默认 30000）
 

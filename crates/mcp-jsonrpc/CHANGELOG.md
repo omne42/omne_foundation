@@ -7,7 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
-- `mcp-jsonrpc`：sync/no-runtime 的 detached fallback 现在收口到独立 `detached` 模块，并改用共享多线程 runtime handle 调度后台收尾任务；一个卡住的 dropped-request writeback 或 batch flush 不会再把后续 detached 补偿任务串行堵死。
+- `mcp-jsonrpc`：sync/no-runtime 的 detached fallback 现在收口到独立 `detached` 模块，并显式启用共享多线程 Tokio runtime handle 调度后台收尾任务；一个卡住的 dropped-request writeback 或 batch flush 不会再把后续 detached 补偿任务串行堵死。
 - `mcp-jsonrpc`：当 detached fallback 不可用时，batch flush、dropped-request response 和 close cleanup 现在都会显式 fail-closed 关闭 transport 并发布关闭原因，而不是 panic 或静默吞掉后台任务。
 - `mcp-jsonrpc`：`streamable_http` 的 graceful SSE EOF 重连现在带最小间隔、轻量抖动并按连续 EOF 指数回退，避免在慢速/macOS 环境里与对端的优雅收尾互相踩出早退重连；session rollover 触发的主动 SSE 切换仍保持立即重连。
 - `mcp-jsonrpc`：加固了 graceful SSE EOF 重连回归测试，在初始 SSE 头之后先发送一条注释帧再优雅收尾，并放宽阶段等待预算，避免慢速/macOS CI 上把“EOF 后应重连”的真通过误判成超时。

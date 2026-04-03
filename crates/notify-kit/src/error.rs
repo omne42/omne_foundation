@@ -128,6 +128,7 @@ impl From<crate::TryNotifyError> for Error {
     }
 }
 
+#[cfg(feature = "http-client")]
 impl From<http_kit::Error> for Error {
     fn from(err: http_kit::Error) -> Self {
         Self::from(anyhow::Error::new(err))

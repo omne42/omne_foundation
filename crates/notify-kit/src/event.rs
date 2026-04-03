@@ -54,6 +54,33 @@ impl Event {
         }
     }
 
+    pub(crate) fn normalize_delivery_views(&mut self) {
+        self.title = self.title_text.to_string();
+
+        match self.body_text.as_ref() {
+            Some(body_text) => {
+                self.body = Some(body_text.to_string());
+            }
+            None => {
+                if let Some(body) = self.body.as_ref() {
+                    self.body_text = Some(StructuredText::freeform(body.clone()));
+                }
+            }
+        }
+
+        for (key, value) in self.tags.clone() {
+            self.tag_texts
+                .entry(key)
+                .or_insert_with(|| StructuredText::freeform(value));
+        }
+
+        self.tags = self
+            .tag_texts
+            .iter()
+            .map(|(key, value)| (key.clone(), value.to_string()))
+            .collect();
+    }
+
     #[must_use]
     pub fn with_body(mut self, body: impl Into<String>) -> Self {
         let body = body.into();
@@ -136,6 +163,39 @@ mod tests {
         assert_eq!(event.title_text, title);
         assert_eq!(event.body_text, Some(body));
         assert_eq!(event.tag_texts.get("thread_id"), Some(&tag));
+        assert_eq!(event.title, event.title_text.to_string());
+        assert_eq!(
+            event.body.as_deref(),
+            event.body_text.as_ref().map(ToString::to_string).as_deref()
+        );
+        assert_eq!(
+            event.tags.get("thread_id"),
+            event
+                .tag_texts
+                .get("thread_id")
+                .map(ToString::to_string)
+                .as_ref()
+        );
+    }
+
+    #[test]
+    fn normalize_delivery_views_prefers_structured_fields() {
+        let mut event = Event::new("kind", Severity::Info, "plain");
+        event.title = "stale-title".to_string();
+        event.body = Some("stale-body".to_string());
+        event
+            .tags
+            .insert("thread_id".to_string(), "stale".to_string());
+        event = event
+            .with_title_text(structured_text!("notify.title", "repo" => "omne"))
+            .with_body_text(structured_text!("notify.body", "step" => "review"))
+            .with_tag_text(
+                "thread_id",
+                structured_text!("notify.tag", "value" => "fresh"),
+            );
+
+        event.normalize_delivery_views();
+
         assert_eq!(event.title, event.title_text.to_string());
         assert_eq!(
             event.body.as_deref(),

@@ -49,6 +49,9 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `FeishuWebhookSink::new_strict` / `new_with_secret_strict`：在构造阶段额外做一次 DNS 公网 IP 校验。
 
 ### Changed
+- `notify-kit`：内置 vendor sinks 与 `env` helper 现在按 feature flags 暴露；默认 features 仍保留当前行为，但 `default-features = false` 已可只拿 core `Hub` / `Event` / `Sink` 抽象，不再被迫吞下整套 HTTP/vendor 依赖面。
+- `notify_kit::env::build_hub_from_standard_env(...)`：`NOTIFY_SOUND` 现在会严格校验布尔值，非法输入直接返回错误，不再静默回退到默认值。
+- `Hub::notify` / `Hub::try_notify` / `Hub::send`：发送前会统一规范化 `Event` 的 structured/string 视图，确保 sinks 在 hub 路径上看到的字符串字段与 `title_text` / `body_text` / `tag_texts` 保持同步。
 - `FeishuWebhookSink`：远程 Markdown 图片下载现在始终强制做 DNS 公网 IP 校验，不再跟随 webhook 主请求的 `with_public_ip_check(false)` 放宽，避免正文图片路径引入 SSRF 到内网 / special-use HTTPS 目标。
 - `FeishuWebhookSink`：本地图片 opt-in 从“只开布尔开关”收紧为“显式开启 + 显式 `local_image_root(s)` allowlist”；加载前会先做绝对路径归一、root 边界检查，并拒绝 `..` 逃逸、symlink 组件和其他特殊路径。
 - `notify-kit::Error` 现在保留结构化错误种类与 `sink_failures()` 访问面；`Hub` 的多 sink 失败不再只压平成一段字符串，下游可以稳定检查失败 sink 的索引、名称与原始错误。

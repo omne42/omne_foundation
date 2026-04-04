@@ -7,6 +7,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：`StreamableHttpOptions` 新增显式 `proxy_mode`，默认继续忽略系统代理环境变量，但调用方现在可以显式切到 `UseSystem`；`enforce_public_ip=true` 的 pinned 路径仍会禁用代理，避免把实际 socket 重定向到中间代理端点。
+- `mcp-jsonrpc`：把 transport options、公开 error 映射和 Tokio time-driver helper 从 `src/lib.rs` 拆到独立模块，降低 `lib.rs` 的 god-module 压力，同时保持运行时行为不变。
 - `mcp-jsonrpc`：底层 `write_all` / `flush` 一旦报错，现在会立即 fail-closed 标记连接已坏、drain 掉全部 pending request，并替换写端；坏 transport 不会再继续暴露成“看起来还活着”的 client。
 - `mcp-jsonrpc`：`spawn_command*` 路径上的 `Client::Drop` 现在会在 `kill_on_drop=true` 时显式触发后台 reap，避免子进程被杀掉后仍延迟停留为 zombie；显式 `wait*` 仍是首选生命周期边界。
 - `mcp-jsonrpc`：`stdout_log.max_parts` 的轮转清理现在对删除失败 fail-closed，初始化和后续 rotation 都会把 prune 错误显式返回，而不是静默把保留策略降级成 best-effort。

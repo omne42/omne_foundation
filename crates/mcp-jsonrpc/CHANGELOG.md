@@ -7,6 +7,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：`streamable_http` 现在会在连接阶段拒绝只靠大小写区分的重复 HTTP header 名，避免 `HashMap<String, String>` 输入在实际 HTTP 语义里发生不确定覆盖。
+- `mcp-jsonrpc`：`streamable_http` 的 `notify()` 现在会等待对应 POST 的 HTTP 结果并把失败直接返回给这次调用；通知失败不再在返回 `Ok(())` 之后异步关闭整个 client。
 - `mcp-jsonrpc`：`StreamableHttpOptions` 新增显式 `proxy_mode`，默认继续忽略系统代理环境变量，但调用方现在可以显式切到 `UseSystem`；`enforce_public_ip=true` 的 pinned 路径仍会禁用代理，避免把实际 socket 重定向到中间代理端点。
 - `mcp-jsonrpc`：把 transport options、公开 error 映射和 Tokio time-driver helper 从 `src/lib.rs` 拆到独立模块，降低 `lib.rs` 的 god-module 压力，同时保持运行时行为不变。
 - `mcp-jsonrpc`：底层 `write_all` / `flush` 一旦报错，现在会立即 fail-closed 标记连接已坏、drain 掉全部 pending request，并替换写端；坏 transport 不会再继续暴露成“看起来还活着”的 client。

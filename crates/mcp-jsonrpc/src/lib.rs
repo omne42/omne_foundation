@@ -20,7 +20,9 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{OsStr, OsString};
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -65,6 +67,8 @@ pub enum Id {
 
 type PendingRequests = Arc<Mutex<HashMap<Id, oneshot::Sender<Result<Value, Error>>>>>;
 type CancelledRequestIds = Arc<Mutex<CancelledRequestIdsState>>;
+type NotifyTransportFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
+type NotifyTransport = Arc<dyn Fn(ClientHandle, Vec<u8>) -> NotifyTransportFuture + Send + Sync>;
 
 const CANCELLED_REQUEST_IDS_MAX: usize = 1024;
 
@@ -161,6 +165,7 @@ pub struct ClientHandle {
     closed: Arc<AtomicBool>,
     close_reason: Arc<OnceLock<String>>,
     stdout_log_write_error: Arc<OnceLock<String>>,
+    notify_transport: Arc<OnceLock<NotifyTransport>>,
 }
 
 impl std::fmt::Debug for ClientHandle {
@@ -482,6 +487,10 @@ impl ClientHandle {
         let _ = self.stdout_log_write_error.set(err.to_string());
     }
 
+    pub(crate) fn install_notify_transport(&self, transport: NotifyTransport) {
+        let _ = self.notify_transport.set(transport);
+    }
+
     pub async fn close(&self, reason: impl Into<String>) {
         self.close_with_reason(reason).await;
     }
@@ -559,6 +568,9 @@ impl ClientHandle {
             params: params.as_ref(),
         };
         let line = serialize_json_line(&msg)?;
+        if let Some(transport) = self.notify_transport.get().cloned() {
+            return transport(self.clone(), line).await;
+        }
         self.write_line(&line).await?;
         Ok(())
     }
@@ -913,6 +925,7 @@ impl Client {
             closed: Arc::new(AtomicBool::new(false)),
             close_reason: Arc::new(OnceLock::new()),
             stdout_log_write_error: Arc::new(OnceLock::new()),
+            notify_transport: Arc::new(OnceLock::new()),
         };
 
         let stdout_log = match stdout_log {
@@ -2985,6 +2998,7 @@ mod background_close_tests {
             closed: Arc::new(AtomicBool::new(false)),
             close_reason: Arc::new(OnceLock::new()),
             stdout_log_write_error: Arc::new(OnceLock::new()),
+            notify_transport: Arc::new(OnceLock::new()),
         };
 
         handle.schedule_close_once("closed outside runtime".to_string());

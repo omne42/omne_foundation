@@ -24,6 +24,9 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `bots/opencode-discord`：OpenCode 风格的 Discord bot 示例（channel/thread → session）。
 - `bots/opencode-telegram`：OpenCode 风格的 Telegram bot 示例（chat → session，long polling）。
 - `bots/_shared/session_store`：支持设置根目录（`rootDir`；bots 可用 `OPENCODE_SESSION_STORE_ROOT`）以限制 session store 文件路径。
+
+### Fixed
+- `GenericWebhookSink::new(...)` 现在与文档契约一致：默认构造路径下只要显式提供 `allowed_hosts`，就可以在保留 host/path 边界的前提下关闭 DNS 公网 IP 校验；未显式提供时仍 fail closed。
 - `bots/_shared/opencode`：抽取 bots 共享逻辑（`assertEnv`/response 文本拼装/tool update 解析）。
 - `bots/_shared/log`：提供 `ignoreError`（best-effort 忽略错误）与 `OPENCODE_BOT_VERBOSE` 可选日志输出。
 - `bots/_shared/bootstrap`：抽取 bots 通用初始化（limiter + session store）。

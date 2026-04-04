@@ -1,4 +1,6 @@
-use http_kit::{UntrustedOutboundPolicy, validate_untrusted_outbound_url};
+use http_kit::{
+    UntrustedOutboundPolicy, validate_untrusted_outbound_url, validate_untrusted_outbound_url_dns,
+};
 use reqwest::RequestBuilder;
 use reqwest::header::{ACCEPT, USER_AGENT};
 
@@ -167,6 +169,24 @@ pub fn validate_github_api_request_url(
     Ok(())
 }
 
+pub async fn validate_github_api_request_url_dns(
+    url: &reqwest::Url,
+    options: GitHubApiRequestOptions<'_>,
+) -> Result<()> {
+    validate_github_api_request_url(url, options)?;
+    if !options.requires_public_ip_pinning() {
+        return Ok(());
+    }
+
+    validate_untrusted_outbound_url_dns(&UntrustedOutboundPolicy::default(), url)
+        .await
+        .map_err(|err| GitHubApiError::InvalidApiBase {
+            details: format!("bearer token target is not allowed: {err}"),
+        })?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,5 +252,23 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("not allowed"), "{message}");
         assert!(message.contains("10.0.0.5"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn dns_validation_rejects_unresolvable_custom_bearer_api_base_after_opt_in() {
+        let url = reqwest::Url::parse("https://github.example.invalid/api/v3/repos/omne42/repo")
+            .expect("url");
+
+        let err = validate_github_api_request_url_dns(
+            &url,
+            GitHubApiRequestOptions::new()
+                .with_bearer_token(Some("secret-token"))
+                .with_allow_custom_bearer_api_base(true),
+        )
+        .await
+        .expect_err("unresolvable target should fail closed");
+
+        let message = err.to_string();
+        assert!(message.contains("dns lookup"), "{message}");
     }
 }

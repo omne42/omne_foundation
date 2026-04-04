@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use crate::client::{
     GitHubApiRequestOptions, apply_github_api_headers, build_github_api_url,
-    validate_github_api_request_url,
+    validate_github_api_request_url_dns,
 };
 use crate::error::{GitHubApiError, Result};
 
@@ -51,7 +51,7 @@ pub async fn fetch_latest_release<S: AsRef<str>>(
             }
         };
         let redacted_url = redact_url_for_error(&url);
-        if let Err(err) = validate_github_api_request_url(&url, options) {
+        if let Err(err) = validate_github_api_request_url_dns(&url, options).await {
             errors.push(format!("{redacted_url} -> {err}"));
             continue;
         }
@@ -314,6 +314,25 @@ mod tests {
 
         let message = err.to_string();
         assert!(message.contains("canonical GitHub API base"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_release_rejects_custom_bearer_api_base_with_failed_dns() {
+        let client = reqwest::Client::new();
+
+        let err = fetch_latest_release(
+            &client,
+            &["https://github.example.invalid/api/v3"],
+            "cli/cli",
+            GitHubApiRequestOptions::new()
+                .with_bearer_token(Some("secret-token"))
+                .with_allow_custom_bearer_api_base(true),
+        )
+        .await
+        .expect_err("failed dns should stop bearer token request");
+
+        let message = err.to_string();
+        assert!(message.contains("dns lookup"), "{message}");
     }
 
     #[tokio::test]

@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：无 Tokio runtime 的 detached dropped-response / batch-flush 补偿写路径现在带硬超时并在超时后 fail-closed，避免卡住的收尾写无限占住 detached worker。
 - `mcp-jsonrpc`：`streamable_http` 现在会在连接阶段拒绝只靠大小写区分的重复 HTTP header 名，避免 `HashMap<String, String>` 输入在实际 HTTP 语义里发生不确定覆盖。
 - `mcp-jsonrpc`：`streamable_http` 的 `notify()` 现在会等待对应 POST 的 HTTP 结果并把失败直接返回给这次调用；通知失败不再在返回 `Ok(())` 之后异步关闭整个 client。
 - `mcp-jsonrpc`：`StreamableHttpOptions` 新增显式 `proxy_mode`，默认继续忽略系统代理环境变量，但调用方现在可以显式切到 `UseSystem`；`enforce_public_ip=true` 的 pinned 路径仍会禁用代理，避免把实际 socket 重定向到中间代理端点。

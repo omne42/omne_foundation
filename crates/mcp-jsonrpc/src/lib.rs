@@ -57,6 +57,10 @@ use stdout_log::LogState;
 
 const REUSABLE_LINE_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 const READ_LINE_INITIAL_CAP_BYTES: usize = 4 * 1024;
+#[cfg(not(test))]
+const DETACHED_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const DETACHED_WRITE_TIMEOUT: Duration = Duration::from_millis(50);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum Id {
@@ -323,11 +327,11 @@ impl BatchResponseWriter {
 
     fn flush_if_ready_without_runtime(&self) {
         let batch = self.clone();
-        if let Err(err) = spawn_detached("batch flush without runtime", async move {
-            let _ = batch.flush_if_ready().await;
-        }) {
-            self.state.handle.schedule_close_once(err.to_string());
-        }
+        spawn_detached_write_with_timeout(
+            "batch flush without runtime",
+            self.state.handle.clone(),
+            async move { batch.flush_if_ready().await },
+        );
     }
 
     async fn finish(&self) -> Result<(), Error> {
@@ -1309,30 +1313,45 @@ impl Drop for IncomingRequest {
         match &self.responder.target {
             RequestResponseTarget::Direct(handle) => {
                 let handle = handle.clone();
-                let close_handle = handle.clone();
-                if let Err(err) = spawn_detached("direct dropped request response", async move {
-                    drop(handle.write_json_line(&response).await);
-                }) {
-                    close_handle.schedule_close_once(err.to_string());
-                }
+                spawn_detached_write_with_timeout(
+                    "direct dropped request response",
+                    handle.clone(),
+                    async move { handle.write_json_line(&response).await },
+                );
             }
             RequestResponseTarget::Batch(batch) => {
                 if tokio::runtime::Handle::try_current().is_ok() {
                     let batch = batch.clone();
-                    let close_batch = batch.clone();
-                    if let Err(err) = spawn_detached("batch dropped request response", async move {
-                        drop(batch.push_reserved_response(response).await);
-                    }) {
-                        close_batch
-                            .state
-                            .handle
-                            .schedule_close_once(err.to_string());
-                    }
+                    spawn_detached_write_with_timeout(
+                        "batch dropped request response",
+                        batch.state.handle.clone(),
+                        async move { batch.push_reserved_response(response).await },
+                    );
                 } else {
                     batch.push_reserved_response_without_runtime(response);
                 }
             }
         }
+    }
+}
+
+fn spawn_detached_write_with_timeout(
+    task_name: &'static str,
+    handle: ClientHandle,
+    task: impl Future<Output = Result<(), Error>> + Send + 'static,
+) {
+    let close_handle = handle.clone();
+    if let Err(err) = spawn_detached(task_name, async move {
+        match tokio::time::timeout(DETACHED_WRITE_TIMEOUT, task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => close_handle.schedule_close_once(format!("{task_name} failed: {err}")),
+            Err(_) => close_handle.schedule_close_once(format!(
+                "{task_name} timed out after {:?}",
+                DETACHED_WRITE_TIMEOUT
+            )),
+        }
+    }) {
+        handle.schedule_close_once(err.to_string());
     }
 }
 
@@ -2978,6 +2997,35 @@ mod wait_timeout_tests {
 #[cfg(test)]
 mod background_close_tests {
     use super::*;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    #[derive(Default)]
+    struct PendingWriter;
+
+    impl AsyncWrite for PendingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<Result<usize, std::io::Error>> {
+            Poll::Pending
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), std::io::Error>> {
+            Poll::Pending
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), std::io::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     #[test]
     fn schedule_close_once_without_runtime_drains_pending_without_panic() {
@@ -3168,6 +3216,135 @@ mod background_close_tests {
 
             drop(client);
         });
+    }
+
+    #[test]
+    fn dropped_direct_request_without_runtime_times_out_stuck_detached_write() {
+        let _guard = detached_runtime_test_guard();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build setup runtime");
+
+        let (request, handle, client) = runtime.block_on(async {
+            let (server_write, client_read) = tokio::io::duplex(2048);
+            let mut client = Client::connect_io(
+                client_read,
+                Box::new(PendingWriter) as Box<dyn AsyncWrite + Send + Unpin>,
+            )
+            .await
+            .expect("connect client");
+            let mut requests = client.take_requests().expect("request receiver");
+            let handle = client.handle();
+            let (_, mut server_write) = tokio::io::split(server_write);
+
+            server_write
+                .write_all(br#"{"jsonrpc":"2.0","id":1,"method":"first"}"#)
+                .await
+                .expect("write request");
+            server_write.write_all(b"\n").await.expect("write newline");
+            server_write.flush().await.expect("flush request");
+
+            let request = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+                .await
+                .expect("request timeout")
+                .expect("request");
+
+            (request, handle, client)
+        });
+        drop(runtime);
+
+        drop(request);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !handle.is_closed() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            handle.is_closed(),
+            "detached timeout should close the client"
+        );
+        let reason = handle.close_reason();
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|detail| detail.contains("direct dropped request response timed out")),
+            "{reason:?}"
+        );
+
+        drop(client);
+    }
+
+    #[test]
+    fn dropped_batch_request_without_runtime_times_out_stuck_detached_flush() {
+        let _guard = detached_runtime_test_guard();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build setup runtime");
+
+        let (request, handle, client) = runtime.block_on(async {
+            let (server_write, client_read) = tokio::io::duplex(2048);
+            let mut client = Client::connect_io(
+                client_read,
+                Box::new(PendingWriter) as Box<dyn AsyncWrite + Send + Unpin>,
+            )
+            .await
+            .expect("connect client");
+            let mut requests = client.take_requests().expect("request receiver");
+            let handle = client.handle();
+            let (_, mut server_write) = tokio::io::split(server_write);
+
+            server_write
+                .write_all(
+                    br#"[{"jsonrpc":"2.0","id":1,"method":"first"},{"jsonrpc":"2.0","id":2,"method":"second"}]"#,
+                )
+                .await
+                .expect("write batch");
+            server_write.write_all(b"\n").await.expect("write newline");
+            server_write.flush().await.expect("flush batch");
+
+            let first = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+                .await
+                .expect("first request timeout")
+                .expect("first request");
+            let second = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+                .await
+                .expect("second request timeout")
+                .expect("second request");
+
+            second
+                .respond_ok(serde_json::json!({"handled":"second"}))
+                .await
+                .expect("respond second");
+
+            (first, handle, client)
+        });
+        drop(runtime);
+
+        drop(request);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !handle.is_closed() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            handle.is_closed(),
+            "detached timeout should close the client"
+        );
+        let reason = handle.close_reason();
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|detail| detail.contains("batch flush without runtime timed out")),
+            "{reason:?}"
+        );
+
+        drop(client);
     }
 }
 

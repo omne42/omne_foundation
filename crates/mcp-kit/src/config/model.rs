@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use reqwest::header::{HeaderName, HeaderValue};
@@ -310,7 +310,6 @@ impl ServerConfig {
                     validate_streamable_http_secret_spec("bearer_token_secret", secret_spec)?;
                 }
 
-                let mut seen_headers = HashSet::new();
                 for (header, value) in cfg.http_headers.iter() {
                     if header.trim().is_empty() {
                         public_bail!(
@@ -325,11 +324,6 @@ impl ServerConfig {
                     if is_reserved_streamable_http_header(&header_name) {
                         public_bail!(
                             "mcp server transport=streamable_http: http_headers key is reserved by transport: {header}"
-                        );
-                    }
-                    if !seen_headers.insert(header_name.clone()) {
-                        public_bail!(
-                            "mcp server transport=streamable_http: duplicate http header name after case normalization: {header}"
                         );
                     }
                     if value.trim().is_empty() {
@@ -357,11 +351,6 @@ impl ServerConfig {
                     if is_reserved_streamable_http_env_header(&header_name) {
                         public_bail!(
                             "mcp server transport=streamable_http: secret_http_headers key is reserved by transport: {header}"
-                        );
-                    }
-                    if !seen_headers.insert(header_name.clone()) {
-                        public_bail!(
-                            "mcp server transport=streamable_http: duplicate http header name after case normalization: {header}"
                         );
                     }
                     if secret_spec.trim().is_empty() {

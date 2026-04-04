@@ -77,8 +77,9 @@ pub struct SpawnOptions {
     pub diagnostics: DiagnosticsOptions,
     /// When true (default), kill the child process if the `Client` is dropped.
     ///
-    /// Note: this is best-effort and does not guarantee the child is reaped. Prefer an explicit
-    /// `Client::wait*` call when you own the child lifecycle.
+    /// Drop also starts a background reap path so killed children do not linger as zombies, but
+    /// explicit `Client::wait*` calls are still the preferred lifecycle boundary when you own the
+    /// child process.
     pub kill_on_drop: bool,
 }
 
@@ -1200,6 +1201,7 @@ impl ClientHandle {
 pub struct Client {
     handle: ClientHandle,
     child: Option<Child>,
+    kill_on_drop: bool,
     notifications_rx: Option<mpsc::Receiver<Notification>>,
     requests_rx: Option<mpsc::Receiver<IncomingRequest>>,
     task: tokio::task::JoinHandle<()>,
@@ -1330,7 +1332,7 @@ impl Client {
             stdout_log_redactor,
             limits,
             diagnostics,
-            ..
+            kill_on_drop,
         } = options;
 
         let notify_cap = limits.notifications_capacity.max(1);
@@ -1380,6 +1382,7 @@ impl Client {
         Ok(Self {
             handle,
             child,
+            kill_on_drop,
             notifications_rx: Some(notify_rx),
             requests_rx: Some(request_rx),
             task,
@@ -1590,6 +1593,47 @@ impl Client {
     }
 }
 
+fn spawn_drop_child_reaper(mut child: Child) {
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        drop(runtime.spawn(async move {
+            let _ = child.wait().await;
+        }));
+        return;
+    }
+
+    let _ = std::thread::Builder::new()
+        .name("mcp-jsonrpc-child-reaper".to_string())
+        .spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            runtime.block_on(async move {
+                let _ = child.wait().await;
+            });
+        });
+}
+
+fn reap_child_on_drop(mut child: Child, kill_on_drop: bool) {
+    if !kill_on_drop {
+        return;
+    }
+
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+
+    if let Err(_err) = child.start_kill() {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+    }
+
+    spawn_drop_child_reaper(child);
+}
+
 impl Drop for Client {
     fn drop(&mut self) {
         let _ = self.handle.mark_closed("client closed".to_string());
@@ -1603,6 +1647,9 @@ impl Drop for Client {
         }
         let err = Error::protocol(ProtocolErrorKind::Closed, "client closed");
         drain_pending(&self.handle.pending, &err);
+        if let Some(child) = self.child.take() {
+            reap_child_on_drop(child, self.kill_on_drop);
+        }
     }
 }
 
@@ -3270,6 +3317,31 @@ mod wait_timeout_tests {
         assert!(!status.success());
     }
 
+    #[tokio::test]
+    async fn drop_reaps_child_when_kill_on_drop_is_enabled() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg("trap '' TERM INT; exec sleep 10");
+
+        let client = match Client::spawn_command(cmd).await {
+            Ok(client) => client,
+            Err(err) => panic!("spawn client: {err}"),
+        };
+        let pid = client.child_id().expect("child pid");
+
+        drop(client);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if !unix_process_exists(pid) {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("child pid {pid} still exists after drop");
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
     #[test]
     fn request_optional_with_timeout_returns_error_without_tokio_time_driver() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -3322,6 +3394,15 @@ mod wait_timeout_tests {
                 other => panic!("expected protocol error, got {other:?}"),
             }
         });
+    }
+
+    fn unix_process_exists(pid: u32) -> bool {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("kill -0 {pid} >/dev/null 2>&1"))
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 }
 

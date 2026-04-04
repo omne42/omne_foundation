@@ -168,6 +168,69 @@ async fn request_timeout_includes_write_stage_and_closes_client() {
 }
 
 #[tokio::test]
+async fn notify_write_error_closes_client_fail_closed() {
+    struct FailingWrite;
+
+    impl tokio::io::AsyncWrite for FailingWrite {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "injected notify write failure",
+            )))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    let (client_stream, _server_stream) = tokio::io::duplex(64);
+    let (client_read, _client_write) = tokio::io::split(client_stream);
+
+    let client = mcp_jsonrpc::Client::connect_io(client_read, FailingWrite)
+        .await
+        .expect("client connect");
+    let handle = client.handle();
+
+    let err = client
+        .notify("demo/notify", Some(serde_json::json!({ "x": 1 })))
+        .await
+        .expect_err("notify should surface the write failure");
+    assert!(matches!(
+        err,
+        mcp_jsonrpc::Error::Io(ref io_err) if io_err.kind() == io::ErrorKind::BrokenPipe
+    ));
+    assert!(
+        client.is_closed(),
+        "write failure should fail-close the client"
+    );
+    assert!(
+        handle
+            .close_reason()
+            .is_some_and(|reason| reason.contains("transport write failed")),
+        "close reason should explain the write failure"
+    );
+
+    let closed_err = client
+        .notify("demo/notify", None)
+        .await
+        .expect_err("subsequent notify should observe a closed client");
+    assert!(matches!(
+        closed_err,
+        mcp_jsonrpc::Error::Protocol(ref protocol)
+            if protocol.kind == mcp_jsonrpc::ProtocolErrorKind::Closed
+    ));
+}
+
+#[tokio::test]
 async fn drop_closes_write_end_even_when_handle_is_cloned() {
     let (client_stream, server_stream) = tokio::io::duplex(64);
     let (client_read, client_write) = tokio::io::split(client_stream);

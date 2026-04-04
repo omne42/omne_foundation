@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：client→server 与 server→client 共用的写出路径现在对底层 `write_all`/`flush` 错误 fail-closed；首次写失败会立刻关闭 client，避免把已坏 transport 继续伪装成可复用连接。
 - `mcp-jsonrpc`：`spawn_command*` 路径上的 `Client::Drop` 现在会在 `kill_on_drop=true` 时显式触发后台 reap，避免子进程被杀掉后仍延迟停留为 zombie；显式 `wait*` 仍是首选生命周期边界。
 - `mcp-jsonrpc`：`stdout_log.max_parts` 的轮转清理现在对删除失败 fail-closed，初始化和后续 rotation 都会把 prune 错误显式返回，而不是静默把保留策略降级成 best-effort。
 - `mcp-jsonrpc`：sync/no-runtime 的 detached fallback 现在收口到独立 `detached` 模块，并显式启用共享多线程 Tokio runtime handle 调度后台收尾任务；一个卡住的 dropped-request writeback 或 batch flush 不会再把后续 detached 补偿任务串行堵死。

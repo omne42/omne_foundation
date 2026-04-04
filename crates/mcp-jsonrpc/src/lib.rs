@@ -1191,8 +1191,16 @@ impl ClientHandle {
     async fn write_line(&self, line: &[u8]) -> Result<(), Error> {
         self.check_closed()?;
         let mut write = self.write.lock().await;
-        write.write_all(line).await?;
-        write.flush().await?;
+        if let Err(err) = write.write_all(line).await {
+            drop(write);
+            self.schedule_close_once(format!("transport write failed: {err}"));
+            return Err(err.into());
+        }
+        if let Err(err) = write.flush().await {
+            drop(write);
+            self.schedule_close_once(format!("transport flush failed: {err}"));
+            return Err(err.into());
+        }
         drop(write);
         Ok(())
     }

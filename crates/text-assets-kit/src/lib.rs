@@ -1,9 +1,7 @@
 #[doc(hidden)]
 pub mod bootstrap_lock;
 mod data_root;
-#[doc = "Deprecated blocking compatibility shim module. Prefer crate-root runtime APIs or explicit runtime-owned handles instead."]
-#[doc(hidden)]
-pub mod lazy_value;
+mod lazy_value;
 mod managed_bootstrap;
 mod resource_bootstrap;
 mod resource_path;

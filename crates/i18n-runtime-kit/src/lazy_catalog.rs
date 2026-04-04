@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use i18n_kit::{Catalog, Locale, TemplateArg};
 #[allow(deprecated)]
-use text_assets_kit::lazy_value::{LazyInitError, LazyValue};
+use text_assets_kit::{LazyInitError, LazyValue};
 
 use crate::catalog_error::{CatalogInitError, CatalogLocaleError};
 use crate::{resolve_locale_from_argv, resolve_locale_from_cli_args};

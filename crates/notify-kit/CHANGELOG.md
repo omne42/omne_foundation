@@ -50,6 +50,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ### Changed
 - `notify-kit`：默认 features 现在收窄为 `standard-env`，不再默认把全部内置 vendor sinks 一次性编进 foundation；需要旧的“全量 sinks”行为时可显式启用新的 `all-sinks` feature。
+- `notify-kit`：默认 feature 收窄后，按 sink feature 暴露的示例与 text helper 现在也同步受对应 `cfg(feature = "...")` 保护，避免默认构建或 mdBook 文档测试因为未启用 vendor sink 而失败。
 - `notify_kit::env::build_hub_from_standard_env(...)` 现在直接返回 `notify_kit::Result` / `notify_kit::Error`，不再把 convenience env helper 暴露成单独的 `anyhow::Result` 错误边界。
 - 内建 text sinks 现在会优先从 `Event::{title_text,body_text,tag_texts}` 渲染消息；结构化字段不再只停留在 `Event` 上当“看起来存在、实际未消费”的影子契约。
 - `notify-kit`：内置 vendor sinks 与 `env` helper 现在按 feature flags 暴露；调用方可通过 `default-features = false` 只拿 core `Hub` / `Event` / `Sink` 抽象，不再被迫吞下整套 HTTP/vendor 依赖面。

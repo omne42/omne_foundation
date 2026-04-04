@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：`streamable_http` 的配置校验现在也会在 `http_headers` / `secret_http_headers` 之间按大小写不敏感语义拒绝重复键，避免仅在连接阶段才暴露重复 header 覆盖冲突。
 - `mcp-kit`：`streamable_http` 配置头在组装时现在按 HTTP 的大小写不敏感语义去重；只靠大小写区分的重复 header 会 fail-closed 报错，而不是在下游 transport 层发生不确定覆盖。
 - `mcp-kit`：duplicate attach 的 `connect_jsonrpc*` 错误现在和 `connect_io*` 一样稳定归类为 `ErrorKind::ManagerState`；调用方判断“已连接，需先 disconnect”不再在 attach transport 类型之间漂移到 `Other`。
 - `mcp-kit`：`SharedManager` 的 reentrant fail-fast 现在只绑定到显式 handler scope；外部调用者和 bare `tokio::spawn(...)` 子任务不再因为“别处有 handler 正在运行”而意外 fail-fast，只有 `spawn_inheriting_handler_scope(...)` 继承的子任务才会保留同样的 handler 语义。

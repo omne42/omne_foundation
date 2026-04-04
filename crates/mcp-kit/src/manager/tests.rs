@@ -3820,6 +3820,7 @@ async fn connect_jsonrpc_rejects_duplicate_attached_connection() {
         .connect_jsonrpc("srv", client2)
         .await
         .expect_err("duplicate attached jsonrpc client should be rejected");
+    assert_eq!(err.kind(), crate::ErrorKind::ManagerState);
     assert!(
         err.to_string().contains("already connected")
             && err.to_string().contains("disconnect first"),

@@ -7,10 +7,13 @@
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
+# #[cfg(feature = "sink-bark")]
+# {
 use notify_kit::{BarkConfig, BarkSink};
 
 let cfg = BarkConfig::new("your_device_key");
 let sink = BarkSink::new(cfg)?;
+# }
 # Ok(())
 # }
 ```
@@ -20,10 +23,13 @@ let sink = BarkSink::new(cfg)?;
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
+# #[cfg(feature = "sink-bark")]
+# {
 use notify_kit::{BarkConfig, BarkSink};
 
 let cfg = BarkConfig::new("your_device_key").with_group("opencode");
 let sink = BarkSink::new(cfg)?;
+# }
 # Ok(())
 # }
 ```

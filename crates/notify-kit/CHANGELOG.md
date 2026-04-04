@@ -49,6 +49,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `FeishuWebhookSink::new_strict` / `new_with_secret_strict`：在构造阶段额外做一次 DNS 公网 IP 校验。
 
 ### Changed
+- `notify_kit::env::build_hub_from_standard_env(...)` 现在直接返回 `notify_kit::Result` / `notify_kit::Error`，不再把 convenience env helper 暴露成单独的 `anyhow::Result` 错误边界。
+- 内建 text sinks 现在会优先从 `Event::{title_text,body_text,tag_texts}` 渲染消息；结构化字段不再只停留在 `Event` 上当“看起来存在、实际未消费”的影子契约。
 - `notify-kit`：内置 vendor sinks 与 `env` helper 现在按 feature flags 暴露；默认 features 仍保留当前行为，但 `default-features = false` 已可只拿 core `Hub` / `Event` / `Sink` 抽象，不再被迫吞下整套 HTTP/vendor 依赖面。
 - `notify_kit::env::build_hub_from_standard_env(...)`：`NOTIFY_SOUND` 现在会严格校验布尔值，非法输入直接返回错误，不再静默回退到默认值。
 - `Hub::notify` / `Hub::try_notify` / `Hub::send`：发送前会统一规范化 `Event` 的 structured/string 视图，确保 sinks 在 hub 路径上看到的字符串字段与 `title_text` / `body_text` / `tag_texts` 保持同步。

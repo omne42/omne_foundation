@@ -27,10 +27,10 @@ impl Sink for CapturingSink {
         let captured = self.captured.clone();
         Box::pin(async move {
             let snapshot = CapturedEvent {
-                title: event.title.clone(),
-                body: event.body.clone(),
+                title: event.title().to_string(),
+                body: event.body().map(str::to_owned),
                 tags: event
-                    .tags
+                    .tags()
                     .iter()
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect(),

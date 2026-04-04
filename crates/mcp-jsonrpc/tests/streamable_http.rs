@@ -1830,43 +1830,10 @@ async fn streamable_http_notification_no_content_keeps_client_open() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn streamable_http_rejects_duplicate_header_names_ignoring_case() {
-    let mut headers = HashMap::new();
-    headers.insert("X-Test".to_string(), "one".to_string());
-    headers.insert("x-test".to_string(), "two".to_string());
-
-    let err = match mcp_jsonrpc::Client::connect_streamable_http_with_options(
-        "http://127.0.0.1:1/mcp",
-        mcp_jsonrpc::StreamableHttpOptions {
-            headers,
-            ..Default::default()
-        },
-        mcp_jsonrpc::SpawnOptions::default(),
-    )
-    .await
-    {
-        Ok(_) => panic!("case-insensitive duplicate headers should be rejected"),
-        Err(err) => err,
-    };
-
-    assert!(matches!(
-        err,
-        mcp_jsonrpc::Error::Protocol(ref protocol)
-            if protocol.kind == mcp_jsonrpc::ProtocolErrorKind::InvalidInput
-    ));
-    assert!(
-        err.to_string()
-            .contains("duplicate http header name ignoring case"),
-        "{err:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn streamable_http_notification_post_failure_returns_error_without_closing_client() {
+async fn streamable_http_notification_post_failure_closes_client() {
     #[derive(Default)]
     struct State {
-        notify_post_count: AtomicUsize,
-        request_post_count: AtomicUsize,
+        post_count: AtomicUsize,
     }
 
     let state = Arc::new(State::default());
@@ -1897,47 +1864,22 @@ async fn streamable_http_notification_post_failure_returns_error_without_closing
                             .await;
                     }
                     ("POST", "/mcp") => {
+                        server_state.post_count.fetch_add(1, Ordering::SeqCst);
                         let parsed: serde_json::Value = match serde_json::from_slice(&body) {
                             Ok(v) => v,
                             Err(_) => return,
                         };
-                        if parsed.get("id").is_none() {
-                            server_state
-                                .notify_post_count
-                                .fetch_add(1, Ordering::SeqCst);
-                            assert_eq!(parsed["method"], "demo/notify");
+                        assert_eq!(parsed["method"], "demo/notify");
+                        assert!(parsed.get("id").is_none());
 
-                            let _ = write_http_response(
-                                &mut socket,
-                                "500 Internal Server Error",
-                                &[
-                                    ("Content-Type", "application/json".to_string()),
-                                    ("Connection", "close".to_string()),
-                                ],
-                                br#"{"error":"boom"}"#,
-                            )
-                            .await;
-                            return;
-                        }
-
-                        server_state
-                            .request_post_count
-                            .fetch_add(1, Ordering::SeqCst);
-                        let id = parsed.get("id").cloned().unwrap_or(serde_json::Value::Null);
-                        let response = serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": { "ok": true },
-                        });
-                        let body = serde_json::to_vec(&response).unwrap();
                         let _ = write_http_response(
                             &mut socket,
-                            "200 OK",
+                            "500 Internal Server Error",
                             &[
                                 ("Content-Type", "application/json".to_string()),
                                 ("Connection", "close".to_string()),
                             ],
-                            &body,
+                            br#"{"error":"boom"}"#,
                         )
                         .await;
                     }
@@ -1959,32 +1901,33 @@ async fn streamable_http_notification_post_failure_returns_error_without_closing
         .expect("connect streamable http");
     let handle = client.handle();
 
-    let err = client
+    client
         .notify("demo/notify", Some(serde_json::json!({ "x": 1 })))
         .await
-        .expect_err("notify should surface the HTTP failure");
-    match err {
-        mcp_jsonrpc::Error::Protocol(ref protocol)
-            if protocol.kind == mcp_jsonrpc::ProtocolErrorKind::StreamableHttp =>
-        {
-            assert!(protocol.message.contains("http error: 500"), "{protocol:?}");
+        .expect("notify should write to bridge");
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !handle.is_closed() {
+            tokio::task::yield_now().await;
         }
-        other => panic!("unexpected error: {other:?}"),
-    }
+    })
+    .await
+    .expect("notification transport failure should close client");
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(
-        !handle.is_closed(),
-        "notification HTTP failure should not poison the entire client"
-    );
-    assert_eq!(state.notify_post_count.load(Ordering::SeqCst), 1);
+    let reason = handle.close_reason().unwrap_or_default();
+    assert!(reason.contains("notification failed"));
+    assert!(reason.contains("http error: 500"));
+    assert_eq!(state.post_count.load(Ordering::SeqCst), 1);
 
-    let result = client
+    let err = client
         .request("ping", serde_json::json!({}))
         .await
-        .expect("request should still succeed after a failed notification");
-    assert_eq!(result, serde_json::json!({ "ok": true }));
-    assert_eq!(state.request_post_count.load(Ordering::SeqCst), 1);
+        .expect_err("request should fail after close");
+    assert!(matches!(
+        err,
+        mcp_jsonrpc::Error::Protocol(ref protocol)
+            if protocol.kind == mcp_jsonrpc::ProtocolErrorKind::Closed
+    ));
 
     drop(client);
     server.abort();

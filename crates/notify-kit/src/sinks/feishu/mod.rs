@@ -778,6 +778,79 @@ mod tests {
     }
 
     #[test]
+    fn local_image_files_resolve_relative_paths_against_explicit_base_dir() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            let project_root =
+                local_image_test_root().join(unique_local_image_test_name("relative-base"));
+            let image_root = project_root.join("exported-images");
+            let image_path = image_root.join("demo.png");
+            std::fs::create_dir_all(&image_root).expect("create image root");
+            std::fs::write(&image_path, b"png").expect("write image");
+
+            let sink = FeishuWebhookSink::new(
+                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+                    .with_app_credentials("app_id", "app_secret")
+                    .with_local_image_files(true)
+                    .with_local_image_root(image_root.clone())
+                    .with_local_image_base_dir(project_root.clone()),
+            )
+            .expect("build sink");
+
+            let loaded = sink
+                .load_image("./exported-images/demo.png")
+                .await
+                .expect("relative path inside root should load");
+            assert_eq!(loaded.bytes, b"png");
+            assert_eq!(loaded.content_type, "image/png");
+
+            let _ = std::fs::remove_file(image_path);
+            let _ = std::fs::remove_dir_all(project_root);
+        });
+    }
+
+    #[test]
+    fn local_image_files_reject_relative_paths_that_escape_root_allowlist() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            let project_root =
+                local_image_test_root().join(unique_local_image_test_name("relative-outside"));
+            let image_root = project_root.join("exported-images");
+            let outside_path = project_root.join("outside.png");
+            std::fs::create_dir_all(&image_root).expect("create image root");
+            std::fs::write(&outside_path, b"png").expect("write outside image");
+
+            let sink = FeishuWebhookSink::new(
+                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+                    .with_app_credentials("app_id", "app_secret")
+                    .with_local_image_files(true)
+                    .with_local_image_root(image_root.clone())
+                    .with_local_image_base_dir(project_root.clone()),
+            )
+            .expect("build sink");
+
+            let err = sink
+                .load_image("./outside.png")
+                .await
+                .expect_err("relative path outside root should fail");
+            assert!(
+                err.to_string()
+                    .contains("outside configured local image roots"),
+                "{err:#}"
+            );
+
+            let _ = std::fs::remove_file(outside_path);
+            let _ = std::fs::remove_dir_all(project_root);
+        });
+    }
+
+    #[test]
     fn local_image_files_reject_non_regular_paths() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

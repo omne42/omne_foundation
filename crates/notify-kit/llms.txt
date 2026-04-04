@@ -656,7 +656,7 @@ fn build_hub_from_env() -> notify_kit::Result<Hub> {
 如果你采用库自带的 `notify_kit::env::build_hub_from_standard_env(...)` helper，`NOTIFY_TIMEOUT_MS` 会先作为各 HTTP sink 的内部 timeout，再自动为 `HubConfig.per_sink_timeout` 留一段额外 slack，避免外层 `Hub` 比内层 HTTP request 更早超时。
 `NOTIFY_SOUND` 现在也会做严格布尔校验；非法值会直接返回错误，而不是静默回退到默认值。
 
-如果你在 integration layer 里接 `FeishuWebhookSink` 且正文会出现相对本地图片路径，记得同时显式配置绝对 `with_local_image_root(...)` 和绝对 `with_local_image_base_dir(...)`；`notify-kit` 不会再退回进程 `current_dir()` 解释这类路径。
+如果你在 integration layer 里接 `FeishuWebhookSink` 且正文会出现相对本地图片路径，记得同时显式配置绝对 `with_local_image_root(...)` 和绝对 `with_local_image_base_dir(...)`；`notify-kit` 不会再退回进程 `current_dir()` 解释这类路径，而且解析后的最终路径仍必须落在显式 `local_image_root(s)` allowlist 里。
 
 如果你采用库自带的 env helper，建议通过 `notify_kit::env::build_hub_from_standard_env(...)` 访问，并把它当成 bootstrap helper：能减少样板代码，但不妨碍你在自己的 integration layer 继续包装、替换或扩展。
 它使用一套中性的 `NOTIFY_*` 约定，而不是业务前缀协议。
@@ -851,23 +851,13 @@ let event = Event::new("turn_completed", Severity::Success, "done")
     .with_tag("thread_id", "t1");
 ```
 
-如果调用方已经持有 `structured-text-kit::StructuredText`，也可以显式保留结构化文本边界：
+`notify-kit` 的事件边界现在只承诺纯字符串投递视图：
 
-```rust,no_run,edition2024
-use notify_kit::{Event, Severity};
-use structured_text_kit::structured_text;
+- `title`
+- `body`
+- `tags`
 
-let event = Event::new_structured(
-    "turn_completed",
-    Severity::Success,
-    structured_text!("notify.turn_completed.title", "repo" => "omne"),
-)
-.with_body_text(structured_text!(
-    "notify.turn_completed.body",
-    "step" => "review"
-))
-.with_tag_text("thread_id", structured_text!("notify.tag.thread_id", "value" => "t1"));
-```
+这样做是为了让所有 text/webhook sinks 都消费同一份真实消息文本，而不是把还没经过 renderer 的 catalog text 静默压成诊断串。
 
 ## 字段约定（建议）
 
@@ -876,17 +866,11 @@ let event = Event::new_structured(
 - `body`：可放更长的上下文（可为空）
 - `tags`：放结构化信息，便于 sink 以不同方式呈现
 
-同时，`Event` 还会并行保留这些字段的结构化表示：
-
-- `title_text`
-- `body_text`
-- `tag_texts`
-
 兼容约束：
 
-- `Event::new` / `with_body` / `with_tag` 继续可用
-- 旧的字符串字段仍保留，便于现有 sinks 直接渲染
-- 新的结构化字段用于在通知边界上保留 catalog key / args 等语义，避免调用方被迫过早压平成裸字符串
+- `Event::new` / `with_body` / `with_tag` 是唯一公开 builder
+- 如果调用方持有更高层的 i18n / structured-text 语义，应先在自己的 integration 层完成渲染，再把最终用户可见文本交给 `notify-kit`
+- `notify-kit` 不再假装替调用方保留一个“尚未渲染但可以安全发送”的结构化文本镜像
 
 ## 组合建议
 
@@ -1207,7 +1191,7 @@ let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook
 let sink = FeishuWebhookSink::new(cfg)?;
 ```
 
-- `local_image_root(s)` 只是 allowlist，不负责给相对路径选基准目录；如果 Markdown 里写的是相对图片路径（例如 `![img](./exported-images/a.png)`），还必须显式配置绝对 `local_image_base_dir`
+- `local_image_root(s)` 是最终读取边界；如果 Markdown 里写的是相对图片路径（例如 `![img](./exported-images/a.png)`），还必须显式配置绝对 `local_image_base_dir`，并且解析后的最终路径仍然必须落在这些 root allowlist 之内
 
 ```rust,no_run,edition2024
 use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
@@ -1220,7 +1204,7 @@ let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook
 let sink = FeishuWebhookSink::new(cfg)?;
 ```
 
-- 只会读取显式 `local_image_root(s)` 之下的文件；超出 root、`..` 逃逸、symlink 组件和其他特殊路径都会 fail closed
+- 只会读取显式 `local_image_root(s)` 之下的文件；相对路径也只是借助显式 `local_image_base_dir` 做解析，最终仍会按 root allowlist 校验，超出 root、`..` 逃逸、symlink 组件和其他特殊路径都会 fail closed
 - 未配置 `local_image_base_dir` 时，相对图片路径会直接报错，而不是退回进程 `current_dir()`
 - 非 Unix 平台如果无法提供安全的 no-follow 打开语义，会直接拒绝本地图片读取，而不是退化成跟随 symlink/reparse point
 - 上传失败时不会中断整条消息，自动回退为文本链接表示

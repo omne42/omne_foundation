@@ -833,6 +833,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolve_allowed_local_image_path_keeps_relative_paths_inside_configured_roots() {
+        let roots = vec![PathBuf::from("/workspace/project/exported-images")];
+        let resolved = super::resolve_allowed_local_image_path(
+            "./exported-images/demo.png",
+            &roots,
+            Some(Path::new("/workspace/project")),
+        )
+        .expect("relative path inside configured root should resolve");
+
+        assert_eq!(
+            resolved,
+            PathBuf::from("/workspace/project/exported-images/demo.png")
+        );
+    }
+
+    #[test]
+    fn resolve_allowed_local_image_path_rejects_relative_paths_outside_configured_roots() {
+        let roots = vec![PathBuf::from("/workspace/project/exported-images")];
+        let err = super::resolve_allowed_local_image_path(
+            "./outside/demo.png",
+            &roots,
+            Some(Path::new("/workspace/project")),
+        )
+        .expect_err("relative path outside configured roots should fail");
+
+        assert!(
+            err.to_string()
+                .contains("outside configured local image roots"),
+            "{err:#}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlink_component_check_catches_parent_relative_escape_to_symlink() {

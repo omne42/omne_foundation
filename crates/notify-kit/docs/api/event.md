@@ -9,25 +9,13 @@ let event = Event::new("turn_completed", Severity::Success, "done")
     .with_tag("thread_id", "t1");
 ```
 
-如果调用方已经持有 `structured-text-kit::StructuredText`，也可以显式保留结构化文本边界：
+`notify-kit` 的事件边界现在只承诺纯字符串投递视图：
 
-```rust,no_run,edition2024
-# extern crate notify_kit;
-# extern crate structured_text_kit;
-use notify_kit::{Event, Severity};
-use structured_text_kit::structured_text;
+- `title`
+- `body`
+- `tags`
 
-let event = Event::new_structured(
-    "turn_completed",
-    Severity::Success,
-    structured_text!("notify.turn_completed.title", "repo" => "omne"),
-)
-.with_body_text(structured_text!(
-    "notify.turn_completed.body",
-    "step" => "review"
-))
-.with_tag_text("thread_id", structured_text!("notify.tag.thread_id", "value" => "t1"));
-```
+这样做是为了让所有 text/webhook sinks 都消费同一份真实消息文本，而不是把还没经过 renderer 的 catalog text 静默压成诊断串。
 
 ## 字段约定（建议）
 
@@ -36,17 +24,11 @@ let event = Event::new_structured(
 - `body`：可放更长的上下文（可为空）
 - `tags`：放结构化信息，便于 sink 以不同方式呈现
 
-同时，`Event` 还会并行保留这些字段的结构化表示：
-
-- `title_text`
-- `body_text`
-- `tag_texts`
-
 兼容约束：
 
-- `Event::new` / `with_body` / `with_tag` 继续可用
-- 旧的字符串字段仍保留，便于现有 sinks 直接渲染
-- 新的结构化字段用于在通知边界上保留 catalog key / args 等语义，避免调用方被迫过早压平成裸字符串
+- `Event::new` / `with_body` / `with_tag` 是唯一公开 builder
+- 如果调用方持有更高层的 i18n / structured-text 语义，应先在自己的 integration 层完成渲染，再把最终用户可见文本交给 `notify-kit`
+- `notify-kit` 不再假装替调用方保留一个“尚未渲染但可以安全发送”的结构化文本镜像
 
 ## 组合建议
 

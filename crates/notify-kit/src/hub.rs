@@ -175,15 +175,13 @@ impl Hub {
     /// - Requires a Tokio runtime with the time driver enabled; otherwise the notification is
     ///   dropped and a warning is logged.
     /// - Concurrency is bounded; if overloaded, notifications are dropped (with a warning).
-    pub fn notify(&self, mut event: Event) {
+    pub fn notify(&self, event: Event) {
         if self.inner.sinks.is_empty() {
             return;
         }
         if !self.is_kind_enabled(event.kind.as_str()) {
             return;
         }
-        event.normalize_delivery_views();
-
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             warn_hub_notify_dropped(event.kind.as_str(), "no_tokio_runtime");
             return;
@@ -204,15 +202,13 @@ impl Hub {
     /// - `Err(TryNotifyError::NoTokioRuntime)` if called outside a Tokio runtime or without the
     ///   Tokio time driver enabled.
     /// - `Err(TryNotifyError::Overloaded)` when Hub inflight capacity is full.
-    pub fn try_notify(&self, mut event: Event) -> Result<(), TryNotifyError> {
+    pub fn try_notify(&self, event: Event) -> Result<(), TryNotifyError> {
         if self.inner.sinks.is_empty() {
             return Ok(());
         }
         if !self.is_kind_enabled(event.kind.as_str()) {
             return Ok(());
         }
-        event.normalize_delivery_views();
-
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return Err(TryNotifyError::NoTokioRuntime);
         };
@@ -226,15 +222,13 @@ impl Hub {
         }
     }
 
-    pub async fn send(&self, mut event: Event) -> crate::Result<()> {
+    pub async fn send(&self, event: Event) -> crate::Result<()> {
         if self.inner.sinks.is_empty() {
             return Ok(());
         }
         if !self.is_kind_enabled(event.kind.as_str()) {
             return Ok(());
         }
-        event.normalize_delivery_views();
-
         tokio::runtime::Handle::try_current()
             .map_err(|_| crate::Error::from(TryNotifyError::NoTokioRuntime))?;
         if !has_tokio_time_driver() {
@@ -372,8 +366,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
-
-    use structured_text_kit::structured_text;
 
     use super::*;
     use crate::event::Severity;
@@ -784,7 +776,7 @@ mod tests {
     }
 
     #[test]
-    fn send_normalizes_event_views_before_sink_fanout() {
+    fn send_preserves_event_delivery_fields() {
         #[derive(Debug)]
         struct RecordingSink {
             title: Arc<std::sync::Mutex<Vec<String>>>,
@@ -832,37 +824,20 @@ mod tests {
             });
 
             let hub = Hub::new(HubConfig::default(), vec![sink]);
-            let mut event = Event::new("kind", Severity::Info, "plain");
-            event.title = "stale-title".to_string();
-            event.body = Some("stale-body".to_string());
-            event
-                .tags
-                .insert("thread_id".to_string(), "stale".to_string());
-            event = event
-                .with_title_text(structured_text!("notify.title", "repo" => "omne"))
-                .with_body_text(structured_text!("notify.body", "step" => "review"))
-                .with_tag_text(
-                    "thread_id",
-                    structured_text!("notify.tag", "value" => "fresh"),
-                );
+            let event = Event::new("kind", Severity::Info, "plain")
+                .with_body("body")
+                .with_tag("thread_id", "t1");
 
             hub.send(event).await.expect("hub send");
 
-            assert_eq!(
-                title.lock().expect("title values").as_slice(),
-                &[structured_text!("notify.title", "repo" => "omne").to_string()]
-            );
+            assert_eq!(title.lock().expect("title values").as_slice(), &["plain"]);
             assert_eq!(
                 body.lock().expect("body values").as_slice(),
-                &[Some(
-                    structured_text!("notify.body", "step" => "review").to_string()
-                )]
+                &[Some("body".to_string())]
             );
             assert_eq!(
                 tag.lock().expect("tag values").as_slice(),
-                &[Some(
-                    structured_text!("notify.tag", "value" => "fresh").to_string()
-                )]
+                &[Some("t1".to_string())]
             );
         });
     }

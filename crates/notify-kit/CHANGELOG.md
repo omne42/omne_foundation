@@ -7,7 +7,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Added
-- `Event::new_structured` / `with_title_text` / `with_body_text` / `with_tag_text`，并在 `Event` 上新增 `title_text` / `body_text` / `tag_texts`，让通知边界可以保留 `structured-text-kit` 语义而不必提前压平成裸字符串。
+- `notify_kit::env::build_hub_from_standard_env(...)` 现在直接返回 `notify_kit::Result` / `notify_kit::Error`，不再把 convenience env helper 暴露成单独的 `anyhow::Result` 错误边界。
+- `FeishuWebhookSink`：补齐相对本地图片路径的 root-anchoring 覆盖，明确要求“显式 `local_image_base_dir` 解析 + 显式 `local_image_root(s)` allowlist 校验”同时成立；不会退回 `current_dir()`，也不会让相对路径越过 root 边界。
 - `log-kit` 集成：关键 warning 路径开始以稳定 `log_code` + 结构化字段形式发射到 `tracing`。
 - `Hub::try_notify`：当缺少 Tokio runtime 时返回错误（避免静默丢通知）。
 - `Hub::send(event).await`：提供可观测的发送结果（等待所有 sinks 完成/超时）。
@@ -51,7 +52,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ### Changed
 - `notify-kit`：内置 vendor sinks 与 `env` helper 现在按 feature flags 暴露；默认 features 仍保留当前行为，但 `default-features = false` 已可只拿 core `Hub` / `Event` / `Sink` 抽象，不再被迫吞下整套 HTTP/vendor 依赖面。
 - `notify_kit::env::build_hub_from_standard_env(...)`：`NOTIFY_SOUND` 现在会严格校验布尔值，非法输入直接返回错误，不再静默回退到默认值。
-- `Hub::notify` / `Hub::try_notify` / `Hub::send`：发送前会统一规范化 `Event` 的 structured/string 视图，确保 sinks 在 hub 路径上看到的字符串字段与 `title_text` / `body_text` / `tag_texts` 保持同步。
+- `notify-kit::Event` 重新收口为纯字符串通知契约；移除了没有 renderer 兜底的 `title_text` / `body_text` / `tag_texts` 镜像字段以及 `new_structured` / `with_*_text` builder，避免 catalog text 被 text sinks 静默降级成诊断串后再冒充真实用户消息。
 - `FeishuWebhookSink`：远程 Markdown 图片下载现在始终强制做 DNS 公网 IP 校验，不再跟随 webhook 主请求的 `with_public_ip_check(false)` 放宽，避免正文图片路径引入 SSRF 到内网 / special-use HTTPS 目标。
 - `FeishuWebhookSink`：本地图片 opt-in 从“只开布尔开关”收紧为“显式开启 + 显式 `local_image_root(s)` allowlist”；加载前会先做绝对路径归一、root 边界检查，并拒绝 `..` 逃逸、symlink 组件和其他特殊路径。
 - `notify-kit::Error` 现在保留结构化错误种类与 `sink_failures()` 访问面；`Hub` 的多 sink 失败不再只压平成一段字符串，下游可以稳定检查失败 sink 的索引、名称与原始错误。

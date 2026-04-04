@@ -147,7 +147,7 @@ fn format_event_text_parts_limited(
     }
 
     if include_title {
-        let title = truncate_chars_cow(&event.title, limits.max_title_chars);
+        let title = truncate_chars_cow(event.title.as_str(), limits.max_title_chars);
         out.push_str(title.as_ref());
         if out.is_full() {
             return out.finish();
@@ -388,5 +388,16 @@ mod tests {
             },
         );
         assert_eq!(out, "a");
+    }
+
+    #[test]
+    fn format_event_text_limited_uses_plain_delivery_fields() {
+        let event = Event::new("k", Severity::Info, "plain-title")
+            .with_body("plain-body")
+            .with_tag("thread_id", "plain");
+        let out = format_event_text_limited(&event, TextLimits::default());
+        assert!(out.contains("plain-title"), "{out}");
+        assert!(out.contains("plain-body"), "{out}");
+        assert!(out.contains("thread_id=plain"), "{out}");
     }
 }

@@ -35,12 +35,14 @@
 //! while still blocking concurrent same-server `disconnect` from tearing down the borrowed
 //! connection underneath in-flight RPCs, including the cold-start config-driven path after the
 //! freshly installed connection has been prepared. Operations that still require the shared lock
-//! or lifecycle gate fail fast when they are called reentrantly from manager-owned handlers and
-//! would otherwise deadlock. Prefer plain `Manager` when you need fine-grained lifecycle control
-//! or handler callbacks that may need to call back into connection setup/teardown paths. If a
-//! handler must spawn a child task that calls back into `shared::SharedManager`, use
-//! `shared::SharedManager::spawn_inheriting_handler_scope(...)`; bare `tokio::spawn(...)` does
-//! not inherit the handler task-local reentrancy scope automatically.
+//! or lifecycle gate fail fast only when they are called reentrantly from manager-owned handlers
+//! (or child tasks that explicitly inherit that scope) and would otherwise deadlock. Prefer plain
+//! `Manager` when you need fine-grained lifecycle control or handler callbacks that may need to
+//! call back into connection setup/teardown paths. If a handler must spawn a child task that calls
+//! back into `shared::SharedManager`, use
+//! `shared::SharedManager::spawn_inheriting_handler_scope(...)`; bare `tokio::spawn(...)` keeps
+//! the normal external-caller waiting behavior because it does not inherit the handler task-local
+//! reentrancy scope automatically.
 //!
 //! Direct manager connection APIs (`Manager::connect`, `connect_named`, transport helpers, etc.)
 //! require an absolute `cwd`. They no longer fall back to the ambient process working directory.

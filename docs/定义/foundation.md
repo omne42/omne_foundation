@@ -11,9 +11,10 @@
 
 - [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md)
 - [`../crates/README.md`](../crates/README.md)
-- [`../../../omne-runtime/README.md`](../../../omne-runtime/README.md)
-- [`../../../omne-runtime/docs/workspace-crate-boundaries.md`](../../../omne-runtime/docs/workspace-crate-boundaries.md)
-- [`../../../wsl-docs/01-博客/OpenAI/Harness Engineering：Agent 优先时代的 Codex 协作.md`](../../../wsl-docs/01-博客/OpenAI/Harness Engineering：Agent 优先时代的 Codex 协作.md)
+- [`./跨仓库复用基建地图.md`](./跨仓库复用基建地图.md)
+- [`./prompt领域定位.md`](./prompt领域定位.md)
+- [`../README.md`](../README.md)
+- [`../规范/文档系统.md`](../规范/文档系统.md)
 
 ## 定义
 
@@ -36,7 +37,7 @@
 
 ## Agent-first 视角下的定义补充
 
-参考 `Harness Engineering` 这篇文章，在 agent 优先时代，工程团队的主要工作不再只是手写代码，而是设计环境、表达意图，并构建能让 agent 可靠工作的反馈循环。
+在 agent 优先时代，工程团队的主要工作不再只是手写代码，而是设计环境、表达意图，并构建能让 agent 可靠工作的反馈循环。
 
 因此，`foundation` 在这个语境里应该被理解为四类东西的组合：
 
@@ -83,11 +84,11 @@
 
 这些原则的目标不是“把一切抽象成公共库”，而是避免领域污染，保证基础能力可以长期复用。
 
-`omne-runtime` 的边界文档进一步补充了另一条很关键的原则：
+当前仓库的跨仓库复用地图进一步补充了另一条很关键的原则：
 
 - 不创建兜底式 `platform` crate，边界应按能力拆分，而不是按“都是跨平台代码”堆在一起
 
-`Harness Engineering` 进一步提醒我们：
+agent-first 维护方式还进一步提醒我们：
 
 - 文档不只是给人看的说明书，它也是 agent 的运行时上下文
 - 约束不应该只停留在口头约定里，而应尽量机械化、可检查

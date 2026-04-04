@@ -87,21 +87,23 @@
 
 ## 安装
 
-如果你通过 crates.io 使用：
+当前 `notify-kit` 的 manifest 明确声明了 `publish = false`，因此它现在的稳定复用契约是 workspace / Git 引用，而不是 registry 发布包。
 
-```toml
-[dependencies]
-notify-kit = "0.1"
-```
-
-如果你通过 Git / monorepo 引用（本仓库 workspace 内）：
+如果你通过 monorepo / workspace 引用（本仓库内）：
 
 ```toml
 [dependencies]
 notify-kit = { path = "crates/notify-kit" }
 ```
 
-> 以上版本与路径仅为示例；请按你的项目实际情况调整。
+如果你通过 Git 引用某个仓库快照：
+
+```toml
+[dependencies]
+notify-kit = { git = "https://github.com/omne42/omne_foundation.git", rev = "<commit>", package = "notify-kit" }
+```
+
+> 以上路径、仓库地址与 commit 仅为示例；请按你的项目实际情况调整。
 
 如果你只需要核心 `Hub` / `Event` / `Sink` 抽象，而不想连带编译内置 vendor sinks，可以关闭默认 features：
 

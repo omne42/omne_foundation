@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from check_common.context import CheckContext
 
 
 MAX_AGENTS_LINES = 80
+MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 
 
 def _read_text(path: Path) -> str:
@@ -15,6 +17,36 @@ def _read_text(path: Path) -> str:
 def _ensure_contains(text: str, marker: str, *, path: Path) -> None:
     if marker not in text:
         raise SystemExit(f"check-workspace: {path.name} missing marker: {marker}")
+
+
+def _normalize_markdown_target(raw_target: str) -> str:
+    target = raw_target.strip()
+    if not target:
+        return ""
+    if target.startswith("<") and target.endswith(">"):
+        target = target[1:-1].strip()
+    if " " in target:
+        target = target.split(" ", 1)[0]
+    return target
+
+
+def _check_repo_local_markdown_links(repo_root: Path, path: Path) -> None:
+    text = _read_text(path)
+    for match in MARKDOWN_LINK_RE.finditer(text):
+        target = _normalize_markdown_target(match.group(1))
+        if not target or target.startswith("#"):
+            continue
+        if target.startswith(("/", "http://", "https://", "mailto:", "tel:")):
+            continue
+        target_path = target.split("#", 1)[0].split("?", 1)[0]
+        if not target_path:
+            continue
+        resolved = (path.parent / target_path).resolve(strict=False)
+        if not resolved.is_relative_to(repo_root):
+            raise SystemExit(
+                "check-workspace: markdown link escapes repository root: "
+                f"{path.relative_to(repo_root)} -> {target}"
+            )
 
 
 def run_docs_system_checks(ctx: CheckContext) -> None:
@@ -68,3 +100,8 @@ def run_docs_system_checks(ctx: CheckContext) -> None:
 
     _ensure_contains(docs_policy_index_text, "./文档系统.md", path=docs_policy_index)
     _ensure_contains(architecture_text, "./AGENTS.md", path=architecture)
+
+    docs_paths = [readme, agents, architecture]
+    docs_paths.extend(sorted((repo_root / "docs").rglob("*.md")))
+    for path in docs_paths:
+        _check_repo_local_markdown_links(repo_root, path)

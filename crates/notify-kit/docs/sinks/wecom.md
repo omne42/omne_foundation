@@ -7,6 +7,7 @@
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
+# #[cfg(feature = "sink-wecom")] {
 use std::time::Duration;
 
 use notify_kit::{WeComWebhookConfig, WeComWebhookSink};
@@ -18,6 +19,7 @@ let cfg = WeComWebhookConfig::new("https://qyapi.weixin.qq.com/cgi-bin/webhook/s
     .with_public_ip_check(false);
 
 let sink = WeComWebhookSink::new(cfg)?;
+# }
 # Ok(())
 # }
 ```

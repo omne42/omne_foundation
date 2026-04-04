@@ -7,6 +7,7 @@
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
+# #[cfg(feature = "sink-dingtalk")] {
 use std::time::Duration;
 
 use notify_kit::{DingTalkWebhookConfig, DingTalkWebhookSink};
@@ -18,6 +19,7 @@ let cfg = DingTalkWebhookConfig::new("https://oapi.dingtalk.com/robot/send?acces
     .with_public_ip_check(false);
 
 let sink = DingTalkWebhookSink::new(cfg)?;
+# }
 # Ok(())
 # }
 ```
@@ -29,6 +31,7 @@ let sink = DingTalkWebhookSink::new(cfg)?;
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
+# #[cfg(feature = "sink-dingtalk")] {
 use notify_kit::{DingTalkWebhookConfig, DingTalkWebhookSink};
 
 let cfg = DingTalkWebhookConfig::new("https://oapi.dingtalk.com/robot/send?access_token=xxx")
@@ -37,6 +40,7 @@ let cfg = DingTalkWebhookConfig::new("https://oapi.dingtalk.com/robot/send?acces
     .with_public_ip_check(false);
 
 let sink = DingTalkWebhookSink::new(cfg)?;
+# }
 # Ok(())
 # }
 ```

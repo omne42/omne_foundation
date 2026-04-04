@@ -7,10 +7,12 @@
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
+# #[cfg(feature = "sink-github")] {
 use notify_kit::{GitHubCommentConfig, GitHubCommentSink};
 
 let cfg = GitHubCommentConfig::new("owner", "repo", 123, "ghp_xxx");
 let sink = GitHubCommentSink::new(cfg)?;
+# }
 # Ok(())
 # }
 ```

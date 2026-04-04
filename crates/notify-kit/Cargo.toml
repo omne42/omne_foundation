@@ -10,21 +10,7 @@ include = ["/src/**", "/Cargo.toml", "/README.md", "/CHANGELOG.md"]
 workspace = true
 
 [features]
-default = [
-    "standard-env",
-    "sink-bark",
-    "sink-dingtalk",
-    "sink-discord",
-    "sink-feishu",
-    "sink-generic-webhook",
-    "sink-github",
-    "sink-pushplus",
-    "sink-serverchan",
-    "sink-slack",
-    "sink-sound",
-    "sink-telegram",
-    "sink-wecom",
-]
+default = ["standard-env"]
 http-client = ["dep:http-kit", "dep:reqwest"]
 crypto = ["dep:base64", "dep:hmac", "dep:sha2"]
 sink-bark = ["http-client"]

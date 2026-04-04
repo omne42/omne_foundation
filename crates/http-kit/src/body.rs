@@ -159,10 +159,7 @@ pub fn body_preview_text(body: &[u8], max_bytes: usize) -> Option<String> {
 }
 
 async fn try_drain_response_body_for_reuse(mut resp: reqwest::Response) {
-    let Some(content_length) = resp.content_length() else {
-        return;
-    };
-    if content_length == 0 || content_length > RESPONSE_BODY_DRAIN_LIMIT_BYTES as u64 {
+    if matches!(resp.content_length(), Some(0)) {
         return;
     }
     drain_response_body_limited(&mut resp, RESPONSE_BODY_DRAIN_LIMIT_BYTES).await;

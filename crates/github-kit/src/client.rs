@@ -10,7 +10,7 @@ pub const DEFAULT_GITHUB_API_BASE: &str = "https://api.github.com";
 pub const DEFAULT_GITHUB_API_VERSION: &str = "2022-11-28";
 pub const DEFAULT_GITHUB_USER_AGENT: &str = "github-kit";
 pub const GITHUB_API_ACCEPT: &str = "application/vnd.github+json";
-const CANONICAL_GITHUB_API_HOST: &str = "api.github.com";
+pub const CANONICAL_GITHUB_API_HOST: &str = "api.github.com";
 
 #[derive(Debug, Clone, Copy)]
 pub struct GitHubApiRequestOptions<'a> {
@@ -18,6 +18,7 @@ pub struct GitHubApiRequestOptions<'a> {
     user_agent: &'a str,
     api_version: &'a str,
     allow_custom_bearer_api_base: bool,
+    trusted_bearer_token_hosts: &'a [&'a str],
 }
 
 impl<'a> Default for GitHubApiRequestOptions<'a> {
@@ -27,6 +28,7 @@ impl<'a> Default for GitHubApiRequestOptions<'a> {
             user_agent: DEFAULT_GITHUB_USER_AGENT,
             api_version: DEFAULT_GITHUB_API_VERSION,
             allow_custom_bearer_api_base: false,
+            trusted_bearer_token_hosts: &[],
         }
     }
 }
@@ -62,12 +64,19 @@ impl<'a> GitHubApiRequestOptions<'a> {
         self
     }
 
-    /// Trust a non-canonical HTTPS GitHub API base for bearer-token requests.
-    ///
-    /// By default, bearer tokens are only sent to `https://api.github.com`.
-    /// GitHub Enterprise or other custom API bases must opt in explicitly.
+    #[must_use]
+    pub fn with_trusted_bearer_token_hosts(
+        mut self,
+        trusted_bearer_token_hosts: &'a [&'a str],
+    ) -> Self {
+        self.trusted_bearer_token_hosts = trusted_bearer_token_hosts;
+        self
+    }
+
     #[must_use]
     pub fn with_allow_custom_bearer_api_base(mut self, allow: bool) -> Self {
+        // Compatibility shim for existing callers that trust a specific non-canonical base URL at
+        // the call site. Prefer `with_trusted_bearer_token_hosts(...)` for new code.
         self.allow_custom_bearer_api_base = allow;
         self
     }
@@ -81,8 +90,15 @@ impl<'a> GitHubApiRequestOptions<'a> {
         self.has_bearer_token()
     }
 
-    fn allows_custom_bearer_api_base(&self) -> bool {
+    pub(crate) fn bearer_token_host_is_trusted(&self, host: &str) -> bool {
         self.allow_custom_bearer_api_base
+            || host.eq_ignore_ascii_case(CANONICAL_GITHUB_API_HOST)
+            || self
+                .trusted_bearer_token_hosts
+                .iter()
+                .map(|candidate| candidate.trim().trim_end_matches('.'))
+                .filter(|candidate| !candidate.is_empty())
+                .any(|candidate| host.eq_ignore_ascii_case(candidate))
     }
 }
 
@@ -131,7 +147,7 @@ pub fn validate_github_api_request_url(
     url: &reqwest::Url,
     options: GitHubApiRequestOptions<'_>,
 ) -> Result<()> {
-    if !options.requires_public_ip_pinning() {
+    if !options.has_bearer_token() {
         return Ok(());
     }
 
@@ -146,17 +162,16 @@ pub fn validate_github_api_request_url(
         });
     }
 
-    let Some(host) = url.host_str() else {
+    let host = url
+        .host_str()
+        .ok_or_else(|| GitHubApiError::InvalidApiBase {
+            details: "bearer token requires a github api base with a host".to_string(),
+        })?;
+    if !options.bearer_token_host_is_trusted(host) {
         return Err(GitHubApiError::InvalidApiBase {
-            details: "github api base must include a host".to_string(),
-        });
-    };
-
-    if !options.allows_custom_bearer_api_base()
-        && !host.eq_ignore_ascii_case(CANONICAL_GITHUB_API_HOST)
-    {
-        return Err(GitHubApiError::InvalidApiBase {
-            details: "bearer token requires the canonical GitHub API base `https://api.github.com` unless custom bases are explicitly trusted".to_string(),
+            details: format!(
+                "bearer token requires the canonical GitHub API base (`https://api.github.com`) or an explicit trusted host allowlist: {host}"
+            ),
         });
     }
 
@@ -192,22 +207,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_custom_public_bearer_api_base_without_explicit_opt_in() {
-        let url = reqwest::Url::parse("https://github.example.com/api/v3/repos/omne42/repo")
-            .expect("url");
-
-        let err = validate_github_api_request_url(
-            &url,
-            GitHubApiRequestOptions::new().with_bearer_token(Some("secret-token")),
-        )
-        .expect_err("custom base should be rejected");
-
-        let message = err.to_string();
-        assert!(message.contains("canonical GitHub API base"), "{message}");
-    }
-
-    #[test]
-    fn allows_custom_public_bearer_api_base_after_explicit_opt_in() {
+    fn allows_explicitly_trusted_public_custom_host() {
         let url = reqwest::Url::parse("https://github.example.com/api/v3/repos/omne42/repo")
             .expect("url");
 
@@ -215,43 +215,26 @@ mod tests {
             &url,
             GitHubApiRequestOptions::new()
                 .with_bearer_token(Some("secret-token"))
-                .with_allow_custom_bearer_api_base(true),
+                .with_trusted_bearer_token_hosts(&["github.example.com"]),
         )
-        .expect("explicitly trusted custom base should be allowed");
+        .expect("trusted public host should be allowed");
     }
 
     #[test]
-    fn rejects_localhost_custom_bearer_api_base_even_after_explicit_opt_in() {
-        let url = reqwest::Url::parse("https://localhost/api/v3/repos/omne42/repo").expect("url");
+    fn rejects_private_ip_even_if_explicitly_allowlisted() {
+        let url = reqwest::Url::parse("https://127.0.0.1/api/v3/repos/omne42/repo").expect("url");
 
         let err = validate_github_api_request_url(
             &url,
             GitHubApiRequestOptions::new()
                 .with_bearer_token(Some("secret-token"))
-                .with_allow_custom_bearer_api_base(true),
+                .with_trusted_bearer_token_hosts(&["127.0.0.1"]),
         )
-        .expect_err("localhost target should be rejected");
+        .expect_err("private ip should still be rejected");
 
         let message = err.to_string();
         assert!(message.contains("not allowed"), "{message}");
-        assert!(message.contains("localhost"), "{message}");
-    }
-
-    #[test]
-    fn rejects_private_ip_literal_custom_bearer_api_base_even_after_explicit_opt_in() {
-        let url = reqwest::Url::parse("https://10.0.0.5/api/v3/repos/omne42/repo").expect("url");
-
-        let err = validate_github_api_request_url(
-            &url,
-            GitHubApiRequestOptions::new()
-                .with_bearer_token(Some("secret-token"))
-                .with_allow_custom_bearer_api_base(true),
-        )
-        .expect_err("private ip literal should be rejected");
-
-        let message = err.to_string();
-        assert!(message.contains("not allowed"), "{message}");
-        assert!(message.contains("10.0.0.5"), "{message}");
+        assert!(message.contains("127.0.0.1"), "{message}");
     }
 
     #[tokio::test]

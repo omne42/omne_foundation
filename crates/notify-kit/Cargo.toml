@@ -10,18 +10,15 @@ include = ["/src/**", "/Cargo.toml", "/README.md", "/CHANGELOG.md"]
 workspace = true
 
 [features]
-default = [
+default = ["standard-env"]
+all-sinks = [
     "standard-env",
     "sink-bark",
     "sink-dingtalk",
     "sink-discord",
-    "sink-feishu",
-    "sink-generic-webhook",
     "sink-github",
     "sink-pushplus",
     "sink-serverchan",
-    "sink-slack",
-    "sink-sound",
     "sink-telegram",
     "sink-wecom",
 ]

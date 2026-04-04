@@ -7,10 +7,13 @@
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
+# #[cfg(feature = "sink-pushplus")]
+# {
 use notify_kit::{PushPlusConfig, PushPlusSink};
 
 let cfg = PushPlusConfig::new("your_token");
 let sink = PushPlusSink::new(cfg)?;
+# }
 # Ok(())
 # }
 ```
@@ -20,6 +23,8 @@ let sink = PushPlusSink::new(cfg)?;
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
+# #[cfg(feature = "sink-pushplus")]
+# {
 use notify_kit::{PushPlusConfig, PushPlusSink};
 
 let cfg = PushPlusConfig::new("your_token")
@@ -27,6 +32,7 @@ let cfg = PushPlusConfig::new("your_token")
     .with_template("txt")
     .with_topic("my_topic");
 let sink = PushPlusSink::new(cfg)?;
+# }
 # Ok(())
 # }
 ```

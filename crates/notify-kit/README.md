@@ -110,11 +110,26 @@ notify-kit = { path = "crates/notify-kit" }
 notify-kit = { path = "crates/notify-kit", default-features = false }
 ```
 
-默认 features 仍会保留当前内置 sinks；若只想按需打开某几个 sink，可在关闭默认 features 后显式启用：
+当前默认 features 只保留 `standard-env` 这条更窄的 foundation 默认面：
+
+- `sink-sound`
+- `sink-generic-webhook`
+- `sink-feishu`
+- `sink-slack`
+- `notify_kit::env`
+
+若只想按需打开某几个 sink，可在关闭默认 features 后显式启用：
 
 ```toml
 [dependencies]
 notify-kit = { path = "crates/notify-kit", default-features = false, features = ["sink-sound", "sink-slack"] }
+```
+
+如果你确实想恢复“把所有内置 vendor sinks 一次性打开”的旧行为，可以显式启用：
+
+```toml
+[dependencies]
+notify-kit = { path = "crates/notify-kit", features = ["all-sinks"] }
 ```
 
 当前主要 feature 边界：
@@ -123,6 +138,8 @@ notify-kit = { path = "crates/notify-kit", default-features = false, features = 
   - 分别启用对应 vendor sink，例如 `sink-github`、`sink-feishu`、`sink-telegram`
 - `standard-env`
   - 启用 `notify_kit::env` 以及它依赖的标准 sinks（`sink-sound`、`sink-generic-webhook`、`sink-feishu`、`sink-slack`）
+- `all-sinks`
+  - 在 `standard-env` 之外额外启用其余内置 vendor sinks，适合明确需要“全家桶”编译面的调用方
 - `sound-command`
   - 允许 `SoundSink` 执行外部命令，并自动依赖 `sink-sound`
 

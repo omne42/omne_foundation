@@ -16,7 +16,10 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio_util::io::StreamReader;
 
-use crate::{Client, ClientHandle, Error, ProtocolErrorKind, SpawnOptions, StreamableHttpOptions};
+use crate::{
+    Client, ClientHandle, Error, ProtocolErrorKind, SpawnOptions, StreamableHttpOptions,
+    StreamableHttpProxyMode,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SseWakeReason {
@@ -185,6 +188,21 @@ fn sse_reconnect_jitter_millis() -> u64 {
     nanos % (SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS + 1)
 }
 
+fn streamable_http_client_options(
+    connect_timeout: Option<Duration>,
+    follow_redirects: bool,
+    proxy_mode: StreamableHttpProxyMode,
+    headers: reqwest::header::HeaderMap,
+) -> HttpClientOptions {
+    HttpClientOptions {
+        connect_timeout,
+        default_headers: headers,
+        follow_redirects,
+        no_proxy: matches!(proxy_mode, StreamableHttpProxyMode::IgnoreSystem),
+        ..Default::default()
+    }
+}
+
 impl Client {
     pub async fn connect_streamable_http(url: &str) -> Result<Self, Error> {
         Self::connect_streamable_http_with_options(
@@ -293,6 +311,7 @@ impl Client {
         let connect_timeout = http_options.connect_timeout;
         let request_timeout = http_options.request_timeout;
         let follow_redirects = http_options.follow_redirects;
+        let proxy_mode = http_options.proxy_mode;
         let error_body_preview_bytes = http_options.error_body_preview_bytes;
         let enforce_public_ip = http_options.enforce_public_ip;
         if connect_timeout.is_some() || request_timeout.is_some() {
@@ -322,16 +341,10 @@ impl Client {
             headers.insert(name, value);
         }
 
-        let http_options = HttpClientOptions {
-            connect_timeout,
-            default_headers: headers,
-            follow_redirects,
-            // Avoid automatic proxy environment variable loading by default.
-            no_proxy: true,
-            ..Default::default()
-        };
+        let client_options =
+            streamable_http_client_options(connect_timeout, follow_redirects, proxy_mode, headers);
 
-        let http_client_profile = build_http_client_profile(&http_options).map_err(|err| {
+        let http_client_profile = build_http_client_profile(&client_options).map_err(|err| {
             Error::protocol(
                 ProtocolErrorKind::InvalidInput,
                 format!("build http client profile failed: {err}"),
@@ -1280,6 +1293,32 @@ mod tests {
 
         let id = jsonrpc_response_id_from_line(br#"[{"id":1}]"#).expect("valid json");
         assert!(id.is_none());
+    }
+
+    #[test]
+    fn streamable_http_client_options_ignore_system_proxy_by_default() {
+        let mapped = streamable_http_client_options(
+            StreamableHttpOptions::default().connect_timeout,
+            StreamableHttpOptions::default().follow_redirects,
+            StreamableHttpOptions::default().proxy_mode,
+            reqwest::header::HeaderMap::new(),
+        );
+        assert!(mapped.no_proxy);
+    }
+
+    #[test]
+    fn streamable_http_client_options_can_enable_system_proxy_loading() {
+        let options = StreamableHttpOptions {
+            proxy_mode: StreamableHttpProxyMode::UseSystem,
+            ..Default::default()
+        };
+        let mapped = streamable_http_client_options(
+            options.connect_timeout,
+            options.follow_redirects,
+            options.proxy_mode,
+            reqwest::header::HeaderMap::new(),
+        );
+        assert!(!mapped.no_proxy);
     }
 
     #[test]

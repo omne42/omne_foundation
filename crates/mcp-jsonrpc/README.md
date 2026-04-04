@@ -18,6 +18,7 @@
 - request / response / notification IO 编排
 - server -> client requests 与 notifications 的接收缓冲
 - 消息大小和队列边界
+- streamable HTTP 的显式代理策略边界
 
 不负责：
 
@@ -46,10 +47,14 @@
 
 - `src/lib.rs`
   - client 主体
+  - 核心读写循环
+- `src/options.rs`
   - transport 选项
   - limits
-  - 错误类型
-  - 核心读写循环
+- `src/error.rs`
+  - 错误类型与 `error-kit` 映射
+- `src/runtime.rs`
+  - Tokio time driver 前置检查
 - `src/stdout_log.rs`
   - stdout 分段日志
 - `src/streamable_http.rs`
@@ -60,3 +65,15 @@
 - 被 `mcp-kit` 消费，作为底层 transport 层
 - 依赖 [`error-kit`](../error-kit/README.md) 提供公开错误的稳定错误码、类别和重试语义
 - 自身不感知 `mcp-kit` 的配置模型和安全策略
+
+## streamable HTTP 网络策略
+
+`StreamableHttpOptions` 当前对代理和 redirects 采用显式、安全优先的配置面：
+
+- `follow_redirects` 默认 `false`
+- `proxy_mode` 默认 [`IgnoreSystem`](./src/options.rs)，不会自动读取 `HTTP_PROXY` / `HTTPS_PROXY`
+- 如果调用方确实需要走系统代理，可显式设置 `StreamableHttpProxyMode::UseSystem`
+
+补充说明：
+
+- 当 `enforce_public_ip = true` 时，底层 pinned public-IP 路径仍会禁用代理，以避免把实际 socket 重定向到中间代理端点

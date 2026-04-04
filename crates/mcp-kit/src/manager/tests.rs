@@ -4162,6 +4162,7 @@ fn streamable_http_validate_rejects_reserved_authorization_env_header() {
 fn untrusted_policy_allows_http_when_configured() {
     let policy = UntrustedStreamableHttpPolicy {
         require_https: false,
+        allow_public_hosts: true,
         ..Default::default()
     };
 
@@ -4172,6 +4173,7 @@ fn untrusted_policy_allows_http_when_configured() {
 #[test]
 fn untrusted_policy_allows_private_ip_when_configured() {
     let policy = UntrustedStreamableHttpPolicy {
+        allow_public_hosts: true,
         outbound: http_kit::UntrustedOutboundPolicy {
             allow_private_ips: true,
             ..Default::default()
@@ -4269,7 +4271,10 @@ fn streamable_http_public_ip_pinning_is_disabled_in_trusted_mode() {
 
 #[test]
 fn untrusted_policy_allows_nat64_well_known_prefix_when_embedded_ipv4_is_public() {
-    let policy = UntrustedStreamableHttpPolicy::default();
+    let policy = UntrustedStreamableHttpPolicy {
+        allow_public_hosts: true,
+        ..Default::default()
+    };
 
     validate_streamable_http_url_untrusted(
         &policy,
@@ -4282,7 +4287,10 @@ fn untrusted_policy_allows_nat64_well_known_prefix_when_embedded_ipv4_is_public(
 
 #[test]
 fn untrusted_policy_allows_6to4_when_embedded_ipv4_is_public() {
-    let policy = UntrustedStreamableHttpPolicy::default();
+    let policy = UntrustedStreamableHttpPolicy {
+        allow_public_hosts: true,
+        ..Default::default()
+    };
 
     validate_streamable_http_url_untrusted(&policy, "srv", "url", "https://[2002:0808:0808::]/mcp")
         .unwrap();
@@ -4306,6 +4314,33 @@ fn untrusted_policy_enforces_allowlist_when_set() {
     let err = validate_streamable_http_url_untrusted(&policy, "srv", "url", "https://evil.com/mcp")
         .unwrap_err();
     assert!(err.to_string().contains("allowlist"));
+}
+
+#[test]
+fn untrusted_policy_refuses_public_hosts_without_explicit_allowlist() {
+    let err = validate_streamable_http_url_untrusted(
+        &UntrustedStreamableHttpPolicy::default(),
+        "srv",
+        "url",
+        "https://example.com/mcp",
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("arbitrary public streamable http host"),
+        "{err}"
+    );
+}
+
+#[test]
+fn untrusted_policy_allows_public_hosts_with_explicit_opt_in() {
+    let policy = UntrustedStreamableHttpPolicy {
+        allow_public_hosts: true,
+        ..Default::default()
+    };
+
+    validate_streamable_http_url_untrusted(&policy, "srv", "url", "https://example.com/mcp")
+        .unwrap();
 }
 
 #[test]
@@ -4389,6 +4424,7 @@ async fn untrusted_policy_dns_check_rejects_localhost_with_allow_private_ip() {
 #[tokio::test]
 async fn untrusted_policy_dns_check_fails_closed_on_lookup_failure_or_timeout() {
     let policy = UntrustedStreamableHttpPolicy {
+        allow_public_hosts: true,
         outbound: http_kit::UntrustedOutboundPolicy {
             dns_check: true,
             dns_timeout: Duration::from_nanos(1),
@@ -4422,6 +4458,7 @@ async fn untrusted_policy_dns_check_fails_closed_on_lookup_failure_or_timeout() 
 #[tokio::test]
 async fn untrusted_policy_dns_check_can_fail_open_on_lookup_timeout() {
     let policy = UntrustedStreamableHttpPolicy {
+        allow_public_hosts: true,
         outbound: http_kit::UntrustedOutboundPolicy {
             dns_check: true,
             dns_fail_open: true,
@@ -4445,6 +4482,84 @@ async fn untrusted_policy_dns_check_can_fail_open_on_lookup_timeout() {
         "https://does-not-exist.invalid/mcp",
     )
     .await
+    .unwrap();
+}
+
+#[test]
+fn untrusted_policy_rejects_custom_headers_by_default() {
+    let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+    server_cfg
+        .http_headers_mut()
+        .unwrap()
+        .insert("x-demo".to_string(), "demo".to_string());
+
+    let err = super::streamable_http_validation::validate_streamable_http_config(
+        TrustMode::Untrusted,
+        &UntrustedStreamableHttpPolicy {
+            outbound: http_kit::UntrustedOutboundPolicy {
+                allowed_hosts: vec!["example.com".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        "srv",
+        "url",
+        "https://example.com/mcp",
+        &server_cfg,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("custom http headers"), "{err}");
+}
+
+#[test]
+fn untrusted_policy_rejects_sensitive_headers_before_generic_custom_header_guard() {
+    let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+    server_cfg
+        .http_headers_mut()
+        .unwrap()
+        .insert("Authorization".to_string(), "Bearer demo".to_string());
+
+    let err = super::streamable_http_validation::validate_streamable_http_config(
+        TrustMode::Untrusted,
+        &UntrustedStreamableHttpPolicy {
+            outbound: http_kit::UntrustedOutboundPolicy {
+                allowed_hosts: vec!["example.com".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        "srv",
+        "url",
+        "https://example.com/mcp",
+        &server_cfg,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("sensitive http header"), "{err}");
+}
+
+#[test]
+fn untrusted_policy_allows_custom_headers_when_explicitly_enabled() {
+    let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+    server_cfg
+        .http_headers_mut()
+        .unwrap()
+        .insert("x-demo".to_string(), "demo".to_string());
+
+    super::streamable_http_validation::validate_streamable_http_config(
+        TrustMode::Untrusted,
+        &UntrustedStreamableHttpPolicy {
+            allow_custom_headers: true,
+            outbound: http_kit::UntrustedOutboundPolicy {
+                allowed_hosts: vec!["example.com".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        "srv",
+        "url",
+        "https://example.com/mcp",
+        &server_cfg,
+    )
     .unwrap();
 }
 

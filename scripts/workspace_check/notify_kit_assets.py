@@ -24,6 +24,7 @@ def _run_docs_test(ctx: CheckContext, crate_root: Path) -> None:
     docs_target_dir = ctx.repo_root / "target" / "mdbook-test" / "notify-kit"
     docs_target_dir.mkdir(parents=True, exist_ok=True)
     clear_directory_contents(docs_target_dir)
+    (docs_target_dir / "debug" / "deps").mkdir(parents=True, exist_ok=True)
 
     env = {"CARGO_TARGET_DIR": str(docs_target_dir)}
     run_command(

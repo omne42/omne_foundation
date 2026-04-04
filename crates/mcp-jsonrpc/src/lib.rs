@@ -21,46 +21,537 @@
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, mpsc as std_mpsc};
 use std::time::Duration;
 
+use error_kit::{ErrorCategory, ErrorCode, ErrorRecord, ErrorRetryAdvice};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use structured_text_kit::StructuredText;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
 
-mod detached;
-mod error;
-mod options;
-mod runtime;
 mod stdout_log;
 mod streamable_http;
 
-use detached::{close_without_runtime, spawn_detached};
-#[cfg(test)]
-use detached::{
-    detached_runtime_test_guard, force_detached_init_failures, force_detached_spawn_failures,
-};
-pub use error::{Error, ProtocolError, ProtocolErrorKind};
-use options::normalize_max_message_bytes;
-pub use options::{
-    DiagnosticsOptions, Limits, SpawnOptions, StdoutLog, StdoutLogRedactor, StreamableHttpOptions,
-    StreamableHttpProxyMode,
-};
-use runtime::ensure_tokio_time_driver;
 use stdout_log::LogState;
 
+pub type StdoutLogRedactor = Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
+
+const DEFAULT_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 const REUSABLE_LINE_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 const READ_LINE_INITIAL_CAP_BYTES: usize = 4 * 1024;
-#[cfg(not(test))]
-const DETACHED_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(test)]
-const DETACHED_WRITE_TIMEOUT: Duration = Duration::from_millis(50);
+const TOKIO_TIME_DRIVER_ERROR: &str =
+    "tokio runtime time driver is not enabled; build the runtime with enable_time()";
+type DetachedTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+pub(crate) fn ensure_tokio_time_driver(operation: &'static str) -> Result<(), Error> {
+    std::panic::catch_unwind(|| {
+        drop(tokio::time::sleep(Duration::ZERO));
+    })
+    .map_err(|_| {
+        Error::protocol(
+            ProtocolErrorKind::Other,
+            format!("{TOKIO_TIME_DRIVER_ERROR} ({operation})"),
+        )
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum CloseReasonPriority {
+    Fallback,
+    Primary,
+}
+
+#[derive(Debug, Default)]
+struct CloseReasonState {
+    inner: Mutex<Option<(CloseReasonPriority, String)>>,
+}
+
+impl CloseReasonState {
+    fn publish(&self, priority: CloseReasonPriority, reason: String) -> bool {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let should_replace = match guard.as_ref() {
+            None => true,
+            Some((current_priority, _)) => priority > *current_priority,
+        };
+        if should_replace {
+            *guard = Some((priority, reason));
+        }
+        should_replace
+    }
+
+    fn get(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|(_, reason)| reason.clone())
+    }
+}
+
+#[derive(Clone)]
+pub struct SpawnOptions {
+    pub stdout_log: Option<StdoutLog>,
+    /// Optional transformation applied to each captured stdout line before it is written to
+    /// `stdout_log`.
+    ///
+    /// This can be used to redact secrets before they are written to disk.
+    pub stdout_log_redactor: Option<StdoutLogRedactor>,
+    pub limits: Limits,
+    pub diagnostics: DiagnosticsOptions,
+    /// When true (default), kill the child process if the `Client` is dropped.
+    ///
+    /// Note: this is best-effort and does not guarantee the child is reaped. Prefer an explicit
+    /// `Client::wait*` call when you own the child lifecycle.
+    pub kill_on_drop: bool,
+}
+
+impl std::fmt::Debug for SpawnOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpawnOptions")
+            .field("stdout_log", &self.stdout_log)
+            .field("stdout_log_redactor", &self.stdout_log_redactor.is_some())
+            .field("limits", &self.limits)
+            .field("diagnostics", &self.diagnostics)
+            .field("kill_on_drop", &self.kill_on_drop)
+            .finish()
+    }
+}
+
+impl Default for SpawnOptions {
+    fn default() -> Self {
+        Self {
+            stdout_log: None,
+            stdout_log_redactor: None,
+            limits: Limits::default(),
+            diagnostics: DiagnosticsOptions::default(),
+            kill_on_drop: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamableHttpOptions {
+    /// Extra HTTP headers to include on all requests.
+    pub headers: HashMap<String, String>,
+    /// Whether untrusted transports must pin the validated public IP set into the actual socket.
+    pub enforce_public_ip: bool,
+    /// Optional timeout applied while establishing HTTP connections.
+    pub connect_timeout: Option<Duration>,
+    /// Optional timeout applied to individual HTTP POST request/response bodies.
+    ///
+    /// Note: do not use this to limit the long-lived SSE connection.
+    pub request_timeout: Option<Duration>,
+    /// Whether to follow HTTP redirects (default: false).
+    ///
+    /// For safety, the default is to disable redirects to reduce SSRF risk.
+    pub follow_redirects: bool,
+    /// Maximum bytes of HTTP response body to include in bridged JSON-RPC error data.
+    ///
+    /// Default: 0 (do not include body previews) to reduce accidental secrets exposure.
+    pub error_body_preview_bytes: usize,
+}
+
+impl Default for StreamableHttpOptions {
+    fn default() -> Self {
+        Self {
+            headers: HashMap::new(),
+            enforce_public_ip: false,
+            connect_timeout: Some(Duration::from_secs(10)),
+            request_timeout: None,
+            follow_redirects: false,
+            error_body_preview_bytes: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DiagnosticsOptions {
+    /// Capture up to N invalid JSON lines (best-effort) for debugging.
+    ///
+    /// Default: 0 (disabled).
+    pub invalid_json_sample_lines: usize,
+    /// Maximum bytes per captured invalid JSON line.
+    ///
+    /// Default: 256.
+    pub invalid_json_sample_max_bytes: usize,
+}
+
+impl Default for DiagnosticsOptions {
+    fn default() -> Self {
+        Self {
+            invalid_json_sample_lines: 0,
+            invalid_json_sample_max_bytes: 256,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StdoutLog {
+    pub path: PathBuf,
+    pub max_bytes_per_part: u64,
+    /// Keep at most N rotated parts (`*.segment-XXXX.log`). When `None`, keep all.
+    pub max_parts: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Limits {
+    /// Maximum bytes for a single JSON-RPC message (one line).
+    pub max_message_bytes: usize,
+    /// Maximum buffered notifications from the server.
+    pub notifications_capacity: usize,
+    /// Maximum buffered server->client requests.
+    pub requests_capacity: usize,
+    /// Maximum in-flight client->server requests waiting for responses.
+    pub max_pending_requests: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            // Large enough for typical MCP messages, but bounded to reduce DoS risk.
+            max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
+            notifications_capacity: 256,
+            requests_capacity: 64,
+            max_pending_requests: 64,
+        }
+    }
+}
+
+pub(crate) fn normalize_max_message_bytes(max_message_bytes: usize) -> usize {
+    if max_message_bytes == 0 {
+        return DEFAULT_MAX_MESSAGE_BYTES;
+    }
+    max_message_bytes
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("json-rpc error {code}: {message}")]
+    Rpc {
+        code: i64,
+        message: String,
+        data: Option<Value>,
+    },
+    #[error("protocol error: {0}")]
+    Protocol(ProtocolError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ProtocolErrorKind {
+    /// The client/transport was closed (explicitly or via drop).
+    Closed,
+    /// Waiting for a child process to exit timed out.
+    WaitTimeout,
+    /// The peer sent an invalid JSON / JSON-RPC message.
+    InvalidMessage,
+    /// Invalid user input (e.g. invalid header name/value).
+    InvalidInput,
+    /// Streamable HTTP transport error (SSE/POST bridge).
+    StreamableHttp,
+    /// Catch-all for internal invariants.
+    Other,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProtocolError {
+    pub kind: ProtocolErrorKind,
+    pub message: String,
+}
+
+impl ProtocolError {
+    pub fn new(kind: ProtocolErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ProtocolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.message.fmt(f)
+    }
+}
+
+impl std::error::Error for ProtocolError {}
+
+impl Error {
+    pub fn protocol(kind: ProtocolErrorKind, message: impl Into<String>) -> Self {
+        Self::Protocol(ProtocolError::new(kind, message))
+    }
+
+    /// Returns true if this error was produced by `Client::wait_with_timeout`.
+    pub fn is_wait_timeout(&self) -> bool {
+        matches!(self, Error::Protocol(err) if err.kind == ProtocolErrorKind::WaitTimeout)
+    }
+
+    #[must_use]
+    pub fn error_code(&self) -> ErrorCode {
+        match self {
+            Self::Io(err) => io_error_code(err.kind()),
+            Self::Json(_) => literal_error_code("mcp_jsonrpc.json"),
+            Self::Rpc { code, .. } => rpc_error_code(*code),
+            Self::Protocol(err) => protocol_error_code(err.kind),
+        }
+    }
+
+    #[must_use]
+    pub fn error_category(&self) -> ErrorCategory {
+        match self {
+            Self::Io(err) => io_error_category(err.kind()),
+            Self::Json(_) => ErrorCategory::ExternalDependency,
+            Self::Rpc { code, .. } => rpc_error_category(*code),
+            Self::Protocol(err) => protocol_error_category(err.kind),
+        }
+    }
+
+    #[must_use]
+    pub fn retry_advice(&self) -> ErrorRetryAdvice {
+        match self {
+            Self::Io(err) => io_error_retry_advice(err.kind()),
+            Self::Json(_) => ErrorRetryAdvice::DoNotRetry,
+            Self::Rpc { code, .. } => rpc_error_retry_advice(*code),
+            Self::Protocol(err) => protocol_error_retry_advice(err.kind),
+        }
+    }
+
+    #[must_use]
+    pub fn error_record(&self) -> ErrorRecord {
+        match self {
+            Self::Io(source) => build_io_error_record(source.kind(), source.to_string()),
+            Self::Json(source) => build_json_error_record(source.to_string()),
+            Self::Rpc {
+                code,
+                message,
+                data,
+            } => build_rpc_error_record(*code, message.as_str(), data.is_some()),
+            Self::Protocol(err) => build_protocol_error_record(err.kind, err.message.as_str()),
+        }
+    }
+
+    #[must_use]
+    pub fn into_error_record(self) -> ErrorRecord {
+        match self {
+            Self::Io(source) => {
+                build_io_error_record(source.kind(), source.to_string()).with_source(source)
+            }
+            Self::Json(source) => build_json_error_record(source.to_string()).with_source(source),
+            Self::Rpc {
+                code,
+                message,
+                data,
+            } => build_rpc_error_record(code, message.as_str(), data.is_some()),
+            Self::Protocol(err) => build_protocol_error_record(err.kind, err.message.as_str()),
+        }
+    }
+}
+
+impl From<Error> for ErrorRecord {
+    fn from(error: Error) -> Self {
+        error.into_error_record()
+    }
+}
+
+fn literal_error_code(code: &'static str) -> ErrorCode {
+    ErrorCode::try_new(code).expect("literal error code should validate")
+}
+
+fn build_io_error_record(kind: std::io::ErrorKind, detail: String) -> ErrorRecord {
+    ErrorRecord::new(io_error_code(kind), io_error_user_text(kind))
+        .with_category(io_error_category(kind))
+        .with_retry_advice(io_error_retry_advice(kind))
+        .with_diagnostic_text(StructuredText::freeform(format!(
+            "json-rpc transport io error: {detail}"
+        )))
+}
+
+fn io_error_code(kind: std::io::ErrorKind) -> ErrorCode {
+    match kind {
+        std::io::ErrorKind::NotFound => literal_error_code("mcp_jsonrpc.io.not_found"),
+        std::io::ErrorKind::PermissionDenied => {
+            literal_error_code("mcp_jsonrpc.io.permission_denied")
+        }
+        std::io::ErrorKind::TimedOut => literal_error_code("mcp_jsonrpc.io.timeout"),
+        std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
+            literal_error_code("mcp_jsonrpc.io.invalid_input")
+        }
+        _ => literal_error_code("mcp_jsonrpc.io"),
+    }
+}
+
+fn io_error_category(kind: std::io::ErrorKind) -> ErrorCategory {
+    match kind {
+        std::io::ErrorKind::NotFound => ErrorCategory::NotFound,
+        std::io::ErrorKind::PermissionDenied => ErrorCategory::PermissionDenied,
+        std::io::ErrorKind::TimedOut => ErrorCategory::Timeout,
+        std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
+            ErrorCategory::InvalidInput
+        }
+        _ => ErrorCategory::ExternalDependency,
+    }
+}
+
+fn io_error_retry_advice(kind: std::io::ErrorKind) -> ErrorRetryAdvice {
+    match kind {
+        std::io::ErrorKind::NotFound
+        | std::io::ErrorKind::PermissionDenied
+        | std::io::ErrorKind::InvalidInput
+        | std::io::ErrorKind::InvalidData => ErrorRetryAdvice::DoNotRetry,
+        std::io::ErrorKind::TimedOut => ErrorRetryAdvice::Retryable,
+        _ => ErrorRetryAdvice::Retryable,
+    }
+}
+
+fn io_error_user_text(kind: std::io::ErrorKind) -> StructuredText {
+    StructuredText::freeform(match kind {
+        std::io::ErrorKind::NotFound => "json-rpc transport resource not found",
+        std::io::ErrorKind::PermissionDenied => "json-rpc transport permission denied",
+        std::io::ErrorKind::TimedOut => "json-rpc transport timed out",
+        std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
+            "json-rpc transport rejected invalid input"
+        }
+        _ => "json-rpc transport io error",
+    })
+}
+
+fn build_json_error_record(detail: String) -> ErrorRecord {
+    ErrorRecord::new(
+        literal_error_code("mcp_jsonrpc.json"),
+        StructuredText::freeform("json-rpc json processing failed"),
+    )
+    .with_category(ErrorCategory::ExternalDependency)
+    .with_retry_advice(ErrorRetryAdvice::DoNotRetry)
+    .with_diagnostic_text(StructuredText::freeform(format!(
+        "json-rpc json error: {detail}"
+    )))
+}
+
+fn build_rpc_error_record(code: i64, message: &str, has_data: bool) -> ErrorRecord {
+    let suffix = if has_data { "; data_present=true" } else { "" };
+    ErrorRecord::new(rpc_error_code(code), rpc_error_user_text(code))
+        .with_category(rpc_error_category(code))
+        .with_retry_advice(rpc_error_retry_advice(code))
+        .with_diagnostic_text(StructuredText::freeform(format!(
+            "remote json-rpc error {code}: {message}{suffix}"
+        )))
+}
+
+fn rpc_error_code(code: i64) -> ErrorCode {
+    match code {
+        -32700 => literal_error_code("mcp_jsonrpc.rpc.parse_error"),
+        -32600 => literal_error_code("mcp_jsonrpc.rpc.invalid_request"),
+        -32601 => literal_error_code("mcp_jsonrpc.rpc.method_not_found"),
+        -32602 => literal_error_code("mcp_jsonrpc.rpc.invalid_params"),
+        -32603 => literal_error_code("mcp_jsonrpc.rpc.internal_error"),
+        -32800 => literal_error_code("mcp_jsonrpc.rpc.request_cancelled"),
+        -32801 => literal_error_code("mcp_jsonrpc.rpc.content_modified"),
+        -32099..=-32000 => literal_error_code("mcp_jsonrpc.rpc.server_error"),
+        _ => literal_error_code("mcp_jsonrpc.rpc"),
+    }
+}
+
+fn rpc_error_category(code: i64) -> ErrorCategory {
+    match code {
+        -32700 | -32600 | -32602 => ErrorCategory::InvalidInput,
+        -32601 => ErrorCategory::NotFound,
+        -32800 | -32801 => ErrorCategory::Conflict,
+        -32603 | -32099..=-32000 => ErrorCategory::ExternalDependency,
+        _ => ErrorCategory::ExternalDependency,
+    }
+}
+
+fn rpc_error_retry_advice(code: i64) -> ErrorRetryAdvice {
+    match code {
+        -32700 | -32600 | -32601 | -32602 => ErrorRetryAdvice::DoNotRetry,
+        -32800 | -32801 | -32603 | -32099..=-32000 => ErrorRetryAdvice::Retryable,
+        _ => ErrorRetryAdvice::DoNotRetry,
+    }
+}
+
+fn rpc_error_user_text(code: i64) -> StructuredText {
+    StructuredText::freeform(match code {
+        -32700 => "remote json-rpc parse error",
+        -32600 => "remote json-rpc request was invalid",
+        -32601 => "remote json-rpc method not found",
+        -32602 => "remote json-rpc parameters were invalid",
+        -32603 => "remote json-rpc internal error",
+        -32800 => "remote json-rpc request was cancelled",
+        -32801 => "remote json-rpc content was modified",
+        -32099..=-32000 => "remote json-rpc server error",
+        _ => "remote json-rpc call failed",
+    })
+}
+
+fn build_protocol_error_record(kind: ProtocolErrorKind, message: &str) -> ErrorRecord {
+    ErrorRecord::new(protocol_error_code(kind), protocol_error_user_text(kind))
+        .with_category(protocol_error_category(kind))
+        .with_retry_advice(protocol_error_retry_advice(kind))
+        .with_diagnostic_text(StructuredText::freeform(message))
+}
+
+fn protocol_error_code(kind: ProtocolErrorKind) -> ErrorCode {
+    match kind {
+        ProtocolErrorKind::Closed => literal_error_code("mcp_jsonrpc.protocol.closed"),
+        ProtocolErrorKind::WaitTimeout => literal_error_code("mcp_jsonrpc.protocol.wait_timeout"),
+        ProtocolErrorKind::InvalidMessage => {
+            literal_error_code("mcp_jsonrpc.protocol.invalid_message")
+        }
+        ProtocolErrorKind::InvalidInput => literal_error_code("mcp_jsonrpc.protocol.invalid_input"),
+        ProtocolErrorKind::StreamableHttp => {
+            literal_error_code("mcp_jsonrpc.protocol.streamable_http")
+        }
+        ProtocolErrorKind::Other => literal_error_code("mcp_jsonrpc.protocol.other"),
+    }
+}
+
+fn protocol_error_category(kind: ProtocolErrorKind) -> ErrorCategory {
+    match kind {
+        ProtocolErrorKind::Closed => ErrorCategory::Unavailable,
+        ProtocolErrorKind::WaitTimeout => ErrorCategory::Timeout,
+        ProtocolErrorKind::InvalidMessage => ErrorCategory::ExternalDependency,
+        ProtocolErrorKind::InvalidInput => ErrorCategory::InvalidInput,
+        ProtocolErrorKind::StreamableHttp => ErrorCategory::ExternalDependency,
+        ProtocolErrorKind::Other => ErrorCategory::Internal,
+    }
+}
+
+fn protocol_error_retry_advice(kind: ProtocolErrorKind) -> ErrorRetryAdvice {
+    match kind {
+        ProtocolErrorKind::Closed
+        | ProtocolErrorKind::WaitTimeout
+        | ProtocolErrorKind::StreamableHttp => ErrorRetryAdvice::Retryable,
+        ProtocolErrorKind::InvalidMessage
+        | ProtocolErrorKind::InvalidInput
+        | ProtocolErrorKind::Other => ErrorRetryAdvice::DoNotRetry,
+    }
+}
+
+fn protocol_error_user_text(kind: ProtocolErrorKind) -> StructuredText {
+    StructuredText::freeform(match kind {
+        ProtocolErrorKind::Closed => "json-rpc client closed",
+        ProtocolErrorKind::WaitTimeout => "json-rpc wait timed out",
+        ProtocolErrorKind::InvalidMessage => "json-rpc peer sent invalid message",
+        ProtocolErrorKind::InvalidInput => "json-rpc input was invalid",
+        ProtocolErrorKind::StreamableHttp => "json-rpc streamable http transport failed",
+        ProtocolErrorKind::Other => "json-rpc protocol error",
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum Id {
@@ -71,8 +562,6 @@ pub enum Id {
 
 type PendingRequests = Arc<Mutex<HashMap<Id, oneshot::Sender<Result<Value, Error>>>>>;
 type CancelledRequestIds = Arc<Mutex<CancelledRequestIdsState>>;
-type NotifyTransportFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
-type NotifyTransport = Arc<dyn Fn(ClientHandle, Vec<u8>) -> NotifyTransportFuture + Send + Sync>;
 
 const CANCELLED_REQUEST_IDS_MAX: usize = 1024;
 
@@ -160,6 +649,7 @@ impl DiagnosticsState {
 #[derive(Clone)]
 pub struct ClientHandle {
     write: Arc<tokio::sync::Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
+    max_message_bytes: usize,
     next_id: Arc<AtomicI64>,
     pending: PendingRequests,
     max_pending_requests: usize,
@@ -167,9 +657,8 @@ pub struct ClientHandle {
     stats: Arc<ClientStatsInner>,
     diagnostics: Option<Arc<DiagnosticsState>>,
     closed: Arc<AtomicBool>,
-    close_reason: Arc<OnceLock<String>>,
+    close_reason: Arc<CloseReasonState>,
     stdout_log_write_error: Arc<OnceLock<String>>,
-    notify_transport: Arc<OnceLock<NotifyTransport>>,
 }
 
 impl std::fmt::Debug for ClientHandle {
@@ -223,6 +712,25 @@ fn serialize_json_line(value: &impl Serialize) -> Result<Vec<u8>, Error> {
     Ok(line)
 }
 
+fn ensure_outbound_message_size_within_limit(
+    line: &[u8],
+    max_message_bytes: usize,
+) -> Result<(), Error> {
+    let payload_len = line
+        .len()
+        .saturating_sub(usize::from(line.ends_with(b"\n")));
+    if payload_len <= max_message_bytes {
+        return Ok(());
+    }
+
+    Err(Error::protocol(
+        ProtocolErrorKind::InvalidInput,
+        format!(
+            "jsonrpc message too large (max_bytes={max_message_bytes} actual_bytes={payload_len})"
+        ),
+    ))
+}
+
 fn serialize_json_value(value: &impl Serialize) -> Result<Value, Error> {
     Ok(serde_json::to_value(value)?)
 }
@@ -266,6 +774,50 @@ struct BatchResponseState {
 #[derive(Clone)]
 struct BatchResponseWriter {
     state: Arc<BatchResponseState>,
+}
+
+struct DetachedRuntime {
+    tx: std_mpsc::Sender<DetachedTask>,
+}
+
+impl DetachedRuntime {
+    fn spawn(&self, task: DetachedTask) {
+        let _ = self.tx.send(task);
+    }
+}
+
+fn spawn_detached(task_name: &str, task: impl Future<Output = ()> + Send + 'static) {
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        drop(runtime.spawn(task));
+        return;
+    }
+
+    detached_runtime(task_name).spawn(Box::pin(task));
+}
+
+fn detached_runtime(task_name: &str) -> &'static DetachedRuntime {
+    static DETACHED_RUNTIME: OnceLock<DetachedRuntime> = OnceLock::new();
+    DETACHED_RUNTIME.get_or_init(|| {
+        let (tx, rx) = std_mpsc::channel::<DetachedTask>();
+        std::thread::Builder::new()
+            .name("mcp-jsonrpc-detached".to_string())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(_) => return,
+                };
+                while let Ok(task) = rx.recv() {
+                    runtime.block_on(task);
+                }
+            })
+            .unwrap_or_else(|err| {
+                panic!("spawn detached mcp-jsonrpc runtime ({task_name}): {err}")
+            });
+        DetachedRuntime { tx }
+    })
 }
 
 impl std::fmt::Debug for BatchResponseWriter {
@@ -327,11 +879,9 @@ impl BatchResponseWriter {
 
     fn flush_if_ready_without_runtime(&self) {
         let batch = self.clone();
-        spawn_detached_write_with_timeout(
-            "batch flush without runtime",
-            self.state.handle.clone(),
-            async move { batch.flush_if_ready().await },
-        );
+        spawn_detached("batch flush without runtime", async move {
+            let _ = batch.flush_if_ready().await;
+        });
     }
 
     async fn finish(&self) -> Result<(), Error> {
@@ -448,18 +998,6 @@ impl RequestResponder {
 }
 
 impl ClientHandle {
-    fn mark_closed(&self, reason: String) -> bool {
-        if self.close_reason.set(reason).is_err() {
-            return false;
-        }
-        self.closed.store(true, Ordering::Release);
-        true
-    }
-
-    fn close_state_visible(&self) -> bool {
-        self.closed.load(Ordering::Acquire) || self.close_reason.get().is_some()
-    }
-
     pub fn stats(&self) -> ClientStats {
         self.stats.snapshot()
     }
@@ -472,11 +1010,11 @@ impl ClientHandle {
     }
 
     pub fn is_closed(&self) -> bool {
-        self.close_state_visible()
+        self.closed.load(Ordering::Relaxed)
     }
 
     pub fn close_reason(&self) -> Option<String> {
-        self.close_reason.get().cloned()
+        self.close_reason.get()
     }
 
     /// Returns the last stdout log write error, if any.
@@ -491,18 +1029,20 @@ impl ClientHandle {
         let _ = self.stdout_log_write_error.set(err.to_string());
     }
 
-    pub(crate) fn install_notify_transport(&self, transport: NotifyTransport) {
-        let _ = self.notify_transport.set(transport);
-    }
-
     pub async fn close(&self, reason: impl Into<String>) {
         self.close_with_reason(reason).await;
     }
 
     fn schedule_close_once(&self, reason: String) {
-        if !self.mark_closed(reason.clone()) {
+        if self
+            .closed
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
             return;
         }
+        self.close_reason
+            .publish(CloseReasonPriority::Primary, reason.clone());
         let handle = self.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             drop(runtime.spawn(async move {
@@ -511,17 +1051,21 @@ impl ClientHandle {
             return;
         }
 
-        close_without_runtime(&handle, reason);
+        // No runtime available (e.g. sync context): avoid panicking and perform best-effort close.
+        let err = Error::protocol(ProtocolErrorKind::Closed, reason);
+        drain_pending(&handle.pending, &err);
+        if let Ok(mut write) = handle.write.try_lock() {
+            drop(std::mem::replace(&mut *write, Box::new(tokio::io::sink())));
+        }
     }
 
     fn check_closed(&self) -> Result<(), Error> {
-        if !self.close_state_visible() {
+        if !self.closed.load(Ordering::Relaxed) {
             return Ok(());
         }
         let reason = self
             .close_reason
             .get()
-            .cloned()
             .unwrap_or_else(|| "client closed".to_string());
         Err(Error::protocol(ProtocolErrorKind::Closed, reason))
     }
@@ -538,7 +1082,9 @@ impl ClientHandle {
     pub(crate) async fn close_with_error(&self, reason: impl Into<String>, err: Error) {
         let reason = reason.into();
 
-        let _ = self.mark_closed(reason);
+        self.closed.store(true, Ordering::Relaxed);
+        self.close_reason
+            .publish(CloseReasonPriority::Primary, reason);
 
         drain_pending(&self.pending, &err);
         let mut write = self.write.lock().await;
@@ -554,11 +1100,17 @@ impl ClientHandle {
         err: &std::io::Error,
     ) {
         let reason = format!("json-rpc transport write failed: {err}");
-        if self.mark_closed(reason.clone()) {
+        if self
+            .close_reason
+            .publish(CloseReasonPriority::Primary, reason.clone())
+        {
+            self.closed.store(true, Ordering::Relaxed);
             drain_pending(
                 &self.pending,
                 &Error::protocol(ProtocolErrorKind::Closed, reason),
             );
+        } else {
+            self.closed.store(true, Ordering::Relaxed);
         }
         let _ = std::mem::replace(write, Box::new(tokio::io::sink()));
     }
@@ -572,9 +1124,6 @@ impl ClientHandle {
             params: params.as_ref(),
         };
         let line = serialize_json_line(&msg)?;
-        if let Some(transport) = self.notify_transport.get().cloned() {
-            return transport(self.clone(), line).await;
-        }
         self.write_line(&line).await?;
         Ok(())
     }
@@ -751,6 +1300,7 @@ impl ClientHandle {
 
     async fn write_json_line(&self, value: &impl Serialize) -> Result<(), Error> {
         let line = serialize_json_line(value)?;
+        ensure_outbound_message_size_within_limit(&line, self.max_message_bytes)?;
         self.write_line(&line).await
     }
 
@@ -773,7 +1323,6 @@ impl ClientHandle {
 pub struct Client {
     handle: ClientHandle,
     child: Option<Child>,
-    kill_on_drop: bool,
     notifications_rx: Option<mpsc::Receiver<Notification>>,
     requests_rx: Option<mpsc::Receiver<IncomingRequest>>,
     task: tokio::task::JoinHandle<()>,
@@ -904,12 +1453,13 @@ impl Client {
             stdout_log_redactor,
             limits,
             diagnostics,
-            kill_on_drop,
+            ..
         } = options;
 
         let notify_cap = limits.notifications_capacity.max(1);
         let request_cap = limits.requests_capacity.max(1);
         let max_pending_requests = limits.max_pending_requests.max(1);
+        let max_message_bytes = normalize_max_message_bytes(limits.max_message_bytes);
         let (notify_tx, notify_rx) = mpsc::channel::<Notification>(notify_cap);
         let (request_tx, request_rx) = mpsc::channel::<IncomingRequest>(request_cap);
         let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
@@ -920,6 +1470,7 @@ impl Client {
         let diagnostics_state = DiagnosticsState::new(&diagnostics);
         let handle = ClientHandle {
             write,
+            max_message_bytes,
             next_id: Arc::new(AtomicI64::new(1)),
             pending: pending.clone(),
             max_pending_requests,
@@ -927,9 +1478,8 @@ impl Client {
             stats: stats.clone(),
             diagnostics: diagnostics_state.clone(),
             closed: Arc::new(AtomicBool::new(false)),
-            close_reason: Arc::new(OnceLock::new()),
+            close_reason: Arc::new(CloseReasonState::default()),
             stdout_log_write_error: Arc::new(OnceLock::new()),
-            notify_transport: Arc::new(OnceLock::new()),
         };
 
         let stdout_log = match stdout_log {
@@ -955,7 +1505,6 @@ impl Client {
         Ok(Self {
             handle,
             child,
-            kill_on_drop,
             notifications_rx: Some(notify_rx),
             requests_rx: Some(request_rx),
             task,
@@ -1166,50 +1715,12 @@ impl Client {
     }
 }
 
-fn spawn_drop_child_reaper(mut child: Child) {
-    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-        drop(runtime.spawn(async move {
-            let _ = child.wait().await;
-        }));
-        return;
-    }
-
-    let _ = std::thread::Builder::new()
-        .name("mcp-jsonrpc-child-reaper".to_string())
-        .spawn(move || {
-            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            else {
-                return;
-            };
-            runtime.block_on(async move {
-                let _ = child.wait().await;
-            });
-        });
-}
-
-fn reap_child_on_drop(mut child: Child, kill_on_drop: bool) {
-    if !kill_on_drop {
-        return;
-    }
-
-    if matches!(child.try_wait(), Ok(Some(_))) {
-        return;
-    }
-
-    if let Err(_err) = child.start_kill() {
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            return;
-        }
-    }
-
-    spawn_drop_child_reaper(child);
-}
-
 impl Drop for Client {
     fn drop(&mut self) {
-        let _ = self.handle.mark_closed("client closed".to_string());
+        self.handle.closed.store(true, Ordering::Relaxed);
+        self.handle
+            .close_reason
+            .publish(CloseReasonPriority::Fallback, "client closed".to_string());
         self.task.abort();
         for task in self.transport_tasks.drain(..) {
             task.abort();
@@ -1220,9 +1731,6 @@ impl Drop for Client {
         }
         let err = Error::protocol(ProtocolErrorKind::Closed, "client closed");
         drain_pending(&self.handle.pending, &err);
-        if let Some(child) = self.child.take() {
-            reap_child_on_drop(child, self.kill_on_drop);
-        }
     }
 }
 
@@ -1313,44 +1821,21 @@ impl Drop for IncomingRequest {
         match &self.responder.target {
             RequestResponseTarget::Direct(handle) => {
                 let handle = handle.clone();
-                spawn_detached_write_with_timeout(
-                    "direct dropped request response",
-                    handle.clone(),
-                    async move { handle.write_json_line(&response).await },
-                );
+                spawn_detached("direct dropped request response", async move {
+                    drop(handle.write_json_line(&response).await);
+                });
             }
             RequestResponseTarget::Batch(batch) => {
                 if tokio::runtime::Handle::try_current().is_ok() {
                     let batch = batch.clone();
-                    spawn_detached_write_with_timeout(
-                        "batch dropped request response",
-                        batch.state.handle.clone(),
-                        async move { batch.push_reserved_response(response).await },
-                    );
+                    spawn_detached("batch dropped request response", async move {
+                        drop(batch.push_reserved_response(response).await);
+                    });
                 } else {
                     batch.push_reserved_response_without_runtime(response);
                 }
             }
         }
-    }
-}
-
-fn spawn_detached_write_with_timeout(
-    task_name: &'static str,
-    handle: ClientHandle,
-    task: impl Future<Output = Result<(), Error>> + Send + 'static,
-) {
-    let close_handle = handle.clone();
-    if let Err(err) = spawn_detached(task_name, async move {
-        match tokio::time::timeout(DETACHED_WRITE_TIMEOUT, task).await {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => close_handle.schedule_close_once(format!("{task_name} failed: {err}")),
-            Err(_) => close_handle.schedule_close_once(format!(
-                "{task_name} timed out after {DETACHED_WRITE_TIMEOUT:?}"
-            )),
-        }
-    }) {
-        handle.schedule_close_once(err.to_string());
     }
 }
 
@@ -2387,7 +2872,6 @@ mod incoming_value_tests {
 
     #[test]
     fn dropped_batch_request_without_runtime_still_flushes_remaining_batch_response() {
-        let _guard = detached_runtime_test_guard();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2469,7 +2953,6 @@ mod incoming_value_tests {
 
     #[test]
     fn dropped_direct_request_without_runtime_still_emits_internal_error() {
-        let _guard = detached_runtime_test_guard();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2696,7 +3179,6 @@ mod stats_tests {
 
     #[test]
     fn spawn_detached_runs_tasks_without_tokio_runtime() {
-        let _guard = detached_runtime_test_guard();
         let counter = Arc::new(AtomicU64::new(0));
         let counter_for_task = Arc::clone(&counter);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -2704,69 +3186,12 @@ mod stats_tests {
         spawn_detached("test detached runtime", async move {
             counter_for_task.fetch_add(1, AtomicOrdering::Relaxed);
             done_tx.send(()).unwrap();
-        })
-        .expect("detached runtime should initialize");
+        });
 
         done_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("detached runtime should execute queued task");
         assert_eq!(counter.load(AtomicOrdering::Relaxed), 1);
-    }
-
-    #[test]
-    fn spawn_detached_does_not_block_independent_tasks_behind_a_stuck_task() {
-        let _guard = detached_runtime_test_guard();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
-        let (blocked_done_tx, blocked_done_rx) = std::sync::mpsc::channel();
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-
-        spawn_detached("test detached blocked task", async move {
-            let _ = release_rx.await;
-            blocked_done_tx.send(()).unwrap();
-        })
-        .expect("detached runtime should initialize blocked task");
-        spawn_detached("test detached ready task", async move {
-            ready_tx.send(()).unwrap();
-        })
-        .expect("detached runtime should initialize ready task");
-
-        ready_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("independent detached task should not wait for a blocked sibling");
-        release_tx.send(()).unwrap();
-        blocked_done_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("blocked task should finish after release");
-    }
-
-    #[test]
-    fn spawn_detached_reports_runtime_init_failure() {
-        let _guard = detached_runtime_test_guard();
-        force_detached_init_failures(1);
-
-        let err = spawn_detached("test detached runtime init failure", async {}).expect_err(
-            "detached runtime init failure should be surfaced instead of silently dropping the task",
-        );
-
-        assert!(
-            err.to_string()
-                .contains("detached runtime unavailable for test detached runtime init failure")
-        );
-    }
-
-    #[test]
-    fn spawn_detached_reports_runtime_spawn_failure() {
-        let _guard = detached_runtime_test_guard();
-        force_detached_spawn_failures(1);
-
-        let err = spawn_detached("test detached runtime spawn failure", async {}).expect_err(
-            "detached runtime spawn failure should be surfaced instead of silently dropping the task",
-        );
-
-        assert!(
-            err.to_string()
-                .contains("detached runtime unavailable for test detached runtime spawn failure")
-        );
     }
 
     #[test]
@@ -2904,31 +3329,6 @@ mod wait_timeout_tests {
         assert!(!status.success());
     }
 
-    #[tokio::test]
-    async fn drop_reaps_child_when_kill_on_drop_is_enabled() {
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c").arg("trap '' TERM INT; exec sleep 10");
-
-        let client = match Client::spawn_command(cmd).await {
-            Ok(client) => client,
-            Err(err) => panic!("spawn client: {err}"),
-        };
-        let pid = client.child_id().expect("child pid");
-
-        drop(client);
-
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            if !unix_process_exists(pid) {
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                panic!("child pid {pid} still exists after drop");
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    }
-
     #[test]
     fn request_optional_with_timeout_returns_error_without_tokio_time_driver() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -2982,49 +3382,11 @@ mod wait_timeout_tests {
             }
         });
     }
-
-    fn unix_process_exists(pid: u32) -> bool {
-        std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!("kill -0 {pid} >/dev/null 2>&1"))
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-    }
 }
 
 #[cfg(test)]
 mod background_close_tests {
     use super::*;
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
-
-    #[derive(Default)]
-    struct PendingWriter;
-
-    impl AsyncWrite for PendingWriter {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-            _buf: &[u8],
-        ) -> Poll<Result<usize, std::io::Error>> {
-            Poll::Pending
-        }
-
-        fn poll_flush(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Result<(), std::io::Error>> {
-            Poll::Pending
-        }
-
-        fn poll_shutdown(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Result<(), std::io::Error>> {
-            Poll::Ready(Ok(()))
-        }
-    }
 
     #[test]
     fn schedule_close_once_without_runtime_drains_pending_without_panic() {
@@ -3036,6 +3398,7 @@ mod background_close_tests {
             write: Arc::new(tokio::sync::Mutex::new(
                 Box::new(tokio::io::sink()) as Box<dyn AsyncWrite + Send + Unpin>
             )),
+            max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
             next_id: Arc::new(AtomicI64::new(1)),
             pending: pending.clone(),
             max_pending_requests: 1,
@@ -3043,9 +3406,8 @@ mod background_close_tests {
             stats: Arc::new(ClientStatsInner::default()),
             diagnostics: None,
             closed: Arc::new(AtomicBool::new(false)),
-            close_reason: Arc::new(OnceLock::new()),
+            close_reason: Arc::new(CloseReasonState::default()),
             stdout_log_write_error: Arc::new(OnceLock::new()),
-            notify_transport: Arc::new(OnceLock::new()),
         };
 
         handle.schedule_close_once("closed outside runtime".to_string());
@@ -3068,282 +3430,6 @@ mod background_close_tests {
                 ..
             })
         ));
-    }
-
-    #[test]
-    fn dropped_direct_request_without_runtime_closes_client_when_detached_runtime_init_fails() {
-        let _guard = detached_runtime_test_guard();
-        force_detached_init_failures(1);
-
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build setup runtime");
-
-        let (request, server_read, handle, client) = runtime.block_on(async {
-            let (client_stream, server_stream) = tokio::io::duplex(2048);
-            let (client_read, client_write) = tokio::io::split(client_stream);
-            let (server_read, mut server_write) = tokio::io::split(server_stream);
-
-            let mut client = Client::connect_io(client_read, client_write)
-                .await
-                .expect("connect client");
-            let mut requests = client.take_requests().expect("request receiver");
-            let handle = client.handle();
-
-            server_write
-                .write_all(br#"{"jsonrpc":"2.0","id":1,"method":"first"}"#)
-                .await
-                .expect("write request");
-            server_write.write_all(b"\n").await.expect("write newline");
-            server_write.flush().await.expect("flush request");
-
-            let request = tokio::time::timeout(Duration::from_secs(1), requests.recv())
-                .await
-                .expect("request timeout")
-                .expect("request");
-
-            (request, server_read, handle, client)
-        });
-        drop(runtime);
-
-        drop(request);
-
-        assert!(handle.is_closed());
-        let reason = handle.close_reason();
-        assert!(
-            reason
-                .as_deref()
-                .is_some_and(|detail| detail.contains("detached runtime unavailable")),
-            "{reason:?}"
-        );
-
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build read runtime");
-
-        runtime.block_on(async move {
-            let mut lines = tokio::io::BufReader::new(server_read).lines();
-            let eof = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
-                .await
-                .expect("EOF timeout")
-                .expect("read result");
-            assert!(
-                eof.is_none(),
-                "transport should fail closed on detached fallback failure"
-            );
-
-            drop(client);
-        });
-    }
-
-    #[test]
-    fn dropped_batch_request_without_runtime_closes_client_when_detached_runtime_init_fails() {
-        let _guard = detached_runtime_test_guard();
-        force_detached_init_failures(1);
-
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build setup runtime");
-
-        let (request, server_read, handle, client) = runtime.block_on(async {
-            let (client_stream, server_stream) = tokio::io::duplex(2048);
-            let (client_read, client_write) = tokio::io::split(client_stream);
-            let (server_read, mut server_write) = tokio::io::split(server_stream);
-
-            let mut client = Client::connect_io(client_read, client_write)
-                .await
-                .expect("connect client");
-            let mut requests = client.take_requests().expect("request receiver");
-            let handle = client.handle();
-
-            server_write
-                .write_all(
-                    br#"[{"jsonrpc":"2.0","id":1,"method":"first"},{"jsonrpc":"2.0","id":2,"method":"second"}]"#,
-                )
-                .await
-                .expect("write batch");
-            server_write.write_all(b"\n").await.expect("write newline");
-            server_write.flush().await.expect("flush batch");
-
-            let first = tokio::time::timeout(Duration::from_secs(1), requests.recv())
-                .await
-                .expect("first request timeout")
-                .expect("first request");
-            let second = tokio::time::timeout(Duration::from_secs(1), requests.recv())
-                .await
-                .expect("second request timeout")
-                .expect("second request");
-
-            second
-                .respond_ok(serde_json::json!({"handled":"second"}))
-                .await
-                .expect("respond second");
-
-            (first, server_read, handle, client)
-        });
-        drop(runtime);
-
-        drop(request);
-
-        assert!(handle.is_closed());
-        let reason = handle.close_reason();
-        assert!(
-            reason
-                .as_deref()
-                .is_some_and(|detail| detail.contains("detached runtime unavailable")),
-            "{reason:?}"
-        );
-
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build read runtime");
-
-        runtime.block_on(async move {
-            let mut lines = tokio::io::BufReader::new(server_read).lines();
-            let eof = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
-                .await
-                .expect("EOF timeout")
-                .expect("read result");
-            assert!(
-                eof.is_none(),
-                "transport should fail closed on detached fallback failure"
-            );
-
-            drop(client);
-        });
-    }
-
-    #[test]
-    fn dropped_direct_request_without_runtime_times_out_stuck_detached_write() {
-        let _guard = detached_runtime_test_guard();
-
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build setup runtime");
-
-        let (request, handle, client) = runtime.block_on(async {
-            let (server_write, client_read) = tokio::io::duplex(2048);
-            let mut client = Client::connect_io(
-                client_read,
-                Box::new(PendingWriter) as Box<dyn AsyncWrite + Send + Unpin>,
-            )
-            .await
-            .expect("connect client");
-            let mut requests = client.take_requests().expect("request receiver");
-            let handle = client.handle();
-            let (_, mut server_write) = tokio::io::split(server_write);
-
-            server_write
-                .write_all(br#"{"jsonrpc":"2.0","id":1,"method":"first"}"#)
-                .await
-                .expect("write request");
-            server_write.write_all(b"\n").await.expect("write newline");
-            server_write.flush().await.expect("flush request");
-
-            let request = tokio::time::timeout(Duration::from_secs(1), requests.recv())
-                .await
-                .expect("request timeout")
-                .expect("request");
-
-            (request, handle, client)
-        });
-        drop(runtime);
-
-        drop(request);
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while !handle.is_closed() && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
-        assert!(
-            handle.is_closed(),
-            "detached timeout should close the client"
-        );
-        let reason = handle.close_reason();
-        assert!(
-            reason
-                .as_deref()
-                .is_some_and(|detail| detail.contains("direct dropped request response timed out")),
-            "{reason:?}"
-        );
-
-        drop(client);
-    }
-
-    #[test]
-    fn dropped_batch_request_without_runtime_times_out_stuck_detached_flush() {
-        let _guard = detached_runtime_test_guard();
-
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build setup runtime");
-
-        let (request, handle, client) = runtime.block_on(async {
-            let (server_write, client_read) = tokio::io::duplex(2048);
-            let mut client = Client::connect_io(
-                client_read,
-                Box::new(PendingWriter) as Box<dyn AsyncWrite + Send + Unpin>,
-            )
-            .await
-            .expect("connect client");
-            let mut requests = client.take_requests().expect("request receiver");
-            let handle = client.handle();
-            let (_, mut server_write) = tokio::io::split(server_write);
-
-            server_write
-                .write_all(
-                    br#"[{"jsonrpc":"2.0","id":1,"method":"first"},{"jsonrpc":"2.0","id":2,"method":"second"}]"#,
-                )
-                .await
-                .expect("write batch");
-            server_write.write_all(b"\n").await.expect("write newline");
-            server_write.flush().await.expect("flush batch");
-
-            let first = tokio::time::timeout(Duration::from_secs(1), requests.recv())
-                .await
-                .expect("first request timeout")
-                .expect("first request");
-            let second = tokio::time::timeout(Duration::from_secs(1), requests.recv())
-                .await
-                .expect("second request timeout")
-                .expect("second request");
-
-            second
-                .respond_ok(serde_json::json!({"handled":"second"}))
-                .await
-                .expect("respond second");
-
-            (first, handle, client)
-        });
-        drop(runtime);
-
-        drop(request);
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while !handle.is_closed() && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
-        assert!(
-            handle.is_closed(),
-            "detached timeout should close the client"
-        );
-        let reason = handle.close_reason();
-        assert!(
-            reason
-                .as_deref()
-                .is_some_and(|detail| detail.contains("batch flush without runtime timed out")),
-            "{reason:?}"
-        );
-
-        drop(client);
     }
 }
 
@@ -3525,8 +3611,6 @@ mod response_routing_tests {
 #[cfg(test)]
 mod error_record_tests {
     use super::*;
-    use error_kit::{ErrorCategory, ErrorRetryAdvice};
-    use structured_text_kit::StructuredText;
 
     #[test]
     fn protocol_wait_timeout_maps_to_retryable_timeout_record() {

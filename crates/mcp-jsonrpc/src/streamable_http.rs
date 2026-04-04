@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -14,106 +13,15 @@ use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio_util::io::StreamReader;
 
-use crate::{
-    Client, ClientHandle, Error, ProtocolErrorKind, SpawnOptions, StreamableHttpOptions,
-    StreamableHttpProxyMode,
-};
+use crate::{Client, ClientHandle, Error, ProtocolErrorKind, SpawnOptions, StreamableHttpOptions};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SseWakeReason {
     Connect,
     SessionChanged,
-}
-
-struct PendingNotificationAck {
-    cancelled: AtomicBool,
-    completion: std::sync::Mutex<Option<oneshot::Sender<Result<(), Error>>>>,
-}
-
-impl PendingNotificationAck {
-    fn new() -> (Arc<Self>, oneshot::Receiver<Result<(), Error>>) {
-        let (completion, receiver) = oneshot::channel();
-        (
-            Arc::new(Self {
-                cancelled: AtomicBool::new(false),
-                completion: std::sync::Mutex::new(Some(completion)),
-            }),
-            receiver,
-        )
-    }
-
-    fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
-        let _ = self
-            .completion
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-    }
-
-    fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
-    }
-
-    fn resolve(&self, result: Result<(), Error>) {
-        if self.is_cancelled() {
-            let _ = self
-                .completion
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            return;
-        }
-
-        if let Some(completion) = self
-            .completion
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
-            let _ = completion.send(result);
-        }
-    }
-}
-
-fn closed_error(handle: &ClientHandle) -> Error {
-    Error::protocol(
-        ProtocolErrorKind::Closed,
-        handle
-            .close_reason()
-            .unwrap_or_else(|| "client closed".to_string()),
-    )
-}
-
-fn build_streamable_http_headers(
-    raw_headers: std::collections::HashMap<String, String>,
-) -> Result<reqwest::header::HeaderMap, Error> {
-    let mut headers = reqwest::header::HeaderMap::new();
-    for (key, value) in raw_headers {
-        let name = reqwest::header::HeaderName::from_bytes(key.as_bytes()).map_err(|_| {
-            Error::protocol(
-                ProtocolErrorKind::InvalidInput,
-                format!("invalid http header name: {key}"),
-            )
-        })?;
-        if headers.contains_key(&name) {
-            return Err(Error::protocol(
-                ProtocolErrorKind::InvalidInput,
-                format!("duplicate http header name ignoring case: {key}"),
-            ));
-        }
-        let value = reqwest::header::HeaderValue::from_str(&value).map_err(|_| {
-            Error::protocol(
-                ProtocolErrorKind::InvalidInput,
-                format!("invalid http header value: {key}"),
-            )
-        })?;
-        headers.insert(name, value);
-    }
-    Ok(headers)
 }
 
 fn ends_with_ignore_ascii_case(haystack: &str, suffix: &str) -> bool {
@@ -225,72 +133,6 @@ fn jsonrpc_request_id_from_line(line: &[u8]) -> Result<Option<crate::Id>, serde_
 const SSE_EVENT_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 const HTTP_RESPONSE_INITIAL_CAP_BYTES: usize = 64 * 1024;
 const HTTP_RESPONSE_UNKNOWN_LENGTH_INITIAL_CAP_BYTES: usize = 4 * 1024;
-const SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS: u64 = 100;
-const SSE_GRACEFUL_EOF_RECONNECT_MAX_DELAY_MS: u64 = 1_000;
-const SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS: u64 = 25;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SseReconnectReason {
-    GracefulEof,
-    SessionChanged,
-}
-
-#[derive(Default)]
-struct SseReconnectBackoff {
-    graceful_eof_streak: u32,
-}
-
-impl SseReconnectBackoff {
-    fn delay_for(&mut self, reason: SseReconnectReason) -> Option<Duration> {
-        match reason {
-            SseReconnectReason::SessionChanged => {
-                self.graceful_eof_streak = 0;
-                None
-            }
-            SseReconnectReason::GracefulEof => {
-                let shift = self.graceful_eof_streak.min(4);
-                self.graceful_eof_streak = self.graceful_eof_streak.saturating_add(1);
-                let base_delay = (SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS << shift)
-                    .min(SSE_GRACEFUL_EOF_RECONNECT_MAX_DELAY_MS);
-                let jitter = sse_reconnect_jitter_millis();
-                Some(Duration::from_millis(
-                    base_delay
-                        .saturating_add(jitter)
-                        .min(SSE_GRACEFUL_EOF_RECONNECT_MAX_DELAY_MS),
-                ))
-            }
-        }
-    }
-}
-
-fn sse_reconnect_jitter_millis() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    if SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS == 0 {
-        return 0;
-    }
-
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| u64::from(duration.subsec_nanos()))
-        .unwrap_or(0);
-    nanos % (SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS + 1)
-}
-
-fn streamable_http_client_options(
-    connect_timeout: Option<Duration>,
-    follow_redirects: bool,
-    proxy_mode: StreamableHttpProxyMode,
-    headers: reqwest::header::HeaderMap,
-) -> HttpClientOptions {
-    HttpClientOptions {
-        connect_timeout,
-        default_headers: headers,
-        follow_redirects,
-        no_proxy: matches!(proxy_mode, StreamableHttpProxyMode::IgnoreSystem),
-        ..Default::default()
-    }
-}
 
 impl Client {
     pub async fn connect_streamable_http(url: &str) -> Result<Self, Error> {
@@ -400,25 +242,39 @@ impl Client {
         let connect_timeout = http_options.connect_timeout;
         let request_timeout = http_options.request_timeout;
         let follow_redirects = http_options.follow_redirects;
-        let proxy_mode = http_options.proxy_mode;
         let error_body_preview_bytes = http_options.error_body_preview_bytes;
         let enforce_public_ip = http_options.enforce_public_ip;
         if connect_timeout.is_some() || request_timeout.is_some() {
             crate::ensure_tokio_time_driver("Client::connect_streamable_http*_with_options")?;
         }
-        // Preserve compatibility with runtimes that do not enable Tokio's time
-        // driver by treating graceful-EOF backoff as best-effort.
-        let sse_reconnect_backoff_enabled = crate::ensure_tokio_time_driver(
-            "Client::connect_streamable_http*_with_options SSE reconnect backoff",
-        )
-        .is_ok();
 
-        let headers = build_streamable_http_headers(http_options.headers)?;
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (key, value) in http_options.headers {
+            let name = reqwest::header::HeaderName::from_bytes(key.as_bytes()).map_err(|_| {
+                Error::protocol(
+                    ProtocolErrorKind::InvalidInput,
+                    format!("invalid http header name: {key}"),
+                )
+            })?;
+            let value = reqwest::header::HeaderValue::from_str(&value).map_err(|_| {
+                Error::protocol(
+                    ProtocolErrorKind::InvalidInput,
+                    format!("invalid http header value: {key}"),
+                )
+            })?;
+            headers.insert(name, value);
+        }
 
-        let client_options =
-            streamable_http_client_options(connect_timeout, follow_redirects, proxy_mode, headers);
+        let http_options = HttpClientOptions {
+            connect_timeout,
+            default_headers: headers,
+            follow_redirects,
+            // Avoid automatic proxy environment variable loading by default.
+            no_proxy: true,
+            ..Default::default()
+        };
 
-        let http_client_profile = build_http_client_profile(&client_options).map_err(|err| {
+        let http_client_profile = build_http_client_profile(&http_options).map_err(|err| {
             Error::protocol(
                 ProtocolErrorKind::InvalidInput,
                 format!("build http client profile failed: {err}"),
@@ -443,30 +299,6 @@ impl Client {
 
         let mut client = Self::connect_io_with_options(client_read, client_write, options).await?;
         let transport_handle = client.handle.clone();
-        let (pending_notify_ack_tx, pending_notify_ack_rx) =
-            mpsc::unbounded_channel::<Arc<PendingNotificationAck>>();
-
-        client
-            .handle
-            .install_notify_transport(Arc::new(move |handle, line| {
-                let pending_notify_ack_tx = pending_notify_ack_tx.clone();
-                Box::pin(async move {
-                    let (pending_ack, receiver) = PendingNotificationAck::new();
-                    pending_notify_ack_tx
-                        .send(Arc::clone(&pending_ack))
-                        .map_err(|_| closed_error(&handle))?;
-
-                    if let Err(err) = handle.write_line(&line).await {
-                        pending_ack.cancel();
-                        return Err(err);
-                    }
-
-                    match receiver.await {
-                        Ok(result) => result,
-                        Err(_) => Err(closed_error(&handle)),
-                    }
-                })
-            }));
 
         let writer: Arc<tokio::sync::Mutex<_>> = Arc::new(tokio::sync::Mutex::new(bridge_write));
         let session_id: Arc<tokio::sync::Mutex<Option<String>>> =
@@ -502,7 +334,6 @@ impl Client {
                 post_url: post_url_post,
                 session_id: session_id_post,
                 sse_wake: sse_wake_post,
-                pending_notify_acks: pending_notify_ack_rx,
                 max_message_bytes,
                 request_timeout: request_timeout_post,
                 error_body_preview_bytes: error_body_preview_bytes_post,
@@ -520,7 +351,6 @@ impl Client {
         let sse_task = tokio::spawn(async move {
             let mut wake_rx = sse_wake_rx;
             let mut current_resp = sse_resp;
-            let mut reconnect_backoff = SseReconnectBackoff::default();
 
             loop {
                 let resp = match current_resp.take() {
@@ -567,7 +397,7 @@ impl Client {
                     }
                 };
 
-                let reconnect_reason = {
+                let reconnect = {
                     let writer = writer_sse.clone();
                     let mut pump_fut =
                         std::pin::pin!(pump_sse_response(resp, writer, max_message_bytes));
@@ -578,7 +408,7 @@ impl Client {
                                 Ok(()) => {
                                     // Treat graceful SSE EOF as a recoverable read-side event:
                                     // reconnect instead of tearing down the whole transport.
-                                    break Some(SseReconnectReason::GracefulEof);
+                                    break true;
                                 }
                                 Err(err) => {
                                     close_post_bridge(
@@ -595,7 +425,7 @@ impl Client {
                                     Some(SseWakeReason::SessionChanged) => {
                                         // Exiting this scope drops the stale SSE pump before the
                                         // reconnect path selects a new socket.
-                                        break Some(SseReconnectReason::SessionChanged);
+                                        break true;
                                     }
                                     Some(SseWakeReason::Connect) => {}
                                     None => {
@@ -625,14 +455,8 @@ impl Client {
                     }
                 };
 
-                let Some(reconnect_reason) = reconnect_reason else {
+                if !reconnect {
                     continue;
-                };
-                let reconnect_delay = reconnect_backoff.delay_for(reconnect_reason);
-                if sse_reconnect_backoff_enabled {
-                    if let Some(delay) = reconnect_delay {
-                        tokio::time::sleep(delay).await;
-                    }
                 }
 
                 let sse_client = match http_client_profile_sse
@@ -687,7 +511,6 @@ struct HttpPostBridge {
     post_url: reqwest::Url,
     session_id: Arc<tokio::sync::Mutex<Option<String>>>,
     sse_wake: mpsc::UnboundedSender<SseWakeReason>,
-    pending_notify_acks: mpsc::UnboundedReceiver<Arc<PendingNotificationAck>>,
     max_message_bytes: usize,
     request_timeout: Option<Duration>,
     error_body_preview_bytes: usize,
@@ -706,7 +529,6 @@ impl HttpPostBridge {
             post_url,
             session_id,
             sse_wake,
-            mut pending_notify_acks,
             max_message_bytes,
             request_timeout,
             error_body_preview_bytes,
@@ -732,33 +554,6 @@ impl HttpPostBridge {
                 continue;
             }
             let line = Bytes::from(line);
-            let notification_ack = match jsonrpc_request_id_from_line(line.as_ref()) {
-                Ok(Some(_)) => None,
-                Ok(None) => match next_pending_notification_ack(&mut pending_notify_acks) {
-                    Some(ack) => Some(ack),
-                    None => {
-                        close_post_bridge(
-                            &writer,
-                            &handle,
-                            "streamable http POST bridge lost notification completion tracking"
-                                .to_string(),
-                        )
-                        .await;
-                        return;
-                    }
-                },
-                Err(err) => {
-                    close_post_bridge(
-                        &writer,
-                        &handle,
-                        format!(
-                            "streamable http POST bridge received invalid JSON from client: {err}"
-                        ),
-                    )
-                    .await;
-                    return;
-                }
-            };
 
             let selected_client = match http_client_profile
                 .select_for_url(&post_url, enforce_public_ip)
@@ -766,13 +561,6 @@ impl HttpPostBridge {
             {
                 Ok(client) => client,
                 Err(err) => {
-                    if let Some(ack) = notification_ack.as_ref() {
-                        ack.resolve(Err(Error::protocol(
-                            ProtocolErrorKind::StreamableHttp,
-                            format!("http client selection failed: {err}"),
-                        )));
-                        continue;
-                    }
                     if !emit_post_bridge_error_from_line(
                         &writer,
                         &handle,
@@ -810,13 +598,6 @@ impl HttpPostBridge {
                 Some(timeout) => match tokio::time::timeout(timeout, send).await {
                     Ok(resp) => resp,
                     Err(_) => {
-                        if let Some(ack) = notification_ack.as_ref() {
-                            ack.resolve(Err(Error::protocol(
-                                ProtocolErrorKind::WaitTimeout,
-                                "http request timed out",
-                            )));
-                            continue;
-                        }
                         if !emit_wait_timeout_from_line(
                             &writer,
                             &handle,
@@ -835,13 +616,6 @@ impl HttpPostBridge {
             let resp = match resp {
                 Ok(resp) => resp,
                 Err(err) => {
-                    if let Some(ack) = notification_ack.as_ref() {
-                        ack.resolve(Err(Error::protocol(
-                            ProtocolErrorKind::StreamableHttp,
-                            format!("http request failed: {}", redact_reqwest_error(&err)),
-                        )));
-                        continue;
-                    }
                     if !emit_post_bridge_error_from_line(
                         &writer,
                         &handle,
@@ -896,15 +670,8 @@ impl HttpPostBridge {
                     let mut reader = tokio::io::BufReader::new(reader);
                     let pump =
                         sse_pump_to_writer(&mut reader, &writer, max_message_bytes, true).await;
-                    if let Err(err) = pump {
-                        if let Some(ack) = notification_ack.as_ref() {
-                            ack.resolve(Err(Error::protocol(
-                                ProtocolErrorKind::StreamableHttp,
-                                format!("http response stream failed: {err}"),
-                            )));
-                            continue;
-                        }
-                        if !emit_post_bridge_error_from_line(
+                    if pump.is_err()
+                        && !emit_post_bridge_error_from_line(
                             &writer,
                             &handle,
                             line.as_ref(),
@@ -913,24 +680,13 @@ impl HttpPostBridge {
                             None,
                         )
                         .await
-                        {
-                            return;
-                        }
-                    }
-                    if let Some(ack) = notification_ack.as_ref() {
-                        ack.resolve(Ok(()));
+                    {
+                        return;
                     }
                     continue;
                 }
 
                 if !is_json_content_type(content_type) {
-                    if let Some(ack) = notification_ack.as_ref() {
-                        ack.resolve(Err(Error::protocol(
-                            ProtocolErrorKind::StreamableHttp,
-                            "unexpected content-type for json response",
-                        )));
-                        continue;
-                    }
                     if !emit_post_bridge_error_from_line(
                         &writer,
                         &handle,
@@ -974,15 +730,6 @@ impl HttpPostBridge {
                 };
                 match body {
                     Err(ReadBodyError::TooLarge { actual_bytes }) => {
-                        if let Some(ack) = notification_ack.as_ref() {
-                            ack.resolve(Err(Error::protocol(
-                                ProtocolErrorKind::StreamableHttp,
-                                format!(
-                                    "http response too large (max_bytes={max_message_bytes} actual_bytes={actual_bytes})"
-                                ),
-                            )));
-                            continue;
-                        }
                         if !emit_post_bridge_error_from_line(
                             &writer,
                             &handle,
@@ -1001,16 +748,6 @@ impl HttpPostBridge {
                         continue;
                     }
                     Err(ReadBodyError::Http(err)) => {
-                        if let Some(ack) = notification_ack.as_ref() {
-                            ack.resolve(Err(Error::protocol(
-                                ProtocolErrorKind::StreamableHttp,
-                                format!(
-                                    "http response read failed: {}",
-                                    redact_reqwest_error(&err)
-                                ),
-                            )));
-                            continue;
-                        }
                         if !emit_post_bridge_error_from_line(
                             &writer,
                             &handle,
@@ -1031,13 +768,6 @@ impl HttpPostBridge {
                             let parsed_json: Value = match serde_json::from_slice(&body) {
                                 Ok(json) => json,
                                 Err(_) => {
-                                    if let Some(ack) = notification_ack.as_ref() {
-                                        ack.resolve(Err(Error::protocol(
-                                            ProtocolErrorKind::StreamableHttp,
-                                            "http response is not valid json",
-                                        )));
-                                        continue;
-                                    }
                                     let data = body_preview_json(&body, error_body_preview_bytes);
                                     if !emit_post_bridge_error_from_line(
                                         &writer,
@@ -1057,15 +787,6 @@ impl HttpPostBridge {
                             let compact = match serde_json::to_vec(&parsed_json) {
                                 Ok(compact) => compact,
                                 Err(err) => {
-                                    if let Some(ack) = notification_ack.as_ref() {
-                                        ack.resolve(Err(Error::protocol(
-                                            ProtocolErrorKind::StreamableHttp,
-                                            format!(
-                                                "http response json re-serialize failed: {err}"
-                                            ),
-                                        )));
-                                        continue;
-                                    }
                                     if !emit_post_bridge_error_from_line(
                                         &writer,
                                         &handle,
@@ -1082,14 +803,6 @@ impl HttpPostBridge {
                                 }
                             };
                             if let Err(err) = write_json_line(&writer, &compact).await {
-                                if let Some(ack) = notification_ack.as_ref() {
-                                    ack.resolve(Err(Error::protocol(
-                                        ProtocolErrorKind::Closed,
-                                        format!(
-                                            "streamable http POST bridge failed writing response: {err}"
-                                        ),
-                                    )));
-                                }
                                 close_post_bridge(
                                     &writer,
                                     &handle,
@@ -1100,19 +813,7 @@ impl HttpPostBridge {
                                 .await;
                                 return;
                             }
-                            if let Some(ack) = notification_ack.as_ref() {
-                                ack.resolve(Ok(()));
-                            }
                         } else {
-                            if serde_json::from_slice::<serde::de::IgnoredAny>(&body).is_err() {
-                                if let Some(ack) = notification_ack.as_ref() {
-                                    ack.resolve(Err(Error::protocol(
-                                        ProtocolErrorKind::StreamableHttp,
-                                        "http response is not valid json",
-                                    )));
-                                    continue;
-                                }
-                            }
                             if serde_json::from_slice::<serde::de::IgnoredAny>(&body).is_err() {
                                 let data = body_preview_json(&body, error_body_preview_bytes);
                                 if !emit_post_bridge_error_from_line(
@@ -1130,14 +831,6 @@ impl HttpPostBridge {
                                 continue;
                             }
                             if let Err(err) = write_json_line(&writer, &body).await {
-                                if let Some(ack) = notification_ack.as_ref() {
-                                    ack.resolve(Err(Error::protocol(
-                                        ProtocolErrorKind::Closed,
-                                        format!(
-                                            "streamable http POST bridge failed writing response: {err}"
-                                        ),
-                                    )));
-                                }
                                 close_post_bridge(
                                     &writer,
                                     &handle,
@@ -1147,9 +840,6 @@ impl HttpPostBridge {
                                 )
                                 .await;
                                 return;
-                            }
-                            if let Some(ack) = notification_ack.as_ref() {
-                                ack.resolve(Ok(()));
                             }
                         }
                     }
@@ -1169,9 +859,6 @@ impl HttpPostBridge {
                             }
                         };
                         if id.is_none() || status == reqwest::StatusCode::ACCEPTED {
-                            if let Some(ack) = notification_ack.as_ref() {
-                                ack.resolve(Ok(()));
-                            }
                             continue;
                         }
                         if !emit_post_bridge_error(
@@ -1192,13 +879,6 @@ impl HttpPostBridge {
                 continue;
             }
 
-            if let Some(ack) = notification_ack.as_ref() {
-                ack.resolve(Err(Error::protocol(
-                    ProtocolErrorKind::StreamableHttp,
-                    format!("http error: {status}"),
-                )));
-                continue;
-            }
             let body_text = match request_timeout {
                 Some(timeout) if error_body_preview_bytes == 0 => {
                     let drain = drain_response_body(resp);
@@ -1231,17 +911,6 @@ impl HttpPostBridge {
             }
         }
     }
-}
-
-fn next_pending_notification_ack(
-    pending_notify_acks: &mut mpsc::UnboundedReceiver<Arc<PendingNotificationAck>>,
-) -> Option<Arc<PendingNotificationAck>> {
-    while let Ok(ack) = pending_notify_acks.try_recv() {
-        if !ack.is_cancelled() {
-            return Some(ack);
-        }
-    }
-    None
 }
 
 async fn emit_post_bridge_error_from_line(
@@ -1468,18 +1137,14 @@ async fn flush_sse_event_data(
 
 fn normalize_sse_event_data_for_json_line(data: &[u8]) -> Result<Vec<u8>, io::Error> {
     if data.iter().any(|byte| matches!(byte, b'\n' | b'\r')) {
-        let value = serde_json::from_slice::<Value>(data).map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("multiline sse event payload is not valid json: {err}"),
-            )
-        })?;
-        return serde_json::to_vec(&value).map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("serialize sse event payload failed: {err}"),
-            )
-        });
+        if let Ok(value) = serde_json::from_slice::<Value>(data) {
+            return serde_json::to_vec(&value).map_err(|err| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("serialize sse event payload failed: {err}"),
+                )
+            });
+        }
     }
 
     Ok(data.to_vec())
@@ -1551,32 +1216,6 @@ mod tests {
 
         let id = jsonrpc_response_id_from_line(br#"[{"id":1}]"#).expect("valid json");
         assert!(id.is_none());
-    }
-
-    #[test]
-    fn streamable_http_client_options_ignore_system_proxy_by_default() {
-        let mapped = streamable_http_client_options(
-            StreamableHttpOptions::default().connect_timeout,
-            StreamableHttpOptions::default().follow_redirects,
-            StreamableHttpOptions::default().proxy_mode,
-            reqwest::header::HeaderMap::new(),
-        );
-        assert!(mapped.no_proxy);
-    }
-
-    #[test]
-    fn streamable_http_client_options_can_enable_system_proxy_loading() {
-        let options = StreamableHttpOptions {
-            proxy_mode: StreamableHttpProxyMode::UseSystem,
-            ..Default::default()
-        };
-        let mapped = streamable_http_client_options(
-            options.connect_timeout,
-            options.follow_redirects,
-            options.proxy_mode,
-            reqwest::header::HeaderMap::new(),
-        );
-        assert!(!mapped.no_proxy);
     }
 
     #[test]
@@ -1691,108 +1330,6 @@ mod tests {
         assert_eq!(
             normalized,
             br#"{"id":1,"jsonrpc":"2.0","result":{"ok":true}}"#
-        );
-    }
-
-    #[test]
-    fn normalize_sse_event_data_rejects_multiline_non_json() {
-        let err = normalize_sse_event_data_for_json_line(b"not json\nstill not json")
-            .expect_err("multiline non-json should be rejected before line framing");
-
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(
-            err.to_string().contains("not valid json"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn sse_pump_rejects_multiline_non_json_event_without_emitting_partial_frames()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let sse = "data: not json\ndata: still not json\n\n";
-
-        let (mut in_write, in_read) = tokio::io::duplex(1024);
-        in_write.write_all(sse.as_bytes()).await?;
-        drop(in_write);
-        let mut reader = tokio::io::BufReader::new(in_read);
-
-        let (client_side, mut capture_side) = tokio::io::duplex(1024);
-        let (read, write) = tokio::io::split(client_side);
-        drop(read);
-        let writer = Arc::new(tokio::sync::Mutex::new(write));
-
-        let err = sse_pump_to_writer(&mut reader, &writer, 1024, false)
-            .await
-            .expect_err("multiline non-json SSE event should fail closed");
-        drop(writer);
-
-        let mut out = Vec::new();
-        capture_side.read_to_end(&mut out).await?;
-
-        assert!(out.is_empty(), "bad SSE event must not emit partial frames");
-        assert!(
-            err.to_string().contains("not valid json"),
-            "unexpected error: {err}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn sse_reconnect_backoff_applies_min_interval_jitter_and_reset() {
-        let mut backoff = SseReconnectBackoff::default();
-
-        let first = backoff
-            .delay_for(SseReconnectReason::GracefulEof)
-            .expect("graceful eof should reconnect");
-        assert!(
-            first >= Duration::from_millis(SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS),
-            "first reconnect delay should honor the minimum interval: {first:?}"
-        );
-        assert!(
-            first
-                <= Duration::from_millis(
-                    SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS
-                        + SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS
-                ),
-            "first reconnect delay should stay within the jitter window: {first:?}"
-        );
-
-        let second = backoff
-            .delay_for(SseReconnectReason::GracefulEof)
-            .expect("second graceful eof should reconnect");
-        assert!(
-            second >= Duration::from_millis(SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS * 2),
-            "second reconnect delay should back off exponentially: {second:?}"
-        );
-        assert!(
-            second
-                <= Duration::from_millis(
-                    (SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS * 2)
-                        + SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS
-                ),
-            "second reconnect delay should stay within the jitter window: {second:?}"
-        );
-
-        let session_change = backoff.delay_for(SseReconnectReason::SessionChanged);
-        assert_eq!(
-            session_change, None,
-            "session rollover reconnect should stay immediate"
-        );
-
-        let reset = backoff
-            .delay_for(SseReconnectReason::GracefulEof)
-            .expect("graceful eof after session rollover should reconnect");
-        assert!(
-            reset >= Duration::from_millis(SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS),
-            "session rollover should reset the EOF streak: {reset:?}"
-        );
-        assert!(
-            reset
-                <= Duration::from_millis(
-                    SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS
-                        + SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS
-                ),
-            "reset reconnect delay should return to the base jitter window: {reset:?}"
         );
     }
 
@@ -2014,9 +1551,6 @@ mod tests {
 
     #[tokio::test]
     async fn streamable_http_reconnects_after_graceful_sse_eof() {
-        const TEST_STAGE_TIMEOUT: Duration = Duration::from_secs(10);
-        const MIN_RECONNECT_DELAY: Duration = Duration::from_millis(80);
-
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind listener");
@@ -2041,21 +1575,12 @@ mod tests {
             .await
             .expect("write initial SSE headers");
             stage_tx.send("initial-sse-open").expect("send stage");
-            write_chunk(&mut initial_sse, b": heartbeat\n\n")
-                .await
-                .expect("write initial SSE comment");
-            let eof_closed_at = std::time::Instant::now();
             finish_chunked_response(&mut initial_sse)
                 .await
                 .expect("finish initial SSE response");
             drop(initial_sse);
 
             let (mut reconnected_sse, _) = listener.accept().await.expect("accept reconnect SSE");
-            assert!(
-                eof_closed_at.elapsed() >= MIN_RECONNECT_DELAY,
-                "graceful EOF reconnect happened too quickly: {:?}",
-                eof_closed_at.elapsed()
-            );
             let reconnect_request = read_http_request(&mut reconnected_sse)
                 .await
                 .expect("read reconnect GET");
@@ -2098,18 +1623,18 @@ mod tests {
             .take_notifications()
             .expect("take notifications receiver");
 
-        let stage = tokio::time::timeout(TEST_STAGE_TIMEOUT, stage_rx.recv())
+        let stage = tokio::time::timeout(Duration::from_secs(2), stage_rx.recv())
             .await
             .expect("initial SSE stage should arrive before timeout")
             .expect("stage channel open");
         assert_eq!(stage, "initial-sse-open");
-        let stage = tokio::time::timeout(TEST_STAGE_TIMEOUT, stage_rx.recv())
+        let stage = tokio::time::timeout(Duration::from_secs(2), stage_rx.recv())
             .await
             .expect("reconnect SSE stage should arrive before timeout")
             .expect("stage channel open");
         assert_eq!(stage, "reconnected-sse-open");
 
-        let notification = tokio::time::timeout(TEST_STAGE_TIMEOUT, notifications.recv())
+        let notification = tokio::time::timeout(Duration::from_secs(2), notifications.recv())
             .await
             .expect("notification should arrive before timeout")
             .expect("notification stream open");

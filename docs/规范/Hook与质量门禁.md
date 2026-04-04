@@ -96,7 +96,7 @@
 
 `scripts/workspace_check/` 现在还会机械检查 workspace 内部 crate 依赖方向。
 
-当前做法是维护一份与 [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md) 对齐的稳定 allowlist，只允许声明过的内部依赖组合继续存在；一旦某个 crate 新增了未记录的 workspace 依赖，`local` / `ci` 和单独的：
+当前做法是维护一份与 [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md) 对齐的稳定 allowlist，只允许声明过的内部依赖组合继续存在；同时也拒绝 allowlist 比真实依赖更宽的“陈旧白名单”。一旦某个 crate 新增了未记录的 workspace 依赖，或文档/allowlist 仍保留了已经删除的内部依赖，`local` / `ci` 和单独的：
 
 ```bash
 scripts/check-workspace.sh dependency-direction
@@ -104,10 +104,11 @@ scripts/check-workspace.sh dependency-direction
 
 都会直接失败。
 
-这条 gate 的目的不是阻止正常演进，而是把“新增内部依赖”变成一个显式动作：
+这条 gate 的目的不是阻止正常演进，而是把“内部依赖发生变化”变成一个显式动作：
 
 - 先决定边界是否合理
 - 再同步更新 `ARCHITECTURE.md`
+- 再同步收紧或放宽 allowlist
 - 然后让 gate 接受新的依赖方向
 
 ### publish contract gate

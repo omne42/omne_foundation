@@ -222,6 +222,22 @@ async fn connect_streamable_http_transport(
 ) -> anyhow::Result<(mcp_jsonrpc::Client, Option<Child>)> {
     let resolved_urls = resolve_streamable_http_urls(ctx, server_name, server_cfg, cwd)?;
 
+    if ctx.trust_mode != TrustMode::Trusted {
+        if server_cfg.bearer_token_secret().is_some() {
+            anyhow::bail!(
+                "refusing to resolve bearer token secret in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
+            );
+        }
+        if server_cfg
+            .secret_http_headers()
+            .is_some_and(|headers| !headers.is_empty())
+        {
+            anyhow::bail!(
+                "refusing to resolve secret-backed http headers in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
+            );
+        }
+    }
+
     validate_streamable_http_config(
         ctx.trust_mode,
         &ctx.untrusted_streamable_http_policy,
@@ -242,20 +258,6 @@ async fn connect_streamable_http_transport(
     }
 
     if ctx.trust_mode != TrustMode::Trusted {
-        if server_cfg.bearer_token_secret().is_some() {
-            anyhow::bail!(
-                "refusing to resolve bearer token secret in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
-            );
-        }
-        if server_cfg
-            .secret_http_headers()
-            .is_some_and(|headers| !headers.is_empty())
-        {
-            anyhow::bail!(
-                "refusing to resolve secret-backed http headers in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
-            );
-        }
-
         validate_streamable_http_url_untrusted_dns(
             &ctx.untrusted_streamable_http_policy,
             server_name,

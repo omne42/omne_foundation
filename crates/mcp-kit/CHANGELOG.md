@@ -10,6 +10,8 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：默认 `TrustMode::Untrusted` 的 `streamable_http` 边界进一步收紧：不再默认放任任意公网 host，也不再默认接受自定义 HTTP header；现在需要显式 allowlist/`allow_public_hosts=true` 或 `allow_custom_headers=true` 才会放开。
+- `mcp-kit`：crate-level 文档现在明确把它收口为 runtime-first boundary，并把“只需要泛化配置加载原语”引导到 `config-kit`；避免 README / rustdoc 继续把 `mcp-kit` 误写成“配置契约可独立复用、且不带运行时栈”的边界。
 - `mcp-kit`：`streamable_http` 的配置校验现在也会在 `http_headers` / `secret_http_headers` 之间按大小写不敏感语义拒绝重复键，避免仅在连接阶段才暴露重复 header 覆盖冲突。
 - `mcp-kit`：`streamable_http` 配置头在组装时现在按 HTTP 的大小写不敏感语义去重；只靠大小写区分的重复 header 会 fail-closed 报错，而不是在下游 transport 层发生不确定覆盖。
 - `mcp-kit`：duplicate attach 的 `connect_jsonrpc*` 错误现在和 `connect_io*` 一样稳定归类为 `ErrorKind::ManagerState`；调用方判断“已连接，需先 disconnect”不再在 attach transport 类型之间漂移到 `Other`。

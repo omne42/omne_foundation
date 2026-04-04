@@ -17,7 +17,10 @@
 //!
 //! Local transports (`transport=stdio|unix`) are powerful and potentially unsafe when a config
 //! comes from an untrusted repository. Therefore `Manager` defaults to `TrustMode::Untrusted`:
-//! - Allows remote `streamable_http` connections (but refuses reading env secrets for auth headers)
+//! - Refuses local `stdio`/`unix` transports
+//! - Refuses arbitrary public `streamable_http` hosts unless you explicitly allowlist them (or
+//!   opt into `allow_public_hosts=true`)
+//! - Refuses caller-provided custom HTTP headers unless you explicitly opt in
 //! - Refuses spawning processes (`stdio`) and connecting arbitrary unix sockets (`unix`)
 //!
 //! To fully trust the local configuration, explicitly opt in:
@@ -56,6 +59,11 @@
 //! Config-driven helpers may reopen a cached server name after the old transport has already
 //! closed, but this is only an on-demand reconnect inside the current `Manager`/`SharedManager`.
 //! `mcp-kit` still does not provide background keepalive, daemonization, or retry policy.
+//!
+//! `mcp-kit` remains a runtime-first boundary: config loading/model types and transport/session
+//! lifecycle still live in the same crate. If you only need generic config loading primitives,
+//! prefer `config-kit`; `mcp-kit` keeps the MCP-specific contract coupled to the runtime stack on
+//! purpose until a narrower split proves stable.
 //!
 //! ## Non-goals
 //!

@@ -103,14 +103,31 @@ notify-kit = { path = "crates/notify-kit" }
 
 > 以上版本与路径仅为示例；请按你的项目实际情况调整。
 
-如果你只需要核心 `Hub` / `Event` / `Sink` 抽象，而不想连带编译内置 vendor sinks，可以关闭默认 features：
+当前默认 features 只保留 `standard-env` 这条常用接线边界：
+
+- `sink-sound`
+- `sink-generic-webhook`
+- `sink-feishu`
+- `sink-slack`
+- `notify_kit::env`
+
+也就是说，直接写：
+
+```toml
+[dependencies]
+notify-kit = { path = "crates/notify-kit" }
+```
+
+默认不会再把 GitHub、Telegram、Discord、Bark、PushPlus、ServerChan、DingTalk、WeCom 等 vendor sinks 一次性编进来。
+
+如果你只需要核心 `Hub` / `Event` / `Sink` 抽象，而不想连 `standard-env` 也编译进去，可以关闭默认 features：
 
 ```toml
 [dependencies]
 notify-kit = { path = "crates/notify-kit", default-features = false }
 ```
 
-默认 features 仍会保留当前内置 sinks；若只想按需打开某几个 sink，可在关闭默认 features 后显式启用：
+若只想按需打开某几个 sink，可在关闭默认 features 后显式启用：
 
 ```toml
 [dependencies]
@@ -123,6 +140,7 @@ notify-kit = { path = "crates/notify-kit", default-features = false, features = 
   - 分别启用对应 vendor sink，例如 `sink-github`、`sink-feishu`、`sink-telegram`
 - `standard-env`
   - 启用 `notify_kit::env` 以及它依赖的标准 sinks（`sink-sound`、`sink-generic-webhook`、`sink-feishu`、`sink-slack`）
+  - 这也是当前默认 feature 集，用于保留一条窄而常用的开箱即用路径
 - `sound-command`
   - 允许 `SoundSink` 执行外部命令，并自动依赖 `sink-sound`
 

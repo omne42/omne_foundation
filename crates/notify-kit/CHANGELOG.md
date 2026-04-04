@@ -10,6 +10,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Added a `core` integration regression test that verifies structured `Event` payloads reach sinks through `title()` / `body()` / `tags()` string projections instead of re-exposing writable dual string fields.
 
 ### Changed
+- `Event` 的双视图字段（`title` / `title_text` / `body` / `body_text` / `tags` / `tag_texts`）现在收口为 crate 内部状态；外部调用方改用只读 accessors 和 builder，避免制造结构化文本与字符串投影失配的不变量破坏。
 - Clarified the examples so `Hub::notify(...)` is documented as fire-and-forget without `Result` handling, while `try_notify(...)` remains the explicit error-reporting path.
 ### Added
 - `Event::new_structured` / `with_title_text` / `with_body_text` / `with_tag_text`，并在 `Event` 上新增 `title_text` / `body_text` / `tag_texts`，让通知边界可以保留 `structured-text-kit` 语义而不必提前压平成裸字符串。

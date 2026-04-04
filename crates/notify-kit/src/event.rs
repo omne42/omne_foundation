@@ -14,12 +14,12 @@ pub enum Severity {
 pub struct Event {
     pub kind: String,
     pub severity: Severity,
-    pub title: String,
-    pub title_text: StructuredText,
-    pub body: Option<String>,
-    pub body_text: Option<StructuredText>,
-    pub tags: BTreeMap<String, String>,
-    pub tag_texts: BTreeMap<String, StructuredText>,
+    pub(crate) title: String,
+    pub(crate) title_text: StructuredText,
+    pub(crate) body: Option<String>,
+    pub(crate) body_text: Option<StructuredText>,
+    pub(crate) tags: BTreeMap<String, String>,
+    pub(crate) tag_texts: BTreeMap<String, StructuredText>,
 }
 
 impl Event {
@@ -52,6 +52,41 @@ impl Event {
             tags: BTreeMap::new(),
             tag_texts: BTreeMap::new(),
         }
+    }
+
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    #[must_use]
+    pub fn title_text(&self) -> &StructuredText {
+        &self.title_text
+    }
+
+    #[must_use]
+    pub fn body(&self) -> Option<&str> {
+        self.body.as_deref()
+    }
+
+    #[must_use]
+    pub fn body_text(&self) -> Option<&StructuredText> {
+        self.body_text.as_ref()
+    }
+
+    #[must_use]
+    pub fn tags(&self) -> &BTreeMap<String, String> {
+        &self.tags
+    }
+
+    #[must_use]
+    pub fn tag_texts(&self) -> &BTreeMap<String, StructuredText> {
+        &self.tag_texts
+    }
+
+    #[must_use]
+    pub fn tag(&self, key: &str) -> Option<&str> {
+        self.tags.get(key).map(String::as_str)
     }
 
     pub(crate) fn normalize_delivery_views(&mut self) {

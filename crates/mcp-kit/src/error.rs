@@ -357,6 +357,26 @@ mod tests {
     }
 
     #[test]
+    fn preserves_tagged_kind_through_anyhow_context_before_conversion() {
+        let err = tag_anyhow(ErrorKind::ManagerState, anyhow!("server already connected"))
+            .context("outer anyhow context")
+            .context("second anyhow context");
+
+        assert_eq!(Error::from(err).kind(), ErrorKind::ManagerState);
+    }
+
+    #[test]
+    fn classifies_typed_jsonrpc_errors_through_anyhow_context_layers() {
+        let err = anyhow::Error::new(mcp_jsonrpc::Error::protocol(
+            mcp_jsonrpc::ProtocolErrorKind::WaitTimeout,
+            "timed out",
+        ))
+        .context("close session");
+
+        assert_eq!(Error::from(err).kind(), ErrorKind::Timeout);
+    }
+
+    #[test]
     fn timeout_errors_map_to_retryable_timeout_records() {
         let err = Error::from(mcp_jsonrpc::Error::protocol(
             mcp_jsonrpc::ProtocolErrorKind::WaitTimeout,

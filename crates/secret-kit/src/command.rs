@@ -1105,6 +1105,10 @@ fn is_allowed_command_env_var(
         return false;
     }
 
+    if is_command_proxy_env_var(key) {
+        return matches!(source, CommandEnvSource::Explicit);
+    }
+
     const COMMON_ALLOWED: &[&str] = &[
         "PATH",
         "Path",
@@ -1135,14 +1139,6 @@ fn is_allowed_command_env_var(
         "SSL_CERT_DIR",
         "REQUESTS_CA_BUNDLE",
         "CURL_CA_BUNDLE",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "NO_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "no_proxy",
-        "all_proxy",
     ];
 
     if COMMON_ALLOWED
@@ -1172,6 +1168,30 @@ fn is_command_search_path_env_var(key: &str) -> bool {
     ["PATH", "Path"]
         .iter()
         .any(|candidate| env_var_name_matches(key, candidate))
+}
+
+#[cfg(test)]
+pub(crate) fn ambient_command_env_var_allowed_for_test(program: &str, key: &str) -> bool {
+    let Some(provider) = SecretCliProgram::from_program(program) else {
+        return true;
+    };
+
+    is_allowed_command_env_var(provider, CommandEnvSource::Ambient, key)
+}
+
+fn is_command_proxy_env_var(key: &str) -> bool {
+    [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "all_proxy",
+    ]
+    .iter()
+    .any(|candidate| env_var_name_matches(key, candidate))
 }
 
 #[cfg(not(windows))]

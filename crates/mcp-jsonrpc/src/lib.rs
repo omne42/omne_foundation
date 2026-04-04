@@ -1346,8 +1346,7 @@ fn spawn_detached_write_with_timeout(
             Ok(Ok(())) => {}
             Ok(Err(err)) => close_handle.schedule_close_once(format!("{task_name} failed: {err}")),
             Err(_) => close_handle.schedule_close_once(format!(
-                "{task_name} timed out after {:?}",
-                DETACHED_WRITE_TIMEOUT
+                "{task_name} timed out after {DETACHED_WRITE_TIMEOUT:?}"
             )),
         }
     }) {

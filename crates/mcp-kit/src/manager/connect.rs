@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -380,6 +380,7 @@ async fn build_streamable_http_headers(
         .saturating_add(usize::from(server_cfg.bearer_token_secret().is_some()))
         .saturating_add(server_cfg.secret_http_headers_required().len());
     let mut headers = HashMap::with_capacity(capacity);
+    let mut seen_names = HashSet::with_capacity(capacity);
 
     for (key, value) in server_cfg.http_headers_required() {
         if is_reserved_streamable_http_header(key) {
@@ -392,12 +393,15 @@ async fn build_streamable_http_headers(
         } else {
             value.to_string()
         };
-        headers.insert(key.to_string(), value);
+        insert_streamable_http_header(&mut headers, &mut seen_names, server_name, key, value)?;
     }
-    headers.insert(
-        MCP_PROTOCOL_VERSION_HEADER.to_string(),
+    insert_streamable_http_header(
+        &mut headers,
+        &mut seen_names,
+        server_name,
+        MCP_PROTOCOL_VERSION_HEADER,
         ctx.protocol_version.clone(),
-    );
+    )?;
 
     if let Some(secret_spec) = server_cfg.bearer_token_secret() {
         debug_assert_eq!(ctx.trust_mode, TrustMode::Trusted);
@@ -406,10 +410,13 @@ async fn build_streamable_http_headers(
             .with_context(|| {
                 format!("resolve bearer token secret (server={server_name}) (spec redacted)")
             })?;
-        headers.insert(
-            AUTHORIZATION_HEADER.to_string(),
+        insert_streamable_http_header(
+            &mut headers,
+            &mut seen_names,
+            server_name,
+            AUTHORIZATION_HEADER,
             format!("Bearer {}", token.expose_secret()),
-        );
+        )?;
     }
 
     if !server_cfg.secret_http_headers_required().is_empty() {
@@ -427,11 +434,33 @@ async fn build_streamable_http_headers(
                         "resolve secret-backed http header: {server_name} header={header} (spec redacted)"
                     )
                 })?;
-            headers.insert(header.to_string(), value.expose_secret().to_owned());
+            insert_streamable_http_header(
+                &mut headers,
+                &mut seen_names,
+                server_name,
+                header,
+                value.expose_secret().to_owned(),
+            )?;
         }
     }
 
     Ok(headers)
+}
+
+fn insert_streamable_http_header(
+    headers: &mut HashMap<String, String>,
+    seen_names: &mut HashSet<reqwest::header::HeaderName>,
+    server_name: &str,
+    key: &str,
+    value: String,
+) -> anyhow::Result<()> {
+    let name = reqwest::header::HeaderName::from_bytes(key.as_bytes())
+        .with_context(|| format!("mcp server {server_name}: invalid http header name: {key}"))?;
+    if !seen_names.insert(name) {
+        anyhow::bail!("mcp server {server_name}: duplicate http header name ignoring case: {key}");
+    }
+    headers.insert(key.to_string(), value);
+    Ok(())
 }
 
 fn is_reserved_streamable_http_header(header: &str) -> bool {
@@ -591,5 +620,28 @@ mod tests {
                 "header={header} err={err:#}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn streamable_http_headers_reject_duplicate_names_ignoring_case() {
+        let ctx = trusted_connect_context();
+        let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+        server_cfg
+            .http_headers_mut()
+            .unwrap()
+            .insert("X-Test".to_string(), "static".to_string());
+        server_cfg
+            .secret_http_headers_mut()
+            .unwrap()
+            .insert("x-test".to_string(), "secret://env/PATH".to_string());
+
+        let err = build_streamable_http_headers(&ctx, "srv", &server_cfg, Path::new("."))
+            .await
+            .expect_err("case-insensitive duplicate headers should be rejected");
+        assert!(
+            err.to_string()
+                .contains("duplicate http header name ignoring case"),
+            "{err:#}"
+        );
     }
 }

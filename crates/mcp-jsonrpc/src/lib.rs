@@ -1000,6 +1000,20 @@ impl ClientHandle {
         let _ = std::mem::replace(&mut *write, Box::new(tokio::io::sink()));
     }
 
+    async fn fail_closed_write_error(
+        &self,
+        write: &mut Box<dyn AsyncWrite + Unpin + Send>,
+        err: std::io::Error,
+    ) -> Error {
+        let reason = format!("client write failed: {err}");
+        let error = Error::Io(err);
+        let _ = self.mark_closed(reason);
+        drain_pending(&self.pending, &error);
+        let _ = write.shutdown().await;
+        let _ = std::mem::replace(write, Box::new(tokio::io::sink()));
+        error
+    }
+
     pub async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), Error> {
         self.check_closed()?;
         let params = params.filter(|v| !v.is_null());
@@ -1191,8 +1205,12 @@ impl ClientHandle {
     async fn write_line(&self, line: &[u8]) -> Result<(), Error> {
         self.check_closed()?;
         let mut write = self.write.lock().await;
-        write.write_all(line).await?;
-        write.flush().await?;
+        if let Err(err) = write.write_all(line).await {
+            return Err(self.fail_closed_write_error(&mut write, err).await);
+        }
+        if let Err(err) = write.flush().await {
+            return Err(self.fail_closed_write_error(&mut write, err).await);
+        }
         drop(write);
         Ok(())
     }

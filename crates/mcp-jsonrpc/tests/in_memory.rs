@@ -15,6 +15,32 @@ fn parse_line(line: &str) -> Value {
     serde_json::from_str(line).expect("valid json")
 }
 
+struct FailingWrite {
+    entered: Arc<AtomicBool>,
+}
+
+impl tokio::io::AsyncWrite for FailingWrite {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.entered.store(true, Ordering::Relaxed);
+        Poll::Ready(Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "injected write failure",
+        )))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
 #[tokio::test]
 async fn wait_returns_ok_none_when_client_has_no_child() {
     let (client_stream, _server_stream) = tokio::io::duplex(64);
@@ -105,6 +131,51 @@ async fn wait_with_timeout_includes_close_stage_lock_wait() {
     assert!(err.is_wait_timeout());
 
     write_task.abort();
+}
+
+#[tokio::test]
+async fn notify_write_failure_closes_client() {
+    let entered = Arc::new(AtomicBool::new(false));
+    let writer = FailingWrite {
+        entered: Arc::clone(&entered),
+    };
+    let (client_stream, _server_stream) = tokio::io::duplex(64);
+    let (client_read, _client_write) = tokio::io::split(client_stream);
+
+    let client = mcp_jsonrpc::Client::connect_io(client_read, writer)
+        .await
+        .expect("client connect");
+    let handle = client.handle();
+
+    let err = client
+        .notify("demo/notify", Some(serde_json::json!({ "x": 1 })))
+        .await
+        .expect_err("notify should surface injected write failure");
+    assert!(
+        matches!(err, mcp_jsonrpc::Error::Io(ref io_err) if io_err.kind() == io::ErrorKind::BrokenPipe)
+    );
+    assert!(
+        entered.load(Ordering::Relaxed),
+        "writer should have been polled"
+    );
+    assert!(
+        handle.is_closed(),
+        "write failure should fail-close the client"
+    );
+
+    let reason = handle.close_reason().unwrap_or_default();
+    assert!(reason.contains("client write failed"), "{reason}");
+    assert!(reason.contains("injected write failure"), "{reason}");
+
+    let closed_err = handle
+        .notify("demo/notify", None)
+        .await
+        .expect_err("subsequent writes should see a closed client");
+    assert!(matches!(
+        closed_err,
+        mcp_jsonrpc::Error::Protocol(ref protocol)
+            if protocol.kind == mcp_jsonrpc::ProtocolErrorKind::Closed
+    ));
 }
 
 #[tokio::test]

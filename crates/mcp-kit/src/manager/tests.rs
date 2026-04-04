@@ -1605,6 +1605,44 @@ async fn server_request_handler_response_write_failure_disables_cached_connectio
 
     assert!(manager.take_connection("srv").is_none());
     server_task.await.unwrap();
+
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let reconnect_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["jsonrpc"], "2.0");
+        assert_eq!(init_value["method"], "initialize");
+        let id = init_value["id"].clone();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "again" },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let note_line = lines.next_line().await.unwrap().unwrap();
+        let note_value: Value = serde_json::from_str(&note_line).unwrap();
+        assert_eq!(note_value["jsonrpc"], "2.0");
+        assert_eq!(note_value["method"], "notifications/initialized");
+    });
+
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .expect("write-failed cached connection should be replaceable");
+    reconnect_task.await.unwrap();
 }
 
 #[tokio::test]

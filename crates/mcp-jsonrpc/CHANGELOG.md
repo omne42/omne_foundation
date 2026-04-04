@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：`spawn_command*` 路径上的 `Client::Drop` 现在会在 `kill_on_drop=true` 时显式触发后台 reap，避免子进程被杀掉后仍延迟停留为 zombie；显式 `wait*` 仍是首选生命周期边界。
 - `mcp-jsonrpc`：`stdout_log.max_parts` 的轮转清理现在对删除失败 fail-closed，初始化和后续 rotation 都会把 prune 错误显式返回，而不是静默把保留策略降级成 best-effort。
 - `mcp-jsonrpc`：sync/no-runtime 的 detached fallback 现在收口到独立 `detached` 模块，并显式启用共享多线程 Tokio runtime handle 调度后台收尾任务；一个卡住的 dropped-request writeback 或 batch flush 不会再把后续 detached 补偿任务串行堵死。
 - `mcp-jsonrpc`：当 detached fallback 不可用时，batch flush、dropped-request response 和 close cleanup 现在都会显式 fail-closed 关闭 transport 并发布关闭原因，而不是 panic 或静默吞掉后台任务。

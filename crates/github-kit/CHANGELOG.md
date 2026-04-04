@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- add runtime DNS validation for bearer-token GitHub API requests so trusted custom API bases fail closed on poisoned or unresolvable targets instead of relying on host-string checks alone
 - refuse to send GitHub bearer tokens to non-HTTPS, localhost, single-label, or private-IP API bases while still allowing tokenless local/mock API bases in tests and controlled callers
 - restore the fail-closed bearer-token boundary so custom public GitHub API bases stay blocked by default unless callers explicitly trust them
 - add `github-kit` for pure GitHub release API client access

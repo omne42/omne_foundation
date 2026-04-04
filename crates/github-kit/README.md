@@ -13,6 +13,7 @@
 负责：
 
 - GitHub API 请求头默认值与可选 bearer token 注入
+- bearer-token 请求目标的静态校验与运行时 DNS fail-closed 校验
 - `owner/repo` 形式的 repository 标识校验
 - latest release endpoint URL 构造
 - latest release metadata DTO 与获取
@@ -45,7 +46,7 @@
 ## 结构设计
 
 - `src/client.rs`
-  - GitHub API 请求头默认值与 request options
+  - GitHub API 请求头默认值、request options 与 bearer-token 目标校验
 - `src/release.rs`
   - latest release DTO、repository/base URL 归一化与获取
 - `src/error.rs`

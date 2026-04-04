@@ -885,7 +885,8 @@ let event = Event::new_structured(
 兼容约束：
 
 - `Event::new` / `with_body` / `with_tag` 继续可用
-- 旧的字符串字段仍保留，便于现有 sinks 直接渲染
+- 旧的字符串字段仍保留，作为兼容镜像视图存在
+- 内建 sinks 现在会优先读取结构化字段；如果拿到的是 catalog text，但当前 sink 又只支持纯文本，就会用稳定诊断串做降级，而不是偷偷回退到过期的字符串镜像
 - 新的结构化字段用于在通知边界上保留 catalog key / args 等语义，避免调用方被迫过早压平成裸字符串
 
 ## 组合建议

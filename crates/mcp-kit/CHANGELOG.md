@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit::Error` 补充回归测试，显式锁定 `anyhow::Context` 包裹前后的 `ErrorKind` 仍基于稳定 typed/tagged 语义分类，不允许回退到文案猜测。
 - `mcp-kit`：当显式允许加载 `--root` 外部的 override config 时，server 内部相对 `unix_path` / `stdout_log.path` 现在统一按该 config 文件所在目录解析，并与 `Config::thread_root()` / 相对 `cwd` 语义保持一致；不再出现同一份外部 `mcp.json` 内部两套相对路径基准。
 - `mcp-kit`：`streamable_http` 的认证 secret 入口现在收口到 `secret-kit` canonical 语义：新增 `bearer_token_secret` / `secret_http_headers`，legacy `bearer_token_env_var` / `env_http_headers` 仅作为兼容别名读取后立即规范化成 `secret://env/...`；同时 Trusted 模式下 transport URL/header placeholder 只再允许 `${MCP_ROOT}` / `${CLAUDE_PLUGIN_ROOT}`，不再允许 `${ENV}` 把 ambient secret 直接注入 transport 配置。
 - `mcp-kit`：`ServerConfig::{argv,inherit_env,env,http_headers,env_http_headers}` 现在只在匹配 transport 时返回值；不再为错误 transport 伪造空集合或 `true` 这类默认值。`mcpctl list-servers` 同步改为输出 `null` 而不是把这些伪默认值误序列化成真实配置。

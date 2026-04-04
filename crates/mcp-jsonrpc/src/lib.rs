@@ -1000,6 +1000,21 @@ impl ClientHandle {
         let _ = std::mem::replace(&mut *write, Box::new(tokio::io::sink()));
     }
 
+    fn fail_closed_after_write_error(
+        &self,
+        write: &mut Box<dyn AsyncWrite + Send + Unpin>,
+        err: &std::io::Error,
+    ) {
+        let reason = format!("json-rpc transport write failed: {err}");
+        if self.mark_closed(reason.clone()) {
+            drain_pending(
+                &self.pending,
+                &Error::protocol(ProtocolErrorKind::Closed, reason),
+            );
+        }
+        let _ = std::mem::replace(write, Box::new(tokio::io::sink()));
+    }
+
     pub async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), Error> {
         self.check_closed()?;
         let params = params.filter(|v| !v.is_null());
@@ -1191,8 +1206,14 @@ impl ClientHandle {
     async fn write_line(&self, line: &[u8]) -> Result<(), Error> {
         self.check_closed()?;
         let mut write = self.write.lock().await;
-        write.write_all(line).await?;
-        write.flush().await?;
+        if let Err(err) = write.write_all(line).await {
+            self.fail_closed_after_write_error(&mut write, &err);
+            return Err(Error::Io(err));
+        }
+        if let Err(err) = write.flush().await {
+            self.fail_closed_after_write_error(&mut write, &err);
+            return Err(Error::Io(err));
+        }
         drop(write);
         Ok(())
     }

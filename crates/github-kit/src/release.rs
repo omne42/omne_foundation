@@ -1,11 +1,12 @@
 use http_kit::{
-    read_json_body_after_http_success_limited, redact_url_for_error, redact_url_str, send_reqwest,
+    UntrustedOutboundPolicy, read_json_body_after_http_success_limited, redact_url_for_error,
+    redact_url_str, send_reqwest, validate_untrusted_outbound_url_dns,
 };
 use serde::Deserialize;
 
 use crate::client::{
     GitHubApiRequestOptions, apply_github_api_headers, build_github_api_url,
-    validate_github_api_request_url_dns,
+    validate_github_api_request_url,
 };
 use crate::error::{GitHubApiError, Result};
 
@@ -51,7 +52,7 @@ pub async fn fetch_latest_release<S: AsRef<str>>(
             }
         };
         let redacted_url = redact_url_for_error(&url);
-        if let Err(err) = validate_github_api_request_url_dns(&url, options).await {
+        if let Err(err) = validate_api_url_for_bearer_token(&url, options).await {
             errors.push(format!("{redacted_url} -> {err}"));
             continue;
         }
@@ -117,6 +118,22 @@ fn normalize_repository(repo: &str) -> Result<(&str, &str)> {
         });
     }
     Ok((owner, name))
+}
+
+async fn validate_api_url_for_bearer_token(
+    url: &reqwest::Url,
+    options: GitHubApiRequestOptions<'_>,
+) -> Result<()> {
+    validate_github_api_request_url(url, options)?;
+    if !options.has_bearer_token() {
+        return Ok(());
+    }
+
+    validate_untrusted_outbound_url_dns(&UntrustedOutboundPolicy::default(), url)
+        .await
+        .map_err(|err| GitHubApiError::InvalidApiBase {
+            details: format!("bearer token target is not allowed: {err}"),
+        })
 }
 
 #[cfg(test)]

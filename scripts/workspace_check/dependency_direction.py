@@ -11,7 +11,7 @@ ALLOWED_INTERNAL_DEPS: dict[str, set[str]] = {
     "error-kit": {"structured-text-kit"},
     "error-protocol": {"error-kit", "structured-text-kit", "structured-text-protocol"},
     "github-kit": {"http-kit"},
-    "http-kit": {"error-kit"},
+    "http-kit": set(),
     "i18n-kit": {"structured-text-kit"},
     "i18n-runtime-kit": {"i18n-kit", "structured-text-kit", "text-assets-kit"},
     "log-kit": {"structured-text-kit"},
@@ -25,7 +25,6 @@ ALLOWED_INTERNAL_DEPS: dict[str, set[str]] = {
         "structured-text-kit",
     },
     "notify-kit": {
-        "error-kit",
         "github-kit",
         "http-kit",
         "log-kit",
@@ -87,6 +86,11 @@ def run_dependency_direction_checks(ctx: CheckContext) -> None:
         if unexpected_deps:
             violations.append(
                 f"{package_name} -> unexpected internal deps: {', '.join(unexpected_deps)}"
+            )
+        stale_allowed_deps = sorted(allowed_deps - actual_deps)
+        if stale_allowed_deps:
+            violations.append(
+                f"{package_name} -> stale allowlist deps: {', '.join(stale_allowed_deps)}"
             )
 
     if violations:

@@ -19,6 +19,10 @@ class WorkspacePackage:
     def is_publish_false(self) -> bool:
         return self.publish == []
 
+    @property
+    def readme_path(self) -> Path:
+        return self.manifest_path.parent / "README.md"
+
 
 def _cargo_metadata(ctx: CheckContext) -> dict:
     metadata = subprocess.check_output(
@@ -88,8 +92,34 @@ def _changed_manifest_paths(ctx: CheckContext) -> set[Path]:
     return changed_paths
 
 
+def _check_publish_false_readme_contract(
+    ctx: CheckContext,
+    packages: dict[str, WorkspacePackage],
+) -> None:
+    violations: list[str] = []
+    for package in sorted(packages.values(), key=lambda item: item.name):
+        if not package.is_publish_false or not package.readme_path.is_file():
+            continue
+        readme = package.readme_path.read_text(encoding="utf-8")
+        if "crates.io" not in readme:
+            continue
+        rel_readme = package.readme_path.relative_to(ctx.repo_root)
+        violations.append(
+            f"{package.name}: {rel_readme} mentions crates.io but {package.manifest_path.relative_to(ctx.repo_root)} is publish = false"
+        )
+
+    if violations:
+        details = "\n".join(f"- {violation}" for violation in violations)
+        raise SystemExit(
+            "check-workspace: publish contract regression detected.\n"
+            "publish = false crates must not advertise crates.io installation in their README.\n"
+            f"{details}"
+        )
+
+
 def run_publish_contract_checks(ctx: CheckContext) -> None:
     packages = _workspace_packages(ctx)
+    _check_publish_false_readme_contract(ctx, packages)
     changed_manifests = _changed_manifest_paths(ctx)
     if not changed_manifests:
         return

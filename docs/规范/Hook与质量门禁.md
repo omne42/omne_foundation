@@ -119,6 +119,7 @@ scripts/check-workspace.sh dependency-direction
 
 - 这条 gate 会扫描整个 workspace 的 `crates/*/Cargo.toml`
 - 如果某个 crate 的普通依赖或 build-dependencies（含 target-specific 表）引用了 workspace 内已经声明 `publish = false` 的 crate，它自己也必须显式 `publish = false`
+- 如果某个 crate 已经声明 `publish = false`，它自己的 `README.md` 也不能再把 crates.io 安装写成当前可直接使用的主契约
 - 否则 gate 会直接失败，避免 manifest 继续暗示“当前可单独走 crates.io 发布”，直到 `cargo package` 或 `cargo publish --dry-run` 才暴露真实边界
 
 可以单独执行：

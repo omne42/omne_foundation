@@ -49,6 +49,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `FeishuWebhookSink::new_strict` / `new_with_secret_strict`：在构造阶段额外做一次 DNS 公网 IP 校验。
 
 ### Changed
+- README: 明确 `notify-kit` 当前是 `publish = false` 的 workspace/Git 复用契约，不再把 crates.io 安装写成可直接使用的主路径。
 - `notify-kit`：默认 features 现在收窄为 `standard-env`，不再默认把全部内置 vendor sinks 一次性编进 foundation；需要旧的“全量 sinks”行为时可显式启用新的 `all-sinks` feature。
 - `notify-kit`：默认 feature 收窄后，按 sink feature 暴露的示例与 text helper 现在也同步受对应 `cfg(feature = "...")` 保护，避免默认构建或 mdBook 文档测试因为未启用 vendor sink 而失败。
 - `notify_kit::env::build_hub_from_standard_env(...)` 现在直接返回 `notify_kit::Result` / `notify_kit::Error`，不再把 convenience env helper 暴露成单独的 `anyhow::Result` 错误边界。

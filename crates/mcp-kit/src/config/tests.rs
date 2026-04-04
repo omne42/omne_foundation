@@ -1118,6 +1118,36 @@ async fn load_denies_streamable_http_with_transport_owned_http_headers() {
 }
 
 #[tokio::test]
+async fn load_denies_streamable_http_with_duplicate_http_header_names_after_case_normalization() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{
+  "version": 1,
+  "servers": {
+    "litellm": {
+      "transport": "streamable_http",
+      "url": "https://example.com/mcp",
+      "http_headers": {
+        "X-Api-Key": "first",
+        "x-api-key": "second"
+      }
+    }
+  }
+}"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("duplicate http header name after case normalization"),
+        "err={err:#}"
+    );
+}
+
+#[tokio::test]
 async fn load_denies_streamable_http_with_reserved_env_http_header_name() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(
@@ -1140,6 +1170,38 @@ async fn load_denies_streamable_http_with_reserved_env_http_header_name() {
     assert!(
         err.to_string()
             .contains("secret_http_headers key is reserved by transport"),
+        "err={err:#}"
+    );
+}
+
+#[tokio::test]
+async fn load_denies_streamable_http_with_duplicate_secret_header_names_after_case_normalization() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{
+  "version": 1,
+  "servers": {
+    "litellm": {
+      "transport": "streamable_http",
+      "url": "https://example.com/mcp",
+      "http_headers": {
+        "X-Api-Key": "first"
+      },
+      "secret_http_headers": {
+        "x-api-key": "secret://env/PATH"
+      }
+    }
+  }
+}"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("duplicate http header name after case normalization"),
         "err={err:#}"
     );
 }

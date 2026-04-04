@@ -1,7 +1,7 @@
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -165,6 +165,103 @@ async fn request_timeout_includes_write_stage_and_closes_client() {
     })
     .await
     .expect("client should be closed after write-stage timeout");
+}
+
+#[tokio::test]
+async fn write_failure_closes_client_and_drains_pending_requests() {
+    struct FailAfterFirstWrite {
+        write_calls: Arc<AtomicUsize>,
+    }
+
+    impl tokio::io::AsyncWrite for FailAfterFirstWrite {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let call = self.write_calls.fetch_add(1, Ordering::Relaxed);
+            if call == 0 {
+                Poll::Ready(Ok(buf.len()))
+            } else {
+                Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "injected write failure",
+                )))
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    let write_calls = Arc::new(AtomicUsize::new(0));
+    let writer = FailAfterFirstWrite {
+        write_calls: Arc::clone(&write_calls),
+    };
+    let (client_stream, _server_stream) = tokio::io::duplex(64);
+    let (client_read, _client_write) = tokio::io::split(client_stream);
+
+    let client = mcp_jsonrpc::Client::connect_io(client_read, writer)
+        .await
+        .expect("client connect");
+    let handle = client.handle();
+
+    let request_handle = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.request_optional("demo/request", None).await })
+    };
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while write_calls.load(Ordering::Relaxed) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("initial request write should complete");
+
+    let err = handle
+        .notify("demo/notify", None)
+        .await
+        .expect_err("second write should fail");
+    assert!(
+        matches!(err, mcp_jsonrpc::Error::Io(ref io_err) if io_err.kind() == io::ErrorKind::BrokenPipe)
+    );
+    assert!(
+        handle.is_closed(),
+        "write failure should fail-close the client"
+    );
+    assert!(
+        handle
+            .close_reason()
+            .is_some_and(|reason| reason.contains("json-rpc transport write failed")),
+        "close reason should explain the write failure"
+    );
+
+    let request_err = tokio::time::timeout(Duration::from_secs(1), request_handle)
+        .await
+        .expect("pending request should be drained")
+        .expect("request task should finish")
+        .expect_err("pending request should fail once the client is closed");
+    assert!(matches!(
+        request_err,
+        mcp_jsonrpc::Error::Protocol(ref protocol)
+            if protocol.kind == mcp_jsonrpc::ProtocolErrorKind::Closed
+    ));
+
+    let closed_err = handle
+        .notify("demo/notify-again", None)
+        .await
+        .expect_err("closed client should reject later writes");
+    assert!(matches!(
+        closed_err,
+        mcp_jsonrpc::Error::Protocol(ref protocol)
+            if protocol.kind == mcp_jsonrpc::ProtocolErrorKind::Closed
+    ));
 }
 
 #[tokio::test]

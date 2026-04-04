@@ -4,28 +4,33 @@ use std::io;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-#[allow(deprecated)]
-use text_assets_kit::lazy_value::{LazyInitError, LazyValue};
 use text_assets_kit::{
     BootstrapLoadError, ResourceManifest, TextDirectory, bootstrap_text_resources_then_load,
     bootstrap_text_resources_then_load_with_base,
 };
+#[allow(deprecated)]
+use text_assets_kit::{LazyInitError, LazyValue};
 
 #[derive(Debug)]
 pub struct PromptBootstrapCleanupError {
-    load: io::Error,
+    rollback: PromptBootstrapRollbackError,
+}
+
+#[derive(Debug)]
+struct PromptBootstrapRollbackError {
     rollback: io::Error,
+    load: io::Error,
 }
 
 impl PromptBootstrapCleanupError {
     #[must_use]
     pub fn load_error(&self) -> &io::Error {
-        &self.load
+        &self.rollback.load
     }
 
     #[must_use]
     pub fn rollback_error(&self) -> &io::Error {
-        &self.rollback
+        &self.rollback.rollback
     }
 }
 
@@ -34,12 +39,25 @@ impl std::fmt::Display for PromptBootstrapCleanupError {
         write!(
             f,
             "prompt directory load error: {}; rollback failed: {}",
-            self.load, self.rollback
+            self.load_error(),
+            self.rollback_error()
         )
     }
 }
 
 impl std::error::Error for PromptBootstrapCleanupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.rollback)
+    }
+}
+
+impl std::fmt::Display for PromptBootstrapRollbackError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "rollback failed: {}", self.rollback)
+    }
+}
+
+impl std::error::Error for PromptBootstrapRollbackError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.load)
     }
@@ -104,7 +122,9 @@ pub fn bootstrap_prompt_directory_with_base(
 fn prompt_bootstrap_cleanup_error(load: io::Error, rollback: io::Error) -> io::Error {
     io::Error::new(
         rollback.kind(),
-        PromptBootstrapCleanupError { load, rollback },
+        PromptBootstrapCleanupError {
+            rollback: PromptBootstrapRollbackError { rollback, load },
+        },
     )
 }
 
@@ -690,7 +710,15 @@ mod tests {
         assert_eq!(cleanup.load_error().to_string(), "load failed");
         assert_eq!(cleanup.rollback_error().to_string(), "rollback failed");
         assert_eq!(
-            cleanup.source().expect("load source").to_string(),
+            cleanup.source().expect("rollback source").to_string(),
+            "rollback failed: rollback failed"
+        );
+        assert_eq!(
+            cleanup
+                .source()
+                .and_then(std::error::Error::source)
+                .expect("load source")
+                .to_string(),
             "load failed"
         );
         assert_eq!(

@@ -178,7 +178,10 @@ impl FeishuWebhookSink {
 
     pub(super) async fn load_remote_image(&self, src: &str) -> crate::Result<LoadedImage> {
         let url = parse_and_validate_https_url_basic(src)?;
-        let client = self.http.select_for_url(&url, true).await?;
+        let client = self
+            .http
+            .select_for_url(&url, self.enforce_public_ip)
+            .await?;
 
         let resp = send_reqwest(client.get(url.clone()), "feishu image download").await?;
         let status = resp.status();

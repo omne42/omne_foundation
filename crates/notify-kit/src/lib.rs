@@ -6,6 +6,7 @@ mod error;
 mod event;
 mod hub;
 mod log;
+mod secret;
 mod sinks;
 
 pub use crate::error::{Error, ErrorKind, SinkFailure};
@@ -13,6 +14,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 pub use crate::event::{Event, Severity};
 pub use crate::hub::{Hub, HubConfig, HubLimits, TryNotifyError};
+pub use crate::secret::SecretString;
 pub use crate::sinks::Sink;
 #[cfg(feature = "sink-bark")]
 pub use crate::sinks::{BarkConfig, BarkSink};
@@ -38,4 +40,3 @@ pub use crate::sinks::{SoundConfig, SoundSink};
 pub use crate::sinks::{TelegramBotConfig, TelegramBotSink};
 #[cfg(feature = "sink-wecom")]
 pub use crate::sinks::{WeComWebhookConfig, WeComWebhookSink};
-pub use secret_kit::SecretString;

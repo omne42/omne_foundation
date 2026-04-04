@@ -153,7 +153,7 @@ let sink = FeishuWebhookSink::new(cfg)?;
 说明：
 
 - 远程图片 URL 默认禁用；如确实需要，可显式调用 `.with_remote_image_urls(true)` 后再允许下载并上传
-- 远程图片下载始终强制做 DNS 公网 IP 校验；即使 webhook 主请求显式关闭了 `with_public_ip_check(false)`，图片下载也不会因此放宽到内网 / special-use 目标
+- 远程图片下载沿用同一个 `with_public_ip_check(...)` 配置；默认仍启用 DNS 公网 IP 校验，只有在调用方显式关闭后才会放宽到更宽的网络环境
 - 图片 URL 仅支持 `https`
 - 本地文件路径默认禁用；如确实需要，需要同时显式配置：
 

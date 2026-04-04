@@ -57,14 +57,16 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `notify-kit`：内置 vendor sinks 与 `env` helper 现在按 feature flags 暴露；调用方可通过 `default-features = false` 只拿 core `Hub` / `Event` / `Sink` 抽象，不再被迫吞下整套 HTTP/vendor 依赖面。
 - `notify_kit::env::build_hub_from_standard_env(...)`：`NOTIFY_SOUND` 现在会严格校验布尔值，非法输入直接返回错误，不再静默回退到默认值。
 - `Hub::notify` / `Hub::try_notify` / `Hub::send`：发送前会统一规范化 `Event` 的 structured/string 视图，确保 sinks 在 hub 路径上看到的字符串字段与 `title_text` / `body_text` / `tag_texts` 保持同步。
-- `FeishuWebhookSink`：远程 Markdown 图片下载现在始终强制做 DNS 公网 IP 校验，不再跟随 webhook 主请求的 `with_public_ip_check(false)` 放宽，避免正文图片路径引入 SSRF 到内网 / special-use HTTPS 目标。
+- `notify-kit::SecretString`：公开 secret 契约现在由 `notify-kit` 自己持有；内部仍复用 `secret-kit` 的安全容器实现，但不再把外部领域边界直接绑到 `secret-kit::SecretString`。
+- `notify-kit::Error` / `SinkFailure`：标准 `source()` 链现在会保留第一条 sink 失败及其底层原因，通用错误工具可以继续沿链下钻。
+- `FeishuWebhookSink`：远程 Markdown 图片下载现在与 webhook 主请求共享同一套 `with_public_ip_check(...)` 语义，避免配置名义和实际行为分裂。
 - `FeishuWebhookSink`：本地图片 opt-in 从“只开布尔开关”收紧为“显式开启 + 显式 `local_image_root(s)` allowlist”；加载前会先做绝对路径归一、root 边界检查，并拒绝 `..` 逃逸、symlink 组件和其他特殊路径。
 - `notify-kit::Error` 现在保留结构化错误种类与 `sink_failures()` 访问面；`Hub` 的多 sink 失败不再只压平成一段字符串，下游可以稳定检查失败 sink 的索引、名称与原始错误。
 - `GitHubCommentSink` / `TelegramBotSink` 现在和其他严格 sink 一样复用 `http-kit::HttpClientProfile::select_for_url(...)`，默认启用公网 IP 校验，并新增 `with_public_ip_check(...)` 配置入口。
 - `notify-kit` crate 发布包现在只包含 Rust 库发布所需的 `src/`、`Cargo.toml`、`README.md` 与 `CHANGELOG.md`，不再把 bots、文档和脚本一并打进 package。
 - `GitHubCommentSink` 现在复用 `github-kit` 提供的 GitHub API base/header/url helper，并新增 `GitHubCommentConfig::with_api_base(...)`，让 GitHub Enterprise 之类的自定义 API base 不再被 sink 内部硬编码挡住。
-- `TelegramBotConfig` / `GitHubCommentConfig` / `FeishuWebhookConfig` 及对应 sinks 现在用 `secret-kit::SecretString` 持有长期凭证；`FeishuWebhookSink` 的 webhook secret、tenant access token 与 app secret 也切到同一安全容器，减少 foundation 层把敏感值长期留在普通 `String` 中的路径。
-- `notify-kit`：其余长期凭证持有也统一收口到 `secret-kit::SecretString`。`Bark.device_key`、`DingTalk.secret`、`PushPlus.token`、`ServerChan.send_key` 不再以裸 `String` 长期保存在 config/sink 里；`ServerChan` 还把 send key 从持久化 URL 中拆出，改为按发送请求临时拼装目标 URL。
+- `TelegramBotConfig` / `GitHubCommentConfig` / `FeishuWebhookConfig` 及对应 sinks 现在用 `notify-kit::SecretString` 持有长期凭证；内部仍复用 `secret-kit` 的安全容器，`FeishuWebhookSink` 的 webhook secret、tenant access token 与 app secret 也切到同一安全容器，减少 foundation 层把敏感值长期留在普通 `String` 中的路径。
+- `notify-kit`：其余长期凭证持有也统一收口到 `notify-kit::SecretString`。`Bark.device_key`、`DingTalk.secret`、`PushPlus.token`、`ServerChan.send_key` 不再以裸 `String` 长期保存在 config/sink 里；`ServerChan` 还把 send key 从持久化 URL 中拆出，改为按发送请求临时拼装目标 URL。
 - `GenericWebhookSink::new` 现在默认按目标 URL 自动推导 host/path 边界并走 strict-by-default 校验；调用方不再需要额外记住 `new_strict(...)` 才能拿到安全默认值，而显式 `new_strict(...)` 仍保留给需要自定义 allow-list/path 前缀的场景。
 - `notify-kit`：`Hub::send`/`notify` 现在会在真正进入 `tokio::time` 超时路径前先验证 time driver；如果 runtime 缺少 timer，不再 panic，而是返回可解释错误并把契约写进 rustdoc。
 - Webhook/API sinks: 内部统一迁移到 `HttpClientProfile`，不再依赖已删除的 `http-kit::select_http_client(...)` timeout-only 入口，从而避免 public-IP pinning 路径静默丢失 `reqwest::Client` 隐式配置。

@@ -186,9 +186,10 @@ hub.notify(Event::new("turn_completed", Severity::Success, "done"));
 
 ## 安全提示
 
+- 公开配置里的长期凭证现在统一使用 `notify_kit::SecretString`；它是 `notify-kit` 自己的边界类型，内部再复用 `secret-kit` 的安全容器。
 - `SoundConfig.command_argv` 会执行外部命令（需要启用 `notify-kit/sound-command`）；应视为 **受信任/本机配置**。
 - `FeishuWebhookSink` 会校验 webhook URL：仅允许 `https` + `open.feishu.cn` / `open.larksuite.com`，且不会在 `Debug`/错误信息中输出完整 URL。
-- `FeishuWebhookSink` 默认不会因为 Markdown 正文里出现远程图片 URL 就主动发起下载；远程图片上传必须显式 `with_remote_image_urls(true)`，本地图片也必须显式 `with_local_image_files(true)`，且在无法安全 no-follow 打开的平台上会直接拒绝。
+- `FeishuWebhookSink` 默认不会因为 Markdown 正文里出现远程图片 URL 就主动发起下载；远程图片上传必须显式 `with_remote_image_urls(true)`，并沿用同一个 `with_public_ip_check(...)` 决定是否启用 DNS 公网 IP 校验。本地图片也必须显式 `with_local_image_files(true)`，且在无法安全 no-follow 打开的平台上会直接拒绝。
 
 ## 配置（环境变量）
 

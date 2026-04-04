@@ -684,7 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_images_always_enforce_public_ip_checks() {
+    fn remote_images_follow_public_ip_check_setting() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -701,12 +701,8 @@ mod tests {
             let err = sink
                 .load_image("https://localhost/image.png")
                 .await
-                .expect_err("remote image fetch should still fail closed");
-            assert!(
-                err.to_string().contains("host is not allowed")
-                    || err.to_string().contains("resolved ip is not allowed"),
-                "{err:#}"
-            );
+                .expect_err("remote image host validation should still reject localhost");
+            assert!(err.to_string().contains("host is not allowed"), "{err:#}");
         });
     }
 

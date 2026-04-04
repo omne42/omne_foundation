@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：duplicate attach 的 `connect_jsonrpc*` 错误现在和 `connect_io*` 一样稳定归类为 `ErrorKind::ManagerState`；调用方判断“已连接，需先 disconnect”不再在 attach transport 类型之间漂移到 `Other`。
 - `mcp-kit`：`SharedManager` 的 reentrant fail-fast 现在只绑定到显式 handler scope；外部调用者和 bare `tokio::spawn(...)` 子任务不再因为“别处有 handler 正在运行”而意外 fail-fast，只有 `spawn_inheriting_handler_scope(...)` 继承的子任务才会保留同样的 handler 语义。
 - `mcp-kit::Error` 补充回归测试，显式锁定 `anyhow::Context` 包裹前后的 `ErrorKind` 仍基于稳定 typed/tagged 语义分类，不允许回退到文案猜测。
 - `mcp-kit`：当显式允许加载 `--root` 外部的 override config 时，server 内部相对 `unix_path` / `stdout_log.path` 现在统一按该 config 文件所在目录解析，并与 `Config::thread_root()` / 相对 `cwd` 语义保持一致；不再出现同一份外部 `mcp.json` 内部两套相对路径基准。

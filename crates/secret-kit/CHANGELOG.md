@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `secret-kit`：内建 provider 的 ambient command-env allowlist 不再默认透传 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` 及其小写变体；secret CLI 现在默认绕过进程级代理环境，只有显式 command env 注入才会进入子进程。
 - `secret-kit`：Linux process-tree cleanup 的异步 retry worker 在创建失败或派发失败时现在都会留下明确 warning，并回退到同步 `kill_tree()` 的 best-effort 清理；失败路径不再 panic，也不会把 retry 不可用静默吞掉。
 - `secret-kit`：内建 provider 的 ambient `PATH` 搜索现在只信任固定的系统级目录集合；workspace、用户目录、`/tmp` 等“绝对但不可信”的路径项不再因为是绝对路径就参与 `vault`/`aws`/`gcloud`/`az` 发现。
 - `CachingSecretResolver` 现在把同一 cacheable spec 的 single-flight 边界前移到 `prepare_secret_resolution(...)`；并发 miss 不会再重复执行昂贵的 prepare 阶段，相关语义也补了 prepare-stage 回归测试。

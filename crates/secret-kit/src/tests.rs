@@ -8,8 +8,8 @@ use std::sync::{
 
 use super::*;
 use crate::command::{
-    build_command_env, resolve_program_on_path_for_test, run_secret_command,
-    secret_command_timeout_from_env,
+    ambient_command_env_var_allowed_for_test, build_command_env, resolve_program_on_path_for_test,
+    run_secret_command, secret_command_timeout_from_env,
 };
 use crate::json::extract_json_key;
 use crate::runtime::{SecretCommandRuntime, SecretEnvironment, SecretResolutionContext};
@@ -1679,6 +1679,27 @@ async fn resolve_secret_rejects_untrusted_non_utf8_ambient_snapshot_path_for_bui
     Ok(())
 }
 
+#[test]
+fn filtered_ambient_command_env_excludes_proxy_variables() {
+    assert!(ambient_command_env_var_allowed_for_test("vault", "PATH"));
+    assert!(ambient_command_env_var_allowed_for_test("vault", "LANG"));
+    assert!(!ambient_command_env_var_allowed_for_test(
+        "vault",
+        "HTTP_PROXY"
+    ));
+    assert!(!ambient_command_env_var_allowed_for_test(
+        "vault",
+        "HTTPS_PROXY"
+    ));
+    assert!(!ambient_command_env_var_allowed_for_test(
+        "vault", "NO_PROXY"
+    ));
+    assert!(!ambient_command_env_var_allowed_for_test(
+        "vault",
+        "http_proxy"
+    ));
+}
+
 #[tokio::test]
 async fn resolve_secret_rejects_builtin_program_override_without_absolute_path() {
     let env = TestEnv {
@@ -1826,6 +1847,29 @@ fn build_command_env_does_not_read_ambient_path_when_snapshot_omits_it() {
     );
     assert!(!env.contains_key("PATH"));
     assert!(!env.contains_key("Path"));
+}
+
+#[test]
+fn build_command_env_keeps_explicit_proxy_configuration() {
+    let env = build_command_env(
+        "vault",
+        BTreeMap::from([
+            (
+                "HTTPS_PROXY".to_string(),
+                "http://proxy.internal:3128".to_string(),
+            ),
+            ("NO_PROXY".to_string(), "vault.internal".to_string()),
+        ]),
+    );
+
+    assert_eq!(
+        env.get("HTTPS_PROXY").map(String::as_str),
+        Some("http://proxy.internal:3128")
+    );
+    assert_eq!(
+        env.get("NO_PROXY").map(String::as_str),
+        Some("vault.internal")
+    );
 }
 
 #[test]

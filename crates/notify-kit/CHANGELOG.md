@@ -7,6 +7,11 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Added
+- Added a `core` integration regression test that verifies structured `Event` payloads reach sinks through `title()` / `body()` / `tags()` string projections instead of re-exposing writable dual string fields.
+
+### Changed
+- Clarified the examples so `Hub::notify(...)` is documented as fire-and-forget without `Result` handling, while `try_notify(...)` remains the explicit error-reporting path.
+### Added
 - `Event::new_structured` / `with_title_text` / `with_body_text` / `with_tag_text`，并在 `Event` 上新增 `title_text` / `body_text` / `tag_texts`，让通知边界可以保留 `structured-text-kit` 语义而不必提前压平成裸字符串。
 - `log-kit` 集成：关键 warning 路径开始以稳定 `log_code` + 结构化字段形式发射到 `tracing`。
 - `Hub::try_notify`：当缺少 Tokio runtime 时返回错误（避免静默丢通知）。

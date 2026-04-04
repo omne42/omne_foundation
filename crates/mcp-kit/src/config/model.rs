@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::ServerName;
-use crate::protocol::is_reserved_streamable_http_transport_header;
+use crate::protocol::{AUTHORIZATION_HEADER, MCP_PROTOCOL_VERSION_HEADER};
 
 macro_rules! public_bail {
     ($($arg:tt)*) => {
@@ -149,29 +149,14 @@ fn empty_kv_map() -> &'static BTreeMap<String, String> {
 }
 
 fn is_reserved_streamable_http_header(header: &HeaderName) -> bool {
-    is_reserved_streamable_http_transport_header(header.as_str())
+    header
+        .as_str()
+        .eq_ignore_ascii_case(MCP_PROTOCOL_VERSION_HEADER)
+        || header.as_str().eq_ignore_ascii_case(AUTHORIZATION_HEADER)
 }
 
 fn is_reserved_streamable_http_env_header(header: &HeaderName) -> bool {
     is_reserved_streamable_http_header(header)
-}
-
-fn validate_streamable_http_url_syntax(url_field: &'static str, url: &str) -> crate::Result<()> {
-    let parsed = reqwest::Url::parse(url).map_err(|err| {
-        anyhow::anyhow!("mcp server transport=streamable_http: invalid {url_field}: {err}")
-    })?;
-    match parsed.scheme() {
-        "http" | "https" => {}
-        scheme => {
-            public_bail!(
-                "mcp server transport=streamable_http: {url_field} must use http or https, got {scheme}"
-            );
-        }
-    }
-    if parsed.host_str().is_none() {
-        public_bail!("mcp server transport=streamable_http: {url_field} must include a host");
-    }
-    Ok(())
 }
 
 impl ServerConfig {
@@ -189,12 +174,6 @@ impl ServerConfig {
         if unix_path.as_os_str().is_empty() {
             public_bail!("mcp server transport=unix: unix_path must not be empty");
         }
-        if unix_path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
-        {
-            public_bail!("mcp server transport=unix: unix_path must not contain `..` segments");
-        }
         Ok(Self::Unix(UnixServerConfig { unix_path }))
     }
 
@@ -203,7 +182,6 @@ impl ServerConfig {
         if url.trim().is_empty() {
             public_bail!("mcp server transport=streamable_http: url must not be empty");
         }
-        validate_streamable_http_url_syntax("url", &url)?;
         Ok(Self::StreamableHttp(StreamableHttpServerConfig {
             urls: StreamableHttpUrls::Single { url },
             bearer_token_env_var: None,
@@ -224,8 +202,6 @@ impl ServerConfig {
         if http_url.trim().is_empty() {
             public_bail!("mcp server transport=streamable_http: http_url must not be empty");
         }
-        validate_streamable_http_url_syntax("sse_url", &sse_url)?;
-        validate_streamable_http_url_syntax("http_url", &http_url)?;
         Ok(Self::StreamableHttp(StreamableHttpServerConfig {
             urls: StreamableHttpUrls::Split { sse_url, http_url },
             bearer_token_env_var: None,
@@ -262,15 +238,6 @@ impl ServerConfig {
                 if cfg.unix_path.as_os_str().is_empty() {
                     public_bail!("mcp server transport=unix: unix_path must not be empty");
                 }
-                if cfg
-                    .unix_path
-                    .components()
-                    .any(|component| matches!(component, Component::ParentDir))
-                {
-                    public_bail!(
-                        "mcp server transport=unix: unix_path must not contain `..` segments"
-                    );
-                }
             }
             Self::StreamableHttp(cfg) => {
                 match &cfg.urls {
@@ -280,7 +247,6 @@ impl ServerConfig {
                                 "mcp server transport=streamable_http: url must not be empty"
                             );
                         }
-                        validate_streamable_http_url_syntax("url", url)?;
                     }
                     StreamableHttpUrls::Split { sse_url, http_url } => {
                         if sse_url.trim().is_empty() {
@@ -293,8 +259,6 @@ impl ServerConfig {
                                 "mcp server transport=streamable_http: http_url must not be empty"
                             );
                         }
-                        validate_streamable_http_url_syntax("sse_url", sse_url)?;
-                        validate_streamable_http_url_syntax("http_url", http_url)?;
                     }
                 }
 
@@ -625,8 +589,7 @@ impl Config {
     }
 
     pub fn server(&self, name: &str) -> Option<&ServerConfig> {
-        let name = ServerName::parse(name).ok()?;
-        self.servers.get(name.as_str())
+        self.servers.get(name)
     }
 
     pub fn server_named(&self, name: &ServerName) -> Option<&ServerConfig> {

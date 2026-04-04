@@ -1,7 +1,7 @@
 //! Connection cache + MCP initialize + request helpers.
 
 use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -19,7 +19,6 @@ use crate::{
 mod connect;
 mod handlers;
 mod lifecycle;
-mod path_identity;
 mod placeholders;
 mod streamable_http_validation;
 
@@ -41,8 +40,7 @@ use streamable_http_validation::validate_streamable_http_url_untrusted;
 use streamable_http_validation::validate_streamable_http_url_untrusted_dns;
 
 pub(crate) use connect::{ConnectContext, connect_transport};
-pub(crate) use handlers::{is_in_manager_handler_scope, scope_manager_handler_call};
-use path_identity::{canonicalize_existing_prefix, normalize_path_lexically};
+pub(crate) use handlers::is_in_manager_handler_scope;
 pub(crate) use streamable_http_validation::should_disconnect_after_jsonrpc_error;
 
 static NEXT_MANAGER_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
@@ -50,24 +48,8 @@ static NEXT_CONNECTION_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
 macro_rules! public_bail {
     ($($arg:tt)*) => {
-        return Err(anyhow::anyhow!($($arg)*).into())
-    };
-}
-
-macro_rules! public_config_bail {
-    ($($arg:tt)*) => {
         return Err(crate::error::tagged_message(
             crate::error::ErrorKind::Config,
-            format!($($arg)*),
-        )
-        .into())
-    };
-}
-
-macro_rules! public_manager_state_bail {
-    ($($arg:tt)*) => {
-        return Err(crate::error::tagged_message(
-            crate::error::ErrorKind::ManagerState,
             format!($($arg)*),
         )
         .into())
@@ -88,13 +70,7 @@ fn normalize_server_name_lookup(server_name: &str) -> &str {
 }
 
 pub(crate) fn resolve_connection_cwd(cwd: &Path) -> anyhow::Result<PathBuf> {
-    if !cwd.is_absolute() {
-        anyhow::bail!(
-            "relative MCP cwd requires an explicit absolute base: {}",
-            cwd.display()
-        );
-    }
-    stable_connection_cwd_identity(cwd)
+    resolve_connection_cwd_with_base(None, cwd)
 }
 
 pub(crate) fn resolve_connection_cwd_with_base(
@@ -104,44 +80,59 @@ pub(crate) fn resolve_connection_cwd_with_base(
     let resolved = if cwd.is_absolute() {
         cwd.to_path_buf()
     } else {
-        if cwd
-            .components()
-            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
-        {
-            anyhow::bail!(
-                "relative MCP cwd must not contain '.' or '..' segments: {}",
-                cwd.display()
-            );
-        }
         let base = match base {
             Some(base) if base.is_absolute() => base.to_path_buf(),
             Some(base) => {
-                anyhow::bail!("relative MCP cwd base must be absolute: {}", base.display())
+                anyhow::bail!(
+                    "relative MCP config base path is not allowed: {}",
+                    base.display()
+                );
             }
-            None => anyhow::bail!(
-                "relative MCP cwd requires an explicit absolute base: {}",
-                cwd.display()
-            ),
+            None => std::env::current_dir()
+                .context("determine current working directory for relative MCP cwd")?,
         };
         base.join(cwd)
     };
-    stable_connection_cwd_identity(&resolved)
+    Ok(stable_connection_cwd_identity(&resolved))
 }
 
-pub(crate) async fn resolve_connection_cwd_with_base_async(
-    base: Option<&Path>,
-    cwd: &Path,
-) -> anyhow::Result<PathBuf> {
-    let base = base.map(Path::to_path_buf);
-    let cwd = cwd.to_path_buf();
-    tokio::task::spawn_blocking(move || resolve_connection_cwd_with_base(base.as_deref(), &cwd))
-        .await
-        .map_err(|err| anyhow::anyhow!("join connection cwd resolution task: {err}"))?
+fn stable_connection_cwd_identity(path: &Path) -> PathBuf {
+    let normalized = normalize_connection_path(path);
+    let mut existing = normalized.as_path();
+    let mut missing_components = Vec::new();
+
+    while std::fs::symlink_metadata(existing).is_err() {
+        let Some(component) = existing.file_name() else {
+            return normalized;
+        };
+        missing_components.push(component.to_os_string());
+        let Some(parent) = existing.parent() else {
+            return normalized;
+        };
+        existing = parent;
+    }
+
+    let mut canonical = std::fs::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
+    for component in missing_components.iter().rev() {
+        canonical.push(component);
+    }
+    canonical
 }
 
-fn stable_connection_cwd_identity(path: &Path) -> anyhow::Result<PathBuf> {
-    let fallback = normalize_path_lexically(path);
-    Ok(canonicalize_existing_prefix(path, "MCP cwd identity")?.unwrap_or(fallback))
+fn normalize_connection_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
 }
 
 pub(crate) fn contains_wait_timeout(err: &anyhow::Error) -> bool {
@@ -247,7 +238,7 @@ pub struct Manager {
     instance_id: u64,
     active_handler_scopes: Arc<AtomicU64>,
     conns: HashMap<ServerName, Connection>,
-    connection_cwds: HashMap<ServerName, ConnectionCwdIdentity>,
+    connection_cwds: HashMap<ServerName, PathBuf>,
     connection_server_configs: HashMap<ServerName, ServerConfig>,
     init_results: HashMap<ServerName, Value>,
     client_name: String,
@@ -273,11 +264,6 @@ pub struct Connection {
     child: Option<Child>,
     client: mcp_jsonrpc::Client,
     handler_tasks: Vec<tokio::task::JoinHandle<()>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ConnectionCwdIdentity {
-    stable_identity: PathBuf,
 }
 
 pub(crate) struct PreparedConnectedClient {
@@ -535,6 +521,7 @@ impl Default for Manager {
 }
 
 impl Manager {
+    #[cfg(test)]
     pub(crate) fn active_handler_scopes(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.active_handler_scopes)
     }
@@ -572,12 +559,12 @@ impl Manager {
         if let Some(protocol_version) = config.client().protocol_version.clone() {
             manager = manager
                 .with_protocol_version(protocol_version)
-                .expect("validated config.client().protocol_version");
+                .expect("validated config.protocol_version");
         }
         if let Some(capabilities) = config.client().capabilities.clone() {
             manager = manager
                 .with_capabilities(capabilities)
-                .expect("validated config.client().capabilities");
+                .expect("validated config.capabilities");
         }
         if let Some(roots) = config.client().roots.clone() {
             manager = manager.with_roots(roots);
@@ -657,7 +644,14 @@ impl Manager {
             protocol_version: Some(protocol_version.clone()),
             ..Default::default()
         }
-        .validate()?;
+        .validate()
+        .map_err(crate::Error::from)
+        .map_err(|err| {
+            crate::Error::from(crate::error::tag_anyhow(
+                crate::error::ErrorKind::Config,
+                err.into_anyhow(),
+            ))
+        })?;
         self.protocol_version = protocol_version;
         Ok(self)
     }
@@ -713,7 +707,14 @@ impl Manager {
             capabilities: Some(capabilities.clone()),
             ..Default::default()
         }
-        .validate()?;
+        .validate()
+        .map_err(crate::Error::from)
+        .map_err(|err| {
+            crate::Error::from(crate::error::tag_anyhow(
+                crate::error::ErrorKind::Config,
+                err.into_anyhow(),
+            ))
+        })?;
         self.capabilities = capabilities;
         if self.roots.is_some() {
             ensure_roots_capability(&mut self.capabilities);
@@ -792,7 +793,6 @@ impl Manager {
         self.initialize_result(server_name.as_str())
     }
 
-    #[cfg(test)]
     pub(crate) fn record_connection_cwd(
         &mut self,
         server_name: &str,
@@ -801,7 +801,6 @@ impl Manager {
         self.record_connection_cwd_with_base(server_name, cwd, None)
     }
 
-    #[cfg(test)]
     pub(crate) fn record_connection_cwd_with_base(
         &mut self,
         server_name: &str,
@@ -809,20 +808,9 @@ impl Manager {
         base: Option<&Path>,
     ) -> anyhow::Result<()> {
         let server_name = parse_server_name_anyhow(server_name)?;
-        self.record_resolved_connection_cwd(
-            server_name,
-            resolve_connection_cwd_with_base(base, cwd)?,
-        );
+        self.connection_cwds
+            .insert(server_name, resolve_connection_cwd_with_base(base, cwd)?);
         Ok(())
-    }
-
-    fn record_resolved_connection_cwd(&mut self, server_name: ServerName, cwd: PathBuf) {
-        self.connection_cwds.insert(
-            server_name,
-            ConnectionCwdIdentity {
-                stable_identity: cwd,
-            },
-        );
     }
 
     pub(crate) fn clear_connection_cwd(&mut self, server_name: &str) {
@@ -851,45 +839,38 @@ impl Manager {
         requested: &ServerConfig,
     ) -> anyhow::Result<()> {
         let Some(connected) = self.connection_server_configs.get(server_name) else {
-            return Err(crate::error::tagged_message(
-                crate::error::ErrorKind::ManagerState,
-                format!(
-                    "mcp server {server_name} is already connected without reusable config metadata and cannot be reused from config (disconnect first)"
-                ),
-            ));
+            anyhow::bail!(
+                "mcp server {server_name} is already connected without reusable config metadata and cannot be reused from config (disconnect first)"
+            );
         };
         if connected == requested {
             return Ok(());
         }
 
-        Err(crate::error::tagged_message(
-            crate::error::ErrorKind::ManagerState,
-            format!(
-                "mcp server {server_name} is already connected with a different effective config and cannot be reused (disconnect first)"
-            ),
-        ))
+        anyhow::bail!(
+            "mcp server {server_name} is already connected with a different effective config and cannot be reused (disconnect first)"
+        );
     }
 
-    fn ensure_resolved_connection_cwd_matches(
+    fn ensure_connection_cwd_matches(
         &self,
         server_name: &str,
-        requested_cwd: &Path,
+        cwd: &Path,
+        base: Option<&Path>,
     ) -> anyhow::Result<()> {
         let Some(connected_cwd) = self.connection_cwds.get(server_name) else {
             return Ok(());
         };
-        if connected_cwd.stable_identity == requested_cwd {
+        let requested_cwd = resolve_connection_cwd_with_base(base, cwd)?;
+        if *connected_cwd == requested_cwd {
             return Ok(());
         }
 
-        Err(crate::error::tagged_message(
-            crate::error::ErrorKind::ManagerState,
-            format!(
-                "mcp server {server_name} is already connected under cwd={} and cannot be reused for cwd={} (disconnect first)",
-                connected_cwd.stable_identity.display(),
-                requested_cwd.display()
-            ),
-        ))
+        anyhow::bail!(
+            "mcp server {server_name} is already connected under cwd={} and cannot be reused for cwd={} (disconnect first)",
+            connected_cwd.display(),
+            requested_cwd.display()
+        );
     }
 
     pub(crate) fn try_prepare_connected_client(
@@ -897,24 +878,13 @@ impl Manager {
         server_name: &str,
         cwd: Option<&Path>,
     ) -> anyhow::Result<Option<PreparedConnectedClient>> {
-        let resolved_cwd = cwd
-            .map(|cwd| resolve_connection_cwd_with_base(None, cwd))
-            .transpose()?;
-        self.try_prepare_connected_client_resolved(server_name, resolved_cwd.as_deref())
-    }
-
-    pub(crate) fn try_prepare_connected_client_resolved(
-        &mut self,
-        server_name: &str,
-        resolved_cwd: Option<&Path>,
-    ) -> anyhow::Result<Option<PreparedConnectedClient>> {
         let server_name = normalize_server_name_lookup(server_name);
         if !self.is_connected_and_alive(server_name) {
             self.clear_connection_cwd(server_name);
             return Ok(None);
         }
-        if let Some(cwd) = resolved_cwd {
-            self.ensure_resolved_connection_cwd_matches(server_name, cwd)?;
+        if let Some(cwd) = cwd {
+            self.ensure_connection_cwd_matches(server_name, cwd, None)?;
         }
 
         let conn = self
@@ -929,13 +899,13 @@ impl Manager {
         }))
     }
 
-    pub(crate) fn try_prepare_reusable_connected_client_resolved(
+    pub(crate) fn try_prepare_reusable_connected_client(
         &mut self,
         server_name: &str,
         server_cfg: &ServerConfig,
-        resolved_cwd: Option<&Path>,
+        cwd: Option<&Path>,
     ) -> anyhow::Result<Option<PreparedConnectedClient>> {
-        let prepared = self.try_prepare_connected_client_resolved(server_name, resolved_cwd)?;
+        let prepared = self.try_prepare_connected_client(server_name, cwd)?;
         let Some(prepared) = prepared else {
             return Ok(None);
         };
@@ -943,32 +913,19 @@ impl Manager {
         Ok(Some(prepared))
     }
 
-    #[cfg(test)]
     pub(crate) fn prepare_transport_connect(
         &mut self,
         config: &Config,
         server_name: &str,
         cwd: &Path,
     ) -> anyhow::Result<Option<PreparedTransportConnect>> {
-        let resolved_cwd = resolve_connection_cwd_with_base(config.thread_root(), cwd)?;
-        self.prepare_transport_connect_resolved(config, server_name, resolved_cwd)
-    }
-
-    pub(crate) fn prepare_transport_connect_resolved(
-        &mut self,
-        config: &Config,
-        server_name: &str,
-        cwd: PathBuf,
-    ) -> anyhow::Result<Option<PreparedTransportConnect>> {
-        let server_cfg = config.server(server_name).ok_or_else(|| {
-            crate::error::tagged_message(
-                crate::error::ErrorKind::Config,
-                format!("unknown mcp server: {server_name}"),
-            )
-        })?;
+        let server_cfg = config
+            .server(server_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
         let server_name_key = parse_server_name_anyhow(server_name)?;
+        let config_root = config.thread_root();
         if self.is_connected_and_alive(server_name_key.as_str()) {
-            self.ensure_resolved_connection_cwd_matches(server_name_key.as_str(), &cwd)?;
+            self.ensure_connection_cwd_matches(server_name_key.as_str(), cwd, config_root)?;
             self.ensure_connection_server_config_matches(server_name_key.as_str(), server_cfg)?;
             return Ok(None);
         }
@@ -977,6 +934,7 @@ impl Manager {
         server_cfg
             .validate()
             .with_context(|| format!("invalid mcp server config (server={server_name_key})"))?;
+        let cwd = resolve_connection_cwd_with_base(config_root, cwd)?;
 
         Ok(Some(PreparedTransportConnect {
             server_name: server_name.to_string(),
@@ -1047,10 +1005,10 @@ impl Manager {
     where
         F: FnOnce() -> anyhow::Result<ServerName>,
     {
-        let cwd = resolve_connection_cwd_with_base_async(cwd_base, cwd).await?;
+        let cwd = resolve_connection_cwd_with_base(cwd_base, cwd)?;
         let server_name_key = build_server_name()?;
         if self.is_connected_and_alive(server_name_key.as_str()) {
-            self.ensure_resolved_connection_cwd_matches(server_name_key.as_str(), &cwd)?;
+            self.ensure_connection_cwd_matches(server_name_key.as_str(), &cwd, None)?;
             self.ensure_connection_server_config_matches(server_name_key.as_str(), server_cfg)?;
             return Ok(());
         }
@@ -1090,7 +1048,7 @@ impl Manager {
         client: mcp_jsonrpc::Client,
     ) -> crate::Result<()> {
         if self.trust_mode == TrustMode::Untrusted {
-            public_config_bail!(
+            public_bail!(
                 "refusing to attach custom JSON-RPC client in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) or use Manager::connect_jsonrpc_unchecked)"
             );
         }
@@ -1153,7 +1111,7 @@ impl Manager {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         if self.trust_mode == TrustMode::Untrusted {
-            public_config_bail!(
+            public_bail!(
                 "refusing to attach custom JSON-RPC IO in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) or use Manager::connect_io_unchecked)"
             );
         }
@@ -1195,12 +1153,9 @@ impl Manager {
         server_name: &str,
         cwd: &Path,
     ) -> crate::Result<()> {
-        let server_cfg = config.server(server_name).ok_or_else(|| {
-            crate::error::tagged_message(
-                crate::error::ErrorKind::Config,
-                format!("unknown mcp server: {server_name}"),
-            )
-        })?;
+        let server_cfg = config
+            .server(server_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
         Ok(self
             .connect_with_builder(server_name, server_cfg, cwd, config.thread_root(), || {
                 parse_server_name_anyhow(server_name)
@@ -1214,12 +1169,9 @@ impl Manager {
         server_name: &ServerName,
         cwd: &Path,
     ) -> crate::Result<()> {
-        let server_cfg = config.server_named(server_name).ok_or_else(|| {
-            crate::error::tagged_message(
-                crate::error::ErrorKind::Config,
-                format!("unknown mcp server: {server_name}"),
-            )
-        })?;
+        let server_cfg = config
+            .server_named(server_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
         let server_name_key = server_name.clone();
         Ok(self
             .connect_with_builder(
@@ -1239,12 +1191,9 @@ impl Manager {
         cwd: &Path,
     ) -> crate::Result<Session> {
         self.get_or_connect(config, server_name, cwd).await?;
-        Ok(self.take_session(server_name).ok_or_else(|| {
-            crate::error::tagged_message(
-                crate::error::ErrorKind::ManagerState,
-                format!("mcp server not connected: {server_name}"),
-            )
-        })?)
+        Ok(self
+            .take_session(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
     }
 
     pub async fn get_or_connect_session_named(
@@ -1254,12 +1203,9 @@ impl Manager {
         cwd: &Path,
     ) -> crate::Result<Session> {
         self.get_or_connect_named(config, server_name, cwd).await?;
-        Ok(self.take_session_named(server_name).ok_or_else(|| {
-            crate::error::tagged_message(
-                crate::error::ErrorKind::ManagerState,
-                format!("mcp server not connected: {server_name}"),
-            )
-        })?)
+        Ok(self
+            .take_session_named(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
     }
 
     pub async fn connect_named(
@@ -1397,12 +1343,9 @@ impl Manager {
         cwd: &Path,
     ) -> crate::Result<Session> {
         self.connect(server_name, server_cfg, cwd).await?;
-        Ok(self.take_session(server_name).ok_or_else(|| {
-            crate::error::tagged_message(
-                crate::error::ErrorKind::ManagerState,
-                format!("mcp server not connected: {server_name}"),
-            )
-        })?)
+        Ok(self
+            .take_session(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
     }
 
     pub async fn connect_session_named(
@@ -1412,12 +1355,9 @@ impl Manager {
         cwd: &Path,
     ) -> crate::Result<Session> {
         self.connect_named(server_name, server_cfg, cwd).await?;
-        Ok(self.take_session_named(server_name).ok_or_else(|| {
-            crate::error::tagged_message(
-                crate::error::ErrorKind::ManagerState,
-                format!("mcp server not connected: {server_name}"),
-            )
-        })?)
+        Ok(self
+            .take_session_named(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
     }
 
     pub async fn connect_jsonrpc_session(
@@ -1426,12 +1366,9 @@ impl Manager {
         client: mcp_jsonrpc::Client,
     ) -> crate::Result<Session> {
         self.connect_jsonrpc(server_name, client).await?;
-        Ok(self.take_session(server_name).ok_or_else(|| {
-            crate::error::tagged_message(
-                crate::error::ErrorKind::ManagerState,
-                format!("mcp server not connected: {server_name}"),
-            )
-        })?)
+        Ok(self
+            .take_session(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
     }
 
     pub async fn connect_jsonrpc_session_named(
@@ -1440,12 +1377,9 @@ impl Manager {
         client: mcp_jsonrpc::Client,
     ) -> crate::Result<Session> {
         self.connect_jsonrpc(server_name.as_str(), client).await?;
-        Ok(self.take_session_named(server_name).ok_or_else(|| {
-            crate::error::tagged_message(
-                crate::error::ErrorKind::ManagerState,
-                format!("mcp server not connected: {server_name}"),
-            )
-        })?)
+        Ok(self
+            .take_session_named(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
     }
 
     pub async fn connect_io_session<R, W>(
@@ -1459,12 +1393,9 @@ impl Manager {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         self.connect_io(server_name, read, write).await?;
-        Ok(self.take_session(server_name).ok_or_else(|| {
-            crate::error::tagged_message(
-                crate::error::ErrorKind::ManagerState,
-                format!("mcp server not connected: {server_name}"),
-            )
-        })?)
+        Ok(self
+            .take_session(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
     }
 
     pub async fn connect_io_session_named<R, W>(
@@ -1478,12 +1409,9 @@ impl Manager {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         self.connect_io(server_name.as_str(), read, write).await?;
-        Ok(self.take_session_named(server_name).ok_or_else(|| {
-            crate::error::tagged_message(
-                crate::error::ErrorKind::ManagerState,
-                format!("mcp server not connected: {server_name}"),
-            )
-        })?)
+        Ok(self
+            .take_session_named(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
     }
 
     pub async fn request(
@@ -1849,7 +1777,7 @@ impl Manager {
     ) -> crate::Result<Value> {
         let Some(prepared) = self.try_prepare_connected_client(server_name, None)? else {
             let server_name = normalize_server_name_lookup(server_name);
-            public_manager_state_bail!("mcp server not connected: {server_name}");
+            public_bail!("mcp server not connected: {server_name}");
         };
         let server_name = prepared.server_name;
         let result = Self::request_raw_handle(
@@ -1889,7 +1817,7 @@ impl Manager {
     ) -> crate::Result<()> {
         let Some(prepared) = self.try_prepare_connected_client(server_name, None)? else {
             let server_name = normalize_server_name_lookup(server_name);
-            public_manager_state_bail!("mcp server not connected: {server_name}");
+            public_bail!("mcp server not connected: {server_name}");
         };
         let server_name = prepared.server_name;
         let result = Self::notify_raw_handle(

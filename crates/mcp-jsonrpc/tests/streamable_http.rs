@@ -1218,9 +1218,6 @@ async fn streamable_http_request_timeout_surfaces_wait_timeout() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn streamable_http_request_timeout_does_not_abort_long_lived_post_sse_response() {
-    const REQUEST_TIMEOUT: Duration = Duration::from_millis(400);
-    const KEEP_ALIVE_INTERVAL: Duration = Duration::from_millis(120);
-
     let Some(listener) = bind_loopback_listener_or_skip().await else {
         return;
     };
@@ -1265,8 +1262,8 @@ async fn streamable_http_request_timeout_does_not_abort_long_lived_post_sse_resp
                             .await;
                         let _ = socket.flush().await;
 
-                        for _ in 0..4 {
-                            tokio::time::sleep(KEEP_ALIVE_INTERVAL).await;
+                        for _ in 0..3 {
+                            tokio::time::sleep(Duration::from_millis(40)).await;
                             let _ = socket.write_all(b": keep-alive\n\n").await;
                             let _ = socket.flush().await;
                         }
@@ -1295,7 +1292,7 @@ async fn streamable_http_request_timeout_does_not_abort_long_lived_post_sse_resp
     let client = mcp_jsonrpc::Client::connect_streamable_http_with_options(
         &url,
         mcp_jsonrpc::StreamableHttpOptions {
-            request_timeout: Some(REQUEST_TIMEOUT),
+            request_timeout: Some(Duration::from_millis(50)),
             ..Default::default()
         },
         mcp_jsonrpc::SpawnOptions::default(),
@@ -1931,140 +1928,6 @@ async fn streamable_http_notification_post_failure_closes_client() {
         mcp_jsonrpc::Error::Protocol(ref protocol)
             if protocol.kind == mcp_jsonrpc::ProtocolErrorKind::Closed
     ));
-
-    drop(client);
-    server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn streamable_http_notification_post_failure_keeps_specific_reason_after_sse_eof() {
-    struct State {
-        post_count: AtomicUsize,
-        sse_connected: AtomicBool,
-        sse_closed: AtomicBool,
-        sse_ready: Notify,
-        close_sse: Notify,
-        sse_closed_notify: Notify,
-    }
-
-    impl Default for State {
-        fn default() -> Self {
-            Self {
-                post_count: AtomicUsize::new(0),
-                sse_connected: AtomicBool::new(false),
-                sse_closed: AtomicBool::new(false),
-                sse_ready: Notify::new(),
-                close_sse: Notify::new(),
-                sse_closed_notify: Notify::new(),
-            }
-        }
-    }
-
-    let state = Arc::new(State::default());
-    let Some(listener) = bind_loopback_listener_or_skip().await else {
-        return;
-    };
-    let addr = listener.local_addr().unwrap();
-
-    let server_state = state.clone();
-    let server = tokio::spawn(async move {
-        loop {
-            let (mut socket, _) = match listener.accept().await {
-                Ok(pair) => pair,
-                Err(_) => return,
-            };
-            let server_state = server_state.clone();
-            tokio::spawn(async move {
-                let Some((req, body)) = read_http_request(&mut socket).await else {
-                    return;
-                };
-
-                match (req.method.as_str(), req.path.as_str()) {
-                    ("GET", "/mcp") => {
-                        let _ = socket
-                            .write_all(
-                                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n",
-                            )
-                            .await;
-                        server_state.sse_connected.store(true, Ordering::SeqCst);
-                        server_state.sse_ready.notify_waiters();
-
-                        server_state.close_sse.notified().await;
-                        drop(socket);
-                        server_state.sse_closed.store(true, Ordering::SeqCst);
-                        server_state.sse_closed_notify.notify_waiters();
-                    }
-                    ("POST", "/mcp") => {
-                        server_state.post_count.fetch_add(1, Ordering::SeqCst);
-                        let parsed: serde_json::Value = match serde_json::from_slice(&body) {
-                            Ok(v) => v,
-                            Err(_) => return,
-                        };
-                        assert_eq!(parsed["method"], "demo/notify");
-                        assert!(parsed.get("id").is_none());
-
-                        if !server_state.sse_connected.load(Ordering::SeqCst) {
-                            server_state.sse_ready.notified().await;
-                        }
-                        server_state.close_sse.notify_waiters();
-                        if !server_state.sse_closed.load(Ordering::SeqCst) {
-                            server_state.sse_closed_notify.notified().await;
-                        }
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-
-                        let _ = write_http_response(
-                            &mut socket,
-                            "500 Internal Server Error",
-                            &[
-                                ("Content-Type", "application/json".to_string()),
-                                ("Connection", "close".to_string()),
-                            ],
-                            br#"{"error":"boom"}"#,
-                        )
-                        .await;
-                    }
-                    _ => {
-                        let _ = socket
-                            .write_all(
-                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                            )
-                            .await;
-                    }
-                }
-            });
-        }
-    });
-
-    let url = format!("http://{addr}/mcp");
-    let client = mcp_jsonrpc::Client::connect_streamable_http(&url)
-        .await
-        .expect("connect streamable http");
-    let handle = client.handle();
-
-    client
-        .notify("demo/notify", Some(serde_json::json!({ "x": 1 })))
-        .await
-        .expect("notify should write to bridge");
-
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while !handle.is_closed() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("notification transport failure should close client");
-
-    let reason = handle.close_reason().unwrap_or_default();
-    assert!(
-        reason.contains("notification failed"),
-        "specific transport error should win over generic eof: {reason}"
-    );
-    assert!(reason.contains("http error: 500"), "{reason}");
-    assert!(
-        !reason.contains("server closed connection"),
-        "generic EOF must not overwrite the POST failure root cause: {reason}"
-    );
-    assert_eq!(state.post_count.load(Ordering::SeqCst), 1);
 
     drop(client);
     server.abort();

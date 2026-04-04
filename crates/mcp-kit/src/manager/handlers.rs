@@ -24,7 +24,7 @@ pub(crate) fn is_in_manager_handler_scope(manager_instance_id: u64) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) async fn scope_manager_handler_call<T>(
+async fn scope_manager_handler_call<T>(
     manager_instance_id: u64,
     active_handler_scopes: Arc<AtomicU64>,
     fut: impl Future<Output = T>,
@@ -58,19 +58,11 @@ enum HandlerOutcome<T> {
     TimedOut { timeout: std::time::Duration },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HandlerTaskStatus {
-    Continue,
-    Stop,
-}
-
 /// Run a user-provided handler with an optional timeout.
 ///
 /// This is a deliberate panic-isolation boundary: panics are caught so a buggy handler can't tear
-/// down the background handler tasks. Once a handler panics, the attached dispatch loop stops and
-/// later requests/notifications fail closed instead of reusing a potentially corrupted handler.
-/// Do not rely on panics for control flow, and avoid mutable shared state across calls unless it
-/// remains correct after a panic.
+/// down the background handler tasks. Do not rely on panics for control flow, and avoid mutable
+/// shared state across calls unless it remains correct after a panic.
 async fn run_handler_with_timeout<T, F, Fut>(
     timeout: Option<std::time::Duration>,
     timeout_counter: &Arc<std::sync::atomic::AtomicU64>,
@@ -111,7 +103,7 @@ async fn drive_handler_tasks<T, F, Fut>(
 ) where
     T: Send + 'static,
     F: FnMut(T) -> Fut + Send + 'static,
-    Fut: Future<Output = HandlerTaskStatus> + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
 {
     let mut in_flight = tokio::task::JoinSet::new();
 
@@ -121,8 +113,7 @@ async fn drive_handler_tasks<T, F, Fut>(
                 in_flight.spawn(make_task(item));
             }
             Some(outcome) = in_flight.join_next(), if !in_flight.is_empty() => {
-                if should_stop_handler_dispatch(outcome) {
-                    in_flight.abort_all();
+                if join_outcome_panicked(outcome) {
                     return;
                 }
             }
@@ -131,19 +122,15 @@ async fn drive_handler_tasks<T, F, Fut>(
     }
 
     while let Some(outcome) = in_flight.join_next().await {
-        if should_stop_handler_dispatch(outcome) {
-            in_flight.abort_all();
+        if join_outcome_panicked(outcome) {
             return;
         }
     }
 }
 
-fn should_stop_handler_dispatch(
-    outcome: Result<HandlerTaskStatus, tokio::task::JoinError>,
-) -> bool {
+fn join_outcome_panicked(outcome: Result<(), tokio::task::JoinError>) -> bool {
     match outcome {
-        Ok(HandlerTaskStatus::Continue) => false,
-        Ok(HandlerTaskStatus::Stop) => true,
+        Ok(()) => false,
         Err(err) if err.is_panic() => true,
         Err(_) => false,
     }
@@ -258,7 +245,7 @@ impl Manager {
                             params: req.params.take(),
                         };
 
-                        let (mut outcome, status) = match run_handler_with_timeout(
+                        let mut outcome = match run_handler_with_timeout(
                             handler_timeout,
                             &timeout_counter,
                             || {
@@ -271,27 +258,19 @@ impl Manager {
                         )
                         .await
                         {
-                            HandlerOutcome::Ok(outcome) => (outcome, HandlerTaskStatus::Continue),
-                            HandlerOutcome::Panicked => (
-                                ServerRequestOutcome::Error {
-                                    code: JSONRPC_SERVER_ERROR,
-                                    message: format!(
-                                        "server request handler panicked and was disabled: {method}"
-                                    ),
-                                    data: None,
-                                },
-                                HandlerTaskStatus::Stop,
-                            ),
-                            HandlerOutcome::TimedOut { timeout } => (
-                                ServerRequestOutcome::Error {
-                                    code: JSONRPC_SERVER_ERROR,
-                                    message: format!(
-                                        "server request handler timed out after {timeout:?}: {method}"
-                                    ),
-                                    data: None,
-                                },
-                                HandlerTaskStatus::Continue,
-                            ),
+                            HandlerOutcome::Ok(outcome) => outcome,
+                            HandlerOutcome::Panicked => ServerRequestOutcome::Error {
+                                code: JSONRPC_SERVER_ERROR,
+                                message: format!("server request handler panicked: {method}"),
+                                data: None,
+                            },
+                            HandlerOutcome::TimedOut { timeout } => ServerRequestOutcome::Error {
+                                code: JSONRPC_SERVER_ERROR,
+                                message: format!(
+                                    "server request handler timed out after {timeout:?}: {method}"
+                                ),
+                                data: None,
+                            },
                         };
 
                         if matches!(outcome, ServerRequestOutcome::MethodNotFound) {
@@ -302,32 +281,27 @@ impl Manager {
                             }
                         }
 
-                        let response = match outcome {
+                        match outcome {
                             ServerRequestOutcome::Ok(result) => {
-                                req.respond_ok(result).await
+                                let _ = req.respond_ok(result).await;
                             }
                             ServerRequestOutcome::Error {
                                 code,
                                 message,
                                 data,
                             } => {
-                                req.respond_error(code, message, data).await
+                                let _ = req.respond_error(code, message, data).await;
                             }
                             ServerRequestOutcome::MethodNotFound => {
-                                req.respond_error(
-                                    JSONRPC_METHOD_NOT_FOUND,
-                                    format!("method not found: {}", method.as_str()),
-                                    None,
-                                )
-                                .await
+                                let _ = req
+                                    .respond_error(
+                                        JSONRPC_METHOD_NOT_FOUND,
+                                        format!("method not found: {}", method.as_str()),
+                                        None,
+                                    )
+                                    .await;
                             }
-                        };
-
-                        if response.is_err() {
-                            return HandlerTaskStatus::Stop;
                         }
-
-                        status
                     }
                 })
                 .await;
@@ -350,20 +324,15 @@ impl Manager {
                             params: note.params,
                         };
 
-                        match run_handler_with_timeout(handler_timeout, &timeout_counter, || {
-                            scope_manager_handler_call(
-                                manager_instance_id,
-                                active_handler_scopes,
-                                handler(ctx),
-                            )
-                        })
-                        .await
-                        {
-                            HandlerOutcome::Panicked => HandlerTaskStatus::Stop,
-                            HandlerOutcome::Ok(()) | HandlerOutcome::TimedOut { .. } => {
-                                HandlerTaskStatus::Continue
-                            }
-                        }
+                        let _ = /* pre-commit: allow-let-underscore */
+                            run_handler_with_timeout(handler_timeout, &timeout_counter, || {
+                                scope_manager_handler_call(
+                                    manager_instance_id,
+                                    active_handler_scopes,
+                                    handler(ctx),
+                                )
+                            })
+                            .await;
                     }
                 })
                 .await;

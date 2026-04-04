@@ -32,11 +32,7 @@
 
 ## Q：是否支持自动重连/守护进程？
 
-`mcp-kit` 不提供后台自动重连/守护进程。
-
-但如果你走的是 `Manager::request` / `get_or_connect` / `SharedManager::request` 这类 config 驱动入口，同名连接在当前实例里已经关闭后，crate 会按需重新建连。
-
-需要 keepalive、退避、长期守护或跨实例重连时，仍然应该由上层实现。
+v1 不做。上层可以通过 drop/重建 `Manager` 或 `Session` 实现重连策略。
 
 ## Q：如何把连接交给其他库持有？
 

@@ -4,11 +4,20 @@ use std::ffi::OsString;
 #[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::Path;
+#[cfg(not(windows))]
 use std::path::PathBuf;
+#[cfg(not(windows))]
+use std::process::Command;
 #[cfg(not(windows))]
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+#[cfg(not(windows))]
+const CWD_UNAVAILABLE_HELPER_ENV: &str = "MCP_KIT_CWD_UNAVAILABLE_HELPER";
+#[cfg(not(windows))]
+const CWD_UNAVAILABLE_TEST_FILTER: &str =
+    "resolve_connection_cwd_errors_when_current_dir_is_unavailable";
 
 fn seed_manager_side_state(manager: &mut Manager, server_name: &str) {
     manager
@@ -25,6 +34,25 @@ fn seed_manager_side_state(manager: &mut Manager, server_name: &str) {
 }
 
 #[cfg(not(windows))]
+fn maybe_run_cwd_unavailable_helper() -> bool {
+    if std::env::var_os(CWD_UNAVAILABLE_HELPER_ENV).is_none() {
+        return false;
+    }
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    std::env::set_current_dir(tempdir.path()).expect("enter tempdir");
+    std::fs::remove_dir(tempdir.path()).expect("remove tempdir");
+
+    let err = resolve_connection_cwd(Path::new("relative"))
+        .expect_err("relative cwd should fail without current dir");
+    assert!(
+        err.to_string()
+            .contains("determine current working directory for relative MCP cwd")
+    );
+    true
+}
+
+#[cfg(not(windows))]
 fn cwd_test_guard() -> std::sync::MutexGuard<'static, ()> {
     static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
     GUARD
@@ -34,38 +62,26 @@ fn cwd_test_guard() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[cfg(not(windows))]
-struct CurrentDirTestGuard {
-    _guard: std::sync::MutexGuard<'static, ()>,
+struct CurrentDirRestoreGuard {
     original_cwd: Option<PathBuf>,
 }
 
 #[cfg(not(windows))]
-impl CurrentDirTestGuard {
-    fn acquire() -> Self {
+impl CurrentDirRestoreGuard {
+    fn capture() -> Self {
         Self {
-            _guard: cwd_test_guard(),
             original_cwd: Some(std::env::current_dir().expect("original cwd")),
         }
     }
 }
 
 #[cfg(not(windows))]
-impl Drop for CurrentDirTestGuard {
+impl Drop for CurrentDirRestoreGuard {
     fn drop(&mut self) {
         if let Some(path) = self.original_cwd.take() {
             let _ = std::env::set_current_dir(path);
         }
     }
-}
-
-fn explicit_cwd_for_direct_connect_test() -> PathBuf {
-    std::env::temp_dir()
-}
-
-fn explicit_named_cwd_for_direct_connect_test(label: &str) -> PathBuf {
-    explicit_cwd_for_direct_connect_test()
-        .join("mcp-kit-direct-connect")
-        .join(label)
 }
 
 #[test]
@@ -108,19 +124,19 @@ fn built_in_roots_list_returns_expected_shape() {
 #[test]
 fn stdout_log_path_within_root_accepts_relative_path() {
     let root = std::env::temp_dir().join("workspace");
-    assert!(
-        stdout_log_path_within_root(Path::new("logs/server.stdout.log"), &root)
-            .expect("path check should succeed")
-    );
+    assert!(stdout_log_path_within_root(
+        Path::new("logs/server.stdout.log"),
+        &root
+    ));
 }
 
 #[test]
 fn stdout_log_path_within_root_rejects_relative_parent_escape() {
     let root = std::env::temp_dir().join("workspace");
-    assert!(
-        !stdout_log_path_within_root(Path::new("../outside.log"), &root)
-            .expect("path check should succeed")
-    );
+    assert!(!stdout_log_path_within_root(
+        Path::new("../outside.log"),
+        &root
+    ));
 }
 
 #[test]
@@ -128,7 +144,7 @@ fn stdout_log_path_within_root_accepts_absolute_path_after_root_absolutize() {
     let base = std::env::temp_dir();
     let root = absolutize_with_base(Path::new("workspace"), &base);
     let log_path = root.join("logs/server.stdout.log");
-    assert!(stdout_log_path_within_root(&log_path, &root).expect("path check should succeed"));
+    assert!(stdout_log_path_within_root(&log_path, &root));
 }
 
 #[cfg(unix)]
@@ -141,10 +157,10 @@ fn stdout_log_path_within_root_rejects_symlink_escape() {
     std::fs::create_dir_all(&outside).unwrap();
     std::os::unix::fs::symlink(&outside, root.join("logs")).unwrap();
 
-    assert!(
-        !stdout_log_path_within_root(Path::new("logs/server.stdout.log"), &root)
-            .expect("path check should succeed")
-    );
+    assert!(!stdout_log_path_within_root(
+        Path::new("logs/server.stdout.log"),
+        &root
+    ));
 }
 
 #[cfg(unix)]
@@ -156,10 +172,10 @@ fn stdout_log_path_within_root_accepts_symlink_that_stays_within_root() {
     std::fs::create_dir_all(&real_logs).unwrap();
     std::os::unix::fs::symlink(&real_logs, root.join("logs")).unwrap();
 
-    assert!(
-        stdout_log_path_within_root(Path::new("logs/server.stdout.log"), &root)
-            .expect("path check should succeed")
-    );
+    assert!(stdout_log_path_within_root(
+        Path::new("logs/server.stdout.log"),
+        &root
+    ));
 }
 
 #[test]
@@ -229,7 +245,7 @@ fn session_notify_returns_error_without_tokio_time_driver() {
 fn stdout_log_path_within_root_rejects_outside_absolute_path() {
     let root = std::env::temp_dir().join("workspace");
     let log_path = std::env::temp_dir().join("other/server.stdout.log");
-    assert!(!stdout_log_path_within_root(&log_path, &root).expect("path check should succeed"));
+    assert!(!stdout_log_path_within_root(&log_path, &root));
 }
 
 #[test]
@@ -237,76 +253,24 @@ fn stdout_log_path_within_root_accepts_equivalent_root_with_parent_segments() {
     let root = std::env::temp_dir().join("workspace");
     let root_with_parent = root.join("nested").join("..");
     let log_path = root.join("logs/server.stdout.log");
-    assert!(
-        stdout_log_path_within_root(&log_path, &root_with_parent)
-            .expect("path check should succeed")
-    );
+    assert!(stdout_log_path_within_root(&log_path, &root_with_parent));
 }
 
 #[cfg(not(windows))]
 #[test]
-fn stdout_log_path_within_root_reports_non_not_found_prefix_errors() {
-    let tempdir = tempfile::tempdir().unwrap();
-    let root = tempdir.path().join("workspace");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join("logs"), b"not a directory").unwrap();
-
-    let err = stdout_log_path_within_root(Path::new("logs/server.stdout.log"), &root)
-        .expect_err("non-directory prefix should not be treated as missing");
-    assert!(err.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotADirectory)
-    }));
-}
-
-#[cfg(not(windows))]
-#[test]
-fn resolve_connection_cwd_with_base_reports_non_not_found_prefix_errors() {
-    let tempdir = tempfile::tempdir().unwrap();
-    let root = tempdir.path().join("workspace");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join("blocked"), b"not a directory").unwrap();
-
-    let err = resolve_connection_cwd_with_base(Some(&root), Path::new("blocked/server"))
-        .expect_err("non-directory cwd prefix should not be treated as missing");
-    assert!(err.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotADirectory)
-    }));
-}
-
-#[test]
-fn resolve_connection_cwd_with_base_rejects_relative_base() {
-    let err = resolve_connection_cwd_with_base(Some(Path::new("workspace")), Path::new("demo"))
-        .expect_err("relative base should fail closed");
-    assert!(err.to_string().contains("base must be absolute"), "{err:#}");
-}
-
-#[test]
-fn resolve_connection_cwd_with_base_rejects_dot_segments() {
-    for cwd in [Path::new("./demo"), Path::new("nested/../demo")] {
-        let err = resolve_connection_cwd_with_base(Some(Path::new("/workspace")), cwd)
-            .expect_err("dot segments should fail closed");
-        assert!(
-            err.to_string()
-                .contains("relative MCP cwd must not contain '.' or '..' segments"),
-            "{err:#}"
-        );
+fn resolve_connection_cwd_errors_when_current_dir_is_unavailable() {
+    if maybe_run_cwd_unavailable_helper() {
+        return;
     }
-}
 
-#[cfg(not(windows))]
-#[test]
-fn resolve_connection_cwd_rejects_relative_path_without_base() {
-    let err = resolve_connection_cwd(Path::new("relative"))
-        .expect_err("relative cwd should require an explicit base");
-    assert!(
-        err.to_string()
-            .contains("relative MCP cwd requires an explicit absolute base"),
-        "{err:#}"
-    );
+    let current_exe = std::env::current_exe().expect("current test binary");
+    let status = Command::new(current_exe)
+        .arg(CWD_UNAVAILABLE_TEST_FILTER)
+        .env(CWD_UNAVAILABLE_HELPER_ENV, "1")
+        .env("RUST_TEST_THREADS", "1")
+        .status()
+        .expect("spawn current_dir helper process");
+    assert!(status.success(), "helper process should exit cleanly");
 }
 
 #[test]
@@ -323,28 +287,6 @@ fn try_from_config_rejects_invalid_client_config() {
             Ok(_) => panic!("expected error"),
             Err(err) => err,
         };
-    assert!(err.to_string().contains("capabilities"), "err={err:#}");
-}
-
-#[test]
-fn with_protocol_version_rejects_empty_value() {
-    let err = match Manager::new("test-client", "0.0.0", Duration::from_secs(1))
-        .with_protocol_version("   ")
-    {
-        Ok(_) => panic!("empty protocol version should fail fast"),
-        Err(err) => err,
-    };
-    assert!(err.to_string().contains("protocol_version"), "err={err:#}");
-}
-
-#[test]
-fn with_capabilities_rejects_non_object() {
-    let err = match Manager::new("test-client", "0.0.0", Duration::from_secs(1))
-        .with_capabilities(serde_json::json!(1))
-    {
-        Ok(_) => panic!("non-object capabilities should fail fast"),
-        Err(err) => err,
-    };
     assert!(err.to_string().contains("capabilities"), "err={err:#}");
 }
 
@@ -578,49 +520,6 @@ async fn try_prepare_connected_client_reuses_same_cwd_identity() {
     assert_eq!(prepared.server_name, "srv");
 }
 
-#[cfg(unix)]
-#[tokio::test]
-async fn try_prepare_connected_client_reuses_symlink_aware_cwd_identity() {
-    let tempdir = tempfile::tempdir().unwrap();
-    let outside_parent = tempdir.path().join("outside-parent");
-    let outside_child = outside_parent.join("child");
-    let outside_server = outside_parent.join("server");
-    let symlink = tempdir.path().join("link");
-    std::fs::create_dir_all(&outside_child).unwrap();
-    std::os::unix::fs::symlink(&outside_child, &symlink).unwrap();
-
-    let (client_stream, server_stream) = tokio::io::duplex(1024);
-    let (client_read, client_write) = tokio::io::split(client_stream);
-    let _server_stream = server_stream;
-    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
-        .await
-        .unwrap();
-
-    let connected_cwd = symlink.join("..").join("server");
-
-    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
-        .with_trust_mode(TrustMode::Trusted);
-    let server_name = ServerName::parse("srv").unwrap();
-    manager.conns.insert(
-        server_name,
-        Connection {
-            id: 1,
-            child: None,
-            client,
-            handler_tasks: Vec::new(),
-        },
-    );
-    manager
-        .record_connection_cwd("srv", &connected_cwd)
-        .unwrap();
-
-    let prepared = manager
-        .try_prepare_connected_client("srv", Some(&outside_server))
-        .unwrap()
-        .expect("symlink-aware cwd identity should allow reuse");
-    assert_eq!(prepared.server_name, "srv");
-}
-
 #[tokio::test]
 async fn prepare_transport_connect_rejects_different_cwd_context() {
     let (client_stream, server_stream) = tokio::io::duplex(1024);
@@ -643,10 +542,7 @@ async fn prepare_transport_connect_rejects_different_cwd_context() {
         },
     );
     manager
-        .record_connection_cwd(
-            "srv",
-            &explicit_named_cwd_for_direct_connect_test("workspace-a"),
-        )
+        .record_connection_cwd("srv", Path::new("/workspace/a"))
         .unwrap();
 
     let mut servers = std::collections::BTreeMap::new();
@@ -656,11 +552,7 @@ async fn prepare_transport_connect_rejects_different_cwd_context() {
     );
     let config = Config::new(crate::ClientConfig::default(), servers);
 
-    let err = match manager.prepare_transport_connect(
-        &config,
-        "srv",
-        &explicit_named_cwd_for_direct_connect_test("workspace-b"),
-    ) {
+    let err = match manager.prepare_transport_connect(&config, "srv", Path::new("/workspace/b")) {
         Ok(_) => panic!("different cwd should be rejected"),
         Err(err) => err,
     };
@@ -692,10 +584,7 @@ async fn prepare_transport_connect_rejects_reuse_without_config_metadata() {
         },
     );
     manager
-        .record_connection_cwd(
-            "srv",
-            &explicit_named_cwd_for_direct_connect_test("workspace-a"),
-        )
+        .record_connection_cwd("srv", Path::new("/workspace/a"))
         .unwrap();
 
     let mut servers = std::collections::BTreeMap::new();
@@ -705,11 +594,7 @@ async fn prepare_transport_connect_rejects_reuse_without_config_metadata() {
     );
     let config = Config::new(crate::ClientConfig::default(), servers);
 
-    let err = match manager.prepare_transport_connect(
-        &config,
-        "srv",
-        &explicit_named_cwd_for_direct_connect_test("workspace-a"),
-    ) {
+    let err = match manager.prepare_transport_connect(&config, "srv", Path::new("/workspace/a")) {
         Ok(_) => panic!("config-driven reuse without metadata should fail closed"),
         Err(err) => err,
     };
@@ -741,10 +626,7 @@ async fn prepare_transport_connect_rejects_different_effective_config() {
         },
     );
     manager
-        .record_connection_cwd(
-            "srv",
-            &explicit_named_cwd_for_direct_connect_test("workspace-a"),
-        )
+        .record_connection_cwd("srv", Path::new("/workspace/a"))
         .unwrap();
     manager
         .record_connection_server_config(
@@ -760,11 +642,7 @@ async fn prepare_transport_connect_rejects_different_effective_config() {
     );
     let config = Config::new(crate::ClientConfig::default(), servers);
 
-    let err = match manager.prepare_transport_connect(
-        &config,
-        "srv",
-        &explicit_named_cwd_for_direct_connect_test("workspace-a"),
-    ) {
+    let err = match manager.prepare_transport_connect(&config, "srv", Path::new("/workspace/a")) {
         Ok(_) => panic!("different effective config should not be silently reused"),
         Err(err) => err,
     };
@@ -782,7 +660,8 @@ fn prepare_transport_connect_resolves_relative_cwd_from_config_thread_root() {
     let expected_cwd = tempdir.path().join("workspace").join("demo");
     let outside = tempfile::tempdir().unwrap();
 
-    let _cwd_guard = CurrentDirTestGuard::acquire();
+    let _guard = cwd_test_guard();
+    let _cwd_restore = CurrentDirRestoreGuard::capture();
     std::env::set_current_dir(outside.path()).expect("enter outside dir");
 
     let mut servers = std::collections::BTreeMap::new();
@@ -792,7 +671,7 @@ fn prepare_transport_connect_resolves_relative_cwd_from_config_thread_root() {
     );
     let config = Config::new(crate::ClientConfig::default(), servers)
         .with_path(config_path)
-        .unwrap();
+        .expect("absolute config path");
 
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
         .with_trust_mode(TrustMode::Trusted);
@@ -1057,7 +936,7 @@ async fn connect_io_performs_initialize_and_exposes_result() {
         let response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
+            "result": { "hello": "world" },
         });
         let mut response_line = serde_json::to_string(&response).unwrap();
         response_line.push('\n');
@@ -1083,7 +962,7 @@ async fn connect_io_performs_initialize_and_exposes_result() {
     assert!(manager.is_connected("srv"));
     assert_eq!(
         manager.initialize_result("srv").unwrap(),
-        &serde_json::json!({ "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" })
+        &serde_json::json!({ "hello": "world" })
     );
 
     server_task.await.unwrap();
@@ -1095,7 +974,7 @@ async fn connect_io_performs_initialize_and_exposes_result() {
 }
 
 #[tokio::test]
-async fn server_request_handler_sync_panic_disables_future_dispatch() {
+async fn server_request_handler_panic_is_bridged_to_error_response() {
     let (client_stream, server_stream) = tokio::io::duplex(2048);
     let (client_read, client_write) = tokio::io::split(client_stream);
     let (server_read, mut server_write) = tokio::io::split(server_stream);
@@ -1112,7 +991,7 @@ async fn server_request_handler_sync_panic_disables_future_dispatch() {
         let response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
+            "result": { "hello": "world" },
         });
         let mut response_line = serde_json::to_string(&response).unwrap();
         response_line.push('\n');
@@ -1155,13 +1034,45 @@ async fn server_request_handler_sync_panic_disables_future_dispatch() {
             sync_panic_resp_value["error"]["message"]
                 .as_str()
                 .unwrap_or("")
-                .contains("panicked and was disabled"),
+                .contains("panicked"),
             "{sync_panic_resp_value}"
+        );
+
+        let async_panic_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 43,
+            "method": "demo/boom",
+            "params": { "x": 2 },
+        });
+        let mut async_panic_request_line = serde_json::to_string(&async_panic_request).unwrap();
+        async_panic_request_line.push('\n');
+        server_write
+            .write_all(async_panic_request_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let async_panic_resp_line = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let async_panic_resp_value: Value = serde_json::from_str(&async_panic_resp_line).unwrap();
+
+        assert_eq!(async_panic_resp_value["jsonrpc"], "2.0");
+        assert_eq!(async_panic_resp_value["id"], 43);
+        assert_eq!(async_panic_resp_value["error"]["code"], -32000);
+        assert!(
+            async_panic_resp_value["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("panicked"),
+            "{async_panic_resp_value}"
         );
 
         let ok_request = serde_json::json!({
             "jsonrpc": "2.0",
-            "id": 43,
+            "id": 44,
             "method": "demo/ok",
             "params": { "x": 3 },
         });
@@ -1179,14 +1090,9 @@ async fn server_request_handler_sync_panic_disables_future_dispatch() {
             .unwrap()
             .unwrap();
         let ok_resp_value: Value = serde_json::from_str(&ok_resp_line).unwrap();
-
         assert_eq!(ok_resp_value["jsonrpc"], "2.0");
-        assert_eq!(ok_resp_value["id"], 43);
-        assert_eq!(ok_resp_value["error"]["code"], -32601);
-        assert_eq!(
-            ok_resp_value["error"]["message"],
-            "no request handler installed"
-        );
+        assert_eq!(ok_resp_value["id"], 44);
+        assert_eq!(ok_resp_value["result"], serde_json::json!({ "ok": true }));
     });
 
     let handler: ServerRequestHandler = Arc::new(|ctx| {
@@ -1195,120 +1101,6 @@ async fn server_request_handler_sync_panic_disables_future_dispatch() {
         }
         Box::pin(async move {
             match ctx.method.as_str() {
-                "demo/ok" => ServerRequestOutcome::Ok(serde_json::json!({ "ok": true })),
-                _ => ServerRequestOutcome::MethodNotFound,
-            }
-        })
-    });
-
-    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
-        .with_trust_mode(TrustMode::Trusted)
-        .with_server_request_handler(handler);
-    manager
-        .connect_io("srv", client_read, client_write)
-        .await
-        .unwrap();
-
-    server_task.await.unwrap();
-    assert!(manager.take_connection("srv").is_some());
-}
-
-#[tokio::test]
-async fn server_request_handler_async_panic_disables_future_dispatch() {
-    let (client_stream, server_stream) = tokio::io::duplex(2048);
-    let (client_read, client_write) = tokio::io::split(client_stream);
-    let (server_read, mut server_write) = tokio::io::split(server_stream);
-
-    let server_task = tokio::spawn(async move {
-        let mut lines = tokio::io::BufReader::new(server_read).lines();
-
-        let init_line = lines.next_line().await.unwrap().unwrap();
-        let init_value: Value = serde_json::from_str(&init_line).unwrap();
-        assert_eq!(init_value["jsonrpc"], "2.0");
-        assert_eq!(init_value["method"], "initialize");
-        let id = init_value["id"].clone();
-
-        let response = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
-        });
-        let mut response_line = serde_json::to_string(&response).unwrap();
-        response_line.push('\n');
-        server_write
-            .write_all(response_line.as_bytes())
-            .await
-            .unwrap();
-        server_write.flush().await.unwrap();
-
-        let note_line = lines.next_line().await.unwrap().unwrap();
-        let note_value: Value = serde_json::from_str(&note_line).unwrap();
-        assert_eq!(note_value["jsonrpc"], "2.0");
-        assert_eq!(note_value["method"], "notifications/initialized");
-
-        let panic_request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 44,
-            "method": "demo/boom",
-            "params": { "x": 2 },
-        });
-        let mut panic_request_line = serde_json::to_string(&panic_request).unwrap();
-        panic_request_line.push('\n');
-        server_write
-            .write_all(panic_request_line.as_bytes())
-            .await
-            .unwrap();
-        server_write.flush().await.unwrap();
-
-        let panic_resp_line = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let panic_resp_value: Value = serde_json::from_str(&panic_resp_line).unwrap();
-        assert_eq!(panic_resp_value["jsonrpc"], "2.0");
-        assert_eq!(panic_resp_value["id"], 44);
-        assert_eq!(panic_resp_value["error"]["code"], -32000);
-        assert!(
-            panic_resp_value["error"]["message"]
-                .as_str()
-                .unwrap_or("")
-                .contains("panicked and was disabled"),
-            "{panic_resp_value}"
-        );
-
-        let ok_request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 45,
-            "method": "demo/ok",
-            "params": { "x": 3 },
-        });
-        let mut ok_request_line = serde_json::to_string(&ok_request).unwrap();
-        ok_request_line.push('\n');
-        server_write
-            .write_all(ok_request_line.as_bytes())
-            .await
-            .unwrap();
-        server_write.flush().await.unwrap();
-
-        let ok_resp_line = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let ok_resp_value: Value = serde_json::from_str(&ok_resp_line).unwrap();
-        assert_eq!(ok_resp_value["jsonrpc"], "2.0");
-        assert_eq!(ok_resp_value["id"], 45);
-        assert_eq!(ok_resp_value["error"]["code"], -32601);
-        assert_eq!(
-            ok_resp_value["error"]["message"],
-            "no request handler installed"
-        );
-    });
-
-    let handler: ServerRequestHandler = Arc::new(|ctx| {
-        Box::pin(async move {
-            match ctx.method.as_str() {
                 "demo/boom" => panic!("boom"),
                 "demo/ok" => ServerRequestOutcome::Ok(serde_json::json!({ "ok": true })),
                 _ => ServerRequestOutcome::MethodNotFound,
@@ -1325,190 +1117,6 @@ async fn server_request_handler_async_panic_disables_future_dispatch() {
         .unwrap();
 
     server_task.await.unwrap();
-    assert!(manager.take_connection("srv").is_some());
-}
-
-#[tokio::test]
-async fn server_request_handler_response_write_failure_disables_cached_connection() {
-    let (client_stream, server_stream) = tokio::io::duplex(2048);
-    let (client_read, client_write) = tokio::io::split(client_stream);
-    let (server_read, mut server_write) = tokio::io::split(server_stream);
-    let respond_after_read_closed = Arc::new(tokio::sync::Notify::new());
-
-    let server_task = tokio::spawn({
-        let respond_after_read_closed = Arc::clone(&respond_after_read_closed);
-        async move {
-            let mut lines = tokio::io::BufReader::new(server_read).lines();
-
-            let init_line = lines.next_line().await.unwrap().unwrap();
-            let init_value: Value = serde_json::from_str(&init_line).unwrap();
-            assert_eq!(init_value["jsonrpc"], "2.0");
-            assert_eq!(init_value["method"], "initialize");
-            let id = init_value["id"].clone();
-
-            let response = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
-            });
-            let mut response_line = serde_json::to_string(&response).unwrap();
-            response_line.push('\n');
-            server_write
-                .write_all(response_line.as_bytes())
-                .await
-                .unwrap();
-            server_write.flush().await.unwrap();
-
-            let note_line = lines.next_line().await.unwrap().unwrap();
-            let note_value: Value = serde_json::from_str(&note_line).unwrap();
-            assert_eq!(note_value["jsonrpc"], "2.0");
-            assert_eq!(note_value["method"], "notifications/initialized");
-
-            let request = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 46,
-                "method": "demo/ok",
-                "params": { "x": 4 },
-            });
-            let mut request_line = serde_json::to_string(&request).unwrap();
-            request_line.push('\n');
-            server_write
-                .write_all(request_line.as_bytes())
-                .await
-                .unwrap();
-            server_write.flush().await.unwrap();
-
-            drop(lines);
-            respond_after_read_closed.notify_one();
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    });
-
-    let handler: ServerRequestHandler = Arc::new({
-        let respond_after_read_closed = Arc::clone(&respond_after_read_closed);
-        move |ctx| {
-            let respond_after_read_closed = Arc::clone(&respond_after_read_closed);
-            Box::pin(async move {
-                assert_eq!(ctx.method, "demo/ok");
-                respond_after_read_closed.notified().await;
-                ServerRequestOutcome::Ok(serde_json::json!({ "ok": true }))
-            })
-        }
-    });
-
-    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
-        .with_trust_mode(TrustMode::Trusted)
-        .with_server_request_handler(handler);
-    manager
-        .connect_io("srv", client_read, client_write)
-        .await
-        .unwrap();
-
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while manager.is_connected("srv") {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("request handler write failure should stop the dispatch task");
-
-    assert!(manager.take_connection("srv").is_none());
-    server_task.await.unwrap();
-}
-
-#[tokio::test]
-async fn server_notification_handler_panic_stops_future_dispatch() {
-    let (client_stream, server_stream) = tokio::io::duplex(2048);
-    let (client_read, client_write) = tokio::io::split(client_stream);
-    let (server_read, mut server_write) = tokio::io::split(server_stream);
-
-    let server_task = tokio::spawn(async move {
-        let mut lines = tokio::io::BufReader::new(server_read).lines();
-
-        let init_line = lines.next_line().await.unwrap().unwrap();
-        let init_value: Value = serde_json::from_str(&init_line).unwrap();
-        assert_eq!(init_value["jsonrpc"], "2.0");
-        assert_eq!(init_value["method"], "initialize");
-        let id = init_value["id"].clone();
-
-        let response = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
-        });
-        let mut response_line = serde_json::to_string(&response).unwrap();
-        response_line.push('\n');
-        server_write
-            .write_all(response_line.as_bytes())
-            .await
-            .unwrap();
-        server_write.flush().await.unwrap();
-
-        let initialized_line = lines.next_line().await.unwrap().unwrap();
-        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
-        assert_eq!(initialized_value["jsonrpc"], "2.0");
-        assert_eq!(initialized_value["method"], "notifications/initialized");
-
-        for notification in [
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "demo/boom",
-                "params": { "x": 1 },
-            }),
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "demo/ok",
-                "params": { "x": 2 },
-            }),
-        ] {
-            let mut line = serde_json::to_string(&notification).unwrap();
-            line.push('\n');
-            server_write.write_all(line.as_bytes()).await.unwrap();
-            server_write.flush().await.unwrap();
-        }
-    });
-
-    let notification_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let (ok_seen_tx, mut ok_seen_rx) = tokio::sync::mpsc::unbounded_channel();
-    let handler_calls = std::sync::Arc::clone(&notification_calls);
-    let handler: ServerNotificationHandler = Arc::new(move |ctx| {
-        let handler_calls = std::sync::Arc::clone(&handler_calls);
-        let ok_seen_tx = ok_seen_tx.clone();
-        Box::pin(async move {
-            handler_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            match ctx.method.as_str() {
-                "demo/boom" => panic!("boom"),
-                "demo/ok" => {
-                    ok_seen_tx
-                        .send(())
-                        .expect("ok notification should only send while receiver is alive");
-                }
-                _ => {}
-            }
-        })
-    });
-
-    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
-        .with_trust_mode(TrustMode::Trusted)
-        .with_server_notification_handler(handler);
-    manager
-        .connect_io("srv", client_read, client_write)
-        .await
-        .unwrap();
-
-    server_task.await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    assert_eq!(
-        notification_calls.load(std::sync::atomic::Ordering::SeqCst),
-        1
-    );
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), ok_seen_rx.recv())
-            .await
-            .is_err(),
-        "notification handler should be disabled after panic"
-    );
     assert!(manager.take_connection("srv").is_some());
 }
 
@@ -1530,7 +1138,7 @@ async fn request_connected_disconnects_after_protocol_error() {
         let response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": init_id,
-            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
+            "result": { "hello": "world" },
         });
         let mut response_line = serde_json::to_string(&response).unwrap();
         response_line.push('\n');
@@ -1612,7 +1220,7 @@ async fn request_connected_accepts_trimmed_server_name() {
         let response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": init_id,
-            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
+            "result": { "hello": "world" },
         });
         let mut response_line = serde_json::to_string(&response).unwrap();
         response_line.push('\n');
@@ -1661,7 +1269,7 @@ async fn request_connected_accepts_trimmed_server_name() {
     assert!(manager.is_connected(" srv "));
     assert_eq!(
         manager.initialize_result(" srv ").unwrap(),
-        &serde_json::json!({ "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" })
+        &serde_json::json!({ "hello": "world" })
     );
     assert_eq!(
         manager
@@ -1702,7 +1310,7 @@ async fn request_connected_timeout_late_response_does_not_disconnect() {
         let init_response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": init_id,
-            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
+            "result": { "hello": "world" },
         });
         let mut init_response_line = serde_json::to_string(&init_response).unwrap();
         init_response_line.push('\n');
@@ -1811,7 +1419,7 @@ async fn connect_io_session_returns_session_and_supports_requests() {
         let response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
+            "result": { "hello": "world" },
         });
         let mut response_line = serde_json::to_string(&response).unwrap();
         response_line.push('\n');
@@ -1858,7 +1466,7 @@ async fn connect_io_session_returns_session_and_supports_requests() {
     assert!(!manager.is_connected("srv"));
     assert_eq!(
         session.initialize_result(),
-        &serde_json::json!({ "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" })
+        &serde_json::json!({ "hello": "world" })
     );
     assert_eq!(
         session
@@ -2197,7 +1805,7 @@ async fn session_request_timeout_late_response_keeps_session_usable() {
         let init_response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": init_id,
-            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
+            "result": { "hello": "world" },
         });
         let mut init_response_line = serde_json::to_string(&init_response).unwrap();
         init_response_line.push('\n');
@@ -2455,54 +2063,6 @@ async fn connect_io_rejects_initialize_protocol_version_mismatch() {
     assert!(
         !manager.server_handler_timeout_counts().contains_key("srv"),
         "failed initialize should not retain timeout counter entry"
-    );
-
-    server_task.await.unwrap();
-}
-
-#[tokio::test]
-async fn connect_io_rejects_missing_initialize_protocol_version_in_strict_mode() {
-    let (client_stream, server_stream) = tokio::io::duplex(1024);
-    let (client_read, client_write) = tokio::io::split(client_stream);
-    let (server_read, mut server_write) = tokio::io::split(server_stream);
-
-    let server_task = tokio::spawn(async move {
-        let mut lines = tokio::io::BufReader::new(server_read).lines();
-
-        let init_line = lines.next_line().await.unwrap().unwrap();
-        let init_value: Value = serde_json::from_str(&init_line).unwrap();
-        assert_eq!(init_value["jsonrpc"], "2.0");
-        assert_eq!(init_value["method"], "initialize");
-        let id = init_value["id"].clone();
-
-        let response = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": { "hello": "world" },
-        });
-        let mut response_line = serde_json::to_string(&response).unwrap();
-        response_line.push('\n');
-        server_write
-            .write_all(response_line.as_bytes())
-            .await
-            .unwrap();
-        server_write.flush().await.unwrap();
-    });
-
-    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
-        .with_trust_mode(TrustMode::Trusted);
-    let err = match manager
-        .connect_io_session("srv", client_read, client_write)
-        .await
-    {
-        Ok(_) => panic!("expected missing protocolVersion to fail in strict mode"),
-        Err(err) => err,
-    };
-    assert!(err.to_string().contains("missing protocolVersion"));
-    assert_eq!(manager.server_handler_timeout_count("srv"), 0);
-    assert!(
-        manager.protocol_version_mismatches().is_empty(),
-        "failed initialize should not retain mismatch state"
     );
 
     server_task.await.unwrap();
@@ -3195,110 +2755,6 @@ async fn server_notification_handler_timeout_is_counted() {
 }
 
 #[tokio::test]
-async fn server_notification_handler_panic_disables_future_dispatch() {
-    let (client_stream, server_stream) = tokio::io::duplex(1024);
-    let (client_read, client_write) = tokio::io::split(client_stream);
-    let (server_read, mut server_write) = tokio::io::split(server_stream);
-    let handler_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let handler_calls_for_server = Arc::clone(&handler_calls);
-
-    let server_task = tokio::spawn(async move {
-        let mut lines = tokio::io::BufReader::new(server_read).lines();
-
-        let init_line = lines.next_line().await.unwrap().unwrap();
-        let init_value: Value = serde_json::from_str(&init_line).unwrap();
-        assert_eq!(init_value["jsonrpc"], "2.0");
-        assert_eq!(init_value["method"], "initialize");
-        let id = init_value["id"].clone();
-
-        let response = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": { "protocolVersion": MCP_PROTOCOL_VERSION },
-        });
-        let mut response_line = serde_json::to_string(&response).unwrap();
-        response_line.push('\n');
-        server_write
-            .write_all(response_line.as_bytes())
-            .await
-            .unwrap();
-        server_write.flush().await.unwrap();
-
-        let note_line = lines.next_line().await.unwrap().unwrap();
-        let note_value: Value = serde_json::from_str(&note_line).unwrap();
-        assert_eq!(note_value["jsonrpc"], "2.0");
-        assert_eq!(note_value["method"], "notifications/initialized");
-
-        let first_note = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "demo/notify",
-            "params": { "seq": 1 },
-        });
-        let mut first_note_line = serde_json::to_string(&first_note).unwrap();
-        first_note_line.push('\n');
-        server_write
-            .write_all(first_note_line.as_bytes())
-            .await
-            .unwrap();
-        server_write.flush().await.unwrap();
-
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while handler_calls_for_server.load(std::sync::atomic::Ordering::Relaxed) < 1 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-
-        let second_note = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "demo/notify",
-            "params": { "seq": 2 },
-        });
-        let mut second_note_line = serde_json::to_string(&second_note).unwrap();
-        second_note_line.push('\n');
-        server_write
-            .write_all(second_note_line.as_bytes())
-            .await
-            .unwrap();
-        server_write.flush().await.unwrap();
-
-        let eof = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            eof.is_none(),
-            "expected EOF after notification handler panic"
-        );
-    });
-
-    let calls_for_handler = Arc::clone(&handler_calls);
-    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
-        .with_trust_mode(TrustMode::Trusted)
-        .with_server_notification_handler(Arc::new(move |_ctx| {
-            let calls_for_handler = Arc::clone(&calls_for_handler);
-            Box::pin(async move {
-                calls_for_handler.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                panic!("boom notify");
-            })
-        }));
-    manager
-        .connect_io("srv", client_read, client_write)
-        .await
-        .unwrap();
-
-    server_task.await.unwrap();
-    assert_eq!(handler_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
-
-    let conn = manager
-        .take_connection("srv")
-        .expect("connection should remain owned");
-    let status = conn.wait().await.unwrap();
-    assert!(status.is_none());
-}
-
-#[tokio::test]
 async fn connect_io_reconnects_when_existing_connection_is_closed() {
     let (client_stream, server_stream) = tokio::io::duplex(1024);
     let (client_read, client_write) = tokio::io::split(client_stream);
@@ -3316,7 +2772,7 @@ async fn connect_io_reconnects_when_existing_connection_is_closed() {
         let response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
+            "result": { "hello": "world" },
         });
         let mut response_line = serde_json::to_string(&response).unwrap();
         response_line.push('\n');
@@ -3375,7 +2831,7 @@ async fn connect_io_reconnects_when_existing_connection_is_closed() {
         let response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
+            "result": { "hello": "world" },
         });
         let mut response_line = serde_json::to_string(&response).unwrap();
         response_line.push('\n');
@@ -3536,7 +2992,7 @@ async fn untrusted_manager_refuses_stdio_spawn() {
     let server_cfg = ServerConfig::stdio(vec!["mcp-server".to_string()]).unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
+        .connect("srv", &server_cfg, Path::new("."))
         .await
         .unwrap_err();
     assert!(err.to_string().contains("untrusted mode"));
@@ -3579,7 +3035,7 @@ async fn untrusted_manager_refuses_unix_connect() {
     let server_cfg = ServerConfig::unix(PathBuf::from("/tmp/mcp.sock")).unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
+        .connect("srv", &server_cfg, Path::new("."))
         .await
         .unwrap_err();
     assert!(err.to_string().contains("untrusted mode"));
@@ -3596,7 +3052,7 @@ async fn untrusted_manager_refuses_streamable_http_env_secrets() {
         .unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
+        .connect("srv", &server_cfg, Path::new("."))
         .await
         .unwrap_err();
     assert!(err.to_string().contains("bearer token env var"));
@@ -3614,7 +3070,7 @@ async fn untrusted_manager_refuses_streamable_http_env_header_secrets() {
         .insert("x-api-key".to_string(), "MCP_API_KEY".to_string());
 
     let err = manager
-        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
+        .connect("srv", &server_cfg, Path::new("."))
         .await
         .unwrap_err();
     assert!(err.to_string().contains("http header env vars"));
@@ -3628,7 +3084,7 @@ async fn untrusted_manager_refuses_streamable_http_non_https_urls() {
     let server_cfg = ServerConfig::streamable_http("http://example.com/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
+        .connect("srv", &server_cfg, Path::new("."))
         .await
         .unwrap_err();
     assert!(err.to_string().contains("non-https"));
@@ -3642,7 +3098,7 @@ async fn untrusted_manager_refuses_streamable_http_localhost() {
     let server_cfg = ServerConfig::streamable_http("https://localhost/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
+        .connect("srv", &server_cfg, Path::new("."))
         .await
         .unwrap_err();
     assert!(err.to_string().contains("localhost"));
@@ -3656,7 +3112,7 @@ async fn untrusted_manager_refuses_streamable_http_localdomain() {
     let server_cfg = ServerConfig::streamable_http("https://localhost.localdomain/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
+        .connect("srv", &server_cfg, Path::new("."))
         .await
         .unwrap_err();
     assert!(err.to_string().contains("localdomain"));
@@ -3670,7 +3126,7 @@ async fn untrusted_manager_refuses_streamable_http_single_label_hosts() {
     let server_cfg = ServerConfig::streamable_http("https://example/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
+        .connect("srv", &server_cfg, Path::new("."))
         .await
         .unwrap_err();
     assert!(err.to_string().contains("single-label"));
@@ -3684,7 +3140,7 @@ async fn untrusted_manager_refuses_streamable_http_private_ip() {
     let server_cfg = ServerConfig::streamable_http("https://192.168.0.10/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
+        .connect("srv", &server_cfg, Path::new("."))
         .await
         .unwrap_err();
     assert!(
@@ -3701,7 +3157,7 @@ async fn untrusted_manager_refuses_streamable_http_ipv4_mapped_ipv6_loopback() {
     let server_cfg = ServerConfig::streamable_http("https://[::ffff:127.0.0.1]/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
+        .connect("srv", &server_cfg, Path::new("."))
         .await
         .unwrap_err();
     assert!(
@@ -3718,7 +3174,7 @@ async fn untrusted_manager_refuses_streamable_http_nat64_well_known_prefix_priva
     let server_cfg = ServerConfig::streamable_http("https://[64:ff9b::c0a8:0001]/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
+        .connect("srv", &server_cfg, Path::new("."))
         .await
         .unwrap_err();
     assert!(
@@ -3735,7 +3191,7 @@ async fn untrusted_manager_refuses_streamable_http_6to4_private_ip() {
     let server_cfg = ServerConfig::streamable_http("https://[2002:c0a8:0001::]/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
+        .connect("srv", &server_cfg, Path::new("."))
         .await
         .unwrap_err();
     assert!(
@@ -3752,7 +3208,7 @@ async fn untrusted_manager_refuses_streamable_http_discard_only_ipv6_prefix() {
     let server_cfg = ServerConfig::streamable_http("https://[100::1]/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
+        .connect("srv", &server_cfg, Path::new("."))
         .await
         .unwrap_err();
     assert!(
@@ -3769,7 +3225,7 @@ async fn untrusted_manager_refuses_streamable_http_ipv6_benchmark_prefix() {
     let server_cfg = ServerConfig::streamable_http("https://[2001:2::1]/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
+        .connect("srv", &server_cfg, Path::new("."))
         .await
         .unwrap_err();
     assert!(
@@ -3786,7 +3242,7 @@ async fn untrusted_manager_refuses_streamable_http_url_credentials() {
     let server_cfg = ServerConfig::streamable_http("https://user:pass@example.com/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
+        .connect("srv", &server_cfg, Path::new("."))
         .await
         .unwrap_err();
     assert!(err.to_string().contains("url credentials"));
@@ -3809,7 +3265,7 @@ async fn untrusted_manager_refuses_streamable_http_hostname_resolving_to_non_glo
     let server_cfg = ServerConfig::streamable_http("https://localhost/mcp").unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
+        .connect("srv", &server_cfg, Path::new("."))
         .await
         .unwrap_err();
     assert!(
@@ -4040,7 +3496,7 @@ async fn argv_placeholder_errors_do_not_leak_plain_argv() {
     .unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
+        .connect("srv", &server_cfg, Path::new("."))
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -4090,7 +3546,7 @@ async fn url_placeholder_errors_do_not_leak_plain_url() {
             .unwrap();
 
     let err = manager
-        .connect("srv", &server_cfg, &explicit_cwd_for_direct_connect_test())
+        .connect("srv", &server_cfg, Path::new("."))
         .await
         .unwrap_err();
     let msg = err.to_string();

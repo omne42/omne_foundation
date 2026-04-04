@@ -1,5 +1,4 @@
 use super::*;
-use crate::ServerName;
 use std::path::PathBuf;
 
 #[tokio::test]
@@ -257,32 +256,6 @@ fn client_config_validate_rejects_empty_protocol_version() {
 }
 
 #[test]
-fn server_config_constructor_rejects_streamable_http_url_without_http_scheme() {
-    let err = ServerConfig::streamable_http("ws://example.com/mcp").unwrap_err();
-    assert!(
-        err.to_string().contains("must use http or https"),
-        "err={err:#}"
-    );
-}
-
-#[test]
-fn server_config_constructor_rejects_streamable_http_url_without_host() {
-    let err = ServerConfig::streamable_http("http://:80/mcp").unwrap_err();
-    assert!(err.to_string().contains("invalid url"), "err={err:#}");
-}
-
-#[test]
-fn server_config_constructor_rejects_split_streamable_http_url_without_http_scheme() {
-    let err =
-        ServerConfig::streamable_http_split("https://example.com/sse", "ftp://example.com/mcp")
-            .unwrap_err();
-    assert!(
-        err.to_string().contains("http_url must use http or https"),
-        "err={err:#}"
-    );
-}
-
-#[test]
 fn client_config_validate_rejects_non_object_capabilities() {
     let cfg = ClientConfig {
         capabilities: Some(serde_json::json!(1)),
@@ -302,40 +275,6 @@ fn config_validate_rejects_invalid_client_roots() {
     };
     let cfg = Config::new(client, std::collections::BTreeMap::new());
     assert!(cfg.validate().is_err());
-}
-
-#[test]
-fn config_with_path_rejects_relative_path() {
-    let err = Config::new(ClientConfig::default(), std::collections::BTreeMap::new())
-        .with_path(PathBuf::from("mcp.json"))
-        .expect_err("relative config path should fail fast");
-    assert!(err.to_string().contains("must be absolute"), "err={err:#}");
-}
-
-#[test]
-fn config_with_path_accepts_absolute_path() {
-    let path = std::env::temp_dir().join("mcp.json");
-    let cfg = Config::new(ClientConfig::default(), std::collections::BTreeMap::new())
-        .with_path(path.clone())
-        .expect("absolute config path should succeed");
-    assert_eq!(cfg.path(), Some(path.as_path()));
-}
-
-#[test]
-fn config_server_lookup_normalizes_trimmed_server_name() {
-    let mut servers = std::collections::BTreeMap::new();
-    servers.insert(
-        ServerName::parse("remote").expect("server name"),
-        ServerConfig::stdio(vec!["mcp-remote".to_string()]).expect("server config"),
-    );
-    let cfg = Config::new(ClientConfig::default(), servers);
-
-    assert!(cfg.server("remote").is_some());
-    assert!(cfg.server(" remote ").is_some());
-    assert!(
-        cfg.server_named(&ServerName::parse(" remote ").expect("normalized server name"))
-            .is_some()
-    );
 }
 
 #[test]
@@ -569,23 +508,6 @@ async fn load_parses_unix_transport_and_resolves_relative_path() {
 }
 
 #[tokio::test]
-async fn load_denies_unix_transport_parent_dir_escape() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{ "version": 1, "servers": { "sock": { "transport": "unix", "unix_path": "../sock/mcp.sock" } } }"#,
-    )
-    .await
-    .unwrap();
-
-    let err = Config::load(dir.path(), None).await.unwrap_err();
-    assert!(
-        err.to_string().contains("unix_path") && err.to_string().contains("`..`"),
-        "unexpected error: {err}"
-    );
-}
-
-#[tokio::test]
 async fn load_parses_streamable_http_transport() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(
@@ -647,50 +569,6 @@ async fn load_parses_streamable_http_transport_with_split_urls() {
     assert_eq!(server.http_url(), Some("https://example.com/mcp"));
 }
 
-#[tokio::test]
-async fn load_denies_streamable_http_with_invalid_url_syntax() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "url": "https://exa mple.com/mcp" } } }"#,
-    )
-    .await
-    .unwrap();
-
-    let err = Config::load(dir.path(), None).await.unwrap_err();
-    assert!(err.to_string().contains("invalid url"), "err={err:#}");
-}
-
-#[tokio::test]
-async fn load_denies_streamable_http_with_non_http_scheme() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "url": "ws://example.com/mcp" } } }"#,
-    )
-    .await
-    .unwrap();
-
-    let err = Config::load(dir.path(), None).await.unwrap_err();
-    assert!(
-        err.to_string().contains("must use http or https"),
-        "err={err:#}"
-    );
-}
-
-#[tokio::test]
-async fn load_denies_streamable_http_split_url_without_host() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "sse_url": "https://example.com/sse", "http_url": "https://user@:443/mcp" } } }"#,
-    )
-    .await
-    .unwrap();
-
-    let err = Config::load(dir.path(), None).await.unwrap_err();
-    assert!(err.to_string().contains("invalid http_url"), "err={err:#}");
-}
 #[tokio::test]
 async fn load_denies_streamable_http_with_url_and_split_urls() {
     let dir = tempfile::tempdir().unwrap();
@@ -882,37 +760,6 @@ async fn load_denies_streamable_http_with_reserved_http_header_name() {
 }
 
 #[tokio::test]
-async fn load_denies_streamable_http_with_transport_owned_http_headers() {
-    for header in ["Accept", "Content-Type", "mcp-session-id"] {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            format!(
-                r#"{{
-  "version": 1,
-  "servers": {{
-    "litellm": {{
-      "transport": "streamable_http",
-      "url": "https://example.com/mcp",
-      "http_headers": {{ "{header}": "override" }}
-    }}
-  }}
-}}"#
-            ),
-        )
-        .await
-        .unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("http_headers key is reserved by transport"),
-            "header={header} err={err:#}"
-        );
-    }
-}
-
-#[tokio::test]
 async fn load_denies_streamable_http_with_reserved_env_http_header_name() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(
@@ -964,37 +811,6 @@ async fn load_denies_streamable_http_with_reserved_authorization_env_header_name
             .contains("env_http_headers key is reserved by transport"),
         "err={err:#}"
     );
-}
-
-#[tokio::test]
-async fn load_denies_streamable_http_with_transport_owned_env_http_headers() {
-    for header in ["Accept", "Content-Type", "mcp-session-id"] {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            format!(
-                r#"{{
-  "version": 1,
-  "servers": {{
-    "litellm": {{
-      "transport": "streamable_http",
-      "url": "https://example.com/mcp",
-      "env_http_headers": {{ "{header}": "MCP_TOKEN" }}
-    }}
-  }}
-}}"#
-            ),
-        )
-        .await
-        .unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("env_http_headers key is reserved by transport"),
-            "header={header} err={err:#}"
-        );
-    }
 }
 
 #[tokio::test]
@@ -1181,24 +997,6 @@ async fn load_override_path_is_fail_closed() {
         "err={msg}"
     );
     assert!(msg.contains("missing.json"), "err={msg}");
-}
-
-#[tokio::test]
-async fn load_fails_closed_when_candidate_discovery_root_is_missing() {
-    let tempdir = tempfile::tempdir().unwrap();
-    let missing_root = tempdir.path().join("missing-root");
-    drop(tempdir);
-
-    let err = Config::load(&missing_root, None).await.unwrap_err();
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("inspect MCP config root before candidate discovery"),
-        "err={msg}"
-    );
-    assert!(
-        msg.contains(&missing_root.display().to_string()),
-        "err={msg}"
-    );
 }
 
 #[tokio::test]

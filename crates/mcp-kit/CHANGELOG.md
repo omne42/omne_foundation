@@ -10,46 +10,13 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
-- `mcp-kit` 现在显式标记 `publish = false`，因为它当前直接依赖同 workspace 的 `config-kit`，发布契约收口为 Git / monorepo 复用而不是暗示可独立 crates.io 发布。
-- `mcp-kit`：strict `protocol_version` 校验现在对 initialize 结果里缺失 `protocolVersion` 也会 fail-closed；服务端不能再通过直接省略字段绕过严格握手检查。
-- `mcp-kit`：crate docs / README 现在明确说明 `SharedManager` 只会在借出连接后释放 shared manager lock，而 same-server 生命周期读门禁会一直持有到对应 JSON-RPC I/O 完成；同 server request/notify 仍可 overlap，但并发 `disconnect` 不会中途拆掉 in-flight 连接。
-- `mcp-kit`：config/thread-root 驱动的相对 `cwd` 现在对 `.` / `..` segment fail-closed，避免调用方通过词法相对路径静默逃逸出显式 base/thread-root 边界；相关库文档与回归测试同步更新。
-- `mcp-kit`：`streamable_http` / `jsonrpc` 文档里的 `request_timeout` 说明现在与 `mcp-jsonrpc` 主线实现保持一致：它只约束单次 POST 的建连、首个 HTTP response 和非 SSE JSON body 读取，不再声称会截断健康的 POST-as-SSE 持续响应流。
-- `mcp-kit`：`cwd` identity 与 `stdout_log.path` root-boundary 检查现在复用同一套私有路径归一化/已存在前缀 canonicalize helper，减少后续边界修补时两处逻辑漂移的风险，同时保持现有 fail-open/fail-closed 语义不变。
-- `mcp-kit`：`SharedManager::{request,notify,request_connected,notify_connected}` 现在都会在借到连接后把 same-server 生命周期门禁降级成读门禁并持有到对应 JSON-RPC I/O 完成；同 server 的 request/notify 仍可 overlap，但并发 `disconnect("srv")` 不会再中途拆掉借出的连接。
-- `mcp-kit`：`Config::load*` 在候选 `mcp.json` 探测前会先验证 config root 本身存在；缺失/失效 root 不再被静默当成“没有配置文件”并回退为空配置，而是 fail-closed 返回真实文件系统错误。
-- `mcp-kit`：`transport=unix` 的 `unix_path` 现在和 `stdout_log.path` 一样 fail-closed 拒绝 `..` segment；相对 socket 路径仍按 `--root` 解析，但不再允许通过 `../` 静默逃逸 root 边界。
-- `mcp-kit`：server request handler 在响应写回失败时不再吞掉错误继续复用 dispatch loop；现在会立即停掉该 request handler 任务，让 `Manager` 的连接存活性检查把这条坏 session fail-closed 清理掉，并补充回归测试锁住该语义。
-- `mcp-kit`：server request/notification handler 的 panic 隔离边界现在改为 fail-closed。单次 panic 仍会被收口成结构化错误，但对应的 handler dispatch loop 会立即停用，后续消息不再继续复用一个可能已半更新状态的 handler。
-- `mcp-kit`：补充 notification handler panic 后停止后续 dispatch 的回归测试，锁住 request/notification 两条 handler 路径都 fail-closed 的语义。
-- `mcp-kit`：读取或修改进程级 `current_dir()` 的测试现在统一走同一把 cwd guard，并把“恢复原 cwd”收口到单一 RAII helper，避免 `cargo test` 并跑时把不相关用例炸掉。
-- `mcp-kit`：cwd-sensitive manager 测试里的 `current_dir_for_test()` 现在补齐 Windows 条件编译实现，避免跨平台测试矩阵因为 helper 缺失而在 Windows 上编译失败。
-- `mcp-kit`：direct/shared-manager 的显式 `cwd` 复用回归测试现在统一用平台真实绝对路径夹具，不再把 Unix 风格 `"/workspace/..."` 误当成 Windows 上的绝对 base，避免跨平台 CI 因测试夹具失真而假失败。
-- `mcp-kit`：`shared_manager` 测试模块里仅供 Unix/非 Windows 路径夹具使用的 `Path` 导入现在也随平台条件一起裁剪，避免 Windows runner 在 `-D warnings` 下把残留 import 误报成产品回归。
-- `mcp-kit`：direct `Manager` 连接入口的相对 `cwd` 现在会直接 fail-closed，要求调用方显式传入绝对路径；只有 config/thread-root 驱动路径还会解析相对 `cwd`。相关回归测试同步从 ambient `current_dir()` helper 改成显式边界断言。
-- `mcp-kit`：`Config::server(&str)` 现在和 `ServerName::parse(...)` 共享同一套 trim/校验归一化，`" remote "` 这类输入在 config 驱动冷启动路径上不再误报 `unknown mcp server`，与已连接热路径保持一致。
-- `mcp-kit`：`SharedManager` 的公共 async facade 现在补齐了 `ServerName` 值对象入口，`is_connected` / `disconnect` / `request` / `notify` 及其 connected/typed 变体都新增对应的 `*_named` 重载，避免共享并发层继续把已校验 server key 退化回 `&str`。
-- `mcp-kit`：连接复用用到的 cwd identity 不再先做词法 `..` 折叠再 canonicalize；现在会按原始路径查找现存前缀并做 symlink-aware identity 解析，避免不同真实目录在 symlink 场景下被误判成同一个连接上下文。同时，相对 cwd base 现在要求调用方显式提供绝对路径，不再偷偷借 ambient `current_dir()` 扩展边界。
-- `mcp-kit`：`config::load` 里仅在非 Windows 编译的边界回归测试现在也把相关导入放到同一条件编译下，避免 Windows 测试矩阵因为 unused imports 假失败。
-- `mcp-kit`：公开 `ErrorKind` 分类不再退化成英文字符串匹配；config / manager-state 路径改为带类型标记的边界错误，`Error::context` / `with_context` 也会保留原始分类。
-- `mcp-kit`：initialize 握手前的空 `protocol_version` / 非 object `capabilities` 兜底校验现在也会保留 `ErrorKind::Config`，不会再静默退化成 `Other`。
-- `mcp-kit`：`manager::lifecycle` 的 initialize 分类回归测试现在保持在文件尾部，避免 `clippy::items_after_test_module` 让跨平台 CI 假阴性失败。
-- `mcp-kit`：`ErrorKind` 现在会按 `mcp_jsonrpc::Error` 的真实变体分类，底层 transport I/O 故障不再被误标成 `Protocol`；`mcpctl` 的 cwd-unavailable helper 测试也会在退出前恢复有效工作目录，避免留下已删除 cwd 的测试噪音。
-- `mcp-kit`：README、crate docs 和 FAQ 现在明确区分“当前实例内按需重建已关闭连接”和“后台自动重连/daemon 化”，避免文档与实现语义漂移。
-- `mcp-kit`（BREAKING）：`Config::with_path`、`Manager::with_protocol_version` 和 `Manager::with_capabilities` 现在会在构造期做 fail-fast 校验并返回 `Result<Self>`；相对 config path、空 `protocol_version` 和非 object `capabilities` 不再拖到后续 `current_dir()` 解析或 `initialize` 握手时才炸。
-- `mcp-kit`：`SharedManager` 的 config 驱动 `request` / `notify` 现在对已复用连接先走 per-server 读门禁，只把 cold-start / disconnect / reconnect 留在写门禁里；同 server 普通 RPC 在借到 handle 后可并发，而生命周期变更仍会等在读侧收尾后再继续。
-- `mcp-kit`：`shared_manager_request_allows_concurrent_same_server_reuse_after_connect` 回归测试不再假设并发请求的到达顺序固定，只继续验证“两次请求都会在首个响应前抵达 server”，避免把 Tokio 调度先后误判成连接复用回归。
-- `mcp-kit`：`SharedManager` 新增 `spawn_inheriting_handler_scope(...)`，把 handler 子任务回调 `SharedManager` 时的 reentrant fail-fast 语义从“依赖 Tokio task-local 是否碰巧继承”收口成显式入口；同时文档与测试明确了 bare `tokio::spawn(...)` 仍按外部调用处理，不会自动继承 handler scope。
-- `mcp-kit`：`SharedManager::{request_connected,notify_connected}` 现在和 `disconnect` / `disconnect_and_wait` 共用同一条 per-server lifecycle gate，并把 config 驱动 request/notify/connect 路径上的 `cwd` identity 解析挪到 `spawn_blocking` 后台线程，同时复用已解析路径避免重复 canonicalize，减少 async 热路径阻塞并修复 connected I/O 与断连竞态。
-- `mcp-kit`：`SharedManager` 不再作为 crate 根导出与 `Manager` 平级暴露；公开路径收口到 `mcp_kit::shared::SharedManager`，把它明确降级为共享并发策略层而不是协议核心入口。
-- `mcp-kit`：`streamable_http` 的 URL 现在会在 `ServerConfig::{streamable_http,streamable_http_split}`、`ServerConfig::validate()` 和 `Config::load` 边界先做语法校验，提前拒绝非法 URL、非 `http/https` scheme 和缺失 host 的配置；trust policy 仍只负责后续 trusted/untrusted 出站约束。
 - `mcp-kit`：config 驱动的连接复用现在不再只按 server 名短路；`Manager`/`SharedManager` 会记录首次连接的有效 `ServerConfig`，后续复用若缺少配置元数据或配置内容已变化，会 fail-closed 要求先断开重连，避免 `mcp.json` 的 transport/URL/header/argv/env 变更静默失效。
 - `mcp-kit`：typed MCP request/notification 的参数序列化与结果反序列化 helper 现在集中收口到 `mcp.rs`，`Manager` / `SharedManager` / `Session` 复用同一套逻辑，减少协议方法扩展时的重复样板和漂移面。
 - `mcp-kit`：公开 fallible API 现在统一返回 crate 自己的 `mcp_kit::Error` / `mcp_kit::Result`，并通过 `ErrorKind` 稳定区分 config、connection、protocol、timeout、manager-state 等失败类别；不再把 `Config` / `Manager` / `SharedManager` / `Session` 的外部错误边界直接暴露成 `anyhow::Result`。
 - `mcp-kit`：`ServerNameError` 的 structured error code 映射现在在内部字面量漂移时会回退到稳定的 internal code，而不是因为 `ErrorCode::try_new(...)` 直接 panic。
 - `mcp-kit`：crate 级 `README.md` 现在收紧为地图式入口，只保留领域、边界、结构地图和文档下钻路径；配置 schema、CLI 用法与示例统一回到 `docs/`。
 - `mcp-kit`：`SharedManager` 的 config 驱动连接安装现在复用 `Manager` 内部共享 helper 完成 install/commit/cleanup/cwd 记录，避免第二套连接安装状态机继续漂移。
-- `mcp-kit`：`SharedManager` 的 config 驱动 cold-start `request` / `notify` 现在只把 same-server lifecycle gate 持有到连接安装并借出 client 为止；随后首个 JSON-RPC I/O 与 `disconnect`/重连可以并发收尾，语义与已复用连接保持一致。
+- `mcp-kit`：`SharedManager` 的 config 驱动 cold-start `request` / `notify` 现在会把同 server 的 lifecycle gate 一直持有到连接完成且首次 I/O 收尾，避免不同 clone 在 connect 与首次发包之间穿插 `disconnect`/重连，把请求打到错误连接、误报 `not connected`，或在旧连接刚建好就被抢先切断。
 - `mcp-kit`：`SharedManager` 在 reentrant handler 场景下处理 request/notify 的 JSON-RPC/IO cleanup 时，不再因为 cleanup 抢不到共享锁而把原始传输错误覆盖成 `REENTRANT_HANDLER_ERROR`；现在会保留原始错误，并在必要时把断连 cleanup 延后到后台任务完成。
 - `mcp-kit`：配置加载与 connection cwd 记录路径上不再依赖隐式 `expect()` 契约；候选配置层缺少 path、或内部 server name 失配时都会返回结构化错误，而不是 panic。
 - `mcp-kit`：`stdout_log.max_parts` 现在在 `mcp.json`、手动 Rust `StdoutLogConfig` 构造和底层 `mcp-jsonrpc` 之间统一语义；`0`/`Some(0)` 都表示 unlimited，避免公开配置契约与 `validate()` 路径继续分裂。
@@ -59,8 +26,6 @@
 - `mcp-kit`：`Manager::try_from_config` 现在会对完整 `Config` 做 fail-fast 校验，而不再只检查 `client`；手动构造的无效 server 配置会在构造期直接失败，不再拖到首次连接时才暴露。
 - `mcp-kit`：config 驱动的连接路径现在会把相对 `cwd` 锚定到 `mcp.json` 所在的 thread root，并把 `cwd` 复用判断收口到稳定目录身份；同一物理目录的 `.`/`..` 等不同词法写法不再误判成不同连接上下文。
 - `mcp-kit`：`streamable_http` 现在会在配置校验阶段拒绝 `http_headers` / `env_http_headers` 里试图声明 transport 保留头（例如 `MCP-Protocol-Version`），避免用户配置重新覆盖握手边界。
-- `mcp-kit`：`streamable_http` 的 transport 保留头集合现在补齐到 `mcp-session-id` / `Accept` / `Content-Type`（以及既有的 `MCP-Protocol-Version` / `Authorization`），并同时在配置校验、连接建头和回归测试三层收口，避免配置覆盖会话粘连与内容协商边界。
-- `mcp-kit`：config override、`mcpctl --config`、`stdout_log` root 边界和 `cwd` identity 的 ancestor/prefix helper 现在只把 `NotFound` 当作“缺失组件”，`NotADirectory`/`PermissionDenied` 等其他文件系统错误会原样上抛，不再被误降级成“不存在”后继续判定。
 - `mcp-kit`：`SharedManager::disconnect_and_wait` 现在会把同 server 的 lifecycle gate 一直持有到 wait 结束，避免旧连接 teardown 仍在进行时，同名 server 的冷启动重连先一步穿透进来。
 - `mcp-kit`：`stdout_log.path` 的 root 边界检查现在会解析已存在路径前缀的真实 symlink 身份，再判断是否仍落在 root 内；中间目录 symlink 越界不再能绕过检查。
 - `mcp-kit`：stdio transport 默认不再把子进程 `stderr` 继承到宿主进程；库层现在 fail-closed 到空设备，避免 foundation 边界替调用方决定日志输出与潜在 secret 泄露面。

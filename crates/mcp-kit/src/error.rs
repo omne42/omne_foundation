@@ -269,13 +269,12 @@ mod tests {
     }
 
     #[test]
-    fn preserves_kind_across_context_layers() {
+    fn preserves_tagged_error_kind_through_context() {
         let err = Error::from(tag_anyhow(
             ErrorKind::Config,
-            anyhow!("base config failure"),
+            anyhow!("invalid client.capabilities"),
         ))
-        .context("outer context")
-        .with_context(|| "lazy context");
+        .context("wrap context");
         assert_eq!(err.kind(), ErrorKind::Config);
     }
 }

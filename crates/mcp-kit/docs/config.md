@@ -106,7 +106,6 @@ stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)
 
 约束：
 
-- `unix_path` 不能包含 `..` path segment；相对路径只能落在 `--root` 内部，不允许静默逃逸到 root 外
 - 不支持 `argv/env/stdout_log`（仅用于连接已存在的 unix socket）
 
 安全：

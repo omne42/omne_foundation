@@ -9,13 +9,13 @@ workspace = true
 
 [dependencies]
 bytes.workspace = true
-error-kit = { version = "0.1.0", path = "../error-kit" }
+error-kit = { path = "../error-kit" }
 futures-util.workspace = true
-http-kit = { version = "0.1.0", path = "../http-kit" }
+http-kit = { path = "../http-kit" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-structured-text-kit = { version = "0.1.0", path = "../structured-text-kit" }
+structured-text-kit = { path = "../structured-text-kit" }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "io-util", "process", "fs", "time", "net"] }
 tokio-util.workspace = true

@@ -17,7 +17,6 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 行为要点：
 
 - `cwd`：child 的工作目录是 `--root`（CLI）或你传入 `Manager::connect(..., cwd)` 的目录
-  direct `Manager` 连接入口要求这里是绝对路径；相对 `cwd` 只在 config/thread-root 驱动路径下解析
 - `stderr`：默认收口到空设备；`mcp-kit` 不会把 child 的 stderr 直接继承到宿主进程
 - `kill_on_drop = true`：连接被 drop 时，child 会被结束
 
@@ -40,7 +39,7 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 
 配置字段（仅 unix 支持）：
 
-- `unix_path`（必填）：socket 路径（相对路径会按 `--root` 解析，且不能通过 `..` 静默逃逸 root）
+- `unix_path`（必填）：socket 路径（相对路径会按 `--root` 解析）
 
 约束：
 

@@ -20,12 +20,10 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{OsStr, OsString};
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, mpsc as std_mpsc};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use error_kit::{ErrorCategory, ErrorCode, ErrorRecord, ErrorRetryAdvice};
@@ -36,9 +34,11 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
 
+mod detached;
 mod stdout_log;
 mod streamable_http;
 
+use detached::{close_without_runtime, spawn_detached};
 use stdout_log::LogState;
 
 pub type StdoutLogRedactor = Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
@@ -48,8 +48,6 @@ const REUSABLE_LINE_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 const READ_LINE_INITIAL_CAP_BYTES: usize = 4 * 1024;
 const TOKIO_TIME_DRIVER_ERROR: &str =
     "tokio runtime time driver is not enabled; build the runtime with enable_time()";
-type DetachedTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-
 pub(crate) fn ensure_tokio_time_driver(operation: &'static str) -> Result<(), Error> {
     std::panic::catch_unwind(|| {
         drop(tokio::time::sleep(Duration::ZERO));
@@ -793,50 +791,6 @@ struct BatchResponseWriter {
     state: Arc<BatchResponseState>,
 }
 
-struct DetachedRuntime {
-    tx: std_mpsc::Sender<DetachedTask>,
-}
-
-impl DetachedRuntime {
-    fn spawn(&self, task: DetachedTask) {
-        let _ = self.tx.send(task);
-    }
-}
-
-fn spawn_detached(task_name: &str, task: impl Future<Output = ()> + Send + 'static) {
-    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-        drop(runtime.spawn(task));
-        return;
-    }
-
-    detached_runtime(task_name).spawn(Box::pin(task));
-}
-
-fn detached_runtime(task_name: &str) -> &'static DetachedRuntime {
-    static DETACHED_RUNTIME: OnceLock<DetachedRuntime> = OnceLock::new();
-    DETACHED_RUNTIME.get_or_init(|| {
-        let (tx, rx) = std_mpsc::channel::<DetachedTask>();
-        std::thread::Builder::new()
-            .name("mcp-jsonrpc-detached".to_string())
-            .spawn(move || {
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(runtime) => runtime,
-                    Err(_) => return,
-                };
-                while let Ok(task) = rx.recv() {
-                    runtime.block_on(task);
-                }
-            })
-            .unwrap_or_else(|err| {
-                panic!("spawn detached mcp-jsonrpc runtime ({task_name}): {err}")
-            });
-        DetachedRuntime { tx }
-    })
-}
-
 impl std::fmt::Debug for BatchResponseWriter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BatchResponseWriter")
@@ -896,9 +850,11 @@ impl BatchResponseWriter {
 
     fn flush_if_ready_without_runtime(&self) {
         let batch = self.clone();
-        spawn_detached("batch flush without runtime", async move {
+        if let Err(err) = spawn_detached("batch flush without runtime", async move {
             let _ = batch.flush_if_ready().await;
-        });
+        }) {
+            close_without_runtime(&self.state.handle, err.close_reason());
+        }
     }
 
     async fn finish(&self) -> Result<(), Error> {
@@ -1069,11 +1025,7 @@ impl ClientHandle {
         }
 
         // No runtime available (e.g. sync context): avoid panicking and perform best-effort close.
-        let err = Error::protocol(ProtocolErrorKind::Closed, reason);
-        drain_pending(&handle.pending, &err);
-        if let Ok(mut write) = handle.write.try_lock() {
-            drop(std::mem::replace(&mut *write, Box::new(tokio::io::sink())));
-        }
+        close_without_runtime(&handle, reason);
     }
 
     fn check_closed(&self) -> Result<(), Error> {
@@ -1838,16 +1790,22 @@ impl Drop for IncomingRequest {
         match &self.responder.target {
             RequestResponseTarget::Direct(handle) => {
                 let handle = handle.clone();
-                spawn_detached("direct dropped request response", async move {
-                    drop(handle.write_json_line(&response).await);
-                });
+                let handle_for_task = handle.clone();
+                if let Err(err) = spawn_detached("direct dropped request response", async move {
+                    drop(handle_for_task.write_json_line(&response).await);
+                }) {
+                    close_without_runtime(&handle, err.close_reason());
+                }
             }
             RequestResponseTarget::Batch(batch) => {
                 if tokio::runtime::Handle::try_current().is_ok() {
                     let batch = batch.clone();
-                    spawn_detached("batch dropped request response", async move {
-                        drop(batch.push_reserved_response(response).await);
-                    });
+                    let batch_for_task = batch.clone();
+                    if let Err(err) = spawn_detached("batch dropped request response", async move {
+                        drop(batch_for_task.push_reserved_response(response).await);
+                    }) {
+                        close_without_runtime(&batch.state.handle, err.close_reason());
+                    }
                 } else {
                     batch.push_reserved_response_without_runtime(response);
                 }
@@ -3083,10 +3041,11 @@ mod incoming_value_tests {
 
 #[cfg(test)]
 mod stats_tests {
+    use super::detached::{detached_runtime_test_guard, force_detached_init_failures};
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncWrite, AsyncWriteExt};
 
     #[test]
     fn max_message_bytes_zero_falls_back_to_default() {
@@ -3203,12 +3162,70 @@ mod stats_tests {
         spawn_detached("test detached runtime", async move {
             counter_for_task.fetch_add(1, AtomicOrdering::Relaxed);
             done_tx.send(()).unwrap();
-        });
+        })
+        .expect("detached runtime should accept queued task");
 
         done_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("detached runtime should execute queued task");
         assert_eq!(counter.load(AtomicOrdering::Relaxed), 1);
+    }
+
+    #[test]
+    fn spawn_detached_returns_error_when_detached_runtime_init_fails() {
+        let _guard = detached_runtime_test_guard();
+        force_detached_init_failures(1);
+
+        let err = spawn_detached("test detached runtime init failure", async {})
+            .expect_err("forced init failure should not panic");
+        assert!(
+            err.close_reason()
+                .contains("detached runtime unavailable for test detached runtime init failure"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn batch_flush_without_runtime_closes_handle_when_detached_runtime_is_unavailable() {
+        let _guard = detached_runtime_test_guard();
+        force_detached_init_failures(1);
+
+        let handle = ClientHandle {
+            write: Arc::new(tokio::sync::Mutex::new(
+                Box::new(tokio::io::sink()) as Box<dyn AsyncWrite + Send + Unpin>
+            )),
+            max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
+            next_id: Arc::new(AtomicI64::new(1)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            max_pending_requests: 1,
+            cancelled_request_ids: Arc::new(Mutex::new(CancelledRequestIdsState::default())),
+            stats: Arc::new(ClientStatsInner::default()),
+            diagnostics: None,
+            closed: Arc::new(AtomicBool::new(false)),
+            close_reason: Arc::new(CloseReasonState::default()),
+            stdout_log_write_error: Arc::new(OnceLock::new()),
+        };
+        let batch = BatchResponseWriter::new(handle.clone()).reserve_request_slot();
+        batch.state.finished.store(true, Ordering::Relaxed);
+
+        batch.push_reserved_response_without_runtime(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "ok": true }
+        }));
+
+        assert!(
+            handle.is_closed(),
+            "detached runtime failure must fail closed"
+        );
+        assert!(
+            handle
+                .close_reason()
+                .as_deref()
+                .is_some_and(|reason| reason.contains("batch flush without runtime")),
+            "{:?}",
+            handle.close_reason()
+        );
     }
 
     #[test]

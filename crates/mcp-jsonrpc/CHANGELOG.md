@@ -7,6 +7,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：`lib.rs` 里的旧 detached runtime 降级路径已收口到统一的稳健实现；后台 runtime 初始化/派发失败不再 `panic!` 或静默吞掉 batch flush / dropped-request 补偿，而是 fail-closed 并保留关闭原因。
+- `mcp-jsonrpc`：`streamable_http` 的 notification POST 超时不再关闭整条 transport；没有 JSON-RPC `id` 的单次超时现在只丢弃该通知，后续 request/notification 仍可继续复用同一连接。
 - `mcp-jsonrpc`：`ClientHandle::close_reason()` 现在会在 `is_closed()` 对外变为 true 之前先发布最终原因，避免慢速/macOS 调度下观察到“已关闭但原因仍为空”的竞态。
 - `mcp-jsonrpc`：`streamable_http` 的 graceful SSE EOF 重连现在带最小间隔、轻量抖动并按连续 EOF 指数回退，避免在慢速/macOS 环境里与对端的优雅收尾互相踩出早退重连；session rollover 触发的主动 SSE 切换仍保持立即重连。
 - `mcp-jsonrpc`：`streamable_http` 的 SSE 唤醒现在改成有界合并队列；连续 `202 Accepted` / session rollover 不会再把 wake 信号无界堆积，同时仍保持 `SessionChanged` 优先于普通 `Connect`。

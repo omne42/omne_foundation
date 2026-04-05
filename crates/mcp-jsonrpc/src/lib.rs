@@ -1099,9 +1099,9 @@ impl ClientHandle {
     pub(crate) async fn close_with_error(&self, reason: impl Into<String>, err: Error) {
         let reason = reason.into();
 
-        self.closed.store(true, Ordering::Relaxed);
         self.close_reason
             .publish(CloseReasonPriority::Primary, reason);
+        self.closed.store(true, Ordering::Relaxed);
 
         drain_pending(&self.pending, &err);
         let mut write = self.write.lock().await;
@@ -1734,10 +1734,10 @@ impl Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
-        self.handle.closed.store(true, Ordering::Relaxed);
         self.handle
             .close_reason
             .publish(CloseReasonPriority::Fallback, "client closed".to_string());
+        self.handle.closed.store(true, Ordering::Relaxed);
         self.task.abort();
         for task in self.transport_tasks.drain(..) {
             task.abort();

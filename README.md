@@ -12,6 +12,11 @@
 - MCP 与通知：`mcp-jsonrpc`、`mcp-kit`、`notify-kit`
 - 跨仓共享策略元契约：`policy-meta`
 
+跨仓边界上，本仓库现在明确把 `omne-runtime` 的系统原语视为外部 canonical source：
+
+- workspace manifest 通过 git pinned 依赖接入 `omne-runtime` crate
+- 不再通过 `../omne-runtime/...` 这类 sibling path 把两个仓库耦合成隐式单一工作区
+
 它不负责：
 
 - 低层 runtime primitives

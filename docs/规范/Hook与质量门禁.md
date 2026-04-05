@@ -118,9 +118,10 @@ scripts/check-workspace.sh dependency-direction
 当前规则是：
 
 - 这条 gate 会扫描整个 workspace 的 `crates/*/Cargo.toml`
+- workspace 包不能通过 `path = "../..."` 之类的仓库外路径依赖逃出当前 repo root；像 `omne-runtime` 这样的跨仓 foundation/runtime crate 必须改用 canonical git source pin
 - 如果某个 crate 的普通依赖或 build-dependencies（含 target-specific 表）引用了 workspace 内已经声明 `publish = false` 的 crate，它自己也必须显式 `publish = false`
 - 如果某个 crate 已经声明 `publish = false`，它自己的 `README.md` 也不能再把 crates.io 安装写成当前可直接使用的主契约
-- 否则 gate 会直接失败，避免 manifest 继续暗示“当前可单独走 crates.io 发布”，直到 `cargo package` 或 `cargo publish --dry-run` 才暴露真实边界
+- 否则 gate 会直接失败，避免 manifest 继续暗示“当前可单独走 crates.io 发布”或“当前仍与 sibling workspace 隐式绑死”，直到 `cargo package` / `cargo metadata` / 实际跨仓复用时才暴露真实边界
 
 可以单独执行：
 

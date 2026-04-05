@@ -1,7 +1,8 @@
 //! Convenience helpers for bootstrapping a [`crate::Hub`] from a small env convention.
 //!
-//! This module is intentionally not part of the core notification abstraction. Prefer your own
-//! integration layer when you need project-specific env/CLI/file configuration semantics.
+//! This module lives under `notify_kit::integration` on purpose: it is a bootstrap helper for
+//! application wiring, not part of the core notification abstraction. Prefer your own integration
+//! layer when you need project-specific env/CLI/file configuration semantics.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;

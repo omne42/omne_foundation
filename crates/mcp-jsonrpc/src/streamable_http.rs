@@ -1120,13 +1120,9 @@ async fn emit_wait_timeout_from_line(
     };
 
     let Some(id) = id else {
-        close_post_bridge(
-            writer,
-            handle,
-            format!("streamable http notification timed out: {message}"),
-        )
-        .await;
-        return false;
+        // Notifications have no reply path, so a single slow POST must not tear down the whole
+        // transport. Drop the timed-out notification and keep the bridge alive for later traffic.
+        return true;
     };
 
     if let Some(tx) = crate::lock_pending(&handle.pending).remove(&id) {
@@ -1910,6 +1906,140 @@ mod tests {
             notification.params,
             Some(serde_json::json!({ "session": "session-1" }))
         );
+
+        client.close("test complete").await;
+        let _ = close_tx.send(());
+        server.await.expect("server task should join");
+    }
+
+    #[tokio::test]
+    async fn streamable_http_notification_timeout_does_not_close_transport() {
+        const REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
+        const TEST_STAGE_TIMEOUT: Duration = Duration::from_secs(2);
+
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let base_url = format!("http://{addr}");
+        let (stage_tx, mut stage_rx) = mpsc::unbounded_channel();
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let (mut sse_stream, _) = listener.accept().await.expect("accept initial SSE");
+            let sse_request = read_http_request(&mut sse_stream).await.expect("read GET");
+            assert_eq!(sse_request.method, "GET");
+            assert_eq!(sse_request.path, "/sse");
+            write_chunked_response_headers(
+                &mut sse_stream,
+                "200 OK",
+                &[
+                    ("content-type", "text/event-stream"),
+                    ("mcp-session-id", "session-1"),
+                ],
+            )
+            .await
+            .expect("write SSE headers");
+            stage_tx.send("sse-open").expect("send stage");
+
+            let (mut slow_post, _) = listener.accept().await.expect("accept timed-out POST");
+            let notify_request = read_http_request(&mut slow_post)
+                .await
+                .expect("read notify POST");
+            assert_eq!(notify_request.method, "POST");
+            assert_eq!(notify_request.path, "/post");
+            assert!(
+                String::from_utf8(notify_request.body)
+                    .expect("utf8 notify body")
+                    .contains("\"method\":\"demo/notify-timeout\""),
+                "unexpected notify body"
+            );
+            stage_tx.send("notify-post-received").expect("send stage");
+            tokio::time::sleep(REQUEST_TIMEOUT + Duration::from_millis(20)).await;
+            drop(slow_post);
+
+            let (mut request_post, _) = listener.accept().await.expect("accept request POST");
+            let request = read_http_request(&mut request_post)
+                .await
+                .expect("read request POST");
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/post");
+            assert!(
+                String::from_utf8(request.body)
+                    .expect("utf8 request body")
+                    .contains("\"method\":\"demo/ping\""),
+                "unexpected request body"
+            );
+
+            let response_body = serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": { "ok": true }
+            }))
+            .expect("serialize response");
+            write_fixed_response(
+                &mut request_post,
+                "200 OK",
+                &[
+                    ("content-type", "application/json"),
+                    ("mcp-session-id", "session-1"),
+                    ("connection", "close"),
+                ],
+                &response_body,
+            )
+            .await
+            .expect("write request response");
+            stage_tx.send("request-post-responded").expect("send stage");
+            drop(request_post);
+            let _ = close_rx.await;
+            drop(sse_stream);
+        });
+
+        let mut http_options = StreamableHttpOptions::default();
+        http_options.request_timeout = Some(REQUEST_TIMEOUT);
+        let client = Client::connect_streamable_http_split_with_options(
+            &format!("{base_url}/sse"),
+            &format!("{base_url}/post"),
+            http_options,
+            SpawnOptions::default(),
+        )
+        .await
+        .expect("connect streamable http");
+
+        let stage = tokio::time::timeout(TEST_STAGE_TIMEOUT, stage_rx.recv())
+            .await
+            .expect("SSE stage should arrive before timeout")
+            .expect("stage channel open");
+        assert_eq!(stage, "sse-open");
+
+        client
+            .notify("demo/notify-timeout", None)
+            .await
+            .expect("send notify");
+
+        let stage = tokio::time::timeout(TEST_STAGE_TIMEOUT, stage_rx.recv())
+            .await
+            .expect("notify POST should arrive before timeout")
+            .expect("stage channel open");
+        assert_eq!(stage, "notify-post-received");
+
+        tokio::time::sleep(REQUEST_TIMEOUT + Duration::from_millis(40)).await;
+        assert!(
+            !client.is_closed(),
+            "timed-out notification must not close the transport"
+        );
+
+        let response = client
+            .request("demo/ping", serde_json::json!({}))
+            .await
+            .expect("request after timed-out notification should succeed");
+        assert_eq!(response, serde_json::json!({ "ok": true }));
+
+        let stage = tokio::time::timeout(TEST_STAGE_TIMEOUT, stage_rx.recv())
+            .await
+            .expect("request response stage should arrive before timeout")
+            .expect("stage channel open");
+        assert_eq!(stage, "request-post-responded");
 
         client.close("test complete").await;
         let _ = close_tx.send(());

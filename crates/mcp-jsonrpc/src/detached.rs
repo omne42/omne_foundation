@@ -3,9 +3,10 @@ use std::future::Future;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
-use super::{ClientHandle, Error, ProtocolErrorKind, drain_pending};
+use super::{ClientHandle, CloseReasonPriority, Error, ProtocolErrorKind, drain_pending};
 
 const DETACHED_RUNTIME_WORKER_THREADS: usize = 2;
 
@@ -97,6 +98,10 @@ pub(super) fn spawn_detached(
 }
 
 pub(super) fn close_without_runtime(handle: &ClientHandle, reason: String) {
+    handle
+        .close_reason
+        .publish(CloseReasonPriority::Primary, reason.clone());
+    handle.closed.store(true, Ordering::Relaxed);
     let err = Error::protocol(ProtocolErrorKind::Closed, reason);
     drain_pending(&handle.pending, &err);
     if let Ok(mut write) = handle.write.try_lock() {

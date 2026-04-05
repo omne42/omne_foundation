@@ -95,6 +95,11 @@ CLI 对应：
 - CLI：`--trust --yes-trust`
 - 或代码：`Manager::with_trust_mode(TrustMode::Trusted)`
 
+另外，Trusted 只表示你愿意放开这条边界，并不等于库会自动去读 ambient env。`mcp-kit` 现在要求 secret-backed streamable HTTP auth 走显式接线：
+
+- 推荐：`Manager::with_streamable_http_secret_context(...)`
+- 如果你明确接受 ambient env：`Manager::with_ambient_streamable_http_secrets()`
+
 ## 重要注意点（限制与最佳实践）
 
 ### IP 校验与 DNS 校验

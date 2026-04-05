@@ -92,6 +92,7 @@ pub use error::{Error, ErrorKind, Result};
 pub use manager::{
     Connection, Manager, ProtocolVersionCheck, ProtocolVersionMismatch, ServerNotificationContext,
     ServerNotificationHandler, ServerRequestContext, ServerRequestHandler, ServerRequestOutcome,
+    StreamableHttpSecretContext,
 };
 pub use protocol::{MCP_PROTOCOL_VERSION, McpNotification, McpRequest};
 pub use security::{TrustMode, UntrustedStreamableHttpPolicy};

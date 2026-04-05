@@ -303,7 +303,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if cli.trust {
-        manager = manager.with_trust_mode(mcp_kit::TrustMode::Trusted);
+        manager = manager
+            .with_trust_mode(mcp_kit::TrustMode::Trusted)
+            .with_ambient_streamable_http_secrets();
     }
 
     let result = match cli.command {

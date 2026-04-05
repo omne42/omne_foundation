@@ -167,6 +167,28 @@ use mcp_kit::TrustMode;
 manager = manager.with_trust_mode(TrustMode::Trusted);
 ```
 
+如果该 trusted `streamable_http` 配置还会用到 `bearer_token_secret` / `secret_http_headers`，再额外显式接一层 secret context：
+
+```rust
+use mcp_kit::{StreamableHttpSecretContext, TrustMode};
+use std::sync::Arc;
+
+manager = manager
+    .with_trust_mode(TrustMode::Trusted)
+    .with_streamable_http_secret_context(
+        StreamableHttpSecretContext::from_shared(Arc::new(my_secret_env)),
+    );
+```
+
+如果你明确要沿用 ambient env，也必须显式 opt-in：
+
+```rust
+use mcp_kit::TrustMode;
+manager = manager
+    .with_trust_mode(TrustMode::Trusted)
+    .with_ambient_streamable_http_secrets();
+```
+
 想在“不完全信任”的前提下收紧/放开远程规则，配置：
 
 ```rust

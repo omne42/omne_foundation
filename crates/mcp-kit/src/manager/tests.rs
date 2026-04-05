@@ -387,6 +387,7 @@ async fn connect_transport_stdio_null_routes_stderr_to_devnull() {
         stdout_log_root: PathBuf::from("/"),
         protocol_version: MCP_PROTOCOL_VERSION.to_string(),
         request_timeout: Duration::from_secs(1),
+        streamable_http_secret_context: None,
     };
 
     let (client, child) = connect_transport(&ctx, "srv", &server_cfg, Path::new("/"))
@@ -433,6 +434,7 @@ async fn connect_transport_stdio_allows_stdout_log_within_config_root_when_cwd_d
         stdout_log_root: config_root.clone(),
         protocol_version: MCP_PROTOCOL_VERSION.to_string(),
         request_timeout: Duration::from_secs(1),
+        streamable_http_secret_context: None,
     };
 
     let (client, child) = connect_transport(&ctx, "srv", &server_cfg, &cwd)

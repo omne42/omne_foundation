@@ -139,12 +139,28 @@ impl Default for SpawnOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StreamableHttpProxyMode {
+    /// Ignore proxy environment variables such as `HTTP_PROXY` / `HTTPS_PROXY`.
+    ///
+    /// This remains the safer default for generic or untrusted streamable HTTP transports.
+    #[default]
+    IgnoreSystem,
+    /// Allow `reqwest` to read the process proxy environment.
+    ///
+    /// Note: when `StreamableHttpOptions.enforce_public_ip` is true, the pinned public-IP path
+    /// still disables proxies so the socket cannot be redirected to an intermediate endpoint.
+    UseSystem,
+}
+
 #[derive(Debug, Clone)]
 pub struct StreamableHttpOptions {
     /// Extra HTTP headers to include on all requests.
     pub headers: HashMap<String, String>,
     /// Whether untrusted transports must pin the validated public IP set into the actual socket.
     pub enforce_public_ip: bool,
+    /// Proxy environment loading policy for the unpinned HTTP client path.
+    pub proxy_mode: StreamableHttpProxyMode,
     /// Optional timeout applied while establishing HTTP connections.
     pub connect_timeout: Option<Duration>,
     /// Optional timeout applied to individual HTTP POST request/response bodies.
@@ -166,6 +182,7 @@ impl Default for StreamableHttpOptions {
         Self {
             headers: HashMap::new(),
             enforce_public_ip: false,
+            proxy_mode: StreamableHttpProxyMode::IgnoreSystem,
             connect_timeout: Some(Duration::from_secs(10)),
             request_timeout: None,
             follow_redirects: false,

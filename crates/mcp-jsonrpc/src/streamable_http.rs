@@ -16,12 +16,19 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio_util::io::StreamReader;
 
-use crate::{Client, ClientHandle, Error, ProtocolErrorKind, SpawnOptions, StreamableHttpOptions};
+use crate::{
+    Client, ClientHandle, Error, ProtocolErrorKind, SpawnOptions, StreamableHttpOptions,
+    StreamableHttpProxyMode,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SseWakeReason {
     Connect,
     SessionChanged,
+}
+
+fn streamable_http_no_proxy(proxy_mode: StreamableHttpProxyMode) -> bool {
+    matches!(proxy_mode, StreamableHttpProxyMode::IgnoreSystem)
 }
 
 fn ends_with_ignore_ascii_case(haystack: &str, suffix: &str) -> bool {
@@ -244,6 +251,7 @@ impl Client {
         let follow_redirects = http_options.follow_redirects;
         let error_body_preview_bytes = http_options.error_body_preview_bytes;
         let enforce_public_ip = http_options.enforce_public_ip;
+        let proxy_mode = http_options.proxy_mode;
         if connect_timeout.is_some() || request_timeout.is_some() {
             crate::ensure_tokio_time_driver("Client::connect_streamable_http*_with_options")?;
         }
@@ -269,8 +277,7 @@ impl Client {
             connect_timeout,
             default_headers: headers,
             follow_redirects,
-            // Avoid automatic proxy environment variable loading by default.
-            no_proxy: true,
+            no_proxy: streamable_http_no_proxy(proxy_mode),
             ..Default::default()
         };
 
@@ -500,6 +507,25 @@ impl Client {
         client.transport_tasks.push(post_task);
         client.transport_tasks.push(sse_task);
         Ok(client)
+    }
+}
+
+#[cfg(test)]
+mod proxy_mode_tests {
+    use super::*;
+
+    #[test]
+    fn use_system_proxy_keeps_proxy_loading_enabled() {
+        assert!(!streamable_http_no_proxy(
+            StreamableHttpProxyMode::UseSystem
+        ));
+    }
+
+    #[test]
+    fn ignore_system_proxy_disables_proxy_loading() {
+        assert!(streamable_http_no_proxy(
+            StreamableHttpProxyMode::IgnoreSystem
+        ));
     }
 }
 

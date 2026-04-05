@@ -35,6 +35,11 @@
 - 协议层输入校验与类型转换错误
 - `ErrorData` 及其错误专属 DTO
 
+需要明确的一点：
+
+- `ErrorCategoryData::Unknown` / `ErrorRetryAdviceData::Unknown` 只表示“线协议上出现了当前 runtime 还不能表达的值”
+- `error-protocol` 可以把运行时未知枚举降级写成 `unknown` DTO，但反向转成 `error-kit::ErrorRecord` 时不会再静默改写成别的语义，而是返回结构化错误
+
 不覆盖：
 
 - source error 的跨进程传输

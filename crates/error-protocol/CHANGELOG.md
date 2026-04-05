@@ -11,3 +11,4 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ### Changed
 - Forward-compatible protocol mapping for `ErrorCategory` / `ErrorRetryAdvice` now degrades unknown runtime variants to explicit `unknown` DTO values instead of panicking.
+- Deserializing `ErrorCategoryData::Unknown` / `ErrorRetryAdviceData::Unknown` into `error-kit::ErrorRecord` now fails structurally instead of silently rewriting them to `Internal` / `DoNotRetry`.

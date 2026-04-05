@@ -52,6 +52,10 @@ pub enum ErrorDataError {
     InvalidCode(#[from] ErrorCodeValidationError),
     #[error(transparent)]
     Text(#[from] StructuredTextDataError),
+    #[error("error category {value:?} is not representable by error-kit")]
+    UnknownCategory { value: ErrorCategoryData },
+    #[error("error retry advice {value:?} is not representable by error-kit")]
+    UnknownRetryAdvice { value: ErrorRetryAdviceData },
 }
 
 impl From<ErrorCategory> for ErrorCategoryData {
@@ -72,21 +76,19 @@ impl From<ErrorCategory> for ErrorCategoryData {
     }
 }
 
-impl From<ErrorCategoryData> for ErrorCategory {
-    fn from(value: ErrorCategoryData) -> Self {
-        match value {
-            ErrorCategoryData::InvalidInput => Self::InvalidInput,
-            ErrorCategoryData::NotFound => Self::NotFound,
-            ErrorCategoryData::Conflict => Self::Conflict,
-            ErrorCategoryData::PermissionDenied => Self::PermissionDenied,
-            ErrorCategoryData::Unauthenticated => Self::Unauthenticated,
-            ErrorCategoryData::RateLimited => Self::RateLimited,
-            ErrorCategoryData::Timeout => Self::Timeout,
-            ErrorCategoryData::Unavailable => Self::Unavailable,
-            ErrorCategoryData::ExternalDependency => Self::ExternalDependency,
-            ErrorCategoryData::Internal => Self::Internal,
-            ErrorCategoryData::Unknown => Self::Internal,
-        }
+fn try_error_category(value: ErrorCategoryData) -> Result<ErrorCategory, ErrorDataError> {
+    match value {
+        ErrorCategoryData::InvalidInput => Ok(ErrorCategory::InvalidInput),
+        ErrorCategoryData::NotFound => Ok(ErrorCategory::NotFound),
+        ErrorCategoryData::Conflict => Ok(ErrorCategory::Conflict),
+        ErrorCategoryData::PermissionDenied => Ok(ErrorCategory::PermissionDenied),
+        ErrorCategoryData::Unauthenticated => Ok(ErrorCategory::Unauthenticated),
+        ErrorCategoryData::RateLimited => Ok(ErrorCategory::RateLimited),
+        ErrorCategoryData::Timeout => Ok(ErrorCategory::Timeout),
+        ErrorCategoryData::Unavailable => Ok(ErrorCategory::Unavailable),
+        ErrorCategoryData::ExternalDependency => Ok(ErrorCategory::ExternalDependency),
+        ErrorCategoryData::Internal => Ok(ErrorCategory::Internal),
+        ErrorCategoryData::Unknown => Err(ErrorDataError::UnknownCategory { value }),
     }
 }
 
@@ -100,13 +102,11 @@ impl From<ErrorRetryAdvice> for ErrorRetryAdviceData {
     }
 }
 
-impl From<ErrorRetryAdviceData> for ErrorRetryAdvice {
-    fn from(value: ErrorRetryAdviceData) -> Self {
-        match value {
-            ErrorRetryAdviceData::DoNotRetry => Self::DoNotRetry,
-            ErrorRetryAdviceData::Retryable => Self::Retryable,
-            ErrorRetryAdviceData::Unknown => Self::DoNotRetry,
-        }
+fn try_error_retry_advice(value: ErrorRetryAdviceData) -> Result<ErrorRetryAdvice, ErrorDataError> {
+    match value {
+        ErrorRetryAdviceData::DoNotRetry => Ok(ErrorRetryAdvice::DoNotRetry),
+        ErrorRetryAdviceData::Retryable => Ok(ErrorRetryAdvice::Retryable),
+        ErrorRetryAdviceData::Unknown => Err(ErrorDataError::UnknownRetryAdvice { value }),
     }
 }
 
@@ -130,8 +130,8 @@ impl TryFrom<&ErrorData> for ErrorRecord {
             ErrorCode::try_new(data.code.clone())?,
             StructuredText::try_from(&data.user_text)?,
         )
-        .with_category(data.category.into())
-        .with_retry_advice(data.retry_advice.into());
+        .with_category(try_error_category(data.category)?)
+        .with_retry_advice(try_error_retry_advice(data.retry_advice)?);
 
         if let Some(text) = &data.diagnostic_text {
             error = error.with_diagnostic_text(StructuredText::try_from(text)?);
@@ -214,8 +214,8 @@ mod tests {
     }
 
     #[test]
-    fn unknown_protocol_category_falls_back_to_internal() {
-        let error = ErrorRecord::try_from(ErrorData {
+    fn unknown_protocol_category_is_rejected() {
+        let err = ErrorRecord::try_from(ErrorData {
             code: "secret.lookup_failed".to_string(),
             category: ErrorCategoryData::Unknown,
             retry_advice: ErrorRetryAdviceData::Retryable,
@@ -224,14 +224,19 @@ mod tests {
             },
             diagnostic_text: None,
         })
-        .expect("unknown category should not fail");
+        .expect_err("unknown category should not silently rewrite semantics");
 
-        assert_eq!(error.category(), ErrorCategory::Internal);
+        assert!(matches!(
+            err,
+            ErrorDataError::UnknownCategory {
+                value: ErrorCategoryData::Unknown
+            }
+        ));
     }
 
     #[test]
-    fn unknown_protocol_retry_advice_falls_back_to_do_not_retry() {
-        let error = ErrorRecord::try_from(ErrorData {
+    fn unknown_protocol_retry_advice_is_rejected() {
+        let err = ErrorRecord::try_from(ErrorData {
             code: "secret.lookup_failed".to_string(),
             category: ErrorCategoryData::Unavailable,
             retry_advice: ErrorRetryAdviceData::Unknown,
@@ -240,9 +245,14 @@ mod tests {
             },
             diagnostic_text: None,
         })
-        .expect("unknown retry advice should not fail");
+        .expect_err("unknown retry advice should not silently rewrite semantics");
 
-        assert_eq!(error.retry_advice(), ErrorRetryAdvice::DoNotRetry);
+        assert!(matches!(
+            err,
+            ErrorDataError::UnknownRetryAdvice {
+                value: ErrorRetryAdviceData::Unknown
+            }
+        ));
     }
 
     #[test]

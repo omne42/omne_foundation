@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -13,7 +14,6 @@ use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc;
 use tokio_util::io::StreamReader;
 
 use crate::{
@@ -25,6 +25,80 @@ use crate::{
 enum SseWakeReason {
     Connect,
     SessionChanged,
+}
+
+impl SseWakeReason {
+    const fn priority(self) -> u8 {
+        match self {
+            Self::Connect => 1,
+            Self::SessionChanged => 2,
+        }
+    }
+
+    const fn from_priority(priority: u8) -> Option<Self> {
+        match priority {
+            1 => Some(Self::Connect),
+            2 => Some(Self::SessionChanged),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SseWakeQueue {
+    pending: AtomicU8,
+    notify: tokio::sync::Notify,
+}
+
+impl SseWakeQueue {
+    fn new() -> Self {
+        Self {
+            pending: AtomicU8::new(0),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn send(&self, reason: SseWakeReason) {
+        let reason_priority = reason.priority();
+        let mut current = self.pending.load(Ordering::Acquire);
+        loop {
+            let merged = current.max(reason_priority);
+            match self.pending.compare_exchange(
+                current,
+                merged,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(previous) => {
+                    if previous == 0 {
+                        self.notify.notify_one();
+                    }
+                    return;
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    async fn recv(&self) -> Option<SseWakeReason> {
+        loop {
+            if let Some(reason) =
+                SseWakeReason::from_priority(self.pending.swap(0, Ordering::AcqRel))
+            {
+                return Some(reason);
+            }
+
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(reason) =
+                SseWakeReason::from_priority(self.pending.swap(0, Ordering::AcqRel))
+            {
+                return Some(reason);
+            }
+            notified.await;
+        }
+    }
 }
 
 fn streamable_http_no_proxy(proxy_mode: StreamableHttpProxyMode) -> bool {
@@ -368,7 +442,7 @@ impl Client {
         let session_id: Arc<tokio::sync::Mutex<Option<String>>> =
             Arc::new(tokio::sync::Mutex::new(None));
 
-        let (sse_wake_tx, sse_wake_rx) = mpsc::unbounded_channel::<SseWakeReason>();
+        let sse_wake = Arc::new(SseWakeQueue::new());
         let sse_client = http_client_profile
             .select_for_url(&sse_url, enforce_public_ip)
             .await
@@ -384,7 +458,7 @@ impl Client {
         let http_client_profile_post = http_client_profile.clone();
         let writer_post = writer.clone();
         let session_id_post = session_id.clone();
-        let sse_wake_post = sse_wake_tx.clone();
+        let sse_wake_post = Arc::clone(&sse_wake);
         let request_timeout_post = request_timeout;
         let error_body_preview_bytes_post = error_body_preview_bytes;
         let handle_post = transport_handle.clone();
@@ -413,7 +487,7 @@ impl Client {
         let http_client_profile_sse = http_client_profile.clone();
         let handle_sse = transport_handle;
         let sse_task = tokio::spawn(async move {
-            let mut wake_rx = sse_wake_rx;
+            let wake_queue = sse_wake;
             let mut current_resp = sse_resp;
             let mut reconnect_backoff = SseReconnectBackoff::default();
 
@@ -421,7 +495,7 @@ impl Client {
                 let resp = match current_resp.take() {
                     Some(resp) => resp,
                     None => {
-                        let Some(_) = wake_rx.recv().await else {
+                        let Some(_) = wake_queue.recv().await else {
                             return;
                         };
                         let sse_client = match http_client_profile_sse
@@ -485,7 +559,7 @@ impl Client {
                                     return;
                                 }
                             },
-                            wake = wake_rx.recv() => {
+                            wake = wake_queue.recv() => {
                                 match wake {
                                     Some(SseWakeReason::SessionChanged) => {
                                         // Exiting this scope drops the stale SSE pump before the
@@ -600,7 +674,7 @@ struct HttpPostBridge {
     http_client_profile: HttpClientProfile,
     post_url: reqwest::Url,
     session_id: Arc<tokio::sync::Mutex<Option<String>>>,
-    sse_wake: mpsc::UnboundedSender<SseWakeReason>,
+    sse_wake: Arc<SseWakeQueue>,
     max_message_bytes: usize,
     request_timeout: Option<Duration>,
     error_body_preview_bytes: usize,
@@ -741,7 +815,7 @@ impl HttpPostBridge {
                 }
             }
             if let Some(reason) = wake_reason {
-                let _ = sse_wake.send(reason);
+                sse_wake.send(reason);
             }
 
             let status = resp.status();
@@ -1353,6 +1427,38 @@ mod tests {
         assert!(!is_json_content_type("application/xml"));
         assert!(!is_json_content_type("application/jsonp"));
         assert!(!is_json_content_type("application/notjson+jsone"));
+    }
+
+    #[tokio::test]
+    async fn sse_wake_queue_coalesces_reasons_and_preserves_session_change_priority() {
+        let queue = SseWakeQueue::new();
+        queue.send(SseWakeReason::Connect);
+        queue.send(SseWakeReason::Connect);
+        queue.send(SseWakeReason::SessionChanged);
+        queue.send(SseWakeReason::Connect);
+
+        assert_eq!(queue.recv().await, Some(SseWakeReason::SessionChanged));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), queue.recv())
+                .await
+                .is_err(),
+            "coalesced wake queue should drain the whole pending batch at once"
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_wake_queue_delivers_connect_without_extra_queue_growth() {
+        let queue = Arc::new(SseWakeQueue::new());
+        let receiver = {
+            let queue = Arc::clone(&queue);
+            tokio::spawn(async move { queue.recv().await })
+        };
+
+        queue.send(SseWakeReason::Connect);
+        assert_eq!(
+            receiver.await.expect("receiver task should join"),
+            Some(SseWakeReason::Connect)
+        );
     }
 
     #[test]

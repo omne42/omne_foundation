@@ -8,6 +8,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ### Changed
 - `mcp-jsonrpc`：`streamable_http` 的 graceful SSE EOF 重连现在带最小间隔、轻量抖动并按连续 EOF 指数回退，避免在慢速/macOS 环境里与对端的优雅收尾互相踩出早退重连；session rollover 触发的主动 SSE 切换仍保持立即重连。
+- `mcp-jsonrpc`：`streamable_http` 的 SSE 唤醒现在改成有界合并队列；连续 `202 Accepted` / session rollover 不会再把 wake 信号无界堆积，同时仍保持 `SessionChanged` 优先于普通 `Connect`。
 - `mcp-jsonrpc`：加固了 graceful SSE EOF 重连回归测试，在初始 SSE 头之后先发送一条注释帧、校验最小重连间隔，并统一放宽阶段/通知等待窗口，避免慢速/macOS CI 上把“EOF 后应重连”的真通过误判成超时。
 - `mcp-jsonrpc`：`StreamableHttpOptions.proxy_mode` 现在真正贯通到底层 HTTP client；显式选择 `UseSystem` 时会读取系统代理环境，只有 `enforce_public_ip` 的 pinned socket 路径仍会继续禁用代理。
 - `mcp-jsonrpc`：`streamable_http` 的独立 SSE 读侧现在会在正常 EOF 后自动重连，而不是把整个 transport 直接关闭；会 idle-close/轮换 SSE 的服务端不会再把客户端无谓打死。

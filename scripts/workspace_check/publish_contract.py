@@ -14,6 +14,7 @@ class WorkspacePackage:
     manifest_path: Path
     publish: list[str] | None
     dependency_names: tuple[str, ...]
+    external_path_dependencies: tuple[tuple[str, Path], ...]
 
     @property
     def is_publish_false(self) -> bool:
@@ -42,19 +43,22 @@ def _workspace_packages(ctx: CheckContext) -> dict[str, WorkspacePackage]:
         if repo_root not in manifest_path.parents:
             continue
         dependency_names = []
+        external_path_dependencies = []
         for dependency in package["dependencies"]:
             dependency_path = dependency.get("path")
             if not dependency_path:
                 continue
             dependency_path = Path(dependency_path).resolve()
-            if not dependency_path.is_relative_to(repo_root):
+            if dependency_path.is_relative_to(repo_root):
+                dependency_names.append(dependency["name"])
                 continue
-            dependency_names.append(dependency["name"])
+            external_path_dependencies.append((dependency["name"], dependency_path))
         packages[package["name"]] = WorkspacePackage(
             name=package["name"],
             manifest_path=manifest_path,
             publish=package.get("publish"),
             dependency_names=tuple(dependency_names),
+            external_path_dependencies=tuple(external_path_dependencies),
         )
     return packages
 
@@ -117,9 +121,36 @@ def _check_publish_false_readme_contract(
         )
 
 
+def _check_external_path_dependency_contract(
+    ctx: CheckContext,
+    packages: dict[str, WorkspacePackage],
+) -> None:
+    violations: list[str] = []
+    for package in sorted(packages.values(), key=lambda item: item.name):
+        if not package.external_path_dependencies:
+            continue
+        rel_manifest = package.manifest_path.relative_to(ctx.repo_root)
+        for dependency_name, dependency_path in package.external_path_dependencies:
+            violations.append(
+                f"{package.name}: {rel_manifest} depends on `{dependency_name}` via external path "
+                f"{dependency_path}; cross-repo foundation/runtime deps must use a canonical git "
+                "source instead of escaping the workspace root"
+            )
+
+    if violations:
+        details = "\n".join(f"- {violation}" for violation in violations)
+        raise SystemExit(
+            "check-workspace: publish contract regression detected.\n"
+            "workspace packages must not depend on sibling/external path crates outside the "
+            "repository root.\n"
+            f"{details}"
+        )
+
+
 def run_publish_contract_checks(ctx: CheckContext) -> None:
     packages = _workspace_packages(ctx)
     _check_publish_false_readme_contract(ctx, packages)
+    _check_external_path_dependency_contract(ctx, packages)
     changed_manifests = _changed_manifest_paths(ctx)
     if not changed_manifests:
         return

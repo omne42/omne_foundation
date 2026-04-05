@@ -151,34 +151,51 @@ fn validate_resolved_addrs(
 }
 
 fn is_ip_disallowed_for_host(policy: &UntrustedOutboundPolicy, host: &str, ip: IpAddr) -> bool {
-    let _ = host;
-
-    if is_localhost_resolution_ip(ip) {
-        return true;
-    }
+    let ip = normalize_ip(ip);
+    let host_is_ip_literal = host_for_ip_literal(host).parse::<IpAddr>().is_ok();
+    let host_is_loopback_hostname = is_loopback_hostname(host);
 
     if is_always_disallowed_ip(ip) {
         return true;
     }
 
-    let ip = normalize_ip(ip);
-    if is_private_ip(ip) {
-        return !policy.allow_private_ips;
+    if is_host_local_resolution_ip(ip) {
+        if host_is_ip_literal {
+            return true;
+        }
+        if host_is_loopback_hostname {
+            return !(policy.allow_localhost && policy.allow_private_ips);
+        }
+        return true;
+    }
+
+    if is_loopback_ip(ip) {
+        if host_is_ip_literal {
+            return !policy.allow_private_ips;
+        }
+        if host_is_loopback_hostname {
+            return !(policy.allow_localhost && policy.allow_private_ips);
+        }
+        return true;
+    }
+
+    if policy.allow_private_ips {
+        return false;
     }
 
     is_non_global_ip(ip)
 }
 
-fn is_private_ip(ip: IpAddr) -> bool {
+fn is_host_local_resolution_ip(ip: IpAddr) -> bool {
     match normalize_ip(ip) {
-        IpAddr::V4(ip) => ip.is_private(),
-        IpAddr::V6(ip) => ip.is_unique_local(),
+        IpAddr::V4(ip) => is_host_local_ipv4(ip),
+        IpAddr::V6(_) => false,
     }
 }
 
-fn is_localhost_resolution_ip(ip: IpAddr) -> bool {
+fn is_loopback_ip(ip: IpAddr) -> bool {
     match normalize_ip(ip) {
-        IpAddr::V4(ip) => ip.is_loopback() || is_host_local_ipv4(ip),
+        IpAddr::V4(ip) => ip.is_loopback(),
         IpAddr::V6(ip) => ip.is_loopback(),
     }
 }
@@ -415,6 +432,60 @@ mod tests {
     }
 
     #[test]
+    fn dns_results_allow_loopback_for_localhost_with_private_ip_override() {
+        let policy = UntrustedOutboundPolicy {
+            allow_localhost: true,
+            allow_private_ips: true,
+            ..Default::default()
+        };
+
+        validate_resolved_addrs(
+            &policy,
+            "localhost",
+            [std::net::SocketAddr::from(([127, 0, 0, 1], 443))],
+        )
+        .expect("private-ip override should allow localhost DNS loopback results");
+    }
+
+    #[test]
+    fn dns_results_allow_host_local_resolution_for_localhost_with_private_ip_override() {
+        let policy = UntrustedOutboundPolicy {
+            allow_localhost: true,
+            allow_private_ips: true,
+            ..Default::default()
+        };
+
+        validate_resolved_addrs(
+            &policy,
+            "localhost",
+            [std::net::SocketAddr::from(([0, 0, 0, 1], 443))],
+        )
+        .expect("private-ip override should allow localhost host-local DNS results");
+    }
+
+    #[test]
+    fn dns_results_reject_host_local_resolution_for_non_localhost_hosts_even_with_private_ip_override()
+     {
+        let policy = UntrustedOutboundPolicy {
+            allow_private_ips: true,
+            ..Default::default()
+        };
+
+        let err = validate_resolved_addrs(
+            &policy,
+            "example.test",
+            [std::net::SocketAddr::from(([0, 0, 0, 1], 443))],
+        )
+        .expect_err("private-ip override must not allow host-local dns results");
+
+        assert!(matches!(
+            err,
+            UntrustedOutboundError::ResolvedToNonGlobalIp { ip, .. }
+                if ip == IpAddr::from([0, 0, 0, 1])
+        ));
+    }
+
+    #[test]
     fn resolved_always_disallowed_ip_is_rejected_even_with_private_ip_override() {
         let policy = UntrustedOutboundPolicy {
             allow_private_ips: true,
@@ -436,18 +507,14 @@ mod tests {
     }
 
     #[test]
-    fn private_ip_override_does_not_allow_loopback_ip_literals() {
+    fn private_ip_override_allows_loopback_ip_literals() {
         let policy = UntrustedOutboundPolicy {
             allow_private_ips: true,
             ..Default::default()
         };
         let url = reqwest::Url::parse("https://127.0.0.1/mcp").expect("parse url");
-        let err = validate_untrusted_outbound_url(&policy, &url)
-            .expect_err("loopback ip literal must still be rejected");
-        assert!(matches!(
-            err,
-            UntrustedOutboundError::NonGlobalIpNotAllowed { .. }
-        ));
+        validate_untrusted_outbound_url(&policy, &url)
+            .expect("private-ip override should allow loopback ip literals");
     }
 
     #[test]

@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：sync/no-runtime 的 dropped-request 回归测试现在统一挂到 detached-runtime test guard，避免并行测试下的故障注入状态互相污染，把本地 hook/CI 门禁稳定下来；不改变运行时行为。
 - `mcp-jsonrpc`：`Client::wait_with_timeout()` 现在对无 child client 区分两条路径：有 Tokio time driver 时继续把本地 close 阶段纳入 `timeout`，没有 time driver 时走 best-effort fail-closed 并返回 `Ok(None)`；同时补上无 child / 有 child 两条回归测试，锁住 API 契约。
 - `mcp-jsonrpc`：为 detached-runtime 相关单测补齐统一 test guard，避免并行测试时共享故障注入状态互相污染，保持 `local` 门禁稳定可重复。
 - `mcp-jsonrpc`：将 `src/lib.rs` 收敛为入口与 re-export，把 client 主体、reader/入站分发、错误映射与测试按稳定职责拆到独立模块，降低单文件复杂度并保持公开 API 不变。

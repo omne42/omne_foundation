@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Accept `localhost` DNS answers in the IPv4 `0/8` host-local range when both `allow_localhost=true` and `allow_private_ips=true`, while still rejecting those answers for non-localhost hostnames and IP literals.
+- Keep `allow_private_ips=true` consistent with untrusted host/IP validation by allowing loopback IP literals and `localhost` / `*.localhost` DNS answers, while still rejecting always-disallowed addresses and loopback rebinding from non-localhost hostnames.
 - drain bounded successful responses even when `Content-Length` is absent so chunked keep-alive callers can still return connections to the pool
 - Break `select_http_client_with_options(...)` by removing the unused `base_client` parameter, so the public API no longer pretends to preserve opaque `reqwest::Client` state that it must rebuild from `HttpClientOptions` anyway.
 - Add stable `http_kit::ErrorKind` classification for invalid input, transport, response-body, response-decode, and HTTP-status failures so callers no longer have to pattern-match opaque `anyhow` strings.

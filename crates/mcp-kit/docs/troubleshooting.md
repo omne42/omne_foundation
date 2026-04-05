@@ -92,7 +92,7 @@
 
 - 如果目标是 `localhost` / `localhost.localdomain` / `*.localhost`：
   CLI：加 `--allow-localhost`
-  代码：`UntrustedStreamableHttpPolicy { allow_localhost: true, .. }`
+  代码：`UntrustedStreamableHttpPolicy { outbound: http_kit::UntrustedOutboundPolicy { allow_localhost: true, ..Default::default() }, ..Default::default() }`
 - 如果目标是 `*.local` / `*.localdomain` 或单标签 host：只能改用 `Trusted`
 
 ### refusing to connect non-global ip in untrusted mode
@@ -102,7 +102,7 @@
 解决：
 
 - CLI：加 `--allow-private-ip`
-- 代码：`UntrustedStreamableHttpPolicy { allow_private_ips: true, .. }`
+- 代码：`UntrustedStreamableHttpPolicy { outbound: http_kit::UntrustedOutboundPolicy { allow_private_ips: true, ..Default::default() }, ..Default::default() }`
 
 补充说明：开启后，`streamable_http` transport 也会同步关闭 strict public-IP pinning；否则实际建连阶段仍会把 socket 目标限制在公网地址。
 

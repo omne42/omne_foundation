@@ -91,7 +91,10 @@ async fn main() -> anyhow::Result<()> {
     // `Config::load` 已隐式校验 `config.client()`；手动构造 config 时可用 `Manager::try_from_config`。
     let mut mcp = Manager::from_config(&config, "my-app", "0.1.0", Duration::from_secs(30))
         .with_untrusted_streamable_http_policy(UntrustedStreamableHttpPolicy {
-            allowed_hosts: vec!["example.com".to_string()],
+            outbound: http_kit::UntrustedOutboundPolicy {
+                allowed_hosts: vec!["example.com".to_string()],
+                ..Default::default()
+            },
             ..Default::default()
         });
 

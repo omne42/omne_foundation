@@ -194,7 +194,10 @@ manager = manager
 ```rust
 use mcp_kit::UntrustedStreamableHttpPolicy;
 manager = manager.with_untrusted_streamable_http_policy(UntrustedStreamableHttpPolicy {
-    allowed_hosts: vec!["example.com".into()],
+    outbound: http_kit::UntrustedOutboundPolicy {
+        allowed_hosts: vec!["example.com".into()],
+        ..Default::default()
+    },
     ..Default::default()
 });
 ```

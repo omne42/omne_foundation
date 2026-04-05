@@ -4188,6 +4188,20 @@ fn untrusted_policy_allows_private_ip_when_configured() {
 }
 
 #[test]
+fn untrusted_policy_allows_loopback_ip_literal_when_private_ips_are_allowed() {
+    let policy = UntrustedStreamableHttpPolicy {
+        allow_public_hosts: true,
+        outbound: http_kit::UntrustedOutboundPolicy {
+            allow_private_ips: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    validate_streamable_http_url_untrusted(&policy, "srv", "url", "https://127.0.0.1/mcp").unwrap();
+}
+
+#[test]
 fn streamable_http_public_ip_pinning_stays_enabled_for_default_untrusted_policy() {
     assert!(
         super::connect::should_enforce_streamable_http_public_ip_pinning(
@@ -4401,7 +4415,7 @@ async fn untrusted_policy_dns_check_rejects_localhost_without_allow_private_ip()
 }
 
 #[tokio::test]
-async fn untrusted_policy_dns_check_rejects_localhost_with_allow_private_ip() {
+async fn untrusted_policy_dns_check_allows_localhost_with_allow_private_ip() {
     let policy = UntrustedStreamableHttpPolicy {
         outbound: http_kit::UntrustedOutboundPolicy {
             allow_localhost: true,
@@ -4413,14 +4427,9 @@ async fn untrusted_policy_dns_check_rejects_localhost_with_allow_private_ip() {
     };
 
     validate_streamable_http_url_untrusted(&policy, "srv", "url", "https://localhost/mcp").unwrap();
-    let err =
-        validate_streamable_http_url_untrusted_dns(&policy, "srv", "url", "https://localhost/mcp")
-            .await
-            .unwrap_err();
-    assert!(
-        err.to_string().contains("resolves to non-global ip"),
-        "{err}"
-    );
+    validate_streamable_http_url_untrusted_dns(&policy, "srv", "url", "https://localhost/mcp")
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

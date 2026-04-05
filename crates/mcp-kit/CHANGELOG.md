@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：`shared_manager` 现在按“共享状态与生命周期 gate”/“request-notify facade”/“外置测试”拆到更窄的子模块里，降低单文件复杂度并把并发语义相关测试从主实现文件中移出；公开 API 与运行时行为保持不变。
 - `mcp-kit`：补充 override config path 穿透回归测试，显式锁住 `inside/../../outside.json` 这类“先进入 root 再逃逸”的路径也必须被 root 边界检查拒绝，避免该约束只覆盖简单的 `../outside.json` 场景。
 - `mcp-kit`：`streamable_http` 的 secret-backed auth 不再隐式从进程全局环境解析；Trusted 模式下如需解析 `bearer_token_secret` / `secret_http_headers`，现在必须显式通过 `Manager::with_streamable_http_secret_context(...)` 注入 secret context，或显式调用 `Manager::with_ambient_streamable_http_secrets()` 选择 ambient env。
 - `mcp-kit`：默认 `TrustMode::Untrusted` 的 `streamable_http` 边界进一步收紧：不再默认放任任意公网 host，也不再默认接受自定义 HTTP header；现在需要显式 allowlist/`allow_public_hosts=true` 或 `allow_custom_headers=true` 才会放开。

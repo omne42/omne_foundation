@@ -1995,8 +1995,10 @@ mod tests {
             drop(sse_stream);
         });
 
-        let mut http_options = StreamableHttpOptions::default();
-        http_options.request_timeout = Some(REQUEST_TIMEOUT);
+        let http_options = StreamableHttpOptions {
+            request_timeout: Some(REQUEST_TIMEOUT),
+            ..Default::default()
+        };
         let client = Client::connect_streamable_http_split_with_options(
             &format!("{base_url}/sse"),
             &format!("{base_url}/post"),

@@ -512,6 +512,7 @@ stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)
 
 - 不支持 `argv/unix_path/env/stdout_log`
 - Trusted 模式下，`url` / `sse_url` / `http_url` / `http_headers` 只允许 `${MCP_ROOT}` / `${CLAUDE_PLUGIN_ROOT}` 两种 root placeholder；不再允许 `${ENV}` 直接注入 transport 配置
+- Trusted 模式下如果要解析 `bearer_token_secret` / `secret_http_headers`，还必须显式提供 secret context：代码里用 `Manager::with_streamable_http_secret_context(...)`，或显式 opt-in `Manager::with_ambient_streamable_http_secrets()`；库默认不会偷偷读取进程环境
 
 安全（默认 Untrusted）：
 
@@ -818,6 +819,28 @@ use mcp_kit::TrustMode;
 manager = manager.with_trust_mode(TrustMode::Trusted);
 ```
 
+如果该 trusted `streamable_http` 配置还会用到 `bearer_token_secret` / `secret_http_headers`，再额外显式接一层 secret context：
+
+```rust
+use mcp_kit::{StreamableHttpSecretContext, TrustMode};
+use std::sync::Arc;
+
+manager = manager
+    .with_trust_mode(TrustMode::Trusted)
+    .with_streamable_http_secret_context(
+        StreamableHttpSecretContext::from_shared(Arc::new(my_secret_env)),
+    );
+```
+
+如果你明确要沿用 ambient env，也必须显式 opt-in：
+
+```rust
+use mcp_kit::TrustMode;
+manager = manager
+    .with_trust_mode(TrustMode::Trusted)
+    .with_ambient_streamable_http_secrets();
+```
+
 想在“不完全信任”的前提下收紧/放开远程规则，配置：
 
 ```rust
@@ -946,6 +969,11 @@ CLI 对应：
 
 - CLI：`--trust --yes-trust`
 - 或代码：`Manager::with_trust_mode(TrustMode::Trusted)`
+
+另外，Trusted 只表示你愿意放开这条边界，并不等于库会自动去读 ambient env。`mcp-kit` 现在要求 secret-backed streamable HTTP auth 走显式接线：
+
+- 推荐：`Manager::with_streamable_http_secret_context(...)`
+- 如果你明确接受 ambient env：`Manager::with_ambient_streamable_http_secrets()`
 
 ## 重要注意点（限制与最佳实践）
 
@@ -1081,6 +1109,7 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 - 默认不跟随 redirects（减少 SSRF 风险；可在 `mcp-jsonrpc` 里 opt-in）
 - `mcp-kit` 会把自己的 per-request timeout 设置到 `mcp-jsonrpc` 的 HTTP request timeout
 - Trusted 模式下 transport URL/header placeholder 只支持 `${MCP_ROOT}` / `${CLAUDE_PLUGIN_ROOT}`，不再支持 `${ENV}`
+- Trusted 模式下如需解析 secret-backed auth，还必须显式提供 `Manager::with_streamable_http_secret_context(...)`，或显式 opt-in `Manager::with_ambient_streamable_http_secrets()`
 
 更完整的实现细节（SSE 数据格式、`mcp-session-id`、POST 回包形态、timeout 语义）见 [`streamable_http 传输详解`](streamable_http.md) 与 [`调优与限制`](tuning.md)。
 
@@ -1961,6 +1990,8 @@ manager = manager.with_server_request_handler(handler);
 如果你确实要用认证 header：
 
 - 用 `--trust --yes-trust`（或 `TrustMode::Trusted`）
+- 代码侧再显式提供 `Manager::with_streamable_http_secret_context(...)`
+- 如果你明确接受 ambient env，也可以显式用 `Manager::with_ambient_streamable_http_secrets()`
 - 或者在你自己的上层代码里自行注入 header（但同样建议只在可信环境启用）
 
 ## Q：`mcp_kit::mcp` 的 typed wrapper 为什么不全？

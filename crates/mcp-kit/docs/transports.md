@@ -73,6 +73,7 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 - 默认不跟随 redirects（减少 SSRF 风险；可在 `mcp-jsonrpc` 里 opt-in）
 - `mcp-kit` 会把自己的 per-request timeout 设置到 `mcp-jsonrpc` 的 HTTP request timeout
 - Trusted 模式下 transport URL/header placeholder 只支持 `${MCP_ROOT}` / `${CLAUDE_PLUGIN_ROOT}`，不再支持 `${ENV}`
+- Trusted 模式下如需解析 secret-backed auth，还必须显式提供 `Manager::with_streamable_http_secret_context(...)`，或显式 opt-in `Manager::with_ambient_streamable_http_secrets()`
 
 更完整的实现细节（SSE 数据格式、`mcp-session-id`、POST 回包形态、timeout 语义）见 [`streamable_http 传输详解`](streamable_http.md) 与 [`调优与限制`](tuning.md)。
 

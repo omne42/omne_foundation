@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -21,7 +22,7 @@ use super::streamable_http_validation::{
     validate_streamable_http_config, validate_streamable_http_url_untrusted_dns,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct ConnectContext {
     pub(crate) trust_mode: TrustMode,
     pub(crate) untrusted_streamable_http_policy: UntrustedStreamableHttpPolicy,
@@ -29,6 +30,33 @@ pub(crate) struct ConnectContext {
     pub(crate) stdout_log_root: PathBuf,
     pub(crate) protocol_version: String,
     pub(crate) request_timeout: Duration,
+    pub(crate) streamable_http_secret_context: Option<StreamableHttpSecretContext>,
+}
+
+impl std::fmt::Debug for ConnectContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectContext")
+            .field("trust_mode", &self.trust_mode)
+            .field(
+                "untrusted_streamable_http_policy",
+                &self.untrusted_streamable_http_policy,
+            )
+            .field(
+                "allow_stdout_log_outside_root",
+                &self.allow_stdout_log_outside_root,
+            )
+            .field("stdout_log_root", &self.stdout_log_root)
+            .field("protocol_version", &self.protocol_version)
+            .field("request_timeout", &self.request_timeout)
+            .field(
+                "streamable_http_secret_context",
+                &self
+                    .streamable_http_secret_context
+                    .as_ref()
+                    .map(|_| "<configured>"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -50,8 +78,57 @@ impl SecretEnvironment for AmbientStreamableHttpSecretContext {
 
 impl SecretCommandRuntime for AmbientStreamableHttpSecretContext {}
 
-static AMBIENT_STREAMABLE_HTTP_SECRET_CONTEXT: AmbientStreamableHttpSecretContext =
-    AmbientStreamableHttpSecretContext;
+#[derive(Clone)]
+pub struct StreamableHttpSecretContext {
+    environment: Arc<dyn SecretEnvironment>,
+    command_runtime: Arc<dyn SecretCommandRuntime>,
+}
+
+impl std::fmt::Debug for StreamableHttpSecretContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamableHttpSecretContext")
+            .field("environment", &"<configured>")
+            .field("command_runtime", &"<configured>")
+            .finish()
+    }
+}
+
+impl StreamableHttpSecretContext {
+    #[must_use]
+    pub fn new(
+        environment: Arc<dyn SecretEnvironment>,
+        command_runtime: Arc<dyn SecretCommandRuntime>,
+    ) -> Self {
+        Self {
+            environment,
+            command_runtime,
+        }
+    }
+
+    #[must_use]
+    pub fn from_shared<T>(context: Arc<T>) -> Self
+    where
+        T: SecretEnvironment + SecretCommandRuntime + 'static,
+    {
+        let environment: Arc<dyn SecretEnvironment> = context.clone();
+        let command_runtime: Arc<dyn SecretCommandRuntime> = context;
+        Self::new(environment, command_runtime)
+    }
+
+    #[must_use]
+    pub fn ambient() -> Self {
+        Self::from_shared(Arc::new(AmbientStreamableHttpSecretContext))
+    }
+
+    async fn resolve_secret(&self, spec: &str) -> secret_kit::Result<SecretString> {
+        spec::resolve_secret_with_runtime(
+            spec,
+            self.environment.as_ref(),
+            self.command_runtime.as_ref(),
+        )
+        .await
+    }
+}
 
 pub(super) fn should_enforce_streamable_http_public_ip_pinning(
     trust_mode: TrustMode,
@@ -405,9 +482,23 @@ async fn build_streamable_http_headers(
         ctx.protocol_version.clone(),
     )?;
 
+    let requires_secret_context = server_cfg.bearer_token_secret().is_some()
+        || !server_cfg.secret_http_headers_required().is_empty();
+    let secret_context = if requires_secret_context {
+        Some(ctx.streamable_http_secret_context.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "mcp server {server_name}: secret-backed streamable http auth requires explicit Manager::with_streamable_http_secret_context(...) or Manager::with_ambient_streamable_http_secrets()"
+                )
+            })?)
+    } else {
+        None
+    };
+
     if let Some(secret_spec) = server_cfg.bearer_token_secret() {
         debug_assert_eq!(ctx.trust_mode, TrustMode::Trusted);
-        let token = spec::resolve_secret(secret_spec, &AMBIENT_STREAMABLE_HTTP_SECRET_CONTEXT)
+        let token = secret_context
+            .expect("secret context required when bearer token secret is configured")
+            .resolve_secret(secret_spec)
             .await
             .with_context(|| {
                 format!("resolve bearer token secret (server={server_name}) (spec redacted)")
@@ -429,7 +520,9 @@ async fn build_streamable_http_headers(
                     "mcp server {server_name}: secret-backed http header targets a reserved transport header: {header}"
                 );
             }
-            let value = spec::resolve_secret(secret_spec, &AMBIENT_STREAMABLE_HTTP_SECRET_CONTEXT)
+            let value = secret_context
+                .expect("secret context required when secret-backed headers are configured")
+                .resolve_secret(secret_spec)
                 .await
                 .with_context(|| {
                     format!(
@@ -508,6 +601,27 @@ pub(super) fn stdout_log_path_within_root(
 mod tests {
     use super::*;
     use crate::MCP_PROTOCOL_VERSION;
+    use std::collections::BTreeMap;
+
+    #[derive(Default)]
+    struct TestSecretContext {
+        values: BTreeMap<String, String>,
+    }
+
+    impl TestSecretContext {
+        fn with_secret(mut self, key: &str, value: &str) -> Self {
+            self.values.insert(key.to_string(), value.to_string());
+            self
+        }
+    }
+
+    impl SecretEnvironment for TestSecretContext {
+        fn get_secret(&self, key: &str) -> Option<SecretString> {
+            self.values.get(key).cloned().map(SecretString::new)
+        }
+    }
+
+    impl SecretCommandRuntime for TestSecretContext {}
 
     fn trusted_connect_context() -> ConnectContext {
         ConnectContext {
@@ -517,6 +631,25 @@ mod tests {
             stdout_log_root: PathBuf::from("/"),
             protocol_version: MCP_PROTOCOL_VERSION.to_string(),
             request_timeout: Duration::from_secs(5),
+            streamable_http_secret_context: Some(StreamableHttpSecretContext::from_shared(
+                Arc::new(
+                    TestSecretContext::default()
+                        .with_secret("MCP_TOKEN", "test-token")
+                        .with_secret("MCP_API_KEY", "api-key"),
+                ),
+            )),
+        }
+    }
+
+    fn trusted_connect_context_without_secret_context() -> ConnectContext {
+        ConnectContext {
+            trust_mode: TrustMode::Trusted,
+            untrusted_streamable_http_policy: UntrustedStreamableHttpPolicy::default(),
+            allow_stdout_log_outside_root: false,
+            stdout_log_root: PathBuf::from("/"),
+            protocol_version: MCP_PROTOCOL_VERSION.to_string(),
+            request_timeout: Duration::from_secs(5),
+            streamable_http_secret_context: None,
         }
     }
 
@@ -543,20 +676,18 @@ mod tests {
     async fn bearer_token_secret_still_populates_authorization_header() {
         let ctx = trusted_connect_context();
         let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
-        let env_var = "PATH";
         server_cfg
-            .set_bearer_token_secret(Some(format!("secret://env/{env_var}")))
+            .set_bearer_token_secret(Some("secret://env/MCP_TOKEN".to_string()))
             .unwrap();
-        let token = std::env::var(env_var).expect("PATH should be present in test environment");
 
         let headers = build_streamable_http_headers(&ctx, "srv", &server_cfg, Path::new("."))
             .await
             .expect("bearer token secret should remain supported");
-        let expected_authorization = format!("Bearer {token}");
+        let expected_authorization = "Bearer test-token";
 
         assert_eq!(
             headers.get(AUTHORIZATION_HEADER).map(String::as_str),
-            Some(expected_authorization.as_str())
+            Some(expected_authorization)
         );
         assert_eq!(
             headers.get(MCP_PROTOCOL_VERSION_HEADER).map(String::as_str),
@@ -635,7 +766,7 @@ mod tests {
         server_cfg
             .secret_http_headers_mut()
             .unwrap()
-            .insert("x-test".to_string(), "secret://env/PATH".to_string());
+            .insert("x-test".to_string(), "secret://env/MCP_API_KEY".to_string());
 
         let err = build_streamable_http_headers(&ctx, "srv", &server_cfg, Path::new("."))
             .await
@@ -643,6 +774,24 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("duplicate http header name ignoring case"),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn secret_backed_streamable_http_headers_require_explicit_secret_context() {
+        let ctx = trusted_connect_context_without_secret_context();
+        let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+        server_cfg
+            .set_bearer_token_secret(Some("secret://env/MCP_TOKEN".to_string()))
+            .unwrap();
+
+        let err = build_streamable_http_headers(&ctx, "srv", &server_cfg, Path::new("."))
+            .await
+            .expect_err("secret-backed auth should require explicit secret context");
+        assert!(
+            err.to_string()
+                .contains("requires explicit Manager::with_streamable_http_secret_context"),
             "{err:#}"
         );
     }

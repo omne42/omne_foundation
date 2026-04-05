@@ -21,6 +21,8 @@
 如果你确实要用认证 header：
 
 - 用 `--trust --yes-trust`（或 `TrustMode::Trusted`）
+- 代码侧再显式提供 `Manager::with_streamable_http_secret_context(...)`
+- 如果你明确接受 ambient env，也可以显式用 `Manager::with_ambient_streamable_http_secrets()`
 - 或者在你自己的上层代码里自行注入 header（但同样建议只在可信环境启用）
 
 ## Q：`mcp_kit::mcp` 的 typed wrapper 为什么不全？

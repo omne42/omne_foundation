@@ -33,6 +33,7 @@
 - `Manager` / `SharedManager` 的 config 驱动入口会在“同名连接已自然关闭”后按需重新建连，这属于当前实例内部的连接复用语义。
 - direct `Manager` 连接入口要求调用方传入绝对 `cwd`；不再隐式借 ambient `current_dir()` 解析相对目录。
 - config 驱动入口上的相对 `cwd` 只会相对显式的 thread root/base 解析；包含 `.` / `..` 的相对路径会直接 fail-closed，避免静默逃逸出 base 边界。
+- `streamable_http` 的 secret-backed auth 也要求显式边界：库侧默认不会偷偷读取进程环境；需要的话请显式注入 `StreamableHttpSecretContext`，或显式 opt-in `with_ambient_streamable_http_secrets()`。
 - crate 不负责后台自动重连循环、keepalive、守护进程或跨实例重连策略。
 - server handler 的 panic 会被隔离成 fail-closed 边界：当前条消息会收到结构化错误或直接停止 notification dispatch，后续消息不会继续复用同一个 handler 实例。
 

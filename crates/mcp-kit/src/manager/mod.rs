@@ -41,6 +41,7 @@ use streamable_http_validation::validate_streamable_http_url_untrusted;
 #[cfg(test)]
 use streamable_http_validation::validate_streamable_http_url_untrusted_dns;
 
+pub use connect::StreamableHttpSecretContext;
 pub(crate) use connect::{ConnectContext, connect_transport};
 pub(crate) use handlers::{is_in_manager_handler_scope, scope_manager_handler_call};
 use path_identity::{canonicalize_existing_prefix, normalize_path_lexically};
@@ -257,6 +258,7 @@ pub struct Manager {
     capabilities: Value,
     roots: Option<Arc<Vec<Root>>>,
     trust_mode: TrustMode,
+    streamable_http_secret_context: Option<StreamableHttpSecretContext>,
     untrusted_streamable_http_policy: UntrustedStreamableHttpPolicy,
     allow_stdout_log_outside_root: bool,
     request_timeout: Duration,
@@ -633,6 +635,7 @@ impl Manager {
             capabilities: Value::Object(serde_json::Map::new()),
             roots: None,
             trust_mode: TrustMode::Untrusted,
+            streamable_http_secret_context: None,
             untrusted_streamable_http_policy: UntrustedStreamableHttpPolicy::default(),
             allow_stdout_log_outside_root: false,
             request_timeout: timeout,
@@ -645,6 +648,19 @@ impl Manager {
 
     pub fn with_trust_mode(mut self, trust_mode: TrustMode) -> Self {
         self.trust_mode = trust_mode;
+        self
+    }
+
+    pub fn with_streamable_http_secret_context(
+        mut self,
+        context: StreamableHttpSecretContext,
+    ) -> Self {
+        self.streamable_http_secret_context = Some(context);
+        self
+    }
+
+    pub fn with_ambient_streamable_http_secrets(mut self) -> Self {
+        self.streamable_http_secret_context = Some(StreamableHttpSecretContext::ambient());
         self
     }
 
@@ -1083,6 +1099,7 @@ impl Manager {
                 stdout_log_root,
                 protocol_version: self.protocol_version.clone(),
                 request_timeout: self.request_timeout,
+                streamable_http_secret_context: self.streamable_http_secret_context.clone(),
             },
         }))
     }
@@ -1146,6 +1163,7 @@ impl Manager {
             stdout_log_root,
             protocol_version: self.protocol_version.clone(),
             request_timeout: self.request_timeout,
+            streamable_http_secret_context: self.streamable_http_secret_context.clone(),
         };
         let (client, child) = connect_transport(&ctx, server_name, server_cfg, &cwd).await?;
 

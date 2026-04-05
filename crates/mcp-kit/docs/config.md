@@ -149,6 +149,7 @@ stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)
 
 - 不支持 `argv/unix_path/env/stdout_log`
 - Trusted 模式下，`url` / `sse_url` / `http_url` / `http_headers` 只允许 `${MCP_ROOT}` / `${CLAUDE_PLUGIN_ROOT}` 两种 root placeholder；不再允许 `${ENV}` 直接注入 transport 配置
+- Trusted 模式下如果要解析 `bearer_token_secret` / `secret_http_headers`，还必须显式提供 secret context：代码里用 `Manager::with_streamable_http_secret_context(...)`，或显式 opt-in `Manager::with_ambient_streamable_http_secrets()`；库默认不会偷偷读取进程环境
 
 安全（默认 Untrusted）：
 

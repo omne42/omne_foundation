@@ -319,3 +319,79 @@ fn protocol_error_user_text(kind: ProtocolErrorKind) -> StructuredText {
         ProtocolErrorKind::Other => "json-rpc protocol error",
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_wait_timeout_maps_to_retryable_timeout_record() {
+        let err = Error::protocol(ProtocolErrorKind::WaitTimeout, "wait timed out after 1s");
+
+        let record = err.error_record();
+
+        assert_eq!(record.code().as_str(), "mcp_jsonrpc.protocol.wait_timeout");
+        assert_eq!(record.category(), ErrorCategory::Timeout);
+        assert_eq!(record.retry_advice(), ErrorRetryAdvice::Retryable);
+        assert_eq!(
+            record.user_text().freeform_text(),
+            Some("json-rpc wait timed out")
+        );
+        assert_eq!(
+            record
+                .diagnostic_text()
+                .and_then(StructuredText::freeform_text),
+            Some("wait timed out after 1s")
+        );
+    }
+
+    #[test]
+    fn rpc_method_not_found_maps_to_not_found_record() {
+        let err = Error::Rpc {
+            code: -32601,
+            message: String::from("tools/list"),
+            data: None,
+        };
+
+        let record = err.error_record();
+
+        assert_eq!(record.code().as_str(), "mcp_jsonrpc.rpc.method_not_found");
+        assert_eq!(record.category(), ErrorCategory::NotFound);
+        assert_eq!(record.retry_advice(), ErrorRetryAdvice::DoNotRetry);
+        assert_eq!(
+            record.user_text().freeform_text(),
+            Some("remote json-rpc method not found")
+        );
+        assert_eq!(
+            record
+                .diagnostic_text()
+                .and_then(StructuredText::freeform_text),
+            Some("remote json-rpc error -32601: tools/list")
+        );
+    }
+
+    #[test]
+    fn into_error_record_preserves_io_source() {
+        let err = Error::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "permission denied",
+        ));
+
+        let record = err.into_error_record();
+
+        assert_eq!(record.code().as_str(), "mcp_jsonrpc.io.permission_denied");
+        assert_eq!(record.category(), ErrorCategory::PermissionDenied);
+        assert_eq!(record.retry_advice(), ErrorRetryAdvice::DoNotRetry);
+        assert_eq!(
+            record.user_text().freeform_text(),
+            Some("json-rpc transport permission denied")
+        );
+        assert_eq!(
+            record
+                .source_ref()
+                .expect("io source should be preserved")
+                .to_string(),
+            "permission denied"
+        );
+    }
+}

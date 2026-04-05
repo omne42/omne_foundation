@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：将 `src/lib.rs` 收敛为入口与 re-export，把 client 主体、reader/入站分发、错误映射与测试按稳定职责拆到独立模块，降低单文件复杂度并保持公开 API 不变。
 - `mcp-jsonrpc`：`lib.rs` 里的旧 detached runtime 降级路径已收口到统一的稳健实现；后台 runtime 初始化/派发失败不再 `panic!` 或静默吞掉 batch flush / dropped-request 补偿，而是 fail-closed 并保留关闭原因。
 - `mcp-jsonrpc`：`streamable_http` 的 notification POST 超时不再关闭整条 transport；没有 JSON-RPC `id` 的单次超时现在只丢弃该通知，后续 request/notification 仍可继续复用同一连接。
 - `mcp-jsonrpc`：notification-timeout 回归测试改成直接用结构体字面量初始化 `StreamableHttpOptions`，保持 `clippy::field_reassign_with_default` 门禁持续为绿。

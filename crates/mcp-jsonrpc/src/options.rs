@@ -5,7 +5,7 @@ use std::time::Duration;
 
 pub type StdoutLogRedactor = Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
 
-const DEFAULT_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const DEFAULT_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct SpawnOptions {

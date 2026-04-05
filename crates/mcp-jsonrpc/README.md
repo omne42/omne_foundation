@@ -46,8 +46,16 @@
 ## 结构设计
 
 - `src/lib.rs`
+  - crate 入口
+  - 对外 API re-export
+- `src/client.rs`
   - client 主体
-  - 核心读写循环
+  - request / response 编排
+  - pending request / close state
+- `src/reader.rs`
+  - reader loop
+  - 入站 JSON-RPC 分发
+  - 行读取与 batch 处理辅助
 - `src/options.rs`
   - transport 选项
   - limits
@@ -55,6 +63,8 @@
   - 错误类型与 `error-kit` 映射
 - `src/runtime.rs`
   - Tokio time driver 前置检查
+- `src/detached.rs`
+  - 无 runtime 场景的后台派发与 fail-closed close 辅助
 - `src/stdout_log.rs`
   - stdout 分段日志
 - `src/streamable_http.rs`

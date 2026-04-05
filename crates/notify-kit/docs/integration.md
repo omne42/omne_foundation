@@ -4,11 +4,11 @@
 
 如果你只想快速接线，库里也提供了：
 
-- `notify_kit::env::build_hub_from_standard_env(...)`
-- `notify_kit::env::StandardEnvHubOptions`
+- `notify_kit::integration::standard_env::build_hub_from_standard_env(...)`
+- `notify_kit::integration::standard_env::StandardEnvHubOptions`
 
 它们是 convenience helper，不是强制协议，也不改变推荐分层。
-公开入口固定为 `notify_kit::env::...`。
+公开入口固定为 `notify_kit::integration::standard_env::...`。
 如果你关闭了默认 features，需要额外启用 `standard-env` feature 才会编译这组 helper。
 
 ## 一个推荐的配置层结构
@@ -88,12 +88,12 @@ fn build_hub_from_env() -> notify_kit::Result<Hub> {
 }
 ```
 
-如果你采用库自带的 `notify_kit::env::build_hub_from_standard_env(...)` helper，`NOTIFY_TIMEOUT_MS` 会先作为各 HTTP sink 的内部 timeout，再自动为 `HubConfig.per_sink_timeout` 留一段额外 slack，避免外层 `Hub` 比内层 HTTP request 更早超时。
+如果你采用库自带的 `notify_kit::integration::standard_env::build_hub_from_standard_env(...)` helper，`NOTIFY_TIMEOUT_MS` 会先作为各 HTTP sink 的内部 timeout，再自动为 `HubConfig.per_sink_timeout` 留一段额外 slack，避免外层 `Hub` 比内层 HTTP request 更早超时。
 `NOTIFY_SOUND` 现在也会做严格布尔校验；非法值会直接返回错误，而不是静默回退到默认值。
 
 如果你在 integration layer 里接 `FeishuWebhookSink` 且正文会出现相对本地图片路径，记得同时显式配置绝对 `with_local_image_root(...)` 和绝对 `with_local_image_base_dir(...)`；`notify-kit` 不会再退回进程 `current_dir()` 解释这类路径。
 
-如果你采用库自带的 env helper，建议通过 `notify_kit::env::build_hub_from_standard_env(...)` 访问，并把它当成 bootstrap helper：能减少样板代码，但不妨碍你在自己的 integration layer 继续包装、替换或扩展。
+如果你采用库自带的 env helper，建议通过 `notify_kit::integration::standard_env::build_hub_from_standard_env(...)` 访问，并把它当成 bootstrap helper：能减少样板代码，但不妨碍你在自己的 integration layer 继续包装、替换或扩展。
 它使用一套中性的 `NOTIFY_*` 约定，而不是业务前缀协议。
 
 ## 标准 helper 示例

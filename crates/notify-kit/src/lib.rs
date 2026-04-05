@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 
-#[cfg(feature = "standard-env")]
-pub mod env;
 mod error;
 mod event;
 mod hub;
+#[cfg(feature = "standard-env")]
+pub mod integration;
 mod log;
 mod secret;
 mod sinks;

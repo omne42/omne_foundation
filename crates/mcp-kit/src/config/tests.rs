@@ -715,10 +715,41 @@ async fn load_parses_streamable_http_transport() {
     assert!(server.sse_url().is_none());
     assert!(server.http_url().is_none());
     assert!(server.bearer_token_secret().is_none());
+    assert_eq!(
+        server.streamable_http_proxy_mode(),
+        Some(StreamableHttpProxyMode::IgnoreSystem)
+    );
     assert!(server.http_headers().is_some_and(BTreeMap::is_empty));
     assert!(server.secret_http_headers().is_some_and(BTreeMap::is_empty));
     assert_eq!(server.env(), None);
     assert!(server.stdout_log().is_none());
+}
+
+#[tokio::test]
+async fn load_parses_streamable_http_proxy_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{
+  "version": 1,
+  "servers": {
+    "remote": {
+      "transport": "streamable_http",
+      "url": "https://example.com/mcp",
+      "streamable_http_proxy_mode": "use_system"
+    }
+  }
+}"#,
+    )
+    .await
+    .unwrap();
+
+    let cfg = Config::load(dir.path(), None).await.unwrap();
+    let server = cfg.servers().get("remote").unwrap();
+    assert_eq!(
+        server.streamable_http_proxy_mode(),
+        Some(StreamableHttpProxyMode::UseSystem)
+    );
 }
 
 #[tokio::test]
@@ -850,6 +881,10 @@ async fn load_parses_streamable_http_transport_with_split_urls() {
     assert!(server.url().is_none());
     assert_eq!(server.sse_url(), Some("https://example.com/sse"));
     assert_eq!(server.http_url(), Some("https://example.com/mcp"));
+    assert_eq!(
+        server.streamable_http_proxy_mode(),
+        Some(StreamableHttpProxyMode::IgnoreSystem)
+    );
 }
 
 #[tokio::test]
@@ -950,6 +985,33 @@ async fn load_denies_streamable_http_with_env() {
 
     let err = Config::load(dir.path(), None).await.unwrap_err();
     assert!(err.to_string().contains("transport=streamable_http"));
+}
+
+#[tokio::test]
+async fn load_denies_streamable_http_proxy_mode_on_stdio_transport() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{
+  "version": 1,
+  "servers": {
+    "local": {
+      "transport": "stdio",
+      "argv": ["demo"],
+      "streamable_http_proxy_mode": "use_system"
+    }
+  }
+}"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("streamable_http_proxy_mode is only valid for transport=streamable_http"),
+        "err={err:#}"
+    );
 }
 
 #[tokio::test]

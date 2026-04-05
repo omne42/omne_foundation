@@ -174,6 +174,25 @@ fn is_loopback_hostname(host: &str) -> bool {
             .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".localhost"))
 }
 
+fn build_streamable_http_options(
+    server_cfg: &ServerConfig,
+    headers: HashMap<String, String>,
+    enforce_public_ip: bool,
+    request_timeout: Duration,
+) -> mcp_jsonrpc::StreamableHttpOptions {
+    mcp_jsonrpc::StreamableHttpOptions {
+        headers,
+        // `mcp-jsonrpc` only exposes a strict public-only DNS pinning mode. Once the
+        // untrusted policy intentionally allows non-public endpoints, keep syntax/DNS
+        // validation but stop forcing the transport into a contradictory public-only socket
+        // selection path.
+        enforce_public_ip,
+        proxy_mode: server_cfg.streamable_http_proxy_mode_required().into(),
+        request_timeout: Some(request_timeout),
+        ..Default::default()
+    }
+}
+
 pub(crate) async fn connect_transport(
     ctx: &ConnectContext,
     server_name: &str,
@@ -363,16 +382,7 @@ async fn connect_streamable_http_transport(
     let client = mcp_jsonrpc::Client::connect_streamable_http_split_with_options(
         &resolved_urls.sse_url,
         &resolved_urls.post_url,
-        mcp_jsonrpc::StreamableHttpOptions {
-            headers,
-            // `mcp-jsonrpc` only exposes a strict public-only DNS pinning mode. Once the
-            // untrusted policy intentionally allows non-public endpoints, keep syntax/DNS
-            // validation but stop forcing the transport into a contradictory public-only socket
-            // selection path.
-            enforce_public_ip,
-            request_timeout: Some(ctx.request_timeout),
-            ..Default::default()
-        },
+        build_streamable_http_options(server_cfg, headers, enforce_public_ip, ctx.request_timeout),
         mcp_jsonrpc::SpawnOptions::default(),
     )
     .await
@@ -601,7 +611,7 @@ pub(super) fn stdout_log_path_within_root(
 mod tests {
     use super::*;
     use crate::MCP_PROTOCOL_VERSION;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
 
     #[derive(Default)]
     struct TestSecretContext {
@@ -670,6 +680,28 @@ mod tests {
                 .contains("secret-backed http header targets a reserved transport header"),
             "{err:#}"
         );
+    }
+
+    #[test]
+    fn build_streamable_http_options_propagates_proxy_mode() {
+        let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+        server_cfg
+            .set_streamable_http_proxy_mode(crate::StreamableHttpProxyMode::UseSystem)
+            .unwrap();
+
+        let options = build_streamable_http_options(
+            &server_cfg,
+            HashMap::new(),
+            true,
+            Duration::from_secs(30),
+        );
+
+        assert_eq!(
+            options.proxy_mode,
+            mcp_jsonrpc::StreamableHttpProxyMode::UseSystem
+        );
+        assert!(options.enforce_public_ip);
+        assert_eq!(options.request_timeout, Some(Duration::from_secs(30)));
     }
 
     #[tokio::test]

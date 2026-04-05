@@ -492,6 +492,7 @@ stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)
 {
   "transport": "streamable_http",
   "url": "https://example.com/mcp",
+  "streamable_http_proxy_mode": "use_system",
   "http_headers": { "X-Client": "my-app" },
   "bearer_token_secret": "secret://env/MCP_TOKEN",
   "secret_http_headers": { "X-Api-Key": "secret://env/MCP_API_KEY" }
@@ -502,6 +503,7 @@ stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)
 
 - `url`（可选）：远程 MCP server URL（同时用于 SSE 与 POST）
 - `sse_url` + `http_url`（可选）：分离的 SSE URL 与 POST URL（两者必须同时设置；不能与 `url` 同时出现）
+- `streamable_http_proxy_mode`（可选）：`"ignore_system"`（默认）或 `"use_system"`；决定是否读取 `HTTP_PROXY` / `HTTPS_PROXY` 等系统代理环境变量
 - `http_headers`（可选）：静态 header
 - `bearer_token_secret`（可选）：通过 `secret-kit` 解析 secret spec，并注入 `Authorization: Bearer ...`
 - `secret_http_headers`（可选）：通过 `secret-kit` 解析每个 header 的 secret spec
@@ -873,7 +875,7 @@ manager = manager.with_untrusted_streamable_http_policy(UntrustedStreamableHttpP
 - `Manager::connect_io_unchecked(...)`
 - `Manager::connect_jsonrpc_unchecked(...)`
 
-如果你需要调整 `mcp-jsonrpc` 的 `Limits` 或 streamable_http 的网络选项（例如 connect_timeout / redirects），推荐先用 `mcp-jsonrpc` 构建 `Client`，再用 `connect_jsonrpc` 接入；细节见 [`调优与限制`](tuning.md)。
+如果你需要调整 `mcp-jsonrpc` 的 `Limits` 或 streamable_http 的更细网络选项（例如 connect_timeout / redirects），推荐先用 `mcp-jsonrpc` 构建 `Client`，再用 `connect_jsonrpc` 接入；如果只是决定是否沿用系统代理环境，`mcp.json` 已经支持 `streamable_http_proxy_mode`。细节见 [`调优与限制`](tuning.md)。
 
 ---
 
@@ -1104,6 +1106,7 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 
 - `url`（可选）：例如 `https://example.com/mcp`（同时用于 SSE 与 POST）
 - `sse_url` + `http_url`（可选）：分离的 SSE 与 POST URL（两者必须同时设置；不能与 `url` 同时出现）
+- `streamable_http_proxy_mode`（可选）：`ignore_system`（默认）或 `use_system`；控制是否读取系统代理环境变量
 - `http_headers`（可选）：静态 header（不涉及 secrets 时可在 Untrusted 下使用）
 - `bearer_token_secret`（可选）：通过 `secret-kit` 解析 secret spec 并注入 `Authorization: Bearer ...`（Untrusted 下拒绝）
 - `secret_http_headers`（可选）：通过 `secret-kit` 解析 header secret spec（Untrusted 下拒绝）
@@ -1113,6 +1116,7 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 
 - 会自动添加 header：`MCP-Protocol-Version: <protocol_version>`
 - 默认不跟随 redirects（减少 SSRF 风险；可在 `mcp-jsonrpc` 里 opt-in）
+- 默认不读取系统代理环境变量；只有把 `streamable_http_proxy_mode` 设为 `use_system` 时，才会沿用 `HTTP_PROXY` / `HTTPS_PROXY`
 - `mcp-kit` 会把自己的 per-request timeout 设置到 `mcp-jsonrpc` 的 HTTP request timeout
 - Trusted 模式下 transport URL/header placeholder 只支持 `${MCP_ROOT}` / `${CLAUDE_PLUGIN_ROOT}`，不再支持 `${ENV}`
 - Trusted 模式下如需解析 secret-backed auth，还必须显式提供 `Manager::with_streamable_http_secret_context(...)`，或显式 opt-in `Manager::with_ambient_streamable_http_secrets()`
@@ -1247,9 +1251,10 @@ data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}
 为了降低 SSRF 风险与行为不确定性：
 
 - `follow_redirects` 默认 `false`（不跟随 30x）
-- 默认禁用“自动读取系统代理环境变量”（`reqwest::Client::builder().no_proxy()`）
+- 默认禁用“自动读取系统代理环境变量”
+- 在 `mcp-kit` 的 `mcp.json` 里，可通过 `streamable_http_proxy_mode = "use_system"` 显式沿用 `HTTP_PROXY` / `HTTPS_PROXY`；未配置时默认仍是 `ignore_system`
 
-如果你需要不同的网络策略（例如走企业代理或允许 redirects），可以在上层自行构建 `mcp_jsonrpc::Client` 并接入 `mcp-kit`（见 [`作为库使用`](library.md) 的自定义 transport 章节）。
+如果你需要更进一步的网络策略（例如自定义 `connect_timeout` 或允许 redirects），仍然需要在上层自行构建 `mcp_jsonrpc::Client` 并接入 `mcp-kit`（见 [`作为库使用`](library.md) 的自定义 transport 章节）。
 
 ## 与 mcp-kit 的关系
 
@@ -1421,6 +1426,15 @@ stdout_log 是 best-effort：
 
 如果你需要修改 connect_timeout，需要在上层自行构建 `mcp_jsonrpc::Client::connect_streamable_http_with_options(...)` 并接入 `mcp-kit`（见下文“自定义 Limits/Options”）。
 
+### streamable_http：proxy_mode
+
+`mcp-kit` 现在可以直接通过 `mcp.json` 的 `streamable_http_proxy_mode` 控制是否读取系统代理环境变量：
+
+- `ignore_system`（默认）：不读取 `HTTP_PROXY` / `HTTPS_PROXY`
+- `use_system`：允许 `reqwest` 沿用进程代理环境
+
+这条开关只覆盖代理环境变量；`connect_timeout` / `follow_redirects` 之类更细的 transport 选项仍需要走下文的自定义 client 路径。
+
 ## DoS 防护与队列（mcp_jsonrpc::Limits）
 
 `mcp-jsonrpc` 内置了几类限制，默认值适用于大多数 MCP server，但你可以按需调整。
@@ -1473,7 +1487,7 @@ server→client requests（需要 respond）同样进入有界队列：
 
 `mcp-kit` 默认使用 `mcp_jsonrpc::SpawnOptions::default()`（即默认 Limits）。
 
-如果你需要自定义 Limits（或 streamable_http 的 connect_timeout / follow_redirects 等），推荐路径是：
+如果你需要自定义 Limits（或 streamable_http 的 connect_timeout / follow_redirects 等非 `proxy_mode` 选项），推荐路径是：
 
 1. 直接用 `mcp-jsonrpc` 构建 client（带 options）
 2. 显式切换到 `TrustMode::Trusted` 后，用 `Manager::connect_jsonrpc(...)` 或 `connect_jsonrpc_session(...)` 接入

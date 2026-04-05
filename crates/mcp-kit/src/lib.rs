@@ -86,7 +86,8 @@ pub mod shared {
 }
 
 pub use config::{
-    ClientConfig, Config, ConfigLoadPolicy, Root, ServerConfig, StdoutLogConfig, Transport,
+    ClientConfig, Config, ConfigLoadPolicy, Root, ServerConfig, StdoutLogConfig,
+    StreamableHttpProxyMode, Transport,
 };
 pub use error::{Error, ErrorKind, Result};
 pub use manager::{

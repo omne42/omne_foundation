@@ -92,9 +92,10 @@ data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}
 为了降低 SSRF 风险与行为不确定性：
 
 - `follow_redirects` 默认 `false`（不跟随 30x）
-- 默认禁用“自动读取系统代理环境变量”（`reqwest::Client::builder().no_proxy()`）
+- 默认禁用“自动读取系统代理环境变量”
+- 在 `mcp-kit` 的 `mcp.json` 里，可通过 `streamable_http_proxy_mode = "use_system"` 显式沿用 `HTTP_PROXY` / `HTTPS_PROXY`；未配置时默认仍是 `ignore_system`
 
-如果你需要不同的网络策略（例如走企业代理或允许 redirects），可以在上层自行构建 `mcp_jsonrpc::Client` 并接入 `mcp-kit`（见 [`作为库使用`](library.md) 的自定义 transport 章节）。
+如果你需要更进一步的网络策略（例如自定义 `connect_timeout` 或允许 redirects），仍然需要在上层自行构建 `mcp_jsonrpc::Client` 并接入 `mcp-kit`（见 [`作为库使用`](library.md) 的自定义 transport 章节）。
 
 ## 与 mcp-kit 的关系
 

@@ -102,6 +102,15 @@ impl Error {
             {
                 ErrorKind::Timeout
             }
+            mcp_jsonrpc::Error::Protocol(protocol)
+                if matches!(
+                    protocol.kind,
+                    mcp_jsonrpc::ProtocolErrorKind::Closed
+                        | mcp_jsonrpc::ProtocolErrorKind::StreamableHttp
+                ) =>
+            {
+                ErrorKind::Connection
+            }
             mcp_jsonrpc::Error::Json(_)
             | mcp_jsonrpc::Error::Rpc { .. }
             | mcp_jsonrpc::Error::Protocol(_) => ErrorKind::Protocol,
@@ -325,6 +334,24 @@ mod tests {
             "bad request",
         ));
         assert_eq!(err.kind(), ErrorKind::Protocol);
+    }
+
+    #[test]
+    fn classifies_jsonrpc_closed_errors_as_connection_errors() {
+        let err = Error::from(mcp_jsonrpc::Error::protocol(
+            mcp_jsonrpc::ProtocolErrorKind::Closed,
+            "transport closed",
+        ));
+        assert_eq!(err.kind(), ErrorKind::Connection);
+    }
+
+    #[test]
+    fn classifies_streamable_http_errors_as_connection_errors() {
+        let err = Error::from(mcp_jsonrpc::Error::protocol(
+            mcp_jsonrpc::ProtocolErrorKind::StreamableHttp,
+            "http bridge failed",
+        ));
+        assert_eq!(err.kind(), ErrorKind::Connection);
     }
 
     #[test]

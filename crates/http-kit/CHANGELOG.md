@@ -3,10 +3,11 @@
 ## Unreleased
 
 - drain bounded successful responses even when `Content-Length` is absent so chunked keep-alive callers can still return connections to the pool
+- Break `select_http_client_with_options(...)` by removing the unused `base_client` parameter, so the public API no longer pretends to preserve opaque `reqwest::Client` state that it must rebuild from `HttpClientOptions` anyway.
+- Add stable `http_kit::ErrorKind` classification for invalid input, transport, response-body, response-decode, and HTTP-status failures so callers no longer have to pattern-match opaque `anyhow` strings.
 - Remove the dead default pinned-client cache/expiry branch and keep only per-key build locking plus DNS re-resolution, so the public-IP pinned path now matches its actual always-rebuild behavior without carrying misleading cache state.
 - Replace process-global pinned-client cache/build-lock/DNS state with explicit per-`HttpClientProfile` shared state, and keep `select_http_client_with_options(...)` isolated so unrelated callers no longer contend through hidden process-wide HTTP state.
 - Rejoin `http-kit` to workspace dependency/lint governance via workspace-managed dependencies and `[lints] workspace = true`.
-- Fix `select_http_client_with_options(...)` so `enforce_public_ip=false` reuses the caller-provided `base_client` instead of silently discarding it and honoring a different contract than the function signature advertises.
 - Fix `validate_untrusted_outbound_url_dns(...)` so `allow_private_ips=true` still rejects loopback and always-disallowed resolved addresses instead of short-circuiting DNS validation entirely.
 - Narrow `allow_localhost` so it only exempts loopback-style hostnames (`localhost`, `localhost.localdomain`, `*.localhost`) instead of also allowing `*.local`, `*.localdomain`, or single-label hosts.
 - Require exact IP-literal matches in `allowed_hosts` so malformed suffix entries such as `2.3.4` can no longer allow `1.2.3.4`.

@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Semaphore;
 
+use crate::error::{self, ErrorKind};
 use crate::public_ip::validate_public_addrs;
 
 const DEFAULT_DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -17,12 +18,15 @@ struct PinnedRedirectOrigin {
 
 impl PinnedRedirectOrigin {
     fn from_url(url: &reqwest::Url) -> crate::Result<Self> {
-        let host = url
-            .host_str()
-            .ok_or_else(|| anyhow::anyhow!("url must have a host"))?;
-        let port = url
-            .port_or_known_default()
-            .ok_or_else(|| anyhow::anyhow!("url must have an explicit or known default port"))?;
+        let host = url.host_str().ok_or_else(|| {
+            error::tagged_message(ErrorKind::InvalidInput, "url must have a host")
+        })?;
+        let port = url.port_or_known_default().ok_or_else(|| {
+            error::tagged_message(
+                ErrorKind::InvalidInput,
+                "url must have an explicit or known default port",
+            )
+        })?;
         Ok(Self {
             host: host.to_string(),
             scheme: url.scheme().to_string(),
@@ -104,7 +108,10 @@ fn dns_lookup_timeout_message() -> String {
 fn remaining_dns_timeout(deadline: Instant) -> crate::Result<Duration> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining == Duration::ZERO {
-        return Err(anyhow::anyhow!(dns_lookup_timeout_message()).into());
+        return Err(error::tagged_message(
+            ErrorKind::Transport,
+            dns_lookup_timeout_message(),
+        ));
     }
     Ok(remaining)
 }
@@ -190,9 +197,13 @@ pub fn build_http_client(timeout: Duration) -> crate::Result<reqwest::Client> {
 pub fn build_http_client_with_options(
     options: &HttpClientOptions,
 ) -> crate::Result<reqwest::Client> {
-    build_http_client_builder(options)
-        .build()
-        .map_err(|err| anyhow::anyhow!("build reqwest client: {err}").into())
+    build_http_client_builder(options).build().map_err(|err| {
+        error::tag_anyhow(
+            ErrorKind::InvalidInput,
+            anyhow::anyhow!("build reqwest client: {err}"),
+        )
+        .into()
+    })
 }
 
 pub fn build_http_client_profile(options: &HttpClientOptions) -> crate::Result<HttpClientProfile> {
@@ -222,9 +233,12 @@ pub async fn send_reqwest(
     context: &str,
 ) -> crate::Result<reqwest::Response> {
     builder.send().await.map_err(|err| {
-        anyhow::anyhow!(
-            "{context} request failed ({})",
-            sanitize_reqwest_error(&err)
+        error::tag_anyhow(
+            ErrorKind::Transport,
+            anyhow::anyhow!(
+                "{context} request failed ({})",
+                sanitize_reqwest_error(&err)
+            ),
         )
         .into()
     })
@@ -236,15 +250,24 @@ async fn resolve_url_to_public_addrs_async(
     timeout: Duration,
 ) -> crate::Result<Vec<SocketAddr>> {
     let Some(host) = url.host_str() else {
-        return Err(anyhow::anyhow!("url must have a host").into());
+        return Err(error::tagged_message(
+            ErrorKind::InvalidInput,
+            "url must have a host",
+        ));
     };
 
-    let port = url
-        .port_or_known_default()
-        .ok_or_else(|| anyhow::anyhow!("url must have an explicit or known default port"))?;
+    let port = url.port_or_known_default().ok_or_else(|| {
+        error::tagged_message(
+            ErrorKind::InvalidInput,
+            "url must have an explicit or known default port",
+        )
+    })?;
     let dns_timeout = timeout.min(DEFAULT_DNS_LOOKUP_TIMEOUT);
     if dns_timeout == Duration::ZERO {
-        return Err(anyhow::anyhow!(dns_lookup_timeout_message()).into());
+        return Err(error::tagged_message(
+            ErrorKind::Transport,
+            dns_lookup_timeout_message(),
+        ));
     }
 
     let deadline = Instant::now() + dns_timeout;
@@ -254,16 +277,33 @@ async fn resolve_url_to_public_addrs_async(
             shared_state.dns_lookup_semaphore().acquire(),
         )
         .await
-        .map_err(|_| anyhow::anyhow!(dns_lookup_timeout_message()))?
-        .map_err(|_| anyhow::anyhow!("dns lookup failed"))?;
+        .map_err(|_| {
+            error::tag_anyhow(
+                ErrorKind::Transport,
+                anyhow::anyhow!(dns_lookup_timeout_message()),
+            )
+        })?
+        .map_err(|_| {
+            error::tag_anyhow(ErrorKind::Transport, anyhow::anyhow!("dns lookup failed"))
+        })?;
 
         tokio::time::timeout(
             remaining_dns_timeout(deadline)?,
             tokio::net::lookup_host((host, port)),
         )
         .await
-        .map_err(|_| anyhow::anyhow!(dns_lookup_timeout_message()))?
-        .map_err(|err| anyhow::anyhow!("dns lookup failed: {err}"))?
+        .map_err(|_| {
+            error::tag_anyhow(
+                ErrorKind::Transport,
+                anyhow::anyhow!(dns_lookup_timeout_message()),
+            )
+        })?
+        .map_err(|err| {
+            error::tag_anyhow(
+                ErrorKind::Transport,
+                anyhow::anyhow!("dns lookup failed: {err}"),
+            )
+        })?
     };
 
     validate_public_addrs(lookup)
@@ -300,7 +340,7 @@ fn build_http_client_pinned_with_addrs(
 ) -> crate::Result<reqwest::Client> {
     let host = url
         .host_str()
-        .ok_or_else(|| anyhow::anyhow!("url must have a host"))?;
+        .ok_or_else(|| error::tagged_message(ErrorKind::InvalidInput, "url must have a host"))?;
     let addrs = resolve_override_addrs_for_reqwest(url, addrs);
     build_http_client_builder_with_policy(
         options,
@@ -309,7 +349,13 @@ fn build_http_client_pinned_with_addrs(
     )
     .resolve_to_addrs(host, &addrs)
     .build()
-    .map_err(|err| anyhow::anyhow!("build reqwest client: {err}").into())
+    .map_err(|err| {
+        error::tag_anyhow(
+            ErrorKind::InvalidInput,
+            anyhow::anyhow!("build reqwest client: {err}"),
+        )
+        .into()
+    })
 }
 
 async fn build_http_client_pinned_async(
@@ -346,14 +392,14 @@ pub async fn select_http_client_from_profile(
 }
 
 pub async fn select_http_client_with_options(
-    base_client: &reqwest::Client,
     options: &HttpClientOptions,
     url: &reqwest::Url,
     enforce_public_ip: bool,
 ) -> crate::Result<reqwest::Client> {
     if !enforce_public_ip {
-        let _ = options;
-        return Ok(base_client.clone());
+        // `reqwest::Client` keeps its builder state opaque, so callers must pass the reusable
+        // configuration explicitly instead of relying on an unrelated base client.
+        return build_http_client_with_options(options);
     }
 
     // `reqwest::Client` does not expose a safe way to clone its opaque builder state while
@@ -529,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn select_http_client_with_options_preserves_base_client_on_unpinned_path() {
+    fn select_http_client_with_options_rebuilds_unpinned_client_from_options() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let addr = listener.local_addr().expect("listener addr");
         let server = thread::spawn(move || {
@@ -538,8 +584,8 @@ mod tests {
             let read = stream.read(&mut buf).expect("read request");
             let request = String::from_utf8_lossy(&buf[..read]);
             assert!(
-                request.contains("x-test-header: base-client\r\n"),
-                "request should reuse the caller's base client on the unpinned path: {request}"
+                request.contains("x-test-header: options\r\n"),
+                "request should rebuild the unpinned client from explicit options: {request}"
             );
 
             stream
@@ -552,17 +598,6 @@ mod tests {
             .build()
             .expect("build tokio runtime");
         rt.block_on(async {
-            let mut base_headers = reqwest::header::HeaderMap::new();
-            base_headers.insert(
-                "x-test-header",
-                reqwest::header::HeaderValue::from_static("base-client"),
-            );
-            let base_client = build_http_client_with_options(&HttpClientOptions {
-                timeout: Some(Duration::from_secs(1)),
-                default_headers: base_headers,
-                ..Default::default()
-            })
-            .expect("build base client");
             let mut default_headers = reqwest::header::HeaderMap::new();
             default_headers.insert(
                 "x-test-header",
@@ -576,7 +611,7 @@ mod tests {
             let url = reqwest::Url::parse(&format!("http://127.0.0.1:{}/hook", addr.port()))
                 .expect("parse url");
 
-            let response = select_http_client_with_options(&base_client, &options, &url, false)
+            let response = select_http_client_with_options(&options, &url, false)
                 .await
                 .expect("select unpinned client from options")
                 .get(url)

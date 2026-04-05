@@ -1,5 +1,6 @@
 use std::io::Write;
 
+use crate::error::{self, ErrorKind};
 use crate::{client::sanitize_reqwest_error, url::redact_url_for_error};
 
 pub const DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 16 * 1024;
@@ -11,7 +12,13 @@ pub async fn read_json_body_limited(
     max_bytes: usize,
 ) -> crate::Result<serde_json::Value> {
     let buf = read_body_bytes_limited(resp, max_bytes).await?;
-    serde_json::from_slice(&buf).map_err(|err| anyhow::anyhow!("decode json failed: {err}").into())
+    serde_json::from_slice(&buf).map_err(|err| {
+        error::tag_anyhow(
+            ErrorKind::ResponseDecode,
+            anyhow::anyhow!("decode json failed: {err}"),
+        )
+        .into()
+    })
 }
 
 pub async fn read_text_body_limited(
@@ -37,20 +44,28 @@ where
 
     let mut downloaded_bytes = 0_u64;
     while let Some(chunk) = resp.chunk().await.map_err(|err| {
-        anyhow::anyhow!(
-            "read response body failed ({})",
-            sanitize_reqwest_error(&err)
+        error::tag_anyhow(
+            ErrorKind::ResponseBody,
+            anyhow::anyhow!(
+                "read response body failed ({})",
+                sanitize_reqwest_error(&err)
+            ),
         )
     })? {
         downloaded_bytes = downloaded_bytes
             .checked_add(chunk.len() as u64)
-            .ok_or_else(|| anyhow::anyhow!("response body size overflow"))?;
+            .ok_or_else(|| {
+                error::tagged_message(ErrorKind::ResponseBody, "response body size overflow")
+            })?;
         if let Some(limit) = max_bytes {
             ensure_response_body_size_within_limit(downloaded_bytes, limit, &url)?;
         }
-        writer
-            .write_all(&chunk)
-            .map_err(|err| anyhow::anyhow!("write response body failed: {err}"))?;
+        writer.write_all(&chunk).map_err(|err| {
+            error::tag_anyhow(
+                ErrorKind::ResponseBody,
+                anyhow::anyhow!("write response body failed: {err}"),
+            )
+        })?;
     }
 
     Ok(())
@@ -61,7 +76,10 @@ pub fn response_body_read_error(
     status: reqwest::StatusCode,
     err: &crate::Error,
 ) -> crate::Error {
-    anyhow::anyhow!("{label}: {status} (failed to read response body: {err})").into()
+    error::tagged_message(
+        ErrorKind::ResponseBody,
+        format!("{label}: {status} (failed to read response body: {err})"),
+    )
 }
 
 pub fn http_status_text_error(
@@ -71,10 +89,16 @@ pub fn http_status_text_error(
 ) -> crate::Error {
     let summary = truncate_chars(body.trim(), ERROR_RESPONSE_SUMMARY_MAX_CHARS);
     if summary.is_empty() {
-        return anyhow::anyhow!("{context} http error: {status} (response body omitted)").into();
+        return error::tagged_message(
+            ErrorKind::HttpStatus,
+            format!("{context} http error: {status} (response body omitted)"),
+        );
     }
 
-    anyhow::anyhow!("{context} http error: {status}, response={summary}").into()
+    error::tagged_message(
+        ErrorKind::HttpStatus,
+        format!("{context} http error: {status}, response={summary}"),
+    )
 }
 
 pub async fn ensure_http_success(resp: reqwest::Response, context: &str) -> crate::Result<()> {
@@ -185,28 +209,40 @@ async fn read_body_bytes_limited(
 ) -> crate::Result<Vec<u8>> {
     if max_bytes == 0 {
         drain_response_body_limited(&mut resp, RESPONSE_BODY_DRAIN_LIMIT_BYTES).await;
-        return Err(anyhow::anyhow!("response body too large (response body omitted)").into());
+        return Err(error::tagged_message(
+            ErrorKind::ResponseBody,
+            "response body too large (response body omitted)",
+        ));
     }
 
     let mut cap_hint = 0usize;
     if let Some(len) = resp.content_length() {
         if len > max_bytes as u64 {
             drain_response_body_limited(&mut resp, RESPONSE_BODY_DRAIN_LIMIT_BYTES).await;
-            return Err(anyhow::anyhow!("response body too large (response body omitted)").into());
+            return Err(error::tagged_message(
+                ErrorKind::ResponseBody,
+                "response body too large (response body omitted)",
+            ));
         }
         cap_hint = content_length_capacity_hint(len, max_bytes);
     }
 
     let mut buf = Vec::with_capacity(cap_hint);
     while let Some(chunk) = resp.chunk().await.map_err(|err| {
-        anyhow::anyhow!(
-            "read response body failed ({})",
-            sanitize_reqwest_error(&err)
+        error::tag_anyhow(
+            ErrorKind::ResponseBody,
+            anyhow::anyhow!(
+                "read response body failed ({})",
+                sanitize_reqwest_error(&err)
+            ),
         )
     })? {
         if chunk.len() > max_bytes.saturating_sub(buf.len()) {
             drain_response_body_limited(&mut resp, RESPONSE_BODY_DRAIN_LIMIT_BYTES).await;
-            return Err(anyhow::anyhow!("response body too large (response body omitted)").into());
+            return Err(error::tagged_message(
+                ErrorKind::ResponseBody,
+                "response body too large (response body omitted)",
+            ));
         }
         buf.extend_from_slice(&chunk);
     }
@@ -234,9 +270,12 @@ async fn read_body_bytes_truncated(
 
     let mut buf = Vec::with_capacity(cap_hint);
     while let Some(chunk) = resp.chunk().await.map_err(|err| {
-        anyhow::anyhow!(
-            "read response body failed ({})",
-            sanitize_reqwest_error(&err)
+        error::tag_anyhow(
+            ErrorKind::ResponseBody,
+            anyhow::anyhow!(
+                "read response body failed ({})",
+                sanitize_reqwest_error(&err)
+            ),
         )
     })? {
         if buf.len() >= max_bytes {
@@ -278,10 +317,12 @@ fn content_length_capacity_hint(content_length: u64, max_bytes: usize) -> usize 
 
 fn ensure_response_body_size_within_limit(size: u64, limit: u64, url: &str) -> crate::Result<()> {
     if size > limit {
-        return Err(anyhow::anyhow!(
-            "response body size {size} exceeds configured max download size {limit} for {url}"
-        )
-        .into());
+        return Err(error::tagged_message(
+            ErrorKind::ResponseBody,
+            format!(
+                "response body size {size} exceeds configured max download size {limit} for {url}"
+            ),
+        ));
     }
 
     Ok(())

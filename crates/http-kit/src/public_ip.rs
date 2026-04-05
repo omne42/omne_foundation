@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 
+use crate::error::{ErrorKind, tagged_message};
 use crate::ip::is_public_ip;
 
 pub(crate) fn validate_public_addrs<I>(addrs: I) -> crate::Result<Vec<SocketAddr>>
@@ -16,7 +17,10 @@ where
     for addr in addrs {
         seen_any = true;
         if !is_public_ip(addr.ip()) {
-            return Err(anyhow::anyhow!("resolved ip is not allowed").into());
+            return Err(tagged_message(
+                ErrorKind::InvalidInput,
+                "resolved ip is not allowed",
+            ));
         }
         if uniq.insert(addr) {
             out.push(addr);
@@ -24,7 +28,7 @@ where
     }
 
     if !seen_any {
-        return Err(anyhow::anyhow!("dns lookup failed").into());
+        return Err(tagged_message(ErrorKind::Transport, "dns lookup failed"));
     }
 
     Ok(out)

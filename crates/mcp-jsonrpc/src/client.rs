@@ -1607,6 +1607,7 @@ mod tests {
 
     #[test]
     fn spawn_detached_runs_tasks_without_tokio_runtime() {
+        let _guard = detached_runtime_test_guard();
         let counter = Arc::new(AtomicU64::new(0));
         let counter_for_task = Arc::clone(&counter);
         let (done_tx, done_rx) = std::sync::mpsc::channel();

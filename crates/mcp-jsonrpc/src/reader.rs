@@ -807,6 +807,8 @@ mod tests {
 
     #[test]
     fn dropped_batch_request_without_runtime_still_flushes_remaining_batch_response() {
+        let _guard = detached_runtime_test_guard();
+
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -888,6 +890,8 @@ mod tests {
 
     #[test]
     fn dropped_direct_request_without_runtime_still_emits_internal_error() {
+        let _guard = detached_runtime_test_guard();
+
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

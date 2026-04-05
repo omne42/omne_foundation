@@ -255,19 +255,23 @@ impl FeishuWebhookSink {
 
         let status = resp.status();
         if !status.is_success() {
-            self.invalidate_tenant_access_token(&access_token).await;
             let body = read_text_body_limited(resp, DEFAULT_MAX_RESPONSE_BODY_BYTES)
                 .await
                 .map_err(|err| {
                     response_body_read_error("feishu image upload http error", status, &err)
                 })?;
+            if should_invalidate_cached_tenant_token_http_error(status, &body) {
+                self.invalidate_tenant_access_token(&access_token).await;
+            }
             return Err(http_status_text_error("feishu image upload", status, &body).into());
         }
 
         let body = read_json_body_limited(resp, DEFAULT_MAX_RESPONSE_BODY_BYTES).await?;
         let code = body["code"].as_i64().unwrap_or(-1);
         if code != 0 {
-            self.invalidate_tenant_access_token(&access_token).await;
+            if should_invalidate_cached_tenant_token_api_error(&body) {
+                self.invalidate_tenant_access_token(&access_token).await;
+            }
             return Err(anyhow::anyhow!("feishu image upload api error: code={code}").into());
         }
 
@@ -426,6 +430,30 @@ impl FeishuWebhookSink {
             expires_at: Instant::now() + tenant_access_token_cache_ttl(expires_in),
         })
     }
+}
+
+fn should_invalidate_cached_tenant_token_http_error(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> bool {
+    status == reqwest::StatusCode::UNAUTHORIZED
+        || status == reqwest::StatusCode::FORBIDDEN
+        || body_mentions_tenant_token_failure(body)
+}
+
+fn should_invalidate_cached_tenant_token_api_error(body: &serde_json::Value) -> bool {
+    body.get("msg")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| body.get("message").and_then(serde_json::Value::as_str))
+        .is_some_and(body_mentions_tenant_token_failure)
+}
+
+fn body_mentions_tenant_token_failure(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("token")
+        && ["invalid", "expired", "reject", "unauthoriz", "auth"]
+            .iter()
+            .any(|needle| lowered.contains(needle))
 }
 
 pub(super) fn normalize_local_image_roots(
@@ -741,7 +769,8 @@ mod tests {
     use super::{
         TenantAccessTokenRefreshGuard, ensure_local_image_path_has_no_symlink_components,
         normalize_local_image_base_dir, normalize_local_image_roots, resolve_local_image_path,
-        resolve_local_image_path_with_base, tenant_access_token_cache_ttl,
+        resolve_local_image_path_with_base, should_invalidate_cached_tenant_token_api_error,
+        should_invalidate_cached_tenant_token_http_error, tenant_access_token_cache_ttl,
         tenant_access_token_refresh_waiter,
     };
 
@@ -796,6 +825,28 @@ mod tests {
         assert_eq!(tenant_access_token_cache_ttl(30), Duration::ZERO);
         assert_eq!(tenant_access_token_cache_ttl(120), Duration::from_secs(60));
         assert_eq!(tenant_access_token_cache_ttl(-1), Duration::ZERO);
+    }
+
+    #[test]
+    fn cached_token_invalidation_helpers_only_match_auth_failures() {
+        assert!(should_invalidate_cached_tenant_token_http_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "temporary upstream failure"
+        ));
+        assert!(should_invalidate_cached_tenant_token_http_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            "tenant access token rejected"
+        ));
+        assert!(!should_invalidate_cached_tenant_token_http_error(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "temporary upstream failure"
+        ));
+        assert!(should_invalidate_cached_tenant_token_api_error(
+            &serde_json::json!({"code": 1, "msg": "tenant access token expired"})
+        ));
+        assert!(!should_invalidate_cached_tenant_token_api_error(
+            &serde_json::json!({"code": 1, "msg": "temporary upstream failure"})
+        ));
     }
 
     #[test]

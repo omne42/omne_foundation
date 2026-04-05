@@ -10,6 +10,10 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Added a `core` integration regression test that verifies structured `Event` payloads reach sinks through `title()` / `body()` / `tags()` string projections instead of re-exposing writable dual string fields.
 
 ### Changed
+- `FeishuWebhookSink`：严格模式 helper 现在复用显式 `validate_public_ip_sync()` / `validate_public_ip().await` 校验入口；对象构造本身不再被“必须同步/异步校验一次”的运行时约束绑死，调用方可以先构造再按宿主环境选择何时做公网 IP 校验。
+- `FeishuWebhookSink`：图片上传只会在明确的认证失效场景（如 `401/403` 或响应文本明确指向 token 失效）下清空缓存 tenant token；普通上游故障不会再触发持续刷新风暴。
+- `notify_kit::env::build_hub_from_standard_env(...)`：恢复兼容 `NOTIFY_SINK_TIMEOUT_MS` / `NOTIFY_HUB_TIMEOUT_MS`，并保留 `NOTIFY_TIMEOUT_MS` 作为共享默认值；当未显式提供 hub timeout 时，helper 仍会自动给外层 `Hub` 留 slack，避免 Hub 先于内部 HTTP sink 超时。
+- `notify-kit::Error`：公开错误种类现在额外区分 `Config` / `Transport` / `Io` / `InvalidResponse`，不再把这几类边界全部压成 `Other(anyhow)`。
 - `Event` 的双视图字段（`title` / `title_text` / `body` / `body_text` / `tags` / `tag_texts`）现在收口为 crate 内部状态；外部调用方改用只读 accessors 和 builder，避免制造结构化文本与字符串投影失配的不变量破坏。
 - Clarified the examples so `Hub::notify(...)` is documented as fire-and-forget without `Result` handling, while `try_notify(...)` remains the explicit error-reporting path.
 - 自定义 sink 文档示例改为通过 `Event::title()` 读取标题，保持公开 API 示例与新的只读 accessor 边界一致，并修复 mdBook/rustdoc 门禁。

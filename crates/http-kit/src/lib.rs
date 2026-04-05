@@ -21,7 +21,7 @@ pub use client::{
     build_http_client_with_options, select_http_client_from_profile,
     select_http_client_with_options, send_reqwest,
 };
-pub use error::{Error, Result};
+pub use error::{Error, ErrorKind, Result};
 pub use http_probe::{
     HttpProbeKind, HttpProbeMethod, HttpProbeResult, probe_http_endpoint,
     probe_http_endpoint_detailed,

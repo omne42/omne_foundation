@@ -1,23 +1,41 @@
+use crate::error::{ErrorKind, tagged_message};
+
 pub fn parse_and_validate_https_url_basic(url_str: &str) -> crate::Result<reqwest::Url> {
-    let url = reqwest::Url::parse(url_str).map_err(|err| anyhow::anyhow!("invalid url: {err}"))?;
+    let url = reqwest::Url::parse(url_str)
+        .map_err(|err| tagged_message(ErrorKind::InvalidInput, format!("invalid url: {err}")))?;
 
     if url.scheme() != "https" {
-        return Err(anyhow::anyhow!("url must use https").into());
+        return Err(tagged_message(
+            ErrorKind::InvalidInput,
+            "url must use https",
+        ));
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err(anyhow::anyhow!("url must not contain credentials").into());
+        return Err(tagged_message(
+            ErrorKind::InvalidInput,
+            "url must not contain credentials",
+        ));
     }
 
     let Some(host) = url.host_str() else {
-        return Err(anyhow::anyhow!("url must have a host").into());
+        return Err(tagged_message(
+            ErrorKind::InvalidInput,
+            "url must have a host",
+        ));
     };
     if host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok() {
-        return Err(anyhow::anyhow!("url host is not allowed").into());
+        return Err(tagged_message(
+            ErrorKind::InvalidInput,
+            "url host is not allowed",
+        ));
     }
 
     if let Some(port) = url.port() {
         if port != 443 {
-            return Err(anyhow::anyhow!("url port is not allowed").into());
+            return Err(tagged_message(
+                ErrorKind::InvalidInput,
+                "url port is not allowed",
+            ));
         }
     }
 
@@ -30,14 +48,20 @@ pub fn parse_and_validate_https_url(
 ) -> crate::Result<reqwest::Url> {
     let url = parse_and_validate_https_url_basic(url_str)?;
     let Some(host) = url.host_str() else {
-        return Err(anyhow::anyhow!("url must have a host").into());
+        return Err(tagged_message(
+            ErrorKind::InvalidInput,
+            "url must have a host",
+        ));
     };
 
     if !allowed_hosts
         .iter()
         .any(|allowed| host.eq_ignore_ascii_case(allowed))
     {
-        return Err(anyhow::anyhow!("url host is not allowed").into());
+        return Err(tagged_message(
+            ErrorKind::InvalidInput,
+            "url host is not allowed",
+        ));
     }
 
     Ok(url)
@@ -82,14 +106,20 @@ pub fn redact_reqwest_error(err: &reqwest::Error) -> String {
 pub fn validate_url_path_prefix(url: &reqwest::Url, prefix: &str) -> crate::Result<()> {
     let path = url.path();
     if prefix.is_empty() {
-        return Err(anyhow::anyhow!("url path is not allowed").into());
+        return Err(tagged_message(
+            ErrorKind::InvalidInput,
+            "url path is not allowed",
+        ));
     }
 
     if prefix.ends_with('/') {
         if path.starts_with(prefix) {
             return Ok(());
         }
-        return Err(anyhow::anyhow!("url path is not allowed").into());
+        return Err(tagged_message(
+            ErrorKind::InvalidInput,
+            "url path is not allowed",
+        ));
     }
 
     if path == prefix {
@@ -97,14 +127,20 @@ pub fn validate_url_path_prefix(url: &reqwest::Url, prefix: &str) -> crate::Resu
     }
 
     let Some(next) = path.as_bytes().get(prefix.len()) else {
-        return Err(anyhow::anyhow!("url path is not allowed").into());
+        return Err(tagged_message(
+            ErrorKind::InvalidInput,
+            "url path is not allowed",
+        ));
     };
 
     if path.starts_with(prefix) && *next == b'/' {
         return Ok(());
     }
 
-    Err(anyhow::anyhow!("url path is not allowed").into())
+    Err(tagged_message(
+        ErrorKind::InvalidInput,
+        "url path is not allowed",
+    ))
 }
 
 #[cfg(test)]

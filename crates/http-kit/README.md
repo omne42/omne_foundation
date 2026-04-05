@@ -60,7 +60,7 @@
 - `src/http_probe.rs`
   - endpoint 可达性探测
 - `src/error.rs`
-  - crate 统一错误封装
+  - crate 统一错误封装与稳定 `ErrorKind` 分类
 
 ## 与其他 crate 的关系
 

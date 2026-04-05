@@ -201,15 +201,19 @@ impl std::fmt::Debug for FeishuWebhookSink {
 
 impl FeishuWebhookSink {
     pub fn new(config: FeishuWebhookConfig) -> crate::Result<Self> {
-        Self::new_internal(config, None, false)
+        Self::new_internal(config, None)
     }
 
     pub fn new_strict(config: FeishuWebhookConfig) -> crate::Result<Self> {
-        Self::new_internal(config, None, true)
+        let sink = Self::new_internal(config, None)?;
+        sink.validate_public_ip_sync()?;
+        Ok(sink)
     }
 
     pub async fn new_strict_async(config: FeishuWebhookConfig) -> crate::Result<Self> {
-        Self::new_internal_async(config, None, true).await
+        let sink = Self::new_internal(config, None)?;
+        sink.validate_public_ip().await?;
+        Ok(sink)
     }
 
     pub fn new_with_secret(
@@ -217,7 +221,7 @@ impl FeishuWebhookSink {
         secret: impl Into<SecretString>,
     ) -> crate::Result<Self> {
         let secret = normalize_secret(secret)?;
-        Self::new_internal(config, Some(secret), false)
+        Self::new_internal(config, Some(secret))
     }
 
     pub fn new_with_secret_strict(
@@ -225,7 +229,9 @@ impl FeishuWebhookSink {
         secret: impl Into<SecretString>,
     ) -> crate::Result<Self> {
         let secret = normalize_secret(secret)?;
-        Self::new_internal(config, Some(secret), true)
+        let sink = Self::new_internal(config, Some(secret))?;
+        sink.validate_public_ip_sync()?;
+        Ok(sink)
     }
 
     pub async fn new_with_secret_strict_async(
@@ -233,18 +239,16 @@ impl FeishuWebhookSink {
         secret: impl Into<SecretString>,
     ) -> crate::Result<Self> {
         let secret = normalize_secret(secret)?;
-        Self::new_internal_async(config, Some(secret), true).await
+        let sink = Self::new_internal(config, Some(secret))?;
+        sink.validate_public_ip().await?;
+        Ok(sink)
     }
 
     fn new_internal(
         config: FeishuWebhookConfig,
         secret: Option<SecretString>,
-        validate_public_ip_at_construction: bool,
     ) -> crate::Result<Self> {
         let enforce_public_ip = config.enforce_public_ip;
-        if validate_public_ip_at_construction && !enforce_public_ip {
-            return Err(anyhow::anyhow!("feishu strict mode requires public ip check").into());
-        }
 
         let app_credentials = normalize_app_credentials(config.app_id, config.app_secret)?;
         let local_image_roots =
@@ -262,15 +266,6 @@ impl FeishuWebhookSink {
             timeout: Some(config.timeout),
             ..Default::default()
         })?;
-        if validate_public_ip_at_construction {
-            if tokio::runtime::Handle::try_current().is_ok() {
-                return Err(anyhow::anyhow!(
-                    "feishu strict constructor cannot run inside tokio runtime; use new_strict_async/new_with_secret_strict_async"
-                )
-                .into());
-            }
-            Self::validate_public_ip_at_construction_sync(&http, &webhook_url)?;
-        }
 
         Ok(Self {
             webhook_url,
@@ -289,51 +284,38 @@ impl FeishuWebhookSink {
         })
     }
 
-    async fn new_internal_async(
-        config: FeishuWebhookConfig,
-        secret: Option<SecretString>,
-        validate_public_ip_at_construction: bool,
-    ) -> crate::Result<Self> {
-        let enforce_public_ip = config.enforce_public_ip;
-        if validate_public_ip_at_construction && !enforce_public_ip {
-            return Err(anyhow::anyhow!("feishu strict mode requires public ip check").into());
-        }
+    pub async fn validate_public_ip(&self) -> crate::Result<()> {
+        self.ensure_public_ip_validation_enabled("validate_public_ip")?;
+        self.http
+            .select_for_url(&self.webhook_url, true)
+            .await
+            .map(|_| ())
+            .map_err(crate::Error::from)
+    }
 
-        let app_credentials = normalize_app_credentials(config.app_id, config.app_secret)?;
-        let local_image_roots =
-            normalize_local_image_roots(config.allow_local_image_files, config.local_image_roots)?;
-        let local_image_base_dir = normalize_local_image_base_dir(
-            config.allow_local_image_files,
-            config.local_image_base_dir,
-        )?;
-        let webhook_url = parse_and_validate_https_url(
-            &config.webhook_url,
-            &["open.feishu.cn", "open.larksuite.com"],
-        )?;
-        validate_url_path_prefix(&webhook_url, "/open-apis/bot/v2/hook/")?;
-        let http = build_http_client_profile(&HttpClientOptions {
-            timeout: Some(config.timeout),
-            ..Default::default()
-        })?;
-        if validate_public_ip_at_construction {
-            http.select_for_url(&webhook_url, true).await.map(|_| ())?;
+    pub fn validate_public_ip_sync(&self) -> crate::Result<()> {
+        self.ensure_public_ip_validation_enabled("validate_public_ip_sync")?;
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(crate::error::tagged_message(
+                crate::ErrorKind::Config,
+                "feishu public-ip validation cannot block inside a tokio runtime; use validate_public_ip()/new_strict_async/new_with_secret_strict_async",
+            )
+            .into());
         }
+        Self::validate_public_ip_sync_with_profile(&self.http, &self.webhook_url)
+    }
 
-        Ok(Self {
-            webhook_url,
-            http,
-            secret,
-            max_chars: config.max_chars,
-            enforce_public_ip,
-            enable_markdown_rich_text: config.enable_markdown_rich_text,
-            allow_remote_image_urls: config.allow_remote_image_urls,
-            allow_local_image_files: config.allow_local_image_files,
-            local_image_roots,
-            local_image_base_dir,
-            image_upload_max_bytes: config.image_upload_max_bytes,
-            app_credentials,
-            tenant_access_token: Arc::new(tokio::sync::Mutex::new(TenantAccessTokenState::Empty)),
-        })
+    fn ensure_public_ip_validation_enabled(&self, operation: &str) -> crate::Result<()> {
+        if self.enforce_public_ip {
+            return Ok(());
+        }
+        Err(crate::error::tagged_message(
+            crate::ErrorKind::Config,
+            format!(
+                "{operation} requires FeishuWebhookConfig::with_public_ip_check(true) so public ip validation stays enabled"
+            ),
+        )
+        .into())
     }
 
     fn ensure_success_response(body: &serde_json::Value) -> crate::Result<()> {
@@ -341,8 +323,9 @@ impl FeishuWebhookSink {
             .as_i64()
             .or_else(|| body["code"].as_i64())
         else {
-            return Err(anyhow::anyhow!(
-                "feishu api error: missing status code (response body omitted)"
+            return Err(crate::error::tagged_message(
+                crate::ErrorKind::InvalidResponse,
+                "feishu api error: missing status code (response body omitted)",
             )
             .into());
         };
@@ -351,10 +334,14 @@ impl FeishuWebhookSink {
             return Ok(());
         }
 
-        Err(anyhow::anyhow!("feishu api error: code={code} (response body omitted)").into())
+        Err(crate::error::tagged_message(
+            crate::ErrorKind::Other,
+            format!("feishu api error: code={code} (response body omitted)"),
+        )
+        .into())
     }
 
-    fn validate_public_ip_at_construction_sync(
+    fn validate_public_ip_sync_with_profile(
         http: &HttpClientProfile,
         webhook_url: &reqwest::Url,
     ) -> crate::Result<()> {
@@ -546,6 +533,24 @@ mod tests {
             .with_public_ip_check(false);
         let err = FeishuWebhookSink::new_strict(cfg).expect_err("expected strict validation");
         assert!(err.to_string().contains("public ip"), "{err:#}");
+        assert_eq!(err.kind(), crate::ErrorKind::Config);
+    }
+
+    #[test]
+    fn explicit_public_ip_validation_requires_public_ip_check() {
+        let sink = FeishuWebhookSink::new(
+            FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+                .with_public_ip_check(false),
+        )
+        .expect("build sink");
+        let err = sink
+            .validate_public_ip_sync()
+            .expect_err("expected explicit validation failure");
+        assert!(
+            err.to_string().contains("with_public_ip_check(true)"),
+            "{err:#}"
+        );
+        assert_eq!(err.kind(), crate::ErrorKind::Config);
     }
 
     #[test]
@@ -558,7 +563,8 @@ mod tests {
             let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x");
             let err =
                 FeishuWebhookSink::new_strict(cfg).expect_err("expected runtime constructor error");
-            assert!(err.to_string().contains("new_strict_async"), "{err:#}");
+            assert!(err.to_string().contains("validate_public_ip"), "{err:#}");
+            assert_eq!(err.kind(), crate::ErrorKind::Config);
         });
     }
 

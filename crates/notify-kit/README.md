@@ -202,8 +202,9 @@ hub.notify(Event::new("turn_completed", Severity::Success, "done"));
 
 它们只是 convenience helper，适合快速接线或共享一套简单约定；不是强制协议，也不是核心架构边界。
 同时，这组 helper 现在也显式属于 `standard-env` feature；如果你关闭了默认 features，需要手动启用它。
-这套 helper 自带的中性约定是 `NOTIFY_*`，例如 `NOTIFY_SOUND`、`NOTIFY_WEBHOOK_URL`、`NOTIFY_TIMEOUT_MS`、`NOTIFY_EVENTS`。
+这套 helper 自带的中性约定是 `NOTIFY_*`，例如 `NOTIFY_SOUND`、`NOTIFY_WEBHOOK_URL`、`NOTIFY_TIMEOUT_MS`、`NOTIFY_SINK_TIMEOUT_MS`、`NOTIFY_HUB_TIMEOUT_MS`、`NOTIFY_EVENTS`。
 如果显式提供 `NOTIFY_SOUND`，它现在必须是合法布尔值（`1/0/true/false/yes/no/on/off`）；非法值会直接报错，而不是静默降级。
+如果只提供 `NOTIFY_TIMEOUT_MS`，helper 会把它当作各 HTTP sink 的基础 timeout，并自动给外层 `Hub` timeout 留一段 slack；如果你需要恢复旧的拆分控制，可以分别设置 `NOTIFY_SINK_TIMEOUT_MS` 和 `NOTIFY_HUB_TIMEOUT_MS`。
 公开入口就是 `notify_kit::env::...`；不要在 crate root 上再叠一层快捷别名。
 
 ## 标准 helper 示例

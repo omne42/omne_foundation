@@ -10,6 +10,7 @@
 
 ```rust,no_run,edition2024
 # extern crate notify_kit;
+# extern crate tokio;
 # fn main() -> notify_kit::Result<()> {
 use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
 
@@ -19,7 +20,21 @@ let sink = FeishuWebhookSink::new(cfg)?;
 # }
 ```
 
-默认发送前会做 DNS 公网 IP 校验；如果你希望在 **构造阶段** 也校验一次（可能导致无网络时构造失败），可以用：
+默认发送前会做 DNS 公网 IP 校验。如果你希望显式提前校验一次，可以在构造后主动调用：
+
+```rust,no_run,edition2024
+# extern crate notify_kit;
+# fn main() -> notify_kit::Result<()> {
+use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+
+let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx");
+let sink = FeishuWebhookSink::new(cfg)?;
+sink.validate_public_ip_sync()?;
+# Ok(())
+# }
+```
+
+如果你仍然希望沿用“构造阶段顺手校验一次”的 helper，可以继续用：
 
 ```rust,no_run,edition2024
 # extern crate notify_kit;
@@ -49,7 +64,7 @@ let sink = FeishuWebhookSink::new_with_secret(cfg, "your_secret")?;
 
 每次发送会自动填充 `timestamp` / `sign` 字段，并且不会在 `Debug`/错误信息中泄露 secret 或完整 webhook URL。
 
-如果你需要同时启用签名 + DNS 公网 IP 校验，并且希望在 **构造阶段** 也校验一次，可以用：
+如果你需要同时启用签名 + DNS 公网 IP 校验，并且希望在构造阶段也顺手校验一次，可以用：
 
 ```rust,no_run,edition2024
 # extern crate notify_kit;

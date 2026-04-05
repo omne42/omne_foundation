@@ -505,6 +505,7 @@ fn maybe_shrink_line_buffer(buf: &mut Vec<u8>, max_bytes: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::detached::{detached_runtime_test_guard, force_detached_init_failures};
     use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
@@ -942,6 +943,61 @@ mod tests {
 
             drop(client);
         });
+    }
+
+    #[test]
+    fn dropped_direct_request_without_runtime_fail_closes_when_detached_runtime_is_unavailable() {
+        let _guard = detached_runtime_test_guard();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build setup runtime");
+
+        let (request, client) = runtime.block_on(async {
+            let (client_stream, server_stream) = tokio::io::duplex(2048);
+            let (client_read, client_write) = tokio::io::split(client_stream);
+            let (_server_read, mut server_write) = tokio::io::split(server_stream);
+
+            let mut client = crate::Client::connect_io(client_read, client_write)
+                .await
+                .expect("connect client");
+            let mut requests = client.take_requests().expect("request receiver");
+
+            server_write
+                .write_all(br#"{"jsonrpc":"2.0","id":1,"method":"first"}"#)
+                .await
+                .expect("write request");
+            server_write.write_all(b"\n").await.expect("write newline");
+            server_write.flush().await.expect("flush request");
+
+            let request = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+                .await
+                .expect("request timeout")
+                .expect("request");
+
+            (request, client)
+        });
+        drop(runtime);
+
+        force_detached_init_failures(1);
+        let handle = client.handle();
+        drop(request);
+
+        assert!(
+            handle.is_closed(),
+            "detached runtime failure must fail closed"
+        );
+        assert!(
+            handle.close_reason().as_deref().is_some_and(|reason| {
+                reason.contains("direct dropped request response")
+                    && reason.contains("detached runtime unavailable")
+            }),
+            "{:?}",
+            handle.close_reason()
+        );
+
+        drop(client);
     }
 
     #[tokio::test]

@@ -673,7 +673,7 @@ mod retry_tests {
     fn linux_cleanup_dispatcher_reuses_single_worker() {
         let _guard = linux_cleanup_test_lock()
             .lock()
-            .expect("linux cleanup test mutex poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         linux_cleanup_dispatcher().reset_for_test();
         force_linux_cleanup_worker_spawn_failures(0);
         let before = linux_cleanup_worker_spawn_count();
@@ -708,7 +708,7 @@ mod retry_tests {
     fn linux_cleanup_dispatcher_retries_after_spawn_failure_without_panicking() {
         let _guard = linux_cleanup_test_lock()
             .lock()
-            .expect("linux cleanup test mutex poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         linux_cleanup_dispatcher().reset_for_test();
         let _ = take_linux_cleanup_warning_for_test();
         force_linux_cleanup_worker_spawn_failures(1);
@@ -741,10 +741,59 @@ mod retry_tests {
 
     #[cfg(all(unix, target_os = "linux"))]
     #[test]
+    fn linux_cleanup_dispatcher_recovers_after_stale_sender_disconnect() {
+        let _guard = linux_cleanup_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        linux_cleanup_dispatcher().reset_for_test();
+        force_linux_cleanup_worker_spawn_failures(0);
+        let _ = take_linux_cleanup_warning_for_test();
+
+        let dispatcher = linux_cleanup_dispatcher();
+        let before = linux_cleanup_worker_spawn_count();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime");
+        let mut child = runtime
+            .block_on(async {
+                let mut command = tokio::process::Command::new("sh");
+                command.arg("-c").arg("exec sleep 5");
+                configure_command_for_process_tree(&mut command);
+                command.spawn()
+            })
+            .expect("spawn child");
+        let cleanup = ProcessTreeCleanup::new(&child).expect("capture cleanup");
+        {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            drop(receiver);
+            *dispatcher.lock_sender() = Some(sender);
+        }
+
+        assert!(
+            dispatcher.send(cleanup).is_ok(),
+            "dispatcher should discard a disconnected sender and retry with a fresh worker"
+        );
+        runtime
+            .block_on(async { child.wait().await })
+            .expect("wait child after cleanup");
+        assert_eq!(
+            linux_cleanup_worker_spawn_count(),
+            before + 1,
+            "recovering from a disconnected sender should start exactly one replacement worker"
+        );
+        assert!(
+            take_linux_cleanup_warning_for_test().is_none(),
+            "successful recovery from a stale sender should not emit an availability warning"
+        );
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[test]
     fn linux_cleanup_dispatcher_mutex_poison_recovers_without_panicking() {
         let _guard = linux_cleanup_test_lock()
             .lock()
-            .expect("linux cleanup test mutex poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         linux_cleanup_dispatcher().reset_for_test();
         force_linux_cleanup_worker_spawn_failures(0);
 
@@ -774,7 +823,7 @@ mod retry_tests {
     fn start_process_tree_cleanup_reports_when_retry_dispatch_is_unavailable() {
         let _guard = linux_cleanup_test_lock()
             .lock()
-            .expect("linux cleanup test mutex poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         linux_cleanup_dispatcher().reset_for_test();
         force_linux_cleanup_worker_spawn_failures(1);
         let _ = take_linux_cleanup_warning_for_test();

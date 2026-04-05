@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit::Error` 现在会把 `mcp-jsonrpc` 的 `ProtocolErrorKind::Closed` 和 `ProtocolErrorKind::StreamableHttp` 稳定归类为 `ErrorKind::Connection`，不再把可重试的连接/传输失败误报成协议错误；并补充对应回归测试，锁住 `anyhow::Context` 包裹后的分类语义。
 - `mcp-kit`：`shared_manager` 现在按“共享状态与生命周期 gate”/“request-notify facade”/“外置测试”拆到更窄的子模块里，降低单文件复杂度并把并发语义相关测试从主实现文件中移出；公开 API 与运行时行为保持不变。
 - `mcp-kit`：补充 override config path 穿透回归测试，显式锁住 `inside/../../outside.json` 这类“先进入 root 再逃逸”的路径也必须被 root 边界检查拒绝，避免该约束只覆盖简单的 `../outside.json` 场景。
 - `mcp-kit`：`streamable_http` 的 secret-backed auth 不再隐式从进程全局环境解析；Trusted 模式下如需解析 `bearer_token_secret` / `secret_http_headers`，现在必须显式通过 `Manager::with_streamable_http_secret_context(...)` 注入 secret context，或显式调用 `Manager::with_ambient_streamable_http_secrets()` 选择 ambient env。

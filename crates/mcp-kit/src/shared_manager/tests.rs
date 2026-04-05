@@ -1,0 +1,3334 @@
+use std::collections::BTreeMap;
+#[cfg(not(windows))]
+use std::path::Path;
+#[cfg(not(windows))]
+use std::path::PathBuf;
+#[cfg(not(windows))]
+use std::sync::OnceLock;
+#[cfg(unix)]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::sync::oneshot;
+
+use crate::shared::SharedManager;
+use crate::{
+    ClientConfig, Config, Manager, McpNotification, McpRequest, ProtocolVersionCheck, ServerConfig,
+    ServerName, ServerRequestHandler, ServerRequestOutcome, TrustMode,
+};
+
+struct NestedRequest;
+
+#[derive(Serialize)]
+struct NestedParams {
+    phase: &'static str,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct NestedResult {
+    nested: bool,
+}
+
+impl McpRequest for NestedRequest {
+    const METHOD: &'static str = "nested";
+    type Params = NestedParams;
+    type Result = NestedResult;
+}
+
+struct NamedNotification;
+
+#[derive(Serialize)]
+struct NamedNotificationParams {
+    phase: &'static str,
+}
+
+impl McpNotification for NamedNotification {
+    const METHOD: &'static str = "named/notify";
+    type Params = NamedNotificationParams;
+}
+
+fn explicit_named_cwd_for_shared_manager_test(label: &str) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("mcp-kit-shared-manager")
+        .join(label)
+}
+
+#[cfg(not(windows))]
+async fn cwd_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static GUARD: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    GUARD
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
+}
+
+#[cfg(not(windows))]
+struct CurrentDirRestoreGuard {
+    original_cwd: PathBuf,
+}
+
+#[cfg(not(windows))]
+impl CurrentDirRestoreGuard {
+    fn capture() -> Self {
+        Self {
+            original_cwd: std::env::current_dir().expect("original cwd"),
+        }
+    }
+}
+
+#[cfg(not(windows))]
+impl Drop for CurrentDirRestoreGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.original_cwd);
+    }
+}
+
+#[tokio::test]
+async fn shared_manager_clones_share_cache() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let request_line = lines.next_line().await.unwrap().unwrap();
+        let request_value: Value = serde_json::from_str(&request_line).unwrap();
+        assert_eq!(request_value["method"], "ping");
+        let request_id = request_value["id"].clone();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": { "ok": true },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+
+    let shared = manager.into_shared();
+    let clone = shared.clone();
+    assert_eq!(shared.connected_server_names().await.unwrap().len(), 1);
+    let result = clone.request_connected("srv", "ping", None).await.unwrap();
+    assert_eq!(result, serde_json::json!({ "ok": true }));
+
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_manager_named_facade_delegates_to_server_name_api() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let notify_line = lines.next_line().await.unwrap().unwrap();
+        let notify_value: Value = serde_json::from_str(&notify_line).unwrap();
+        assert_eq!(notify_value["method"], "named/notify");
+        assert_eq!(notify_value["params"]["phase"], "connected");
+
+        let request_line = lines.next_line().await.unwrap().unwrap();
+        let request_value: Value = serde_json::from_str(&request_line).unwrap();
+        assert_eq!(request_value["method"], "ping");
+        let request_id = request_value["id"].clone();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": { "ok": true },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let eof = lines.next_line().await.unwrap();
+        assert!(eof.is_none(), "expected EOF after named disconnect");
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+
+    let shared = manager.into_shared();
+    let server_name = ServerName::parse("srv").unwrap();
+
+    assert!(shared.is_connected_named(&server_name).await.unwrap());
+    assert_eq!(
+        shared
+            .server_handler_timeout_count_named(&server_name)
+            .await
+            .unwrap(),
+        0
+    );
+
+    shared
+        .notify_typed_connected_named::<NamedNotification>(
+            &server_name,
+            Some(NamedNotificationParams { phase: "connected" }),
+        )
+        .await
+        .unwrap();
+
+    let result = shared
+        .request_connected_named(&server_name, "ping", None)
+        .await
+        .unwrap();
+    assert_eq!(result, serde_json::json!({ "ok": true }));
+
+    assert!(shared.disconnect_named(&server_name).await.unwrap());
+    assert!(!shared.is_connected_named(&server_name).await.unwrap());
+
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_manager_inspect_reads_initialize_result() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+
+    let shared = manager.into_shared();
+    let server_name = shared
+        .inspect(|manager| {
+            manager
+                .initialize_result("srv")
+                .and_then(|value| value["serverInfo"]["name"].as_str())
+                .map(str::to_string)
+        })
+        .await
+        .unwrap();
+    assert_eq!(server_name.as_deref(), Some("demo"));
+
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_manager_disconnect_affects_all_clones() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let eof = lines.next_line().await.unwrap();
+        assert!(eof.is_none(), "expected EOF after disconnect");
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+    let shared = manager.into_shared();
+    let clone = shared.clone();
+
+    assert!(shared.disconnect("srv").await.unwrap());
+    assert!(!clone.is_connected("srv").await.unwrap());
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn shared_manager_request_connected_blocks_same_server_disconnect_until_io_finishes() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+    let (request_seen_tx, request_seen_rx) = oneshot::channel();
+    let (respond_tx, respond_rx) = oneshot::channel();
+    let (disconnect_finished_tx, disconnect_finished_rx) = oneshot::channel();
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let request_line = lines.next_line().await.unwrap().unwrap();
+        let request_value: Value = serde_json::from_str(&request_line).unwrap();
+        assert_eq!(request_value["method"], "ping");
+        request_seen_tx.send(()).unwrap();
+        respond_rx.await.unwrap();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_value["id"].clone(),
+            "result": { "ok": true },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        disconnect_finished_rx.await.unwrap();
+        assert!(
+            lines.next_line().await.unwrap().is_none(),
+            "disconnect should close the connection only after the connected request finishes"
+        );
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+
+    let shared = manager.into_shared();
+    let request_task = tokio::spawn({
+        let shared = shared.clone();
+        async move { shared.request_connected("srv", "ping", None).await }
+    });
+
+    request_seen_rx.await.unwrap();
+    let mut disconnect_task = tokio::spawn({
+        let shared = shared.clone();
+        async move { shared.disconnect("srv").await }
+    });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut disconnect_task)
+            .await
+            .is_err(),
+        "same-server disconnect must wait while request_connected is still in flight"
+    );
+    respond_tx.send(()).unwrap();
+    let result = request_task.await.unwrap().unwrap();
+    assert_eq!(result, serde_json::json!({ "ok": true }));
+    assert!(disconnect_task.await.unwrap().unwrap());
+    disconnect_finished_tx.send(()).unwrap();
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_manager_notify_connected_blocks_same_server_disconnect_until_write_finishes() {
+    let (client_stream, server_stream) = tokio::io::duplex(64);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+    let (allow_server_read_tx, allow_server_read_rx) = oneshot::channel();
+    let (disconnect_finished_tx, disconnect_finished_rx) = oneshot::channel();
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        allow_server_read_rx.await.unwrap();
+        let notify_line = lines.next_line().await.unwrap().unwrap();
+        let notify_value: Value = serde_json::from_str(&notify_line).unwrap();
+        assert_eq!(notify_value["method"], "demo/notify");
+
+        disconnect_finished_rx.await.unwrap();
+        assert!(
+            lines.next_line().await.unwrap().is_none(),
+            "disconnect should close the connection only after notify_connected finishes"
+        );
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+
+    let shared = manager.into_shared();
+    let notify_task = tokio::spawn({
+        let shared = shared.clone();
+        async move {
+            shared
+                .notify_connected(
+                    "srv",
+                    "demo/notify",
+                    Some(serde_json::json!({ "payload": "x".repeat(4096) })),
+                )
+                .await
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut disconnect_task = tokio::spawn({
+        let shared = shared.clone();
+        async move { shared.disconnect("srv").await }
+    });
+
+    assert!(
+        !notify_task.is_finished(),
+        "large notify should still be blocked on the transport write"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut disconnect_task)
+            .await
+            .is_err(),
+        "same-server disconnect must wait while notify_connected is still flushing"
+    );
+
+    allow_server_read_tx.send(()).unwrap();
+    notify_task.await.unwrap().unwrap();
+    assert!(disconnect_task.await.unwrap().unwrap());
+    disconnect_finished_tx.send(()).unwrap();
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_manager_notify_blocks_same_server_disconnect_until_write_finishes() {
+    let (client_stream, server_stream) = tokio::io::duplex(64);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+    let (allow_server_read_tx, allow_server_read_rx) = oneshot::channel();
+    let (disconnect_finished_tx, disconnect_finished_rx) = oneshot::channel();
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        allow_server_read_rx.await.unwrap();
+        let notify_line = lines.next_line().await.unwrap().unwrap();
+        let notify_value: Value = serde_json::from_str(&notify_line).unwrap();
+        assert_eq!(notify_value["method"], "demo/notify");
+
+        disconnect_finished_rx.await.unwrap();
+        assert!(
+            lines.next_line().await.unwrap().is_none(),
+            "disconnect should close the connection only after notify finishes"
+        );
+    });
+
+    let cwd_dir = tempfile::tempdir().unwrap();
+    let cwd = cwd_dir.path().to_path_buf();
+    let mut servers = BTreeMap::new();
+    servers.insert(
+        ServerName::parse("srv").unwrap(),
+        ServerConfig::stdio(vec!["mock-server".to_string()]).unwrap(),
+    );
+    let config = Config::new(ClientConfig::default(), servers);
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .expect("connect in-memory client");
+    manager
+        .record_connection_cwd("srv", &cwd)
+        .expect("record cwd identity");
+    manager
+        .record_connection_server_config("srv", config.server("srv").expect("config server"))
+        .expect("record config identity");
+
+    let shared = manager.into_shared();
+    let notify_task = tokio::spawn({
+        let shared = shared.clone();
+        let config = config.clone();
+        let cwd = cwd.clone();
+        async move {
+            shared
+                .notify(
+                    &config,
+                    "srv",
+                    "demo/notify",
+                    Some(serde_json::json!({ "payload": "x".repeat(4096) })),
+                    &cwd,
+                )
+                .await
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut disconnect_task = tokio::spawn({
+        let shared = shared.clone();
+        async move { shared.disconnect("srv").await }
+    });
+
+    assert!(
+        !notify_task.is_finished(),
+        "large notify should still be blocked on the transport write"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut disconnect_task)
+            .await
+            .is_err(),
+        "same-server disconnect must wait while notify is still flushing"
+    );
+
+    allow_server_read_tx.send(()).unwrap();
+    notify_task.await.unwrap().unwrap();
+    assert!(disconnect_task.await.unwrap().unwrap());
+    disconnect_finished_tx.send(()).unwrap();
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_manager_plain_spawn_from_handler_waits_without_inherited_scope() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+    let (send_notification_tx, send_notification_rx) = oneshot::channel();
+    let (handler_result_tx, handler_result_rx) = oneshot::channel();
+    let shared_slot = Arc::new(StdMutex::new(None::<SharedManager>));
+    let shared_slot_for_handler = Arc::clone(&shared_slot);
+    let handler_result_tx = Arc::new(StdMutex::new(Some(handler_result_tx)));
+    let handler_result_tx_for_handler = Arc::clone(&handler_result_tx);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        send_notification_rx.await.unwrap();
+
+        let notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "demo/notify",
+            "params": {},
+        });
+        let mut notification_line = serde_json::to_string(&notification).unwrap();
+        notification_line.push('\n');
+        server_write
+            .write_all(notification_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let eof = lines.next_line().await.unwrap();
+        assert!(eof.is_none(), "expected EOF after test completes");
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .with_server_notification_handler(Arc::new(move |_ctx| {
+            let shared_slot_for_handler = Arc::clone(&shared_slot_for_handler);
+            let handler_result_tx_for_handler = Arc::clone(&handler_result_tx_for_handler);
+            Box::pin(async move {
+                let shared = shared_slot_for_handler
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                    .expect("shared manager should be installed before notification")
+                    .clone();
+                let child = tokio::spawn(async move { shared.inspect(|_| ()).await });
+                let message = match child.await {
+                    Ok(Ok(())) => "spawned shared-manager call succeeded".to_string(),
+                    Ok(Err(err)) => format!("{err:#}"),
+                    Err(err) => panic!("spawned task should join: {err}"),
+                };
+                if let Some(tx) = handler_result_tx_for_handler
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    let _ = tx.send(message);
+                }
+            })
+        }));
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+
+    let shared = manager.into_shared();
+    shared_slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .replace(shared.clone());
+
+    let held_lock = shared.lock_for_async_op("held_lock").await.unwrap();
+    send_notification_tx.send(()).unwrap();
+
+    let mut handler_result_rx = Box::pin(handler_result_rx);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut handler_result_rx)
+            .await
+            .is_err(),
+        "bare spawned child should keep waiting until the shared lock is released"
+    );
+
+    drop(held_lock);
+    let result = tokio::time::timeout(Duration::from_secs(1), &mut handler_result_rx)
+        .await
+        .expect("spawned handler task should finish after the shared lock is released")
+        .unwrap();
+    assert_eq!(result, "spawned shared-manager call succeeded");
+    shared_slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    drop(shared);
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_manager_spawn_inheriting_handler_scope_fails_fast() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+    let (send_notification_tx, send_notification_rx) = oneshot::channel();
+    let (handler_result_tx, handler_result_rx) = oneshot::channel();
+    let shared_slot = Arc::new(StdMutex::new(None::<SharedManager>));
+    let shared_slot_for_handler = Arc::clone(&shared_slot);
+    let handler_result_tx = Arc::new(StdMutex::new(Some(handler_result_tx)));
+    let handler_result_tx_for_handler = Arc::clone(&handler_result_tx);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        send_notification_rx.await.unwrap();
+
+        let notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "demo/notify",
+            "params": {},
+        });
+        let mut notification_line = serde_json::to_string(&notification).unwrap();
+        notification_line.push('\n');
+        server_write
+            .write_all(notification_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let eof = lines.next_line().await.unwrap();
+        assert!(eof.is_none(), "expected EOF after test completes");
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .with_server_notification_handler(Arc::new(move |_ctx| {
+            let shared_slot_for_handler = Arc::clone(&shared_slot_for_handler);
+            let handler_result_tx_for_handler = Arc::clone(&handler_result_tx_for_handler);
+            Box::pin(async move {
+                let shared = shared_slot_for_handler
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                    .expect("shared manager should be installed before notification")
+                    .clone();
+                let child_shared = shared.clone();
+                let child = shared.spawn_inheriting_handler_scope(async move {
+                    child_shared.inspect(|_| ()).await
+                });
+                let message = match child.await {
+                    Ok(Ok(())) => "spawned shared-manager call unexpectedly succeeded".to_string(),
+                    Ok(Err(err)) => format!("{err:#}"),
+                    Err(err) => panic!("spawned task should join: {err}"),
+                };
+                if let Some(tx) = handler_result_tx_for_handler
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    let _ = tx.send(message);
+                }
+            })
+        }));
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+
+    let shared = manager.into_shared();
+    shared_slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .replace(shared.clone());
+
+    let held_lock = shared.lock_for_async_op("held_lock").await.unwrap();
+    send_notification_tx.send(()).unwrap();
+
+    let result = tokio::time::timeout(Duration::from_secs(1), handler_result_rx)
+        .await
+        .expect("spawned handler task should fail fast")
+        .unwrap();
+    assert!(
+        result.contains(super::REENTRANT_HANDLER_ERROR) && result.contains("inspect"),
+        "unexpected result: {result}"
+    );
+
+    drop(held_lock);
+    shared_slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    drop(shared);
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_manager_external_call_waits_if_other_handler_scope_is_active() {
+    let manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    let active_handler_scopes = manager.active_handler_scopes();
+    active_handler_scopes.fetch_add(1, Ordering::Relaxed);
+
+    let shared = manager.into_shared();
+    let (release_tx, release_rx) = oneshot::channel();
+    let held_lock = tokio::spawn({
+        let shared = shared.clone();
+        async move {
+            let guard = shared.lock_for_async_op("held_lock").await.unwrap();
+            let _ = release_rx.await;
+            drop(guard);
+        }
+    });
+
+    tokio::task::yield_now().await;
+
+    let inspect = tokio::spawn({
+        let shared = shared.clone();
+        async move { shared.inspect(|_| ()).await }
+    });
+
+    let mut inspect = Box::pin(inspect);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut inspect)
+            .await
+            .is_err(),
+        "external call should keep waiting behind the held lock"
+    );
+
+    release_tx.send(()).unwrap();
+    inspect.await.unwrap().unwrap();
+    held_lock.await.unwrap();
+    active_handler_scopes.fetch_sub(1, Ordering::Relaxed);
+}
+
+#[tokio::test]
+async fn shared_manager_external_connect_gate_waits_if_other_handler_scope_is_active() {
+    let manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    let active_handler_scopes = manager.active_handler_scopes();
+    active_handler_scopes.fetch_add(1, Ordering::Relaxed);
+
+    let shared = manager.into_shared();
+    let (release_tx, release_rx) = oneshot::channel();
+    let held_gate = tokio::spawn({
+        let shared = shared.clone();
+        async move {
+            let guard = shared
+                .lock_connect_gate_write("held_gate", "srv")
+                .await
+                .unwrap();
+            let _ = release_rx.await;
+            drop(guard);
+        }
+    });
+
+    tokio::task::yield_now().await;
+
+    let wait_for_gate = tokio::spawn({
+        let shared = shared.clone();
+        async move { shared.lock_connect_gate_write("second_gate", "srv").await }
+    });
+
+    let mut wait_for_gate = Box::pin(wait_for_gate);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut wait_for_gate)
+            .await
+            .is_err(),
+        "external gate acquisition should keep waiting behind the held gate"
+    );
+
+    release_tx.send(()).unwrap();
+    let gate = wait_for_gate.await.unwrap().unwrap();
+    drop(gate);
+    held_gate.await.unwrap();
+    active_handler_scopes.fetch_sub(1, Ordering::Relaxed);
+}
+
+#[tokio::test]
+async fn shared_manager_request_rejects_different_cwd_context() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let eof = lines.next_line().await.unwrap();
+        assert!(eof.is_none(), "expected EOF after test completes");
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+    let connected_cwd = explicit_named_cwd_for_shared_manager_test("workspace-a");
+    let requested_cwd = explicit_named_cwd_for_shared_manager_test("workspace-b");
+    manager
+        .record_connection_cwd("srv", &connected_cwd)
+        .unwrap();
+
+    let mut servers = BTreeMap::new();
+    servers.insert(
+        ServerName::parse("srv").unwrap(),
+        ServerConfig::stdio(vec!["mock-server".to_string()]).unwrap(),
+    );
+    let shared = manager.into_shared();
+    let config = Config::new(ClientConfig::default(), servers);
+    let err = shared
+        .request(&config, "srv", "ping", None, &requested_cwd)
+        .await
+        .expect_err("different cwd should be rejected");
+    assert!(
+        err.to_string().contains("cannot be reused for cwd="),
+        "{err:#}"
+    );
+    assert!(shared.is_connected("srv").await.unwrap());
+    drop(shared);
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_manager_stale_cleanup_does_not_disconnect_replacement_connection() {
+    let (old_client_stream, old_server_stream) = tokio::io::duplex(1024);
+    let (old_client_read, old_client_write) = tokio::io::split(old_client_stream);
+    let (old_server_read, mut old_server_write) = tokio::io::split(old_server_stream);
+
+    let old_server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(old_server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "old" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        old_server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        old_server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let eof = lines.next_line().await.unwrap();
+        assert!(
+            eof.is_none(),
+            "old connection should be closed during replacement"
+        );
+    });
+
+    let (new_client_stream, new_server_stream) = tokio::io::duplex(1024);
+    let (new_client_read, new_client_write) = tokio::io::split(new_client_stream);
+    let (new_server_read, mut new_server_write) = tokio::io::split(new_server_stream);
+
+    let new_server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(new_server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "new" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        new_server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        new_server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let request_line = lines.next_line().await.unwrap().unwrap();
+        let request_value: Value = serde_json::from_str(&request_line).unwrap();
+        assert_eq!(request_value["method"], "ping");
+        let request_id = request_value["id"].clone();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": { "ok": true },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        new_server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        new_server_write.flush().await.unwrap();
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    manager
+        .connect_io("srv", old_client_read, old_client_write)
+        .await
+        .unwrap();
+    let shared = manager.into_shared();
+
+    let prepared = shared
+        .try_prepare_connected_client("stale_cleanup_prepare", "srv", None)
+        .await
+        .unwrap()
+        .expect("prepared old connection");
+
+    {
+        let mut manager = shared
+            .lock_for_async_op("replace_connection")
+            .await
+            .unwrap();
+        assert!(manager.disconnect("srv"));
+        manager
+            .connect_io("srv", new_client_read, new_client_write)
+            .await
+            .unwrap();
+    }
+
+    let disconnect = {
+        let mut manager = shared.lock_for_async_op("stale_cleanup").await.unwrap();
+        manager.prepare_disconnect_for_wait_if_connection(
+            &prepared.server_name,
+            prepared.connection_id,
+        )
+    };
+    disconnect.wait_for_jsonrpc_error_cleanup().await;
+
+    assert!(
+        shared.is_connected("srv").await.unwrap(),
+        "stale cleanup should not remove the replacement connection"
+    );
+    let result = shared.request_connected("srv", "ping", None).await.unwrap();
+    assert_eq!(result, serde_json::json!({ "ok": true }));
+
+    old_server_task.await.unwrap();
+    new_server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_manager_disconnect_and_wait_releases_lock_while_waiting() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let notify = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "demo/notify",
+            "params": {},
+        });
+        let mut notify_line = serde_json::to_string(&notify).unwrap();
+        notify_line.push('\n');
+        server_write
+            .write_all(notify_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let eof = lines.next_line().await.unwrap();
+        assert!(eof.is_none(), "expected EOF after disconnect");
+    });
+
+    let handler_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started_for_handler = Arc::clone(&handler_started);
+    let handler_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dropped_for_handler = Arc::clone(&handler_dropped);
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .with_server_notification_handler(Arc::new(move |_ctx| {
+            let started_for_handler = Arc::clone(&started_for_handler);
+            let dropped_for_handler = Arc::clone(&dropped_for_handler);
+            Box::pin(async move {
+                struct OnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+                impl Drop for OnDrop {
+                    fn drop(&mut self) {
+                        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+
+                let _on_drop = OnDrop(dropped_for_handler);
+                started_for_handler.store(true, std::sync::atomic::Ordering::Relaxed);
+                std::future::pending::<()>().await;
+            })
+        }));
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !handler_started.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let shared = manager.into_shared();
+    let clone = shared.clone();
+    let disconnect_task = tokio::spawn(async move {
+        shared
+            .disconnect_and_wait(
+                "srv",
+                Duration::from_millis(100),
+                mcp_jsonrpc::WaitOnTimeout::ReturnError,
+            )
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let names = tokio::time::timeout(Duration::from_millis(20), clone.connected_server_names())
+        .await
+        .expect("connected_server_names should not be blocked by disconnect_and_wait")
+        .unwrap();
+    assert!(
+        names.is_empty(),
+        "disconnect should remove the shared connection early"
+    );
+
+    let err = disconnect_task.await.unwrap().unwrap_err();
+    let err_chain = format!("{err:#}");
+    assert!(
+        err_chain.contains("wait timed out after"),
+        "unexpected error: {err_chain}"
+    );
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !handler_dropped.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    server_task.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shared_manager_disconnect_and_wait_fail_fast_blocks_same_server_reconnect_until_wait_finishes()
+ {
+    use tokio::sync::oneshot;
+
+    let socket_path = unique_socket_path("disconnect-wait-gate");
+    let _ = std::fs::remove_file(&socket_path);
+    let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
+        return;
+    };
+
+    let (notify_started_tx, notify_started_rx) = oneshot::channel();
+    let (second_accept_seen_tx, second_accept_seen_rx) = oneshot::channel();
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (server_read, mut server_write) = tokio::io::split(stream);
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["method"], "initialize");
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let notify = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "demo/notify",
+            "params": {},
+        });
+        let mut notify_line = serde_json::to_string(&notify).unwrap();
+        notify_line.push('\n');
+        server_write
+            .write_all(notify_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+        let _ = notify_started_tx.send(());
+
+        let eof = lines.next_line().await.unwrap();
+        assert!(eof.is_none(), "expected EOF after disconnect_and_wait");
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let _ = second_accept_seen_tx.send(());
+        let (server_read, mut server_write) = tokio::io::split(stream);
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["method"], "initialize");
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo-reconnect" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let request_line = lines.next_line().await.unwrap().unwrap();
+        let request_value: Value = serde_json::from_str(&request_line).unwrap();
+        assert_eq!(request_value["method"], "ping");
+        let request_id = request_value["id"].clone();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": { "ok": true },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let eof = lines.next_line().await.unwrap();
+        assert!(eof.is_none(), "expected EOF after reconnect request");
+    });
+
+    let handler_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started_for_handler = Arc::clone(&handler_started);
+    let mut servers = BTreeMap::new();
+    servers.insert(
+        ServerName::parse("srv").unwrap(),
+        ServerConfig::unix(socket_path.clone()).unwrap(),
+    );
+    let config = Config::new(ClientConfig::default(), servers);
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .with_server_notification_handler(Arc::new(move |_ctx| {
+            let started_for_handler = Arc::clone(&started_for_handler);
+            Box::pin(async move {
+                started_for_handler.store(true, std::sync::atomic::Ordering::Relaxed);
+                std::future::pending::<()>().await;
+            })
+        }));
+    manager
+        .get_or_connect(&config, "srv", Path::new("/"))
+        .await
+        .unwrap();
+    notify_started_rx.await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !handler_started.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let shared = manager.into_shared();
+    let disconnect_shared = shared.clone();
+    let disconnect_task = tokio::spawn(async move {
+        disconnect_shared
+            .disconnect_and_wait(
+                "srv",
+                Duration::from_millis(100),
+                mcp_jsonrpc::WaitOnTimeout::ReturnError,
+            )
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let reconnect_shared = shared.clone();
+    let reconnect_config = config.clone();
+    let reconnect_task = tokio::spawn(async move {
+        reconnect_shared
+            .request(
+                &reconnect_config,
+                "srv",
+                "ping",
+                None::<Value>,
+                Path::new("/"),
+            )
+            .await
+    });
+
+    let mut reconnect_task = Box::pin(reconnect_task);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut reconnect_task)
+            .await
+            .is_err(),
+        "same-server reconnect should keep waiting behind disconnect_and_wait"
+    );
+
+    let disconnect_err = disconnect_task.await.unwrap().unwrap_err();
+    let disconnect_err_chain = format!("{disconnect_err:#}");
+    assert!(
+        disconnect_err_chain.contains("wait timed out after"),
+        "{disconnect_err_chain}"
+    );
+
+    let reconnect_result = reconnect_task
+        .await
+        .unwrap()
+        .expect("reconnect request should succeed once disconnect_and_wait releases the gate");
+    second_accept_seen_rx
+        .await
+        .expect("reconnect should establish a replacement connection");
+    assert_eq!(reconnect_result, serde_json::json!({ "ok": true }));
+    let _ = shared.disconnect("srv").await.unwrap();
+    server_task.await.unwrap();
+    let _ = std::fs::remove_file(socket_path);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shared_manager_disconnect_waits_for_inflight_connect_and_prevents_revival() {
+    use tokio::sync::oneshot;
+
+    let socket_path = unique_socket_path("disconnect-race");
+    let _ = std::fs::remove_file(&socket_path);
+    let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
+        return;
+    };
+
+    let (init_seen_tx, init_seen_rx) = oneshot::channel();
+    let (release_init_tx, release_init_rx) = oneshot::channel();
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (server_read, mut server_write) = tokio::io::split(stream);
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["method"], "initialize");
+        let init_id = init_value["id"].clone();
+        let _ = init_seen_tx.send(());
+
+        release_init_rx.await.unwrap();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        match tokio::time::timeout(Duration::from_millis(200), lines.next_line()).await {
+            Ok(Ok(Some(request_line))) => {
+                let request_value: Value = serde_json::from_str(&request_line).unwrap();
+                assert_eq!(request_value["method"], "ping");
+                let request_id = request_value["id"].clone();
+
+                let response = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": { "ok": true },
+                });
+                let mut response_line = serde_json::to_string(&response).unwrap();
+                response_line.push('\n');
+                if server_write
+                    .write_all(response_line.as_bytes())
+                    .await
+                    .is_ok()
+                    && server_write.flush().await.is_ok()
+                {
+                    let eof = lines.next_line().await.unwrap();
+                    assert!(eof.is_none(), "expected EOF after disconnect");
+                }
+            }
+            Ok(Ok(None)) => {}
+            Ok(Err(err)) => panic!("read post-initialize line: {err}"),
+            Err(_) => panic!("expected shared request to either send ping or close"),
+        }
+    });
+
+    let mut servers = BTreeMap::new();
+    servers.insert(
+        ServerName::parse("srv").unwrap(),
+        ServerConfig::unix(socket_path.clone()).unwrap(),
+    );
+    let config = Arc::new(Config::new(ClientConfig::default(), servers));
+
+    let shared = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .into_shared();
+
+    let request_shared = shared.clone();
+    let request_config = Arc::clone(&config);
+    let request_task = tokio::spawn(async move {
+        request_shared
+            .request(
+                request_config.as_ref(),
+                "srv",
+                "ping",
+                None::<Value>,
+                Path::new("/"),
+            )
+            .await
+    });
+
+    init_seen_rx.await.unwrap();
+
+    let disconnect_shared = shared.clone();
+    let mut disconnect_task =
+        tokio::spawn(async move { disconnect_shared.disconnect("srv").await });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut disconnect_task)
+            .await
+            .is_err(),
+        "disconnect should wait for the in-flight connect gate"
+    );
+
+    release_init_tx.send(()).unwrap();
+
+    let disconnected = tokio::time::timeout(Duration::from_secs(1), &mut disconnect_task)
+        .await
+        .expect("disconnect should finish after initialize completes")
+        .unwrap()
+        .unwrap();
+    assert!(
+        disconnected,
+        "disconnect should remove the connection after the in-flight connect commits"
+    );
+    assert!(!shared.is_connected("srv").await.unwrap());
+    assert!(shared.connected_server_names().await.unwrap().is_empty());
+    assert!(shared.request_connected("srv", "ping", None).await.is_err());
+
+    let _ = tokio::time::timeout(Duration::from_secs(1), request_task)
+        .await
+        .expect("outer request should not hang");
+
+    server_task.await.unwrap();
+    let _ = std::fs::remove_file(socket_path);
+}
+
+#[test]
+fn shared_manager_try_unwrap_requires_unique_owner() {
+    let shared = Manager::new("test-client", "0.0.0", Duration::from_secs(1)).into_shared();
+    let clone = shared.clone();
+    assert!(shared.clone().try_unwrap().is_err());
+    drop(clone);
+    let inner = match shared.try_unwrap() {
+        Ok(inner) => inner,
+        Err(_) => panic!("unique owner should unwrap"),
+    };
+    assert_eq!(inner.trust_mode(), TrustMode::Untrusted);
+}
+
+#[tokio::test]
+async fn shared_manager_cached_connection_queries_do_not_prune_dead_state_until_refresh() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["method"], "initialize");
+
+        let response_line = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_value["id"].clone(),
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION }
+        })
+        .to_string()
+            + "\n";
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let note_line = lines.next_line().await.unwrap().unwrap();
+        let note_value: Value = serde_json::from_str(&note_line).unwrap();
+        assert_eq!(note_value["method"], "notifications/initialized");
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+    manager.seed_connection_side_state_for_test("srv");
+
+    let shared = manager.into_shared();
+
+    server_task.await.unwrap();
+
+    loop {
+        let closed = shared
+            .with_manager_lock("connection_is_closed_for_test", |manager| {
+                manager.connection_is_closed_for_test("srv")
+            })
+            .await
+            .unwrap();
+        if closed {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    assert!(shared.is_connected_cached("srv").await.unwrap());
+    assert_eq!(
+        shared.connected_server_names_cached().await.unwrap(),
+        vec![ServerName::parse("srv").unwrap()]
+    );
+    assert_eq!(shared.server_handler_timeout_count("srv").await.unwrap(), 1);
+    assert_eq!(shared.protocol_version_mismatches().await.unwrap().len(), 1);
+    assert!(
+        shared
+            .inspect(|manager| manager.initialize_result("srv").is_some())
+            .await
+            .unwrap()
+    );
+
+    assert!(!shared.is_connected("srv").await.unwrap());
+    assert!(!shared.is_connected_cached("srv").await.unwrap());
+    assert!(
+        shared
+            .connected_server_names_cached()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(shared.server_handler_timeout_count("srv").await.unwrap(), 0);
+    assert!(
+        shared
+            .protocol_version_mismatches()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !shared
+            .inspect(|manager| manager.initialize_result("srv").is_some())
+            .await
+            .unwrap()
+    );
+}
+
+#[test]
+fn shared_manager_connect_gates_prune_stale_entries() {
+    let shared = Manager::new("test-client", "0.0.0", Duration::from_secs(1)).into_shared();
+
+    let first = shared.connect_gate_for(" alpha ");
+    {
+        let gates = shared
+            .connect_gates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(gates.len(), 1);
+        assert_eq!(gates.get("alpha").unwrap().strong_count(), 1);
+    }
+    drop(first);
+
+    let second = shared.connect_gate_for("beta");
+    {
+        let gates = shared
+            .connect_gates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(gates.len(), 1);
+        assert!(gates.get("alpha").is_none());
+        assert_eq!(gates.get("beta").unwrap().strong_count(), 1);
+    }
+    drop(second);
+}
+
+#[tokio::test]
+async fn shared_manager_telemetry_drain_is_shared() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": "1900-01-01" },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(1))
+        .with_trust_mode(TrustMode::Trusted)
+        .with_protocol_version_check(ProtocolVersionCheck::Warn);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+
+    let shared = manager.into_shared();
+    let clone = shared.clone();
+
+    let snapshot = shared.protocol_version_mismatches().await.unwrap();
+    assert_eq!(snapshot.len(), 1);
+    let still_present = clone
+        .inspect(|manager| manager.protocol_version_mismatches().len())
+        .await
+        .unwrap();
+    assert_eq!(still_present, 1);
+
+    let mismatches = shared.take_protocol_version_mismatches().await.unwrap();
+    assert_eq!(mismatches.len(), 1);
+    let after = clone
+        .inspect(|manager| manager.protocol_version_mismatches().len())
+        .await
+        .unwrap();
+    assert_eq!(after, 0);
+
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_manager_reentrant_handler_request_connected_succeeds() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let request_line = lines.next_line().await.unwrap().unwrap();
+        let request_value: Value = serde_json::from_str(&request_line).unwrap();
+        assert_eq!(request_value["method"], "ping");
+        let request_id = request_value["id"].clone();
+
+        let callback_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "callback",
+            "params": { "phase": "reentrant" },
+        });
+        let mut callback_line = serde_json::to_string(&callback_request).unwrap();
+        callback_line.push('\n');
+        server_write
+            .write_all(callback_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let nested_request_line = lines.next_line().await.unwrap().unwrap();
+        let nested_request: Value = serde_json::from_str(&nested_request_line).unwrap();
+        assert_eq!(nested_request["method"], "nested");
+        let nested_request_id = nested_request["id"].clone();
+
+        let nested_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": nested_request_id,
+            "result": { "nested": true },
+        });
+        let mut nested_response_line = serde_json::to_string(&nested_response).unwrap();
+        nested_response_line.push('\n');
+        server_write
+            .write_all(nested_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let callback_response_line = lines.next_line().await.unwrap().unwrap();
+        let callback_response: Value = serde_json::from_str(&callback_response_line).unwrap();
+        assert_eq!(callback_response["id"], 99);
+        assert_eq!(
+            callback_response["result"],
+            serde_json::json!({ "nested": true })
+        );
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": { "ok": true },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+    });
+
+    let shared_slot: Arc<StdMutex<Option<SharedManager>>> = Arc::new(StdMutex::new(None));
+    let handler_slot = shared_slot.clone();
+    let handler: ServerRequestHandler = Arc::new(move |_| {
+        let shared = handler_slot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("shared manager installed")
+            .clone();
+        Box::pin(async move {
+            let nested = shared
+                .request_connected("srv", "nested", None::<Value>)
+                .await
+                .expect("connected shared request should release manager lock during I/O");
+            ServerRequestOutcome::Ok(nested)
+        })
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .with_server_request_handler(handler);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+
+    let shared = manager.into_shared();
+    *shared_slot.lock().unwrap() = Some(shared.clone());
+
+    let result = shared.request_connected("srv", "ping", None).await.unwrap();
+    assert_eq!(result, serde_json::json!({ "ok": true }));
+
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_manager_reentrant_handler_request_typed_connected_succeeds() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let request_line = lines.next_line().await.unwrap().unwrap();
+        let request_value: Value = serde_json::from_str(&request_line).unwrap();
+        assert_eq!(request_value["method"], "ping");
+        let request_id = request_value["id"].clone();
+
+        let callback_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "callback",
+            "params": { "phase": "typed" },
+        });
+        let mut callback_line = serde_json::to_string(&callback_request).unwrap();
+        callback_line.push('\n');
+        server_write
+            .write_all(callback_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let nested_request_line = lines.next_line().await.unwrap().unwrap();
+        let nested_request: Value = serde_json::from_str(&nested_request_line).unwrap();
+        assert_eq!(nested_request["method"], "nested");
+        assert_eq!(
+            nested_request["params"],
+            serde_json::json!({ "phase": "typed" })
+        );
+        let nested_request_id = nested_request["id"].clone();
+
+        let nested_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": nested_request_id,
+            "result": { "nested": true },
+        });
+        let mut nested_response_line = serde_json::to_string(&nested_response).unwrap();
+        nested_response_line.push('\n');
+        server_write
+            .write_all(nested_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let callback_response_line = lines.next_line().await.unwrap().unwrap();
+        let callback_response: Value = serde_json::from_str(&callback_response_line).unwrap();
+        assert_eq!(callback_response["id"], 99);
+        assert_eq!(
+            callback_response["result"],
+            serde_json::json!({ "nested": true })
+        );
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": { "ok": true },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+    });
+
+    let shared_slot: Arc<StdMutex<Option<SharedManager>>> = Arc::new(StdMutex::new(None));
+    let handler_slot = shared_slot.clone();
+    let handler: ServerRequestHandler = Arc::new(move |_| {
+        let shared = handler_slot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("shared manager installed")
+            .clone();
+        Box::pin(async move {
+            let nested = shared
+                .request_typed_connected::<NestedRequest>(
+                    "srv",
+                    Some(NestedParams { phase: "typed" }),
+                )
+                .await
+                .expect("typed connected shared request should release manager lock during I/O");
+            ServerRequestOutcome::Ok(serde_json::to_value(nested).unwrap())
+        })
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .with_server_request_handler(handler);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+
+    let shared = manager.into_shared();
+    *shared_slot.lock().unwrap() = Some(shared.clone());
+
+    let result = shared.request_connected("srv", "ping", None).await.unwrap();
+    assert_eq!(result, serde_json::json!({ "ok": true }));
+
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_manager_reentrant_handler_is_connected_fails_fast_on_manager_lock() {
+    use tokio::sync::oneshot;
+
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+    let (send_callback_tx, send_callback_rx) = oneshot::channel();
+    let (callback_done_tx, callback_done_rx) = oneshot::channel();
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        send_callback_rx.await.unwrap();
+
+        let callback_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "callback",
+            "params": { "phase": "lock-held" },
+        });
+        let mut callback_line = serde_json::to_string(&callback_request).unwrap();
+        callback_line.push('\n');
+        server_write
+            .write_all(callback_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let callback_response_line = lines.next_line().await.unwrap().unwrap();
+        let callback_response: Value = serde_json::from_str(&callback_response_line).unwrap();
+        assert_eq!(callback_response["id"], 99);
+        let error_message = callback_response["error"]["message"]
+            .as_str()
+            .expect("callback should receive error response");
+        assert!(
+            error_message.contains(super::REENTRANT_HANDLER_ERROR),
+            "unexpected callback error: {callback_response}"
+        );
+        assert!(
+            error_message.contains("is_connected"),
+            "callback error should identify the blocked operation: {callback_response}"
+        );
+        let _ = callback_done_tx.send(());
+
+        let eof = lines.next_line().await.unwrap();
+        assert!(eof.is_none(), "expected EOF after shared disconnect");
+    });
+
+    let shared_slot: Arc<StdMutex<Option<SharedManager>>> = Arc::new(StdMutex::new(None));
+    let handler_slot = shared_slot.clone();
+    let handler: ServerRequestHandler = Arc::new(move |_| {
+        let shared = handler_slot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("shared manager installed")
+            .clone();
+        Box::pin(async move {
+            match shared.is_connected("srv").await {
+                Ok(connected) => ServerRequestOutcome::Ok(serde_json::json!({
+                    "connected": connected,
+                })),
+                Err(err) => ServerRequestOutcome::Error {
+                    code: -32001,
+                    message: format!("{err:#}"),
+                    data: None,
+                },
+            }
+        })
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .with_server_request_handler(handler);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+
+    let shared = manager.into_shared();
+    *shared_slot.lock().unwrap() = Some(shared.clone());
+
+    let (lock_started_tx, lock_started_rx) = oneshot::channel();
+    let (release_lock_tx, release_lock_rx) = std::sync::mpsc::channel();
+    let lock_shared = shared.clone();
+    let runtime = tokio::runtime::Handle::current();
+    let lock_thread = std::thread::spawn(move || {
+        runtime.block_on(async move {
+            lock_shared
+                .inspect(|_| {
+                    let _ = lock_started_tx.send(());
+                    release_lock_rx.recv().expect("release manager lock");
+                })
+                .await
+                .expect("inspect should succeed outside handler");
+        });
+    });
+
+    lock_started_rx.await.unwrap();
+
+    send_callback_tx.send(()).unwrap();
+    callback_done_rx.await.unwrap();
+    release_lock_tx.send(()).unwrap();
+    lock_thread.join().unwrap();
+    assert!(shared.disconnect("srv").await.unwrap());
+    server_task.await.unwrap();
+}
+
+#[cfg(unix)]
+fn unique_socket_path(label: &str) -> std::path::PathBuf {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let short_label: String = label
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .take(8)
+        .collect();
+    let base_dir = if std::path::Path::new("/tmp").is_dir() {
+        std::path::PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+
+    base_dir.join(format!(
+        "mcp-sm-{short_label}-{}-{}.sock",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
+#[cfg(unix)]
+fn bind_unix_listener_or_skip(path: &std::path::Path) -> Option<tokio::net::UnixListener> {
+    match tokio::net::UnixListener::bind(path) {
+        Ok(listener) => Some(listener),
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!(
+                "skipping shared_manager unix-socket test: unix listener bind not permitted in this environment: {err}"
+            );
+            None
+        }
+        Err(err) => panic!(
+            "failed to bind shared_manager unix listener at {}: {err}",
+            path.display()
+        ),
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shared_manager_cold_start_initialize_does_not_block_other_servers() {
+    use tokio::sync::oneshot;
+
+    let slow_socket_path = unique_socket_path("slow");
+    let fast_socket_path = unique_socket_path("fast");
+    let _ = std::fs::remove_file(&slow_socket_path);
+    let _ = std::fs::remove_file(&fast_socket_path);
+
+    let Some(slow_listener) = bind_unix_listener_or_skip(&slow_socket_path) else {
+        return;
+    };
+    let Some(fast_listener) = bind_unix_listener_or_skip(&fast_socket_path) else {
+        return;
+    };
+    let (slow_init_seen_tx, slow_init_seen_rx) = oneshot::channel();
+    let (release_slow_tx, release_slow_rx) = oneshot::channel();
+
+    let slow_server_task = tokio::spawn(async move {
+        let (stream, _) = slow_listener.accept().await.unwrap();
+        let (server_read, mut server_write) = tokio::io::split(stream);
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["method"], "initialize");
+        let init_id = init_value["id"].clone();
+        let _ = slow_init_seen_tx.send(());
+
+        release_slow_rx.await.unwrap();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "slow" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let request_line = lines.next_line().await.unwrap().unwrap();
+        let request_value: Value = serde_json::from_str(&request_line).unwrap();
+        assert_eq!(request_value["method"], "ping");
+        let request_id = request_value["id"].clone();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": { "server": "slow" },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let eof = lines.next_line().await.unwrap();
+        assert!(eof.is_none(), "expected EOF after shared disconnect");
+    });
+
+    let fast_server_task = tokio::spawn(async move {
+        let (stream, _) = fast_listener.accept().await.unwrap();
+        let (server_read, mut server_write) = tokio::io::split(stream);
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["method"], "initialize");
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "fast" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let request_line = lines.next_line().await.unwrap().unwrap();
+        let request_value: Value = serde_json::from_str(&request_line).unwrap();
+        assert_eq!(request_value["method"], "ping");
+        let request_id = request_value["id"].clone();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": { "server": "fast" },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let eof = lines.next_line().await.unwrap();
+        assert!(eof.is_none(), "expected EOF after shared disconnect");
+    });
+
+    let mut servers = BTreeMap::new();
+    servers.insert(
+        ServerName::parse("slow").unwrap(),
+        ServerConfig::unix(slow_socket_path.clone()).unwrap(),
+    );
+    servers.insert(
+        ServerName::parse("fast").unwrap(),
+        ServerConfig::unix(fast_socket_path.clone()).unwrap(),
+    );
+    let config = Arc::new(Config::new(ClientConfig::default(), servers));
+
+    let shared = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .into_shared();
+
+    let slow_shared = shared.clone();
+    let slow_config = Arc::clone(&config);
+    let slow_request = tokio::spawn(async move {
+        slow_shared
+            .request(
+                slow_config.as_ref(),
+                "slow",
+                "ping",
+                None::<Value>,
+                Path::new("/"),
+            )
+            .await
+    });
+
+    slow_init_seen_rx.await.unwrap();
+
+    let fast_result = tokio::time::timeout(Duration::from_millis(250), async {
+        shared
+            .request(
+                config.as_ref(),
+                "fast",
+                "ping",
+                None::<Value>,
+                Path::new("/"),
+            )
+            .await
+    })
+    .await
+    .expect("fast cold-start should not be blocked by slow initialize")
+    .unwrap();
+    assert_eq!(fast_result, serde_json::json!({ "server": "fast" }));
+
+    release_slow_tx.send(()).unwrap();
+
+    let slow_result = tokio::time::timeout(Duration::from_secs(1), slow_request)
+        .await
+        .expect("slow request should finish after initialize is released")
+        .unwrap()
+        .unwrap();
+    assert_eq!(slow_result, serde_json::json!({ "server": "slow" }));
+
+    assert!(shared.disconnect("slow").await.unwrap());
+    assert!(shared.disconnect("fast").await.unwrap());
+    slow_server_task.await.unwrap();
+    fast_server_task.await.unwrap();
+
+    let _ = std::fs::remove_file(slow_socket_path);
+    let _ = std::fs::remove_file(fast_socket_path);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shared_manager_reentrant_handler_cold_start_fails_fast_on_connect_gate() {
+    let socket_path = unique_socket_path("reentrant-cold-start");
+    let _ = std::fs::remove_file(&socket_path);
+    let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
+        return;
+    };
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (server_read, mut server_write) = tokio::io::split(stream);
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["method"], "initialize");
+        let init_id = init_value["id"].clone();
+
+        let callback_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "callback",
+            "params": { "phase": "cold-start" },
+        });
+        let mut callback_line = serde_json::to_string(&callback_request).unwrap();
+        callback_line.push('\n');
+        server_write
+            .write_all(callback_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let callback_response_line = lines.next_line().await.unwrap().unwrap();
+        let callback_response: Value = serde_json::from_str(&callback_response_line).unwrap();
+        assert_eq!(callback_response["id"], 99);
+        let error_message = callback_response["error"]["message"]
+            .as_str()
+            .expect("callback should receive error response");
+        assert!(
+            error_message.contains(super::REENTRANT_HANDLER_ERROR),
+            "unexpected callback error: {callback_response}"
+        );
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let request_line = lines.next_line().await.unwrap().unwrap();
+        let request_value: Value = serde_json::from_str(&request_line).unwrap();
+        assert_eq!(request_value["method"], "ping");
+        let request_id = request_value["id"].clone();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": { "ok": true },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let eof = lines.next_line().await.unwrap();
+        assert!(eof.is_none(), "expected EOF after shared disconnect");
+    });
+
+    let mut servers = BTreeMap::new();
+    servers.insert(
+        ServerName::parse("srv").unwrap(),
+        ServerConfig::unix(socket_path.clone()).unwrap(),
+    );
+    let config = Arc::new(Config::new(ClientConfig::default(), servers));
+    let shared_slot: Arc<StdMutex<Option<SharedManager>>> = Arc::new(StdMutex::new(None));
+
+    let handler_slot = Arc::clone(&shared_slot);
+    let handler_config = Arc::clone(&config);
+    let handler: ServerRequestHandler = Arc::new(move |_| {
+        let shared = handler_slot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("shared manager installed")
+            .clone();
+        let config = Arc::clone(&handler_config);
+        Box::pin(async move {
+            match shared
+                .request(
+                    config.as_ref(),
+                    "srv",
+                    "nested",
+                    None::<Value>,
+                    Path::new("/"),
+                )
+                .await
+            {
+                Ok(result) => ServerRequestOutcome::Ok(result),
+                Err(err) => ServerRequestOutcome::Error {
+                    code: -32001,
+                    message: format!("{err:#}"),
+                    data: None,
+                },
+            }
+        })
+    });
+
+    let shared = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .with_server_request_handler(handler)
+        .into_shared();
+    *shared_slot.lock().unwrap() = Some(shared.clone());
+
+    let result = tokio::time::timeout(Duration::from_secs(1), async {
+        shared
+            .request(
+                config.as_ref(),
+                "srv",
+                "ping",
+                None::<Value>,
+                Path::new("/"),
+            )
+            .await
+    })
+    .await
+    .expect("outer cold-start request should not deadlock")
+    .unwrap();
+    assert_eq!(result, serde_json::json!({ "ok": true }));
+
+    assert!(shared.disconnect("srv").await.unwrap());
+    server_task.await.unwrap();
+
+    let _ = std::fs::remove_file(socket_path);
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn shared_manager_request_resolves_relative_cwd_from_config_thread_root() {
+    let _guard = cwd_test_guard().await;
+    let _cwd_restore = CurrentDirRestoreGuard::capture();
+    let tempdir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::env::set_current_dir(outside.path()).expect("enter outside dir");
+
+    let config_path = tempdir.path().join("mcp.json");
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["method"], "initialize");
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let request_line = lines.next_line().await.unwrap().unwrap();
+        let request_value: Value = serde_json::from_str(&request_line).unwrap();
+        assert_eq!(request_value["method"], "ping");
+        let request_id = request_value["id"].clone();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": { "ok": true },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+    });
+
+    let mut servers = BTreeMap::new();
+    servers.insert(
+        ServerName::parse("srv").unwrap(),
+        ServerConfig::unix(PathBuf::from("/tmp/mock.sock")).unwrap(),
+    );
+    let config = Config::new(ClientConfig::default(), servers)
+        .with_path(config_path)
+        .unwrap();
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .expect("connect in-memory client");
+    manager
+        .record_connection_cwd_with_base("srv", Path::new("workspace/demo"), config.thread_root())
+        .expect("record cwd identity");
+    manager
+        .record_connection_server_config("srv", config.server("srv").expect("config server"))
+        .expect("record config identity");
+
+    let shared = manager.into_shared();
+    let result = shared
+        .request(
+            &config,
+            "srv",
+            "ping",
+            None::<Value>,
+            Path::new("workspace/./demo"),
+        )
+        .await
+        .expect("same thread-root-relative cwd should reuse connection");
+    assert_eq!(result, serde_json::json!({ "ok": true }));
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_manager_request_allows_concurrent_same_server_reuse_after_connect() {
+    let (client_stream, server_stream) = tokio::io::duplex(4096);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let first_line = lines.next_line().await.unwrap().unwrap();
+        let first_request: Value = serde_json::from_str(&first_line).unwrap();
+        assert_eq!(first_request["method"], "ping");
+        let first_id = first_request["id"].clone();
+        let first_request_number = first_request["params"]["request"].as_u64().unwrap();
+
+        let second_line = tokio::time::timeout(Duration::from_millis(200), lines.next_line())
+            .await
+            .expect("second request should arrive before the first response is sent")
+            .unwrap()
+            .unwrap();
+        let second_request: Value = serde_json::from_str(&second_line).unwrap();
+        assert_eq!(second_request["method"], "ping");
+        let second_id = second_request["id"].clone();
+        let second_request_number = second_request["params"]["request"].as_u64().unwrap();
+
+        let mut request_numbers = [first_request_number, second_request_number];
+        request_numbers.sort_unstable();
+        assert_eq!(request_numbers, [1, 2]);
+
+        for (id, request) in [
+            (first_id, first_request_number),
+            (second_id, second_request_number),
+        ] {
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "request": request },
+            });
+            let mut response_line = serde_json::to_string(&response).unwrap();
+            response_line.push('\n');
+            server_write
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+        }
+    });
+
+    let cwd_dir = tempfile::tempdir().unwrap();
+    let cwd = cwd_dir.path().to_path_buf();
+    let mut servers = BTreeMap::new();
+    servers.insert(
+        ServerName::parse("srv").unwrap(),
+        ServerConfig::stdio(vec!["mock-server".to_string()]).unwrap(),
+    );
+    let config = Config::new(ClientConfig::default(), servers);
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .expect("connect in-memory client");
+    manager
+        .record_connection_cwd("srv", &cwd)
+        .expect("record cwd identity");
+    manager
+        .record_connection_server_config("srv", config.server("srv").expect("config server"))
+        .expect("record config identity");
+
+    let shared = manager.into_shared();
+    let first = {
+        let shared = shared.clone();
+        let config = config.clone();
+        let cwd = cwd.clone();
+        tokio::spawn(async move {
+            shared
+                .request(
+                    &config,
+                    "srv",
+                    "ping",
+                    Some(serde_json::json!({ "request": 1 })),
+                    &cwd,
+                )
+                .await
+        })
+    };
+    let second = {
+        let shared = shared.clone();
+        let config = config.clone();
+        let cwd = cwd.clone();
+        tokio::spawn(async move {
+            shared
+                .request(
+                    &config,
+                    "srv",
+                    "ping",
+                    Some(serde_json::json!({ "request": 2 })),
+                    &cwd,
+                )
+                .await
+        })
+    };
+
+    assert_eq!(
+        first.await.unwrap().unwrap(),
+        serde_json::json!({ "request": 1 })
+    );
+    assert_eq!(
+        second.await.unwrap().unwrap(),
+        serde_json::json!({ "request": 2 })
+    );
+    server_task.await.unwrap();
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn shared_manager_request_rejects_different_effective_config() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["method"], "initialize");
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let eof = lines.next_line().await.unwrap();
+        assert!(eof.is_none(), "request should fail before reuse I/O");
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+    manager
+        .record_connection_cwd("srv", Path::new("/workspace/a"))
+        .unwrap();
+    manager
+        .record_connection_server_config(
+            "srv",
+            &ServerConfig::unix(PathBuf::from("/tmp/original.sock")).unwrap(),
+        )
+        .unwrap();
+
+    let mut servers = BTreeMap::new();
+    servers.insert(
+        ServerName::parse("srv").unwrap(),
+        ServerConfig::unix(PathBuf::from("/tmp/changed.sock")).unwrap(),
+    );
+    let config = Config::new(ClientConfig::default(), servers);
+
+    let shared = manager.into_shared();
+    let err = shared
+        .request(
+            &config,
+            "srv",
+            "ping",
+            None::<Value>,
+            Path::new("/workspace/a"),
+        )
+        .await
+        .expect_err("different effective config should not be silently reused");
+    assert!(
+        err.to_string().contains("different effective config"),
+        "{err:#}"
+    );
+    drop(shared);
+    server_task.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shared_manager_request_rejects_different_cwd_on_reuse() {
+    let socket_path = unique_socket_path("cwd-reuse");
+    let _ = std::fs::remove_file(&socket_path);
+    let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
+        return;
+    };
+    let (idle_tx, idle_rx) = tokio::sync::oneshot::channel();
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (server_read, mut server_write) = tokio::io::split(stream);
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["method"], "initialize");
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let request_line = lines.next_line().await.unwrap().unwrap();
+        let request_value: Value = serde_json::from_str(&request_line).unwrap();
+        assert_eq!(request_value["method"], "ping");
+        let request_id = request_value["id"].clone();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": { "ok": true },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), lines.next_line())
+                .await
+                .is_err(),
+            "different cwd reuse should fail before a second request is sent"
+        );
+        idle_tx
+            .send(())
+            .expect("idle window signal should be delivered");
+
+        let eof = lines.next_line().await.unwrap();
+        assert!(eof.is_none(), "expected EOF after shared disconnect");
+    });
+
+    let mut servers = BTreeMap::new();
+    servers.insert(
+        ServerName::parse("srv").unwrap(),
+        ServerConfig::unix(socket_path.clone()).unwrap(),
+    );
+    let config = Config::new(ClientConfig::default(), servers);
+
+    let shared = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .into_shared();
+
+    let first = shared
+        .request(
+            &config,
+            "srv",
+            "ping",
+            None::<Value>,
+            Path::new("/workspace/a"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first, serde_json::json!({ "ok": true }));
+
+    let err = shared
+        .request(
+            &config,
+            "srv",
+            "ping",
+            None::<Value>,
+            Path::new("/workspace/b"),
+        )
+        .await
+        .expect_err("different cwd should be rejected");
+    assert!(
+        err.to_string().contains("cannot be reused for cwd="),
+        "{err:#}"
+    );
+    assert!(shared.is_connected("srv").await.unwrap());
+    idle_rx.await.unwrap();
+    assert!(shared.disconnect("srv").await.unwrap());
+
+    server_task.await.unwrap();
+    let _ = std::fs::remove_file(socket_path);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shared_manager_concurrent_cold_start_requests_share_single_connection() {
+    let socket_path = unique_socket_path("single-flight");
+    let _ = std::fs::remove_file(&socket_path);
+    let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
+        return;
+    };
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (server_read, mut server_write) = tokio::io::split(stream);
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["method"], "initialize");
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        for _ in 0..2 {
+            let request_line = lines.next_line().await.unwrap().unwrap();
+            let request_value: Value = serde_json::from_str(&request_line).unwrap();
+            assert_eq!(request_value["method"], "ping");
+            let request_id = request_value["id"].clone();
+
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": { "ok": true },
+            });
+            let mut response_line = serde_json::to_string(&response).unwrap();
+            response_line.push('\n');
+            server_write
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+        }
+
+        let eof = lines.next_line().await.unwrap();
+        assert!(eof.is_none(), "expected EOF after shared disconnect");
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "expected no second cold-start connection"
+        );
+    });
+
+    let mut servers = BTreeMap::new();
+    servers.insert(
+        ServerName::parse("srv").unwrap(),
+        ServerConfig::unix(socket_path.clone()).unwrap(),
+    );
+    let config = Config::new(ClientConfig::default(), servers);
+
+    let shared = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .into_shared();
+
+    let clone = shared.clone();
+    let (result_a, result_b) = tokio::join!(
+        shared.request(&config, "srv", "ping", None, Path::new("/")),
+        clone.request(&config, "srv", "ping", None, Path::new("/")),
+    );
+    assert_eq!(result_a.unwrap(), serde_json::json!({ "ok": true }));
+    assert_eq!(result_b.unwrap(), serde_json::json!({ "ok": true }));
+
+    assert!(shared.disconnect("srv").await.unwrap());
+    server_task.await.unwrap();
+
+    let _ = std::fs::remove_file(socket_path);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shared_manager_disconnect_waits_while_borrowed_client_gate_is_alive() {
+    let socket_path = unique_socket_path("borrowed-client-gate");
+    let _ = std::fs::remove_file(&socket_path);
+    let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
+        return;
+    };
+
+    let (first_init_seen_tx, first_init_seen_rx) = oneshot::channel();
+    let (release_first_init_tx, release_first_init_rx) = oneshot::channel();
+    let (connection_closed_tx, connection_closed_rx) = oneshot::channel();
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (server_read, mut server_write) = tokio::io::split(stream);
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["method"], "initialize");
+        let init_id = init_value["id"].clone();
+        first_init_seen_tx.send(()).unwrap();
+        release_first_init_rx.await.unwrap();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo-a" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let eof = lines.next_line().await.unwrap();
+        connection_closed_tx.send(()).unwrap();
+        assert!(eof.is_none(), "connection should close after disconnect");
+    });
+
+    let mut servers = BTreeMap::new();
+    servers.insert(
+        ServerName::parse("srv").unwrap(),
+        ServerConfig::unix(socket_path.clone()).unwrap(),
+    );
+    let config = Arc::new(Config::new(ClientConfig::default(), servers));
+
+    let shared = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .into_shared();
+
+    let (prepared_ready_tx, prepared_ready_rx) = oneshot::channel();
+    let (release_gate_tx, release_gate_rx) = oneshot::channel();
+    let first_shared = shared.clone();
+    let first_config = Arc::clone(&config);
+    let prepared_client = tokio::spawn(async move {
+        let prepared = first_shared
+            .prepare_connected_client_with_gate(
+                "test_prepare",
+                first_config.as_ref(),
+                "srv",
+                Path::new("/workspace/a"),
+            )
+            .await
+            .unwrap();
+        prepared_ready_tx.send(()).unwrap();
+        release_gate_rx.await.unwrap();
+        drop(prepared);
+    });
+
+    first_init_seen_rx.await.unwrap();
+
+    let disconnect_finished = Arc::new(AtomicBool::new(false));
+    let disconnect_shared = shared.clone();
+    let disconnect_finished_task = Arc::clone(&disconnect_finished);
+    let mut disconnect_task = tokio::spawn(async move {
+        let disconnected = disconnect_shared.disconnect("srv").await.unwrap();
+        disconnect_finished_task.store(true, Ordering::SeqCst);
+        disconnected
+    });
+
+    release_first_init_tx.send(()).unwrap();
+
+    prepared_ready_rx
+        .await
+        .expect("first cold-start should borrow client before disconnect proceeds");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut disconnect_task)
+            .await
+            .is_err(),
+        "disconnect must wait while the borrowed client still holds the same-server read gate"
+    );
+
+    release_gate_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), prepared_client)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        disconnect_task.await.unwrap(),
+        "disconnect should succeed after the borrowed client releases the read gate"
+    );
+    connection_closed_rx.await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), server_task)
+        .await
+        .expect("server task should observe the disconnect sequence")
+        .unwrap();
+    let _ = std::fs::remove_file(socket_path);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shared_manager_cold_start_request_blocks_disconnect_until_io_completes() {
+    let socket_path = unique_socket_path("request-first-io-gate");
+    let _ = std::fs::remove_file(&socket_path);
+    let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
+        return;
+    };
+
+    let (first_init_seen_tx, first_init_seen_rx) = oneshot::channel();
+    let (release_first_init_tx, release_first_init_rx) = oneshot::channel();
+    let (first_request_seen_tx, first_request_seen_rx) = oneshot::channel();
+    let (respond_tx, respond_rx) = oneshot::channel();
+    let (disconnect_finished_tx, disconnect_finished_rx) = oneshot::channel();
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (server_read, mut server_write) = tokio::io::split(stream);
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["method"], "initialize");
+        let init_id = init_value["id"].clone();
+        first_init_seen_tx.send(()).unwrap();
+        release_first_init_rx.await.unwrap();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo-a" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        let request_line = lines.next_line().await.unwrap().unwrap();
+        let request_value: Value = serde_json::from_str(&request_line).unwrap();
+        assert_eq!(request_value["method"], "ping");
+        let request_id = request_value["id"].clone();
+        first_request_seen_tx.send(()).unwrap();
+
+        respond_rx.await.unwrap();
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": { "ok": true },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        disconnect_finished_rx.await.unwrap();
+
+        let eof = lines.next_line().await.unwrap();
+        assert!(
+            eof.is_none(),
+            "disconnect should close the connection only after the cold-start request finishes"
+        );
+    });
+
+    let mut servers = BTreeMap::new();
+    servers.insert(
+        ServerName::parse("srv").unwrap(),
+        ServerConfig::unix(socket_path.clone()).unwrap(),
+    );
+    let config = Arc::new(Config::new(ClientConfig::default(), servers));
+
+    let shared = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .into_shared();
+
+    let first_shared = shared.clone();
+    let first_config = Arc::clone(&config);
+    let first_request = tokio::spawn(async move {
+        first_shared
+            .request(
+                first_config.as_ref(),
+                "srv",
+                "ping",
+                None::<Value>,
+                Path::new("/workspace/a"),
+            )
+            .await
+    });
+
+    first_init_seen_rx.await.unwrap();
+
+    let disconnect_finished = Arc::new(AtomicBool::new(false));
+    let disconnect_shared = shared.clone();
+    let disconnect_finished_task = Arc::clone(&disconnect_finished);
+    let mut disconnect_task = tokio::spawn(async move {
+        let disconnected = disconnect_shared.disconnect("srv").await.unwrap();
+        disconnect_finished_task.store(true, Ordering::SeqCst);
+        disconnected
+    });
+
+    release_first_init_tx.send(()).unwrap();
+    first_request_seen_rx.await.unwrap();
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut disconnect_task)
+            .await
+            .is_err(),
+        "disconnect must wait while the cold-start request is still in flight"
+    );
+    respond_tx.send(()).unwrap();
+    assert_eq!(
+        first_request.await.unwrap().unwrap(),
+        serde_json::json!({ "ok": true })
+    );
+    assert!(disconnect_task.await.unwrap());
+    disconnect_finished_tx.send(()).unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), server_task)
+        .await
+        .expect("server task should observe disconnect after the request response")
+        .unwrap();
+    assert!(disconnect_finished.load(Ordering::SeqCst));
+    let _ = std::fs::remove_file(socket_path);
+}

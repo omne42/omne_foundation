@@ -218,4 +218,4 @@ manager = manager.with_untrusted_streamable_http_policy(UntrustedStreamableHttpP
 - `Manager::connect_io_unchecked(...)`
 - `Manager::connect_jsonrpc_unchecked(...)`
 
-如果你需要调整 `mcp-jsonrpc` 的 `Limits` 或 streamable_http 的网络选项（例如 connect_timeout / redirects），推荐先用 `mcp-jsonrpc` 构建 `Client`，再用 `connect_jsonrpc` 接入；细节见 [`调优与限制`](tuning.md)。
+如果你需要调整 `mcp-jsonrpc` 的 `Limits` 或 streamable_http 的更细网络选项（例如 connect_timeout / redirects），推荐先用 `mcp-jsonrpc` 构建 `Client`，再用 `connect_jsonrpc` 接入；如果只是决定是否沿用系统代理环境，`mcp.json` 已经支持 `streamable_http_proxy_mode`。细节见 [`调优与限制`](tuning.md)。

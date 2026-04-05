@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{Root, Transport};
+use super::{Root, StreamableHttpProxyMode, Transport};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,6 +42,8 @@ pub(super) struct ServerConfigFile {
     pub(super) sse_url: Option<String>,
     #[serde(default)]
     pub(super) http_url: Option<String>,
+    #[serde(default)]
+    pub(super) streamable_http_proxy_mode: Option<StreamableHttpProxyMode>,
     #[serde(default)]
     pub(super) bearer_token_secret: Option<String>,
     #[serde(default)]

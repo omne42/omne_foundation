@@ -25,6 +25,15 @@
 
 如果你需要修改 connect_timeout，需要在上层自行构建 `mcp_jsonrpc::Client::connect_streamable_http_with_options(...)` 并接入 `mcp-kit`（见下文“自定义 Limits/Options”）。
 
+### streamable_http：proxy_mode
+
+`mcp-kit` 现在可以直接通过 `mcp.json` 的 `streamable_http_proxy_mode` 控制是否读取系统代理环境变量：
+
+- `ignore_system`（默认）：不读取 `HTTP_PROXY` / `HTTPS_PROXY`
+- `use_system`：允许 `reqwest` 沿用进程代理环境
+
+这条开关只覆盖代理环境变量；`connect_timeout` / `follow_redirects` 之类更细的 transport 选项仍需要走下文的自定义 client 路径。
+
 ## DoS 防护与队列（mcp_jsonrpc::Limits）
 
 `mcp-jsonrpc` 内置了几类限制，默认值适用于大多数 MCP server，但你可以按需调整。
@@ -77,7 +86,7 @@ server→client requests（需要 respond）同样进入有界队列：
 
 `mcp-kit` 默认使用 `mcp_jsonrpc::SpawnOptions::default()`（即默认 Limits）。
 
-如果你需要自定义 Limits（或 streamable_http 的 connect_timeout / follow_redirects 等），推荐路径是：
+如果你需要自定义 Limits（或 streamable_http 的 connect_timeout / follow_redirects 等非 `proxy_mode` 选项），推荐路径是：
 
 1. 直接用 `mcp-jsonrpc` 构建 client（带 options）
 2. 显式切换到 `TrustMode::Trusted` 后，用 `Manager::connect_jsonrpc(...)` 或 `connect_jsonrpc_session(...)` 接入

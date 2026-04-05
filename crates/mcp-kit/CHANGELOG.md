@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：`transport=streamable_http` 现在可在 `mcp.json` 中显式设置 `streamable_http_proxy_mode`（`ignore_system` / `use_system`），把“是否沿用系统代理环境变量”的 transport 语义收口进 canonical config 边界，而不必绕到自建 `mcp_jsonrpc::Client` 才能经企业代理出网。
 - `mcp-kit`：untrusted `streamable_http` 的 `allow_private_ips` 现在真正能放开 loopback/private 目标，包括 `localhost` / `*.localhost` 的 DNS 解析结果和 loopback IP 字面量；不再出现上层策略允许、底层 host/IP 校验又把目标拦回去的语义漂移。非 localhost host 的 loopback rebinding 与 always-disallowed 地址仍保持拒绝。
 - `mcp-kit`：同步刷新 `docs/security.md`、`llms.txt` 与 `docs/llms.txt`，把新的 DNS/private-ip 语义说明收口到仓库内 canonical 文档，避免运行时契约和 LLM 聚合文档再次漂移。
 - `mcp-kit`：修正文档示例里的 `UntrustedStreamableHttpPolicy` 字段结构，`allowed_hosts` / `allow_localhost` / `allow_private_ips` 现在都通过 `outbound: http_kit::UntrustedOutboundPolicy { ... }` 展示，避免用户照抄后直接编译失败。

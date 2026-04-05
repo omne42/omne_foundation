@@ -251,6 +251,18 @@ fn ensure_http_headers_auth_only_for_streamable_http(
     Ok(())
 }
 
+fn ensure_proxy_mode_only_for_streamable_http(
+    name: &str,
+    proxy_mode_present: bool,
+) -> anyhow::Result<()> {
+    if proxy_mode_present {
+        anyhow::bail!(
+            "mcp server {name}: streamable_http_proxy_mode is only valid for transport=streamable_http"
+        );
+    }
+    Ok(())
+}
+
 fn env_secret_spec(env_var: String) -> String {
     format!("secret://env/{env_var}")
 }
@@ -439,6 +451,10 @@ fn build_v1_config(
                 let has_url_fields =
                     server.url.is_some() || server.sse_url.is_some() || server.http_url.is_some();
                 ensure_url_fields_only_for_streamable_http(&name, has_url_fields)?;
+                ensure_proxy_mode_only_for_streamable_http(
+                    &name,
+                    server.streamable_http_proxy_mode.is_some(),
+                )?;
                 let has_auth_fields = server.bearer_token_secret.is_some()
                     || server.bearer_token_env_var.is_some()
                     || !server.http_headers.is_empty()
@@ -456,6 +472,10 @@ fn build_v1_config(
                 let has_url_fields =
                     server.url.is_some() || server.sse_url.is_some() || server.http_url.is_some();
                 ensure_url_fields_only_for_streamable_http(&name, has_url_fields)?;
+                ensure_proxy_mode_only_for_streamable_http(
+                    &name,
+                    server.streamable_http_proxy_mode.is_some(),
+                )?;
                 let env_nonempty = !server.env.is_empty();
                 ensure_env_empty(&name, Transport::Unix, env_nonempty)?;
                 let has_auth_fields = server.bearer_token_secret.is_some()
@@ -495,6 +515,9 @@ fn build_v1_config(
                     server.bearer_token_secret,
                     server.bearer_token_env_var,
                 )?)?;
+                server_cfg.set_streamable_http_proxy_mode(
+                    server.streamable_http_proxy_mode.unwrap_or_default(),
+                )?;
                 *server_cfg.http_headers_mut()? = server.http_headers;
                 *server_cfg.secret_http_headers_mut()? = coalesce_secret_http_headers(
                     &name,

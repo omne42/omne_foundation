@@ -27,6 +27,23 @@ pub enum Transport {
     StreamableHttp,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamableHttpProxyMode {
+    #[default]
+    IgnoreSystem,
+    UseSystem,
+}
+
+impl From<StreamableHttpProxyMode> for mcp_jsonrpc::StreamableHttpProxyMode {
+    fn from(value: StreamableHttpProxyMode) -> Self {
+        match value {
+            StreamableHttpProxyMode::IgnoreSystem => Self::IgnoreSystem,
+            StreamableHttpProxyMode::UseSystem => Self::UseSystem,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ClientConfig {
     pub protocol_version: Option<String>,
@@ -133,6 +150,7 @@ pub struct UnixServerConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamableHttpServerConfig {
     urls: StreamableHttpUrls,
+    proxy_mode: StreamableHttpProxyMode,
     bearer_token_secret: Option<String>,
     http_headers: BTreeMap<String, String>,
     secret_http_headers: BTreeMap<String, String>,
@@ -209,6 +227,7 @@ impl ServerConfig {
         validate_streamable_http_url_syntax("url", &url)?;
         Ok(Self::StreamableHttp(StreamableHttpServerConfig {
             urls: StreamableHttpUrls::Single { url },
+            proxy_mode: StreamableHttpProxyMode::IgnoreSystem,
             bearer_token_secret: None,
             http_headers: BTreeMap::new(),
             secret_http_headers: BTreeMap::new(),
@@ -231,6 +250,7 @@ impl ServerConfig {
         validate_streamable_http_url_syntax("http_url", &http_url)?;
         Ok(Self::StreamableHttp(StreamableHttpServerConfig {
             urls: StreamableHttpUrls::Split { sse_url, http_url },
+            proxy_mode: StreamableHttpProxyMode::IgnoreSystem,
             bearer_token_secret: None,
             http_headers: BTreeMap::new(),
             secret_http_headers: BTreeMap::new(),
@@ -459,6 +479,24 @@ impl ServerConfig {
         }
     }
 
+    pub fn streamable_http_proxy_mode(&self) -> Option<StreamableHttpProxyMode> {
+        match self {
+            Self::StreamableHttp(cfg) => Some(cfg.proxy_mode),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn streamable_http_proxy_mode_required(&self) -> StreamableHttpProxyMode {
+        match self {
+            Self::StreamableHttp(cfg) => cfg.proxy_mode,
+            _ => {
+                unreachable!(
+                    "streamable_http_proxy_mode_required called for non-streamable_http transport"
+                )
+            }
+        }
+    }
+
     pub fn http_headers(&self) -> Option<&BTreeMap<String, String>> {
         match self {
             Self::StreamableHttp(cfg) => Some(&cfg.http_headers),
@@ -549,6 +587,22 @@ impl ServerConfig {
                 }
                 Ok(())
             }
+        }
+    }
+
+    pub fn set_streamable_http_proxy_mode(
+        &mut self,
+        proxy_mode: StreamableHttpProxyMode,
+    ) -> crate::Result<()> {
+        match self {
+            Self::StreamableHttp(cfg) => {
+                cfg.proxy_mode = proxy_mode;
+                Ok(())
+            }
+            _ => public_bail!(
+                "mcp server transport={}: streamable_http_proxy_mode is not allowed",
+                transport_tag(self.transport())
+            ),
         }
     }
 

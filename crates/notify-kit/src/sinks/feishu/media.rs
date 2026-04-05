@@ -735,8 +735,8 @@ fn normalize_optional_secret(
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
-    use std::time::Duration;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::{
         TenantAccessTokenRefreshGuard, ensure_local_image_path_has_no_symlink_components,
@@ -744,6 +744,40 @@ mod tests {
         resolve_local_image_path_with_base, tenant_access_token_cache_ttl,
         tenant_access_token_refresh_waiter,
     };
+
+    struct ProcessCwdGuard {
+        original: PathBuf,
+    }
+
+    impl ProcessCwdGuard {
+        fn switch_to(path: &Path) -> Self {
+            let original = std::env::current_dir().expect("capture current dir");
+            std::env::set_current_dir(path).expect("set current dir");
+            Self { original }
+        }
+    }
+
+    impl Drop for ProcessCwdGuard {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.original).expect("restore current dir");
+        }
+    }
+
+    fn cwd_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "notify-kit-feishu-media-{label}-{}-{suffix}",
+            std::process::id()
+        ))
+    }
 
     #[tokio::test]
     async fn tenant_access_token_refresh_waiter_handles_notify_before_await() {
@@ -834,6 +868,51 @@ mod tests {
                 .contains("relative local image paths require explicit base dir"),
             "{err:#}"
         );
+    }
+
+    #[test]
+    fn resolve_local_image_path_does_not_fallback_to_process_cwd_without_base_dir() {
+        let _lock = cwd_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = unique_temp_dir("cwd-fallback");
+        let cwd = temp.join("cwd");
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        std::fs::write(cwd.join("image.png"), b"png").expect("write image");
+        let _cwd = ProcessCwdGuard::switch_to(&cwd);
+
+        let err = resolve_local_image_path(Path::new("image.png"), None)
+            .expect_err("relative path should still require an explicit base dir");
+        assert!(
+            err.to_string()
+                .contains("relative local image paths require explicit base dir"),
+            "{err:#}"
+        );
+
+        drop(_cwd);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn resolve_local_image_path_uses_explicit_base_dir_instead_of_process_cwd() {
+        let _lock = cwd_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = unique_temp_dir("cwd-independence");
+        let cwd = temp.join("cwd");
+        let base = temp.join("base");
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        std::fs::create_dir_all(&base).expect("create base dir");
+        std::fs::write(cwd.join("image.png"), b"cwd").expect("write cwd image");
+        std::fs::write(base.join("image.png"), b"base").expect("write base image");
+        let _cwd = ProcessCwdGuard::switch_to(&cwd);
+
+        let resolved = resolve_local_image_path(Path::new("image.png"), Some(&base))
+            .expect("explicit base dir should resolve relative image path");
+        assert_eq!(resolved, base.join("image.png"));
+
+        drop(_cwd);
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[cfg(unix)]

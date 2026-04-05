@@ -1488,6 +1488,42 @@ async fn load_rejects_relative_override_path_outside_root() {
 }
 
 #[tokio::test]
+async fn load_rejects_override_path_that_escapes_after_entering_root() {
+    let root = tempfile::tempdir().unwrap();
+    let inside = root.path().join("inside");
+    let outside = tempfile::tempdir().unwrap();
+    let outside_config = outside.path().join("outside.json");
+
+    tokio::fs::create_dir_all(&inside).await.unwrap();
+    tokio::fs::write(
+        &outside_config,
+        r#"{ "version": 1, "servers": { "a": { "transport": "stdio", "argv": ["mcp-a"] } } }"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(
+        root.path(),
+        Some(PathBuf::from(format!(
+            "inside/../../{}/outside.json",
+            outside
+                .path()
+                .file_name()
+                .expect("outside tempdir basename")
+                .to_string_lossy()
+        ))),
+    )
+    .await
+    .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("must be within root"), "err={msg}");
+    assert!(
+        msg.contains("inside/../../"),
+        "error should retain the escaping override path: {msg}"
+    );
+}
+
+#[tokio::test]
 async fn load_rejects_absolute_override_path_outside_root() {
     let root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();

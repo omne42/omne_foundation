@@ -12,6 +12,7 @@
 ### Changed
 - `mcp-kit`：untrusted `streamable_http` 的 `allow_private_ips` 现在真正能放开 loopback/private 目标，包括 `localhost` / `*.localhost` 的 DNS 解析结果和 loopback IP 字面量；不再出现上层策略允许、底层 host/IP 校验又把目标拦回去的语义漂移。非 localhost host 的 loopback rebinding 与 always-disallowed 地址仍保持拒绝。
 - `mcp-kit`：同步刷新 `docs/security.md`、`llms.txt` 与 `docs/llms.txt`，把新的 DNS/private-ip 语义说明收口到仓库内 canonical 文档，避免运行时契约和 LLM 聚合文档再次漂移。
+- `mcp-kit`：修正文档示例里的 `UntrustedStreamableHttpPolicy` 字段结构，`allowed_hosts` / `allow_localhost` / `allow_private_ips` 现在都通过 `outbound: http_kit::UntrustedOutboundPolicy { ... }` 展示，避免用户照抄后直接编译失败。
 - `mcp-kit::Error` 现在会把 `mcp-jsonrpc` 的 `ProtocolErrorKind::Closed` 和 `ProtocolErrorKind::StreamableHttp` 稳定归类为 `ErrorKind::Connection`，不再把可重试的连接/传输失败误报成协议错误；并补充对应回归测试，锁住 `anyhow::Context` 包裹后的分类语义。
 - `mcp-kit`：`shared_manager` 现在按“共享状态与生命周期 gate”/“request-notify facade”/“外置测试”拆到更窄的子模块里，降低单文件复杂度并把并发语义相关测试从主实现文件中移出；公开 API 与运行时行为保持不变。
 - `mcp-kit`：补充 override config path 穿透回归测试，显式锁住 `inside/../../outside.json` 这类“先进入 root 再逃逸”的路径也必须被 root 边界检查拒绝，避免该约束只覆盖简单的 `../outside.json` 场景。

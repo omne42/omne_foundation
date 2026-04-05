@@ -48,9 +48,15 @@
 - `src/event.rs`
   - 统一事件模型
 - `src/hub.rs`
-  - hub 配置、限制、并发发送与错误聚合
+  - `Hub` 公开入口与稳定类型
+- `src/hub/`
+  - runtime / backpressure / fanout 子模块
 - `src/sinks/mod.rs`
   - sink trait 与各实现导出
+- `src/sinks/feishu/mod.rs`
+  - 飞书 sink 入口与导出
+- `src/sinks/feishu/`
+  - config / constructor / send / media / payload 子模块
 - `src/sinks/http/`
   - webhook 类 sink 的共享 HTTP 逻辑
 - `src/env.rs`

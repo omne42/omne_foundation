@@ -140,6 +140,57 @@ fn jsonrpc_request_id_from_line(line: &[u8]) -> Result<Option<crate::Id>, serde_
 const SSE_EVENT_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 const HTTP_RESPONSE_INITIAL_CAP_BYTES: usize = 64 * 1024;
 const HTTP_RESPONSE_UNKNOWN_LENGTH_INITIAL_CAP_BYTES: usize = 4 * 1024;
+const SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS: u64 = 100;
+const SSE_GRACEFUL_EOF_RECONNECT_MAX_DELAY_MS: u64 = 1_000;
+const SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS: u64 = 25;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SseReconnectReason {
+    GracefulEof,
+    SessionChanged,
+}
+
+#[derive(Default)]
+struct SseReconnectBackoff {
+    graceful_eof_streak: u32,
+}
+
+impl SseReconnectBackoff {
+    fn delay_for(&mut self, reason: SseReconnectReason) -> Option<Duration> {
+        match reason {
+            SseReconnectReason::SessionChanged => {
+                self.graceful_eof_streak = 0;
+                None
+            }
+            SseReconnectReason::GracefulEof => {
+                let shift = self.graceful_eof_streak.min(4);
+                self.graceful_eof_streak = self.graceful_eof_streak.saturating_add(1);
+                let base_delay = (SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS << shift)
+                    .min(SSE_GRACEFUL_EOF_RECONNECT_MAX_DELAY_MS);
+                let jitter = sse_reconnect_jitter_millis();
+                Some(Duration::from_millis(
+                    base_delay
+                        .saturating_add(jitter)
+                        .min(SSE_GRACEFUL_EOF_RECONNECT_MAX_DELAY_MS),
+                ))
+            }
+        }
+    }
+}
+
+fn sse_reconnect_jitter_millis() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    if SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS == 0 {
+        return 0;
+    }
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::from(duration.subsec_nanos()))
+        .unwrap_or(0);
+    nanos % (SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS + 1)
+}
 
 impl Client {
     pub async fn connect_streamable_http(url: &str) -> Result<Self, Error> {
@@ -255,6 +306,12 @@ impl Client {
         if connect_timeout.is_some() || request_timeout.is_some() {
             crate::ensure_tokio_time_driver("Client::connect_streamable_http*_with_options")?;
         }
+        // Preserve compatibility with runtimes that do not enable Tokio's time
+        // driver by treating graceful-EOF backoff as best-effort.
+        let sse_reconnect_backoff_enabled = crate::ensure_tokio_time_driver(
+            "Client::connect_streamable_http*_with_options SSE reconnect backoff",
+        )
+        .is_ok();
 
         let mut headers = reqwest::header::HeaderMap::new();
         for (key, value) in http_options.headers {
@@ -358,6 +415,7 @@ impl Client {
         let sse_task = tokio::spawn(async move {
             let mut wake_rx = sse_wake_rx;
             let mut current_resp = sse_resp;
+            let mut reconnect_backoff = SseReconnectBackoff::default();
 
             loop {
                 let resp = match current_resp.take() {
@@ -404,7 +462,7 @@ impl Client {
                     }
                 };
 
-                let reconnect = {
+                let reconnect_reason = {
                     let writer = writer_sse.clone();
                     let mut pump_fut =
                         std::pin::pin!(pump_sse_response(resp, writer, max_message_bytes));
@@ -415,7 +473,7 @@ impl Client {
                                 Ok(()) => {
                                     // Treat graceful SSE EOF as a recoverable read-side event:
                                     // reconnect instead of tearing down the whole transport.
-                                    break true;
+                                    break Some(SseReconnectReason::GracefulEof);
                                 }
                                 Err(err) => {
                                     close_post_bridge(
@@ -432,7 +490,7 @@ impl Client {
                                     Some(SseWakeReason::SessionChanged) => {
                                         // Exiting this scope drops the stale SSE pump before the
                                         // reconnect path selects a new socket.
-                                        break true;
+                                        break Some(SseReconnectReason::SessionChanged);
                                     }
                                     Some(SseWakeReason::Connect) => {}
                                     None => {
@@ -462,8 +520,14 @@ impl Client {
                     }
                 };
 
-                if !reconnect {
+                let Some(reconnect_reason) = reconnect_reason else {
                     continue;
+                };
+                let reconnect_delay = reconnect_backoff.delay_for(reconnect_reason);
+                if sse_reconnect_backoff_enabled {
+                    if let Some(delay) = reconnect_delay {
+                        tokio::time::sleep(delay).await;
+                    }
                 }
 
                 let sse_client = match http_client_profile_sse
@@ -1359,6 +1423,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sse_reconnect_backoff_applies_min_interval_jitter_and_reset() {
+        let mut backoff = SseReconnectBackoff::default();
+
+        let first = backoff
+            .delay_for(SseReconnectReason::GracefulEof)
+            .expect("graceful eof should reconnect");
+        assert!(
+            first >= Duration::from_millis(SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS),
+            "first reconnect delay should honor the minimum interval: {first:?}"
+        );
+        assert!(
+            first
+                <= Duration::from_millis(
+                    SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS
+                        + SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS
+                ),
+            "first reconnect delay should stay within the jitter window: {first:?}"
+        );
+
+        let second = backoff
+            .delay_for(SseReconnectReason::GracefulEof)
+            .expect("second graceful eof should reconnect");
+        assert!(
+            second >= Duration::from_millis(SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS * 2),
+            "second reconnect delay should back off exponentially: {second:?}"
+        );
+        assert!(
+            second
+                <= Duration::from_millis(
+                    (SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS * 2)
+                        + SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS
+                ),
+            "second reconnect delay should stay within the jitter window: {second:?}"
+        );
+
+        let session_change = backoff.delay_for(SseReconnectReason::SessionChanged);
+        assert_eq!(
+            session_change, None,
+            "session rollover reconnect should stay immediate"
+        );
+
+        let reset = backoff
+            .delay_for(SseReconnectReason::GracefulEof)
+            .expect("graceful eof after session rollover should reconnect");
+        assert!(
+            reset >= Duration::from_millis(SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS),
+            "session rollover should reset the EOF streak: {reset:?}"
+        );
+        assert!(
+            reset
+                <= Duration::from_millis(
+                    SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS
+                        + SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS
+                ),
+            "reset reconnect delay should return to the base jitter window: {reset:?}"
+        );
+    }
+
     #[tokio::test]
     async fn sse_pump_flushes_last_data_event_without_trailing_blank_line()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1578,6 +1701,7 @@ mod tests {
     #[tokio::test]
     async fn streamable_http_reconnects_after_graceful_sse_eof() {
         const TEST_STAGE_TIMEOUT: Duration = Duration::from_secs(10);
+        const MIN_RECONNECT_DELAY: Duration = Duration::from_millis(80);
 
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -1606,12 +1730,18 @@ mod tests {
             write_chunk(&mut initial_sse, b": heartbeat\n\n")
                 .await
                 .expect("write initial SSE comment");
+            let eof_closed_at = std::time::Instant::now();
             finish_chunked_response(&mut initial_sse)
                 .await
                 .expect("finish initial SSE response");
             drop(initial_sse);
 
             let (mut reconnected_sse, _) = listener.accept().await.expect("accept reconnect SSE");
+            assert!(
+                eof_closed_at.elapsed() >= MIN_RECONNECT_DELAY,
+                "graceful EOF reconnect happened too quickly: {:?}",
+                eof_closed_at.elapsed()
+            );
             let reconnect_request = read_http_request(&mut reconnected_sse)
                 .await
                 .expect("read reconnect GET");

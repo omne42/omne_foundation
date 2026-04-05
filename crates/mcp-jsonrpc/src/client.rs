@@ -1067,18 +1067,40 @@ impl Client {
     /// - `WaitOnTimeout::Kill { kill_timeout }` sends a kill signal, then waits up to
     ///   `kill_timeout` for the child to exit.
     ///
-    /// This requires a Tokio runtime with the time driver enabled.
+    /// Waiting on a real child process requires a Tokio runtime with the time driver enabled.
+    /// No-child clients still return `Ok(None)` without that requirement; when timers are
+    /// unavailable this falls back to a best-effort fail-closed local close path instead of
+    /// trying to drive a timeout.
     pub async fn wait_with_timeout(
         &mut self,
         timeout: Duration,
         on_timeout: WaitOnTimeout,
     ) -> Result<Option<std::process::ExitStatus>, Error> {
-        ensure_tokio_time_driver("Client::wait_with_timeout")?;
-        let deadline = tokio::time::Instant::now() + timeout;
         self.task.abort();
         for task in self.transport_tasks.drain(..) {
             task.abort();
         }
+        if self.child.is_none() {
+            if ensure_tokio_time_driver("Client::wait_with_timeout").is_err() {
+                close_without_runtime(&self.handle, "client closed".to_string());
+                return Ok(None);
+            }
+
+            let deadline = tokio::time::Instant::now() + timeout;
+            if tokio::time::timeout_at(deadline, self.handle.close_with_reason("client closed"))
+                .await
+                .is_err()
+            {
+                return Err(Error::protocol(
+                    ProtocolErrorKind::WaitTimeout,
+                    format!("wait timed out after {timeout:?} while closing client"),
+                ));
+            }
+            return Ok(None);
+        }
+
+        ensure_tokio_time_driver("Client::wait_with_timeout")?;
+        let deadline = tokio::time::Instant::now() + timeout;
         if tokio::time::timeout_at(deadline, self.handle.close_with_reason("client closed"))
             .await
             .is_err()
@@ -1791,7 +1813,7 @@ mod tests {
     }
 
     #[test]
-    fn wait_with_timeout_returns_error_without_tokio_time_driver() {
+    fn wait_with_timeout_returns_none_without_tokio_time_driver_when_client_has_no_child() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("build tokio runtime");
@@ -1803,10 +1825,41 @@ mod tests {
                 .await
                 .expect("connect client");
 
+            let status = client
+                .wait_with_timeout(Duration::from_secs(1), WaitOnTimeout::ReturnError)
+                .await
+                .expect("no-child wait should not require a time driver");
+            assert_eq!(status, None);
+        });
+    }
+
+    #[test]
+    fn wait_with_timeout_returns_error_without_tokio_time_driver_when_client_has_child() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            #[cfg(unix)]
+            let cmd = {
+                let mut cmd = tokio::process::Command::new("sh");
+                cmd.arg("-c").arg("exec sleep 1");
+                cmd
+            };
+            #[cfg(windows)]
+            let cmd = {
+                let mut cmd = tokio::process::Command::new("cmd");
+                cmd.arg("/C").arg("ping -n 2 127.0.0.1 >NUL");
+                cmd
+            };
+
+            let mut client = Client::spawn_command(cmd).await.expect("spawn client");
+
             let err = client
                 .wait_with_timeout(Duration::from_secs(1), WaitOnTimeout::ReturnError)
                 .await
-                .expect_err("missing time driver should fail");
+                .expect_err("missing time driver should still fail when waiting on a child");
             match err {
                 Error::Protocol(protocol_err) => {
                     assert_eq!(protocol_err.kind, ProtocolErrorKind::Other);

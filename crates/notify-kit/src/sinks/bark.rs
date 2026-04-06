@@ -269,7 +269,7 @@ mod tests {
         let rendered_body = payload["body"].as_str().unwrap_or("");
         assert!(rendered_body.contains(&body.to_string()), "{rendered_body}");
         assert!(
-            rendered_body.contains(&format!("thread_id={}", tag)),
+            rendered_body.contains(&format!("thread_id={tag}")),
             "{rendered_body}"
         );
     }

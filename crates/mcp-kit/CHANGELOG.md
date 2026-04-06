@@ -11,8 +11,10 @@
 
 ### Fixed
 - `Manager` 的 manager-state 校验路径去掉不必要的 `return`，保持 `cargo clippy -D warnings` 在跨平台 CI 上稳定通过；不改变错误边界语义。
+- `mcp-kit`：connection cwd identity 不再先对整条路径做词法 `..` 折叠再 canonicalize；中间目录是 symlink 时，现在会按真实文件系统语义解析已有前缀，再对缺失后缀做词法收尾，避免把 `link/../x` 误算成宿主目录下的 sibling。
 
 ### Changed
+- `mcp-kit`：`Manager` 与 `SharedManager` 现在都通过 `PreparedConnectedClient` 的共享 request/notify helper 执行借用连接上的 JSON-RPC I/O；`SharedManager` 额外把错误后的 cleanup 编排收口到内部统一 helper，减少同一套 prepared-client 边界在两类入口之间继续漂移。
 - `mcp-kit` 现在显式标记 `publish = false`，因为当前实现直接依赖 `config-kit` 等 workspace-only foundation crate；crate manifest 不再暗示可独立 crates.io 发布。
 - `mcp-kit`: `SharedManager` 现在使用 per-server read/write lifecycle gate；同 server 的 `request*` / `notify*` 可以并发复用同一连接，而 `disconnect` / `disconnect_and_wait` 仍会等待在途 RPC I/O 先释放借用连接。
 - `mcp-jsonrpc`: `ClientHandle::close_reason()` 的公开文档现在明确它只是 first-writer best-effort 诊断，不承诺并发关闭路径里哪一个 close source 一定胜出。

@@ -360,6 +360,46 @@ impl SharedManager {
         });
     }
 
+    async fn run_prepared_request(
+        &self,
+        prepared: crate::manager::PreparedConnectedClient,
+        method: &str,
+        params: Option<Value>,
+    ) -> crate::Result<Value> {
+        let result = prepared.request(method, params).await;
+        if let Err(err) = &result {
+            if crate::manager::should_disconnect_after_jsonrpc_error(err) {
+                self.cleanup_connection_after_error(
+                    prepared.server_name.clone(),
+                    prepared.connection_id,
+                )
+                .await;
+            }
+        }
+        Ok(result?)
+    }
+
+    async fn run_prepared_notify(
+        &self,
+        prepared: crate::manager::PreparedConnectedClient,
+        method: &str,
+        params: Option<Value>,
+    ) -> crate::Result<()> {
+        let result = prepared.notify(method, params).await;
+        if let Err(err) = &result {
+            if crate::manager::should_disconnect_after_jsonrpc_error(err)
+                || crate::manager::contains_wait_timeout(err)
+            {
+                self.cleanup_connection_after_error(
+                    prepared.server_name.clone(),
+                    prepared.connection_id,
+                )
+                .await;
+            }
+        }
+        Ok(result?)
+    }
+
     pub async fn is_connected(&self, server_name: &str) -> crate::Result<bool> {
         Ok(self
             .with_manager_lock("is_connected", |manager| manager.is_connected(server_name))
@@ -413,24 +453,7 @@ impl SharedManager {
         } = self
             .prepare_connected_client_with_gate("request", config, server_name, cwd)
             .await?;
-        let result = Manager::request_raw_handle(
-            prepared.timeout,
-            &prepared.server_name,
-            &prepared.client,
-            method,
-            params,
-        )
-        .await;
-        if let Err(err) = &result {
-            if crate::manager::should_disconnect_after_jsonrpc_error(err) {
-                self.cleanup_connection_after_error(
-                    prepared.server_name.clone(),
-                    prepared.connection_id,
-                )
-                .await;
-            }
-        }
-        Ok(result?)
+        self.run_prepared_request(prepared, method, params).await
     }
 
     pub async fn request_connected(
@@ -445,27 +468,7 @@ impl SharedManager {
         } = self
             .prepare_existing_connected_client_with_gate("request_connected", server_name)
             .await?;
-
-        let result = Manager::request_raw_handle(
-            prepared.timeout,
-            &prepared.server_name,
-            &prepared.client,
-            method,
-            params,
-        )
-        .await;
-
-        if let Err(err) = &result {
-            if crate::manager::should_disconnect_after_jsonrpc_error(err) {
-                self.cleanup_connection_after_error(
-                    prepared.server_name.clone(),
-                    prepared.connection_id,
-                )
-                .await;
-            }
-        }
-
-        Ok(result?)
+        self.run_prepared_request(prepared, method, params).await
     }
 
     pub async fn request_typed<R: McpRequest>(
@@ -508,26 +511,7 @@ impl SharedManager {
         } = self
             .prepare_connected_client_with_gate("notify", config, server_name, cwd)
             .await?;
-        let result = Manager::notify_raw_handle(
-            prepared.timeout,
-            &prepared.server_name,
-            &prepared.client,
-            method,
-            params,
-        )
-        .await;
-        if let Err(err) = &result {
-            if crate::manager::should_disconnect_after_jsonrpc_error(err)
-                || crate::manager::contains_wait_timeout(err)
-            {
-                self.cleanup_connection_after_error(
-                    prepared.server_name.clone(),
-                    prepared.connection_id,
-                )
-                .await;
-            }
-        }
-        Ok(result?)
+        self.run_prepared_notify(prepared, method, params).await
     }
 
     pub async fn notify_connected(
@@ -542,29 +526,7 @@ impl SharedManager {
         } = self
             .prepare_existing_connected_client_with_gate("notify_connected", server_name)
             .await?;
-
-        let result = Manager::notify_raw_handle(
-            prepared.timeout,
-            &prepared.server_name,
-            &prepared.client,
-            method,
-            params,
-        )
-        .await;
-
-        if let Err(err) = &result {
-            if crate::manager::should_disconnect_after_jsonrpc_error(err)
-                || crate::manager::contains_wait_timeout(err)
-            {
-                self.cleanup_connection_after_error(
-                    prepared.server_name.clone(),
-                    prepared.connection_id,
-                )
-                .await;
-            }
-        }
-
-        Ok(result?)
+        self.run_prepared_notify(prepared, method, params).await
     }
 
     pub async fn notify_typed<N: McpNotification>(

@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：对超时关闭诊断的内部格式化写法做了风格收敛，保持与 workspace 的 Clippy 门禁一致而不改变运行时行为。
 - `mcp-jsonrpc`：close 路径现在先同步标记 `closed` 并 drain pending request，再异步收尾写端；`wait_with_timeout` 即使在 close-stage 卡在写锁上超时，也不会再留下“新请求已拒绝、旧 pending 还悬挂”的半关闭窗口。
 - `mcp-jsonrpc`：当本地 server-request handler 已关闭或已满时，reader 不再直接在主循环里等待错误回包写完；错误响应改为有界后台补偿，写不出去会 fail closed，避免坏写端把 reader 主状态机一起拖死。
 - `mcp-jsonrpc`：多行 SSE `data:` event 现在要求整个 event payload 本身必须是合法 JSON；非 JSON 的多行 event 会 fail closed，不再被桥接成多条伪 JSON-RPC line 污染下游状态机。

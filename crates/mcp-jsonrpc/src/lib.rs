@@ -739,12 +739,58 @@ struct BatchResponseWriter {
 }
 
 struct DetachedRuntime {
-    tx: std_mpsc::Sender<DetachedTask>,
+    worker_tx: Mutex<Option<std_mpsc::Sender<DetachedTask>>>,
 }
 
 impl DetachedRuntime {
-    fn spawn(&self, task: DetachedTask) {
-        let _ = self.tx.send(task);
+    fn spawn(&self, task_name: &str, task: DetachedTask) {
+        let task = match self.try_spawn(task_name, task) {
+            Ok(()) => return,
+            Err(task) => task,
+        };
+        spawn_detached_fallback(task_name, task);
+    }
+
+    fn try_spawn(
+        &self,
+        task_name: &str,
+        task: DetachedTask,
+    ) -> std::result::Result<(), DetachedTask> {
+        let mut pending_task = Some(task);
+
+        for _ in 0..2 {
+            let tx = {
+                let mut worker_tx = self
+                    .worker_tx
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if worker_tx.is_none() {
+                    *worker_tx = spawn_detached_runtime_worker(task_name).ok();
+                }
+                worker_tx.clone()
+            };
+
+            let Some(tx) = tx else {
+                break;
+            };
+
+            let task = pending_task
+                .take()
+                .expect("detached runtime task should still be available");
+            match tx.send(task) {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    pending_task = Some(err.0);
+                    let mut worker_tx = self
+                        .worker_tx
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    *worker_tx = None;
+                }
+            }
+        }
+
+        Err(pending_task.expect("detached runtime task should still be available"))
     }
 }
 
@@ -754,32 +800,56 @@ fn spawn_detached(task_name: &str, task: impl Future<Output = ()> + Send + 'stat
         return;
     }
 
-    detached_runtime(task_name).spawn(Box::pin(task));
+    detached_runtime().spawn(task_name, Box::pin(task));
 }
 
-fn detached_runtime(task_name: &str) -> &'static DetachedRuntime {
+fn detached_runtime() -> &'static DetachedRuntime {
     static DETACHED_RUNTIME: OnceLock<DetachedRuntime> = OnceLock::new();
-    DETACHED_RUNTIME.get_or_init(|| {
-        let (tx, rx) = std_mpsc::channel::<DetachedTask>();
-        std::thread::Builder::new()
-            .name("mcp-jsonrpc-detached".to_string())
-            .spawn(move || {
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(runtime) => runtime,
-                    Err(_) => return,
-                };
-                while let Ok(task) = rx.recv() {
-                    runtime.block_on(task);
-                }
-            })
-            .unwrap_or_else(|err| {
-                panic!("spawn detached mcp-jsonrpc runtime ({task_name}): {err}")
-            });
-        DetachedRuntime { tx }
+    DETACHED_RUNTIME.get_or_init(|| DetachedRuntime {
+        worker_tx: Mutex::new(None),
     })
+}
+
+fn spawn_detached_runtime_worker(
+    task_name: &str,
+) -> std::io::Result<std_mpsc::Sender<DetachedTask>> {
+    let (tx, rx) = std_mpsc::channel::<DetachedTask>();
+    std::thread::Builder::new()
+        .name("mcp-jsonrpc-detached".to_string())
+        .spawn(move || run_detached_runtime_worker(rx))
+        .map(|_| tx)
+        .map_err(|err| {
+            std::io::Error::new(
+                err.kind(),
+                format!("spawn detached mcp-jsonrpc runtime ({task_name}): {err}"),
+            )
+        })
+}
+
+fn run_detached_runtime_worker(rx: std_mpsc::Receiver<DetachedTask>) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|err| panic!("build detached mcp-jsonrpc runtime: {err}"));
+
+    while let Ok(task) = rx.recv() {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(task)));
+    }
+}
+
+fn spawn_detached_fallback(task_name: &str, task: DetachedTask) {
+    std::thread::Builder::new()
+        .name("mcp-jsonrpc-detached-fallback".to_string())
+        .spawn(move || run_detached_task(task))
+        .unwrap_or_else(|err| panic!("spawn detached mcp-jsonrpc fallback ({task_name}): {err}"));
+}
+
+fn run_detached_task(task: DetachedTask) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|err| panic!("build detached mcp-jsonrpc fallback runtime: {err}"));
+    runtime.block_on(task);
 }
 
 impl std::fmt::Debug for BatchResponseWriter {
@@ -3114,6 +3184,9 @@ mod stats_tests {
 
     #[test]
     fn spawn_detached_runs_tasks_without_tokio_runtime() {
+        let _guard = detached_runtime_test_guard()
+            .lock()
+            .expect("detached runtime test mutex");
         let counter = Arc::new(AtomicU64::new(0));
         let counter_for_task = Arc::clone(&counter);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -3127,6 +3200,41 @@ mod stats_tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("detached runtime should execute queued task");
         assert_eq!(counter.load(AtomicOrdering::Relaxed), 1);
+    }
+
+    #[test]
+    fn spawn_detached_recovers_after_worker_panic() {
+        let _guard = detached_runtime_test_guard()
+            .lock()
+            .expect("detached runtime test mutex");
+        let (panic_done_tx, panic_done_rx) = std::sync::mpsc::channel();
+
+        spawn_detached("test detached runtime panic", async move {
+            panic_done_tx.send(()).expect("signal panic task start");
+            panic!("boom");
+        });
+        panic_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("panic task should start");
+
+        let counter = Arc::new(AtomicU64::new(0));
+        let counter_for_task = Arc::clone(&counter);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        spawn_detached("test detached runtime restart", async move {
+            counter_for_task.fetch_add(1, AtomicOrdering::Relaxed);
+            done_tx.send(()).expect("signal recovery task completion");
+        });
+
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("detached runtime should recover after worker panic");
+        assert_eq!(counter.load(AtomicOrdering::Relaxed), 1);
+    }
+
+    fn detached_runtime_test_guard() -> &'static Mutex<()> {
+        static DETACHED_RUNTIME_TEST_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        DETACHED_RUNTIME_TEST_GUARD.get_or_init(|| Mutex::new(()))
     }
 
     #[test]

@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：detached runtime 的共享后台 worker 现在在任务 panic 或 worker 初始化失败后会显式重建；如果共享 worker 仍不可用，会退化到单任务 fallback runtime，而不是继续把后续 dropped-request / batch-flush 补偿任务静默丢弃。
 - `Limits::max_message_bytes` 现在重新同时约束出站 request / notification / response 的序列化大小；超限帧会在写入前 fail-fast 返回稳定错误，避免配置名和实际行为继续脱节。
 - `mcp-jsonrpc`：`ClientHandle::close_reason()` 的文档现在明确它只暴露 first-writer best-effort close diagnostics；并发关闭路径里哪一个 source 先写入并不构成稳定契约。
 - `mcp-jsonrpc`：`streamable_http` 的独立 SSE 读侧现在会在正常 EOF 后自动重连，而不是把整个 transport 直接关闭；会 idle-close/轮换 SSE 的服务端不会再把客户端无谓打死。

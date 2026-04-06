@@ -4,10 +4,10 @@ use std::ffi::OsString;
 #[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::Path;
-#[cfg(not(windows))]
 use std::path::PathBuf;
 #[cfg(not(windows))]
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 

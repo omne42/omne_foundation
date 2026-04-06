@@ -23,6 +23,7 @@
 - `mcp-kit`：`stable_connection_cwd_identity` 的缺失尾段回归测试现在比较稳定目录身份而不是原始路径字符串，避免 Windows 上的 verbatim 前缀与 8.3 短路径表示差异把等价路径误报成失败。
 
 ### Changed
+- `mcp-kit`：新补的“非 `NotFound` 文件系统错误上抛”回归测试改为 Unix 专属，避免把 Windows 路径解析差异误报成实现回归；产品行为不变。
 - `mcp-kit`：连接阶段解析相对 `cwd` 时现在必须拿到显式绝对 base（例如已加载 `mcp.json` 的 thread root）；`Manager` / `SharedManager` 不再在运行时偷偷回退到进程级 `current_dir()`，避免连接身份与复用语义继续依赖 ambient process state。
 - `mcp-kit`：底层 `resolve_connection_cwd*` helper 也改为对“relative cwd + missing base”直接 fail-closed，并把相对 thread root/base 视为稳定配置错误，避免后续入口重新引入 ambient `current_dir()` fallback。
 - `mcp-kit`：`absolute_test_cwd()` 测试 helper 继续在 Windows 构建里可见，避免 mcp cross-platform CI 在引用这批 helper 的 manager 测试上编译失败；不改变产品行为。

@@ -8,6 +8,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ### Fixed
 - `notify-kit::env` 的标准 helper 现在默认把 Hub 外层 hard timeout 设为 `sink timeout + slack`，不再把两层超时默认绑成同一个值；显式 `NOTIFY_HUB_TIMEOUT_MS` 若不大于生效的 sink timeout 也会 fail closed，避免 helper 自己制造伪超时。
+- docs: `docs/integration.md` 与聚合 `llms.txt` 现在同步写明标准 env helper 的 timeout 约定，避免继续暗示 legacy `NOTIFY_TIMEOUT_MS` 会同时直接驱动 sink 与 Hub 两层硬超时。
 - docs: `docs/sinks/custom.md` 的自定义 sink 示例改为使用 `Event::title()`，并同步刷新 `llms.txt`，避免文档继续示范对已封装私有字段的直接访问。
 - `FeishuWebhookSink`：Markdown 图片 key 解析/上传现在会对去重后的图片 URL 做并发解析，不再把多图消息线性串行到单个 sink 超时窗口里。
 

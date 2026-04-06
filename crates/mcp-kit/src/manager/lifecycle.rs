@@ -301,9 +301,30 @@ pub(super) fn reap_stale_child_best_effort(mut child: Child) {
 
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         drop(handle.spawn(async move {
-            let _ = tokio::time::timeout(REAP_TIMEOUT, child.wait()).await; // pre-commit: allow-let-underscore
+            if tokio::time::timeout(REAP_TIMEOUT, child.wait())
+                .await
+                .is_err()
+            {
+                spawn_child_reaper_thread(child);
+            }
         }));
+        return;
     }
+
+    spawn_child_reaper_thread(child);
+}
+
+fn spawn_child_reaper_thread(mut child: Child) {
+    let _ = std::thread::Builder::new()
+        .name("mcp-kit-child-reaper".to_string())
+        .spawn(move || {
+            if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                let _ = runtime.block_on(async move { child.wait().await }); // pre-commit: allow-let-underscore
+            }
+        });
 }
 
 impl Manager {
@@ -506,5 +527,42 @@ impl Manager {
         self.prepare_disconnect_for_wait(server_name)
             .wait_for_jsonrpc_error_cleanup()
             .await;
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+    use tokio::process::Command;
+
+    #[test]
+    fn reap_stale_child_best_effort_reaps_without_tokio_runtime() {
+        let child = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime")
+            .block_on(async {
+                Command::new("sh")
+                    .arg("-c")
+                    .arg("sleep 30")
+                    .spawn()
+                    .expect("spawn child")
+            });
+        let pid = child.id().expect("spawned child pid");
+
+        reap_stale_child_best_effort(child);
+
+        let proc_path = PathBuf::from(format!("/proc/{pid}"));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while proc_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            !proc_path.exists(),
+            "child was not fully reaped within the expected timeout"
+        );
     }
 }

@@ -244,12 +244,9 @@ impl ServerConfig {
         match self {
             Self::Stdio(cfg) => {
                 validate_argv(Transport::Stdio, &cfg.argv)?;
-                for (key, value) in cfg.env.iter() {
+                for key in cfg.env.keys() {
                     if key.trim().is_empty() {
                         public_bail!("mcp server transport=stdio: env key must not be empty");
-                    }
-                    if value.trim().is_empty() {
-                        public_bail!("mcp server transport=stdio: env[{key}] must not be empty");
                     }
                 }
                 if let Some(log) = cfg.stdout_log.as_ref() {

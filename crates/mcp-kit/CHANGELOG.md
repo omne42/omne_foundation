@@ -10,6 +10,8 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit`：`stdio.env` 现在允许合法的空字符串值和纯空白值，恢复与进程环境变量语义一致的配置边界；仍然继续拒绝空 key。
+- `mcp-kit`：config 驱动 `stdio.stdout_log.path` 的 root 边界检查改为绑定 `mcp.json` thread root，而不是连接请求的 `cwd`；子目录请求不再把合法的 thread-root 日志路径误判为越界。
 - `mcp-kit`：`Connection::drop` 的 best-effort child 回收现在在没有 Tokio runtime 时也会切到独立线程执行 `wait()`；不再停留在只 `start_kill()` 不 reap 的状态，从而避免同步析构路径留下 zombie 子进程。
 - `mcp-kit`：`Manager::connect_jsonrpc*` 遇到已连接的同名 server 时不再静默吞掉传入的 custom `mcp_jsonrpc::Client`；现在会显式报错，并对被拒绝 client 触发 best-effort close/child reap，避免 attach 被跳过时把 child 生命周期直接漏给 `Client::Drop`。
 - `mcp-kit`：复用/配置边界相关回归测试不再把 Unix 风格 `"/workspace/..."` 字面量当成跨平台绝对路径，Windows 现在也会用真实绝对测试路径覆盖同一组行为断言。

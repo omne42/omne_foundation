@@ -30,6 +30,7 @@ pub(crate) struct ConnectContext {
     pub(crate) trust_mode: TrustMode,
     pub(crate) untrusted_streamable_http_policy: UntrustedStreamableHttpPolicy,
     pub(crate) allow_stdout_log_outside_root: bool,
+    pub(crate) stdout_log_root: Option<PathBuf>,
     pub(crate) protocol_version: String,
     pub(crate) request_timeout: Duration,
 }
@@ -105,8 +106,9 @@ async fn connect_stdio_transport(
 
     let stdout_log = server_cfg.stdout_log().map(|log| {
         let resolved_log_path = absolutize_with_base(&log.path, &cwd);
+        let stdout_log_root = ctx.stdout_log_root.as_deref().unwrap_or(cwd.as_path());
         if !ctx.allow_stdout_log_outside_root
-            && !stdout_log_path_within_root(&resolved_log_path, &cwd)
+            && !stdout_log_path_within_root(&resolved_log_path, stdout_log_root)
         {
             config_bail!(
                 "mcp server {server_name}: stdout_log.path must be within root (set Manager::with_allow_stdout_log_outside_root(true) to override): {}",
@@ -431,6 +433,7 @@ mod tests {
             trust_mode: TrustMode::Trusted,
             untrusted_streamable_http_policy: UntrustedStreamableHttpPolicy::default(),
             allow_stdout_log_outside_root: false,
+            stdout_log_root: None,
             protocol_version: MCP_PROTOCOL_VERSION.to_string(),
             request_timeout: Duration::from_secs(5),
         }
@@ -512,5 +515,45 @@ mod tests {
             headers.get(MCP_PROTOCOL_VERSION_HEADER).map(String::as_str),
             Some(MCP_PROTOCOL_VERSION)
         );
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[tokio::test]
+    async fn stdio_stdout_log_root_uses_config_root_not_request_cwd() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path().join("workspace");
+        let cwd = root.join("subdir");
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+
+        let mut server_cfg = ServerConfig::stdio(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "exec cat".to_string(),
+        ])
+        .expect("stdio config");
+        server_cfg
+            .set_stdout_log(Some(crate::StdoutLogConfig {
+                path: root.join("logs/server.stdout.log"),
+                max_bytes_per_part: 1024,
+                max_parts: Some(1),
+            }))
+            .expect("stdout log config");
+
+        let ctx = ConnectContext {
+            trust_mode: TrustMode::Trusted,
+            untrusted_streamable_http_policy: UntrustedStreamableHttpPolicy::default(),
+            allow_stdout_log_outside_root: false,
+            stdout_log_root: Some(root.clone()),
+            protocol_version: MCP_PROTOCOL_VERSION.to_string(),
+            request_timeout: Duration::from_secs(1),
+        };
+
+        let (client, child) = connect_transport(&ctx, "srv", &server_cfg, &cwd)
+            .await
+            .expect("config-root anchored stdout_log path should be accepted");
+        drop(client);
+        let mut child = child.expect("stdio child");
+        child.kill().await.expect("kill child");
+        let _ = child.wait().await;
     }
 }

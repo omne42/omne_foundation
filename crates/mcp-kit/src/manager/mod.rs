@@ -935,6 +935,7 @@ impl Manager {
                 trust_mode: self.trust_mode,
                 untrusted_streamable_http_policy: self.untrusted_streamable_http_policy.clone(),
                 allow_stdout_log_outside_root: self.allow_stdout_log_outside_root,
+                stdout_log_root: config_root.map(Path::to_path_buf),
                 protocol_version: self.protocol_version.clone(),
                 request_timeout: self.request_timeout,
             },
@@ -1012,6 +1013,7 @@ impl Manager {
             trust_mode: self.trust_mode,
             untrusted_streamable_http_policy: self.untrusted_streamable_http_policy.clone(),
             allow_stdout_log_outside_root: self.allow_stdout_log_outside_root,
+            stdout_log_root: Some(cwd.clone()),
             protocol_version: self.protocol_version.clone(),
             request_timeout: self.request_timeout,
         };

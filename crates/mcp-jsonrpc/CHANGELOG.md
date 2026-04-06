@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：将 `Error` / `ProtocolError*` 与 error-record 映射、detached runtime 后台 worker，以及 crate-local `#[cfg(test)]` 模块分别拆到独立源码文件，显著收窄 `src/lib.rs` 的职责边界而不改变公开 API。
 - `mcp-jsonrpc`：detached runtime 的共享后台 worker 现在在任务 panic 或 worker 初始化失败后会显式重建；如果共享 worker 仍不可用，会退化到单任务 fallback runtime，而不是继续把后续 dropped-request / batch-flush 补偿任务静默丢弃。
 - `Limits::max_message_bytes` 现在重新同时约束出站 request / notification / response 的序列化大小；超限帧会在写入前 fail-fast 返回稳定错误，避免配置名和实际行为继续脱节。
 - `mcp-jsonrpc`：`ClientHandle::close_reason()` 的文档现在明确它只暴露 first-writer best-effort close diagnostics；并发关闭路径里哪一个 source 先写入并不构成稳定契约。
@@ -15,6 +16,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `mcp-jsonrpc`：入站 server notification 在本地通知队列过载或接收端已关闭时不再静默丢弃；transport 现在会记录 stats 并主动关闭连接，把数据丢失显式暴露给调用方。
 - `mcp-jsonrpc`：reader 现在对非法 JSON 和非法 JSON-RPC 帧 fail-closed；在记录诊断/返回 `invalid request` 后会立即关闭连接并清空 pending request，避免把协议损坏伪装成后续超时。
 - `mcp-jsonrpc`：同步/无 Tokio runtime 的 dropped-request 与 batch flush 补偿路径现在复用单例后台 runtime，而不是按响应临时起线程建 runtime，避免异常流量把降级路径放大成资源放大器。
+- `mcp-jsonrpc`：当 detached shared worker 或 fallback thread 本身创建失败时，background runtime 现在会退化到当前线程 best-effort 执行或静默放弃补偿任务，而不是直接 panic；对应回归测试覆盖了“双重 spawn 失败也不崩”的路径。
 - `mcp-jsonrpc`：`request_optional_with_timeout` 与 `wait_with_timeout` 现在会在进入 `tokio::time` 前预检 time driver，把错误配置从 panic 收敛成稳定 `ProtocolError`，并在 API 文档中写明前提。
 - Established crate-local changelog ownership now that `omne_foundation` tracks release notes per crate instead of at the repository root.
 - `mcp-jsonrpc`：`streamable_http` 现在会在初始 SSE 已建立后遇到新的 `mcp-session-id` 时主动切断旧 SSE 并按新 session 重连，避免 response/notification 继续挂在过期 session 上。

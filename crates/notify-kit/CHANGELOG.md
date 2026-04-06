@@ -8,6 +8,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ### Fixed
 - docs: `docs/sinks/custom.md` 的自定义 sink 示例改为使用 `Event::title()`，并同步刷新 `llms.txt`，避免文档继续示范对已封装私有字段的直接访问。
+- `FeishuWebhookSink`：Markdown 图片 key 解析/上传现在会对去重后的图片 URL 做并发解析，不再把多图消息线性串行到单个 sink 超时窗口里。
 
 ### Added
 - `Event::new_structured` / `with_title_text` / `with_body_text` / `with_tag_text`，并在 `Event` 上新增 `title_text` / `body_text` / `tag_texts`，让通知边界可以保留 `structured-text-kit` 语义而不必提前压平成裸字符串。

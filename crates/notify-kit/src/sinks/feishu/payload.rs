@@ -1,12 +1,49 @@
 use std::collections::{BTreeSet, HashMap};
 
+use futures_util::StreamExt;
+
 use crate::Event;
+use crate::sinks::BoxFuture;
 use crate::sinks::markdown::{
     Inline as MarkdownInline, Line as MarkdownLine, parse_markdown_lines,
 };
 use crate::sinks::text::{TextLimits, format_event_text_limited, truncate_chars};
 
 use super::FeishuWebhookSink;
+
+fn collect_image_sources(markdown_lines: &[MarkdownLine]) -> Vec<String> {
+    let mut urls = BTreeSet::new();
+    for line in markdown_lines {
+        for inline in &line.inlines {
+            if let MarkdownInline::Image { src, .. } = inline {
+                urls.insert(src.clone());
+            }
+        }
+    }
+    urls.into_iter().collect()
+}
+
+async fn resolve_image_keys_with<'a, F>(
+    markdown_lines: &[MarkdownLine],
+    resolve: F,
+) -> HashMap<String, Option<String>>
+where
+    F: Fn(String) -> BoxFuture<'a, Option<String>>,
+{
+    let sources = collect_image_sources(markdown_lines);
+    if sources.is_empty() {
+        return HashMap::new();
+    }
+
+    let concurrency = sources.len().max(1);
+    futures_util::stream::iter(sources.into_iter().map(|src| {
+        let future = resolve(src.clone());
+        async move { (src, future.await) }
+    }))
+    .buffer_unordered(concurrency)
+    .collect()
+    .await
+}
 
 impl FeishuWebhookSink {
     pub(super) fn base_payload(
@@ -212,20 +249,85 @@ impl FeishuWebhookSink {
         &self,
         markdown_lines: &[MarkdownLine],
     ) -> HashMap<String, Option<String>> {
-        let mut urls = BTreeSet::new();
-        for line in markdown_lines {
-            for inline in &line.inlines {
-                if let MarkdownInline::Image { src, .. } = inline {
-                    urls.insert(src.clone());
-                }
-            }
-        }
+        resolve_image_keys_with(markdown_lines, |src| {
+            Box::pin(async move { self.resolve_single_image_key(&src).await })
+        })
+        .await
+    }
+}
 
-        let mut out = HashMap::with_capacity(urls.len());
-        for src in urls {
-            let key = self.resolve_single_image_key(&src).await;
-            out.insert(src, key);
-        }
-        out
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use tokio::sync::{Notify, mpsc};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn resolve_image_keys_runs_unique_sources_concurrently() {
+        let markdown_lines = parse_markdown_lines(
+            "![a](https://example.com/a.png)\n![b](https://example.com/b.png)\n![dup](https://example.com/a.png)",
+        );
+        let release = Arc::new(Notify::new());
+        let inflight = Arc::new(AtomicUsize::new(0));
+        let max_inflight = Arc::new(AtomicUsize::new(0));
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+
+        let resolve_task = tokio::spawn({
+            let release = Arc::clone(&release);
+            let inflight = Arc::clone(&inflight);
+            let max_inflight = Arc::clone(&max_inflight);
+            async move {
+                resolve_image_keys_with(&markdown_lines, move |src| {
+                    let release = Arc::clone(&release);
+                    let inflight = Arc::clone(&inflight);
+                    let max_inflight = Arc::clone(&max_inflight);
+                    let started_tx = started_tx.clone();
+                    Box::pin(async move {
+                        let current = inflight.fetch_add(1, Ordering::SeqCst) + 1;
+                        max_inflight.fetch_max(current, Ordering::SeqCst);
+                        started_tx
+                            .send(src.clone())
+                            .expect("publish started image source");
+                        release.notified().await;
+                        inflight.fetch_sub(1, Ordering::SeqCst);
+                        Some(format!("key:{src}"))
+                    })
+                })
+                .await
+            }
+        });
+
+        let first = tokio::time::timeout(Duration::from_secs(1), started_rx.recv())
+            .await
+            .expect("first image resolution should start")
+            .expect("start signal should be present");
+        let second = tokio::time::timeout(Duration::from_secs(1), started_rx.recv())
+            .await
+            .expect("second image resolution should start before the first settles")
+            .expect("start signal should be present");
+        assert_ne!(first, second, "duplicate image urls should be deduplicated");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), started_rx.recv())
+                .await
+                .is_err(),
+            "duplicate image urls should not trigger a third resolution",
+        );
+        assert_eq!(max_inflight.load(Ordering::SeqCst), 2);
+
+        release.notify_waiters();
+        let image_keys = resolve_task.await.expect("join resolve task");
+        assert_eq!(image_keys.len(), 2);
+        assert_eq!(
+            image_keys.get("https://example.com/a.png"),
+            Some(&Some("key:https://example.com/a.png".to_string()))
+        );
+        assert_eq!(
+            image_keys.get("https://example.com/b.png"),
+            Some(&Some("key:https://example.com/b.png".to_string()))
+        );
     }
 }

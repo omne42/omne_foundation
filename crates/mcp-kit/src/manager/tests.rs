@@ -324,6 +324,7 @@ fn stdout_log_path_within_root_accepts_equivalent_root_with_parent_segments() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn stdout_log_path_within_root_propagates_non_not_found_errors() {
     let tempdir = tempfile::tempdir().expect("tempdir");
@@ -369,6 +370,7 @@ fn resolve_connection_cwd_with_base_rejects_relative_base() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn resolve_connection_cwd_with_base_propagates_non_not_found_errors() {
     let tempdir = tempfile::tempdir().expect("tempdir");

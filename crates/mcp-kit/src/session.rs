@@ -48,15 +48,6 @@ impl Session {
         &self.connection
     }
 
-    /// Returns the underlying connection (mutable).
-    ///
-    /// Warning: mutating the underlying client can bypass `Session`'s timeout wrappers and can
-    /// make lifecycle/ownership less clear. If you take over lifecycle control, you are
-    /// responsible for closing and waiting for any associated child process.
-    pub fn connection_mut(&mut self) -> &mut Connection {
-        &mut self.connection
-    }
-
     /// Consumes this session and returns the underlying connection.
     ///
     /// After calling this, the caller owns the connection lifecycle. In particular, if the

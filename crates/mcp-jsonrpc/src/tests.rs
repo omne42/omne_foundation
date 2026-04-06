@@ -1070,6 +1070,7 @@ mod wait_timeout_tests {
 #[cfg(test)]
 mod background_close_tests {
     use super::*;
+    use std::io;
     use std::pin::Pin;
     use std::sync::atomic::AtomicBool;
     use std::task::{Context, Poll};
@@ -1077,6 +1078,10 @@ mod background_close_tests {
 
     struct ObserveShutdownWrite {
         shutdown_called: Arc<AtomicBool>,
+    }
+
+    struct FailingWrite {
+        message: &'static str,
     }
 
     impl tokio::io::AsyncWrite for ObserveShutdownWrite {
@@ -1095,6 +1100,40 @@ mod background_close_tests {
         fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
             self.shutdown_called.store(true, Ordering::SeqCst);
             Poll::Ready(Ok(()))
+        }
+    }
+
+    impl tokio::io::AsyncWrite for FailingWrite {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Err(io::Error::other(self.message)))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Err(io::Error::other(self.message)))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn make_test_handle(write: Box<dyn AsyncWrite + Send + Unpin>) -> ClientHandle {
+        ClientHandle {
+            write: Arc::new(tokio::sync::Mutex::new(write)),
+            next_id: Arc::new(AtomicI64::new(1)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            max_message_bytes: Limits::default().max_message_bytes,
+            max_pending_requests: 1,
+            cancelled_request_ids: Arc::new(Mutex::new(CancelledRequestIdsState::default())),
+            stats: Arc::new(ClientStatsInner::default()),
+            diagnostics: None,
+            closed: Arc::new(AtomicBool::new(false)),
+            close_reason: Arc::new(Mutex::new(None)),
+            stdout_log_write_error: Arc::new(OnceLock::new()),
         }
     }
 
@@ -1193,6 +1232,51 @@ mod background_close_tests {
         }
 
         crate::background_runtime::reset_detached_runtime_for_test();
+    }
+
+    #[tokio::test]
+    async fn write_json_line_io_error_closes_client() {
+        let handle = make_test_handle(Box::new(FailingWrite {
+            message: "simulated write failure",
+        }));
+
+        let err = handle
+            .write_json_line(&serde_json::json!({"jsonrpc": "2.0"}))
+            .await
+            .expect_err("write should fail");
+        assert!(matches!(err, Error::Io(_)));
+        assert!(handle.is_closed(), "write failure should close the client");
+        let close_reason = handle.close_reason().expect("close reason");
+        assert!(close_reason.contains("client transport write failed"));
+        assert!(close_reason.contains("simulated write failure"));
+    }
+
+    #[tokio::test]
+    async fn dropped_direct_request_response_write_failure_closes_client() {
+        let handle = make_test_handle(Box::new(FailingWrite {
+            message: "simulated dropped-response write failure",
+        }));
+
+        drop(IncomingRequest {
+            id: Id::Integer(1),
+            method: "demo/test".to_string(),
+            params: None,
+            responder: RequestResponder::direct(handle.clone()),
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !handle.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropped request write failure should close client");
+
+        let close_reason = handle.close_reason().expect("close reason");
+        assert!(
+            close_reason.contains("simulated dropped-response write failure"),
+            "{close_reason}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::Context;
 use tokio::process::{Child, Command};
 
+use crate::error::{ErrorKind, tagged_message, wrap_kind};
 use crate::protocol::{AUTHORIZATION_HEADER, MCP_PROTOCOL_VERSION_HEADER};
 use crate::{ServerConfig, Transport, TrustMode, UntrustedStreamableHttpPolicy};
 
@@ -15,6 +16,12 @@ use super::placeholders::{
 use super::streamable_http_validation::{
     validate_streamable_http_config, validate_streamable_http_url_untrusted_dns,
 };
+
+macro_rules! config_bail {
+    ($($arg:tt)*) => {
+        return Err(tagged_message(ErrorKind::Config, format!($($arg)*)))
+    };
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConnectContext {
@@ -57,7 +64,7 @@ async fn connect_stdio_transport(
     let cwd = super::resolve_connection_cwd(cwd)?;
 
     if ctx.trust_mode == TrustMode::Untrusted {
-        anyhow::bail!(
+        config_bail!(
             "refusing to spawn mcp server in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
         );
     }
@@ -71,7 +78,8 @@ async fn connect_stdio_transport(
                 format!("expand argv placeholder (server={server_name} argv[{idx}] redacted)")
             })
         })
-        .collect::<anyhow::Result<Vec<std::ffi::OsString>>>()?;
+        .collect::<anyhow::Result<Vec<std::ffi::OsString>>>()
+        .map_err(|err| wrap_kind(ErrorKind::Config, err))?;
 
     let mut cmd = Command::new(&expanded_argv[0]);
     cmd.args(expanded_argv.iter().skip(1));
@@ -87,7 +95,8 @@ async fn connect_stdio_transport(
     }
     for (key, value) in server_cfg.env().iter() {
         let value = expand_placeholders_trusted_os(value, &cwd)
-            .with_context(|| format!("expand env placeholder: {key}"))?;
+            .with_context(|| format!("expand env placeholder: {key}"))
+            .map_err(|err| wrap_kind(ErrorKind::Config, err))?;
         cmd.env(key, value);
     }
     cmd.kill_on_drop(true);
@@ -97,7 +106,7 @@ async fn connect_stdio_transport(
         if !ctx.allow_stdout_log_outside_root
             && !stdout_log_path_within_root(&resolved_log_path, &cwd)
         {
-            anyhow::bail!(
+            config_bail!(
                 "mcp server {server_name}: stdout_log.path must be within root (set Manager::with_allow_stdout_log_outside_root(true) to override): {}",
                 log.path.display()
             );
@@ -133,7 +142,7 @@ async fn connect_unix_transport(
     server_cfg: &ServerConfig,
 ) -> anyhow::Result<(mcp_jsonrpc::Client, Option<Child>)> {
     if ctx.trust_mode == TrustMode::Untrusted {
-        anyhow::bail!(
+        config_bail!(
             "refusing to connect unix mcp server in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
         );
     }
@@ -173,12 +182,12 @@ async fn connect_streamable_http_transport(
 
     if ctx.trust_mode != TrustMode::Trusted {
         if server_cfg.bearer_token_env_var().is_some() {
-            anyhow::bail!(
+            config_bail!(
                 "refusing to read bearer token env var in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
             );
         }
         if !server_cfg.env_http_headers().is_empty() {
-            anyhow::bail!(
+            config_bail!(
                 "refusing to read http header env vars in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
             );
         }
@@ -244,11 +253,9 @@ fn resolve_streamable_http_urls(
     ) {
         (Some(url), None, None) => (url, url),
         (None, Some(sse_url), Some(http_url)) => (sse_url, http_url),
-        _ => {
-            anyhow::bail!(
-                "mcp server {server_name}: set url or (sse_url + http_url) for transport=streamable_http"
-            )
-        }
+        _ => config_bail!(
+            "mcp server {server_name}: set url or (sse_url + http_url) for transport=streamable_http"
+        ),
     };
 
     let (sse_url_field, post_url_field) = if server_cfg.url().is_some() {
@@ -262,7 +269,8 @@ fn resolve_streamable_http_urls(
             format!(
                 "expand url placeholder (server={server_name} field={sse_url_field}) (url redacted)"
             )
-        })?
+        })
+        .map_err(|err| wrap_kind(ErrorKind::Config, err))?
     } else {
         sse_url_raw.to_string()
     };
@@ -271,7 +279,8 @@ fn resolve_streamable_http_urls(
             format!(
                 "expand url placeholder (server={server_name} field={post_url_field}) (url redacted)"
             )
-        })?
+        })
+        .map_err(|err| wrap_kind(ErrorKind::Config, err))?
     } else {
         post_url_raw.to_string()
     };
@@ -300,12 +309,14 @@ fn build_streamable_http_headers(
 
     for (key, value) in server_cfg.http_headers() {
         if is_reserved_streamable_http_header(key) {
-            anyhow::bail!("mcp server {server_name}: http header is reserved by transport: {key}");
+            config_bail!("mcp server {server_name}: http header is reserved by transport: {key}");
         }
         let value = if ctx.trust_mode == TrustMode::Trusted {
-            expand_placeholders_trusted(value, cwd).with_context(|| {
-                format!("expand http_header placeholder: {server_name} header={key}")
-            })?
+            expand_placeholders_trusted(value, cwd)
+                .with_context(|| {
+                    format!("expand http_header placeholder: {server_name} header={key}")
+                })
+                .map_err(|err| wrap_kind(ErrorKind::Config, err))?
         } else {
             value.to_string()
         };
@@ -319,7 +330,8 @@ fn build_streamable_http_headers(
     if let Some(env_var) = server_cfg.bearer_token_env_var() {
         debug_assert_eq!(ctx.trust_mode, TrustMode::Trusted);
         let token = std::env::var(env_var)
-            .with_context(|| format!("read bearer token env var: {env_var}"))?;
+            .with_context(|| format!("read bearer token env var: {env_var}"))
+            .map_err(|err| wrap_kind(ErrorKind::Config, err))?;
         headers.insert(AUTHORIZATION_HEADER.to_string(), format!("Bearer {token}"));
     }
 
@@ -327,12 +339,13 @@ fn build_streamable_http_headers(
         debug_assert_eq!(ctx.trust_mode, TrustMode::Trusted);
         for (header, env_var) in server_cfg.env_http_headers().iter() {
             if is_reserved_streamable_http_env_header(header) {
-                anyhow::bail!(
+                config_bail!(
                     "mcp server {server_name}: http header env var targets a reserved transport header: {header}"
                 );
             }
             let value = std::env::var(env_var)
-                .with_context(|| format!("read http header env var: {env_var}"))?;
+                .with_context(|| format!("read http header env var: {env_var}"))
+                .map_err(|err| wrap_kind(ErrorKind::Config, err))?;
             headers.insert(header.to_string(), value);
         }
     }

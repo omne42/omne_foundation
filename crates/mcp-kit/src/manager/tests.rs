@@ -99,6 +99,39 @@ fn roots_capability_overwrites_non_object() {
     assert!(capabilities.get("roots").unwrap().is_object());
 }
 
+#[tokio::test]
+async fn get_or_connect_unknown_server_is_config_error_kind() {
+    let cfg = Config::new(
+        crate::ClientConfig::default(),
+        std::collections::BTreeMap::new(),
+    );
+    let mut manager = Manager::default();
+
+    let err = manager
+        .get_or_connect(&cfg, "missing", Path::new("."))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.kind(), crate::ErrorKind::Config);
+    assert!(err.to_string().contains("unknown mcp server: missing"));
+}
+
+#[tokio::test]
+async fn request_connected_missing_server_is_manager_state_error_kind() {
+    let mut manager = Manager::default();
+
+    let err = manager
+        .request_connected("missing", "ping", None)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.kind(), crate::ErrorKind::ManagerState);
+    assert!(
+        err.to_string()
+            .contains("mcp server not connected: missing")
+    );
+}
+
 #[test]
 fn built_in_roots_list_requires_roots() {
     assert!(super::handlers::try_handle_built_in_request("roots/list", None).is_none());

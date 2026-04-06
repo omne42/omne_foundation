@@ -31,6 +31,7 @@
 - `mcp-kit`：`streamable_http` 现在会在配置校验阶段拒绝 `http_headers` / `env_http_headers` 里试图声明 transport 保留头（例如 `MCP-Protocol-Version`），避免用户配置重新覆盖握手边界。
 - `mcp-kit`：`SharedManager::disconnect_and_wait` 现在会把同 server 的 lifecycle gate 一直持有到 wait 结束，避免旧连接 teardown 仍在进行时，同名 server 的冷启动重连先一步穿透进来。
 - `mcp-kit`：`stdout_log.path` 的 root 边界检查现在会解析已存在路径前缀的真实 symlink 身份，再判断是否仍落在 root 内；中间目录 symlink 越界不再能绕过检查。
+- `mcp-kit`：公开错误分类现在只依赖显式 `ErrorKind` 标签和已知底层错误类型，不再回退到字符串匹配；同时 `ServerConfig` 新增 transport-specific view API，避免把不适用 transport 的 getter/setter 继续堆到单个 enum 表面。
 - `mcp-kit`：stdio transport 默认不再把子进程 `stderr` 继承到宿主进程；库层现在 fail-closed 到空设备，避免 foundation 边界替调用方决定日志输出与潜在 secret 泄露面。
 - `mcp-kit`：`SharedManager` 的 crate-level 文档和类型注释现在明确声明它是“single-flight lifecycle gate”，而不是薄 `Arc<Mutex<Manager>>`/actor 替身，收口了同 server 生命周期门禁与 handler reentrant fail-fast 的真实语义边界。
 - `mcp-kit`：两处“`current_dir()` 不可用”回归测试现在改为通过 helper 子进程隔离执行，并保留共享的 `cwd` guard/restore helper 给 thread-root 相对路径回归测试复用；不再把父测试进程的工作目录切到已删除路径，避免同一测试二进制里的其他并行测试或子进程启动路径收到 `getcwd()` 噪音与潜在 flake。

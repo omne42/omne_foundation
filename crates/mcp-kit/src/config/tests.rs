@@ -103,7 +103,41 @@ async fn load_defaults_to_empty_when_missing() {
 async fn load_required_errors_when_missing() {
     let dir = tempfile::tempdir().unwrap();
     let err = Config::load_required(dir.path(), None).await.unwrap_err();
+    assert_eq!(err.kind(), crate::ErrorKind::Config);
     assert!(err.to_string().contains("not found"), "err={err:#}");
+}
+
+#[test]
+fn server_config_transport_specific_views_are_variant_scoped() {
+    let mut stdio = ServerConfig::stdio(vec!["mcp-a".to_string()]).unwrap();
+    assert!(stdio.as_stdio().is_some());
+    assert!(stdio.as_unix().is_none());
+    assert!(stdio.as_streamable_http().is_none());
+    stdio
+        .as_stdio_mut()
+        .unwrap()
+        .env_mut()
+        .insert("NO_COLOR".to_string(), "1".to_string());
+    assert_eq!(stdio.env().get("NO_COLOR").map(String::as_str), Some("1"));
+
+    let mut streamable = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+    assert!(streamable.as_stdio().is_none());
+    assert!(streamable.as_unix().is_none());
+    assert!(streamable.as_streamable_http().is_some());
+    streamable
+        .as_streamable_http_mut()
+        .unwrap()
+        .http_headers_mut()
+        .insert("X-Test".to_string(), "1".to_string());
+    assert_eq!(
+        streamable.http_headers().get("X-Test").map(String::as_str),
+        Some("1")
+    );
+
+    let unix = ServerConfig::unix(PathBuf::from("/tmp/mcp.sock")).unwrap();
+    assert!(unix.as_stdio().is_none());
+    assert!(unix.as_unix().is_some());
+    assert!(unix.as_streamable_http().is_none());
 }
 
 #[tokio::test]

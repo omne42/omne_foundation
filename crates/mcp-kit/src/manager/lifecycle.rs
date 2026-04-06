@@ -5,12 +5,25 @@ use anyhow::Context;
 use serde_json::Value;
 use tokio::process::Child;
 
+use crate::error::{ErrorKind, tagged_message, wrap_kind};
 use crate::{ServerConfig, ServerName};
 
 use super::{
     Connection, Manager, ProtocolVersionCheck, ProtocolVersionMismatch,
     handlers::HandlerAttachSnapshot,
 };
+
+macro_rules! config_bail {
+    ($($arg:tt)*) => {
+        return Err(tagged_message(ErrorKind::Config, format!($($arg)*)))
+    };
+}
+
+macro_rules! protocol_bail {
+    ($($arg:tt)*) => {
+        return Err(tagged_message(ErrorKind::Protocol, format!($($arg)*)))
+    };
+}
 
 enum ProtocolVersionMismatchUpdate {
     None,
@@ -59,10 +72,10 @@ impl InitializeSnapshot {
         client: &mcp_jsonrpc::Client,
     ) -> anyhow::Result<(Value, ProtocolVersionMismatchUpdate)> {
         if self.protocol_version.trim().is_empty() {
-            anyhow::bail!("mcp protocol version must not be empty");
+            config_bail!("mcp protocol version must not be empty");
         }
         if !self.capabilities.is_object() {
-            anyhow::bail!("mcp client capabilities must be a JSON object");
+            config_bail!("mcp client capabilities must be a JSON object");
         }
 
         let initialize_params = serde_json::json!({
@@ -78,6 +91,7 @@ impl InitializeSnapshot {
         let outcome =
             tokio::time::timeout(timeout, client.request("initialize", initialize_params)).await;
         let result = outcome
+            .map_err(|err| wrap_kind(ErrorKind::Timeout, err.into()))
             .with_context(|| {
                 format!(
                     "mcp initialize timed out after {timeout:?} (server={})",
@@ -92,14 +106,12 @@ impl InitializeSnapshot {
         {
             Some(server_protocol_version) if server_protocol_version != self.protocol_version => {
                 match self.protocol_version_check {
-                    ProtocolVersionCheck::Strict => {
-                        anyhow::bail!(
-                            "mcp initialize protocolVersion mismatch (server={}): client={}, server={}",
-                            server_name.as_str(),
-                            self.protocol_version,
-                            server_protocol_version
-                        );
-                    }
+                    ProtocolVersionCheck::Strict => protocol_bail!(
+                        "mcp initialize protocolVersion mismatch (server={}): client={}, server={}",
+                        server_name.as_str(),
+                        self.protocol_version,
+                        server_protocol_version
+                    ),
                     ProtocolVersionCheck::Warn => {
                         ProtocolVersionMismatchUpdate::Upsert(ProtocolVersionMismatch {
                             server_name: server_name.clone(),

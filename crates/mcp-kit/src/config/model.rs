@@ -6,11 +6,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::ServerName;
+use crate::error::{ErrorKind, tagged_message, wrap_kind};
 use crate::protocol::{AUTHORIZATION_HEADER, MCP_PROTOCOL_VERSION_HEADER};
 
 macro_rules! public_bail {
     ($($arg:tt)*) => {
-        return Err(anyhow::anyhow!($($arg)*).into())
+        return Err(tagged_message(ErrorKind::Config, format!($($arg)*)).into())
     };
 }
 
@@ -131,6 +132,31 @@ pub struct StreamableHttpServerConfig {
     bearer_token_env_var: Option<String>,
     http_headers: BTreeMap<String, String>,
     env_http_headers: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StdioServerConfigRef<'a> {
+    inner: &'a StdioServerConfig,
+}
+
+#[derive(Debug)]
+pub struct StdioServerConfigMut<'a> {
+    inner: &'a mut StdioServerConfig,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct UnixServerConfigRef<'a> {
+    inner: &'a UnixServerConfig,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StreamableHttpServerConfigRef<'a> {
+    inner: &'a StreamableHttpServerConfig,
+}
+
+#[derive(Debug)]
+pub struct StreamableHttpServerConfigMut<'a> {
+    inner: &'a mut StreamableHttpServerConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,8 +299,11 @@ impl ServerConfig {
                         );
                     }
                     let header_name = HeaderName::from_bytes(header.as_bytes()).map_err(|_| {
-                        anyhow::anyhow!(
-                            "mcp server transport=streamable_http: invalid http_headers key: {header}"
+                        wrap_kind(
+                            ErrorKind::Config,
+                            anyhow::anyhow!(
+                                "mcp server transport=streamable_http: invalid http_headers key: {header}"
+                            ),
                         )
                     })?;
                     if is_reserved_streamable_http_header(&header_name) {
@@ -288,8 +317,11 @@ impl ServerConfig {
                         );
                     }
                     HeaderValue::from_str(value).map_err(|_| {
-                        anyhow::anyhow!(
-                            "mcp server transport=streamable_http: invalid http_headers[{header}] value"
+                        wrap_kind(
+                            ErrorKind::Config,
+                            anyhow::anyhow!(
+                                "mcp server transport=streamable_http: invalid http_headers[{header}] value"
+                            ),
                         )
                     })?;
                 }
@@ -300,8 +332,11 @@ impl ServerConfig {
                         );
                     }
                     let header_name = HeaderName::from_bytes(header.as_bytes()).map_err(|_| {
-                        anyhow::anyhow!(
-                            "mcp server transport=streamable_http: invalid env_http_headers key: {header}"
+                        wrap_kind(
+                            ErrorKind::Config,
+                            anyhow::anyhow!(
+                                "mcp server transport=streamable_http: invalid env_http_headers key: {header}"
+                            ),
                         )
                     })?;
                     if is_reserved_streamable_http_env_header(&header_name) {
@@ -321,25 +356,52 @@ impl ServerConfig {
         Ok(())
     }
 
-    pub fn argv(&self) -> &[String] {
+    pub fn as_stdio(&self) -> Option<StdioServerConfigRef<'_>> {
         match self {
-            Self::Stdio(cfg) => &cfg.argv,
-            _ => &[],
+            Self::Stdio(cfg) => Some(StdioServerConfigRef { inner: cfg }),
+            _ => None,
         }
+    }
+
+    pub fn as_stdio_mut(&mut self) -> Option<StdioServerConfigMut<'_>> {
+        match self {
+            Self::Stdio(cfg) => Some(StdioServerConfigMut { inner: cfg }),
+            _ => None,
+        }
+    }
+
+    pub fn as_unix(&self) -> Option<UnixServerConfigRef<'_>> {
+        match self {
+            Self::Unix(cfg) => Some(UnixServerConfigRef { inner: cfg }),
+            _ => None,
+        }
+    }
+
+    pub fn as_streamable_http(&self) -> Option<StreamableHttpServerConfigRef<'_>> {
+        match self {
+            Self::StreamableHttp(cfg) => Some(StreamableHttpServerConfigRef { inner: cfg }),
+            _ => None,
+        }
+    }
+
+    pub fn as_streamable_http_mut(&mut self) -> Option<StreamableHttpServerConfigMut<'_>> {
+        match self {
+            Self::StreamableHttp(cfg) => Some(StreamableHttpServerConfigMut { inner: cfg }),
+            _ => None,
+        }
+    }
+
+    pub fn argv(&self) -> &[String] {
+        self.as_stdio().map_or(&[], StdioServerConfigRef::argv)
     }
 
     pub fn inherit_env(&self) -> bool {
-        match self {
-            Self::Stdio(cfg) => cfg.inherit_env,
-            _ => true,
-        }
+        self.as_stdio()
+            .is_none_or(StdioServerConfigRef::inherit_env)
     }
 
     pub fn unix_path(&self) -> Option<&Path> {
-        match self {
-            Self::Unix(cfg) => Some(cfg.unix_path.as_path()),
-            _ => None,
-        }
+        self.as_unix().map(UnixServerConfigRef::unix_path)
     }
 
     pub(crate) fn unix_path_required(&self) -> &Path {
@@ -350,85 +412,66 @@ impl ServerConfig {
     }
 
     pub fn url(&self) -> Option<&str> {
-        match self {
-            Self::StreamableHttp(cfg) => match &cfg.urls {
-                StreamableHttpUrls::Single { url } => Some(url.as_str()),
-                StreamableHttpUrls::Split { .. } => None,
-            },
-            _ => None,
-        }
+        self.as_streamable_http()
+            .and_then(StreamableHttpServerConfigRef::url)
     }
 
     pub fn sse_url(&self) -> Option<&str> {
-        match self {
-            Self::StreamableHttp(cfg) => match &cfg.urls {
-                StreamableHttpUrls::Single { .. } => None,
-                StreamableHttpUrls::Split { sse_url, .. } => Some(sse_url.as_str()),
-            },
-            _ => None,
-        }
+        self.as_streamable_http()
+            .and_then(StreamableHttpServerConfigRef::sse_url)
     }
 
     pub fn http_url(&self) -> Option<&str> {
-        match self {
-            Self::StreamableHttp(cfg) => match &cfg.urls {
-                StreamableHttpUrls::Single { .. } => None,
-                StreamableHttpUrls::Split { http_url, .. } => Some(http_url.as_str()),
-            },
-            _ => None,
-        }
+        self.as_streamable_http()
+            .and_then(StreamableHttpServerConfigRef::http_url)
     }
 
     pub fn bearer_token_env_var(&self) -> Option<&str> {
-        match self {
-            Self::StreamableHttp(cfg) => cfg.bearer_token_env_var.as_deref(),
-            _ => None,
-        }
+        self.as_streamable_http()
+            .and_then(StreamableHttpServerConfigRef::bearer_token_env_var)
     }
 
     pub fn http_headers(&self) -> &BTreeMap<String, String> {
-        match self {
-            Self::StreamableHttp(cfg) => &cfg.http_headers,
-            _ => empty_kv_map(),
+        match self.as_streamable_http() {
+            Some(cfg) => cfg.http_headers(),
+            None => empty_kv_map(),
         }
     }
 
     pub fn env_http_headers(&self) -> &BTreeMap<String, String> {
-        match self {
-            Self::StreamableHttp(cfg) => &cfg.env_http_headers,
-            _ => empty_kv_map(),
+        match self.as_streamable_http() {
+            Some(cfg) => cfg.env_http_headers(),
+            None => empty_kv_map(),
         }
     }
 
     pub fn env(&self) -> &BTreeMap<String, String> {
-        match self {
-            Self::Stdio(cfg) => &cfg.env,
-            _ => empty_kv_map(),
+        match self.as_stdio() {
+            Some(cfg) => cfg.env(),
+            None => empty_kv_map(),
         }
     }
 
     pub fn stdout_log(&self) -> Option<&StdoutLogConfig> {
-        match self {
-            Self::Stdio(cfg) => cfg.stdout_log.as_ref(),
-            _ => None,
-        }
+        self.as_stdio().and_then(StdioServerConfigRef::stdout_log)
     }
 
     pub fn set_inherit_env(&mut self, inherit_env: bool) -> crate::Result<()> {
-        match self {
-            Self::Stdio(cfg) => {
-                cfg.inherit_env = inherit_env;
-            }
-            Self::Unix(_) => {
+        if let Some(mut cfg) = self.as_stdio_mut() {
+            return cfg.set_inherit_env(inherit_env);
+        }
+        match self.transport() {
+            Transport::Unix => {
                 if !inherit_env {
                     public_bail!("mcp server transport=unix: inherit_env must be true");
                 }
             }
-            Self::StreamableHttp(_) => {
+            Transport::StreamableHttp => {
                 if !inherit_env {
                     public_bail!("mcp server transport=streamable_http: inherit_env must be true");
                 }
             }
+            Transport::Stdio => unreachable!("stdio transport must yield as_stdio_mut"),
         }
         Ok(())
     }
@@ -437,11 +480,8 @@ impl ServerConfig {
         &mut self,
         bearer_token_env_var: Option<String>,
     ) -> crate::Result<()> {
-        match self {
-            Self::StreamableHttp(cfg) => {
-                cfg.bearer_token_env_var = bearer_token_env_var;
-                Ok(())
-            }
+        match self.as_streamable_http_mut() {
+            Some(mut cfg) => cfg.set_bearer_token_env_var(bearer_token_env_var),
             _ => {
                 if bearer_token_env_var.is_some() {
                     public_bail!(
@@ -455,41 +495,41 @@ impl ServerConfig {
     }
 
     pub fn env_mut(&mut self) -> crate::Result<&mut BTreeMap<String, String>> {
+        let transport = self.transport();
         match self {
             Self::Stdio(cfg) => Ok(&mut cfg.env),
             _ => public_bail!(
                 "mcp server transport={}: env is not allowed",
-                transport_tag(self.transport())
+                transport_tag(transport)
             ),
         }
     }
 
     pub fn http_headers_mut(&mut self) -> crate::Result<&mut BTreeMap<String, String>> {
+        let transport = self.transport();
         match self {
             Self::StreamableHttp(cfg) => Ok(&mut cfg.http_headers),
             _ => public_bail!(
                 "mcp server transport={}: http_headers are not allowed",
-                transport_tag(self.transport())
+                transport_tag(transport)
             ),
         }
     }
 
     pub fn env_http_headers_mut(&mut self) -> crate::Result<&mut BTreeMap<String, String>> {
+        let transport = self.transport();
         match self {
             Self::StreamableHttp(cfg) => Ok(&mut cfg.env_http_headers),
             _ => public_bail!(
                 "mcp server transport={}: env_http_headers are not allowed",
-                transport_tag(self.transport())
+                transport_tag(transport)
             ),
         }
     }
 
     pub fn set_stdout_log(&mut self, stdout_log: Option<StdoutLogConfig>) -> crate::Result<()> {
-        match self {
-            Self::Stdio(cfg) => {
-                cfg.stdout_log = stdout_log;
-                Ok(())
-            }
+        match self.as_stdio_mut() {
+            Some(mut cfg) => cfg.set_stdout_log(stdout_log),
             _ => {
                 if stdout_log.is_some() {
                     public_bail!(
@@ -503,19 +543,158 @@ impl ServerConfig {
     }
 }
 
+impl<'a> StdioServerConfigRef<'a> {
+    pub fn argv(self) -> &'a [String] {
+        &self.inner.argv
+    }
+
+    pub fn inherit_env(self) -> bool {
+        self.inner.inherit_env
+    }
+
+    pub fn env(self) -> &'a BTreeMap<String, String> {
+        &self.inner.env
+    }
+
+    pub fn stdout_log(self) -> Option<&'a StdoutLogConfig> {
+        self.inner.stdout_log.as_ref()
+    }
+}
+
+impl<'a> StdioServerConfigMut<'a> {
+    pub fn argv(&self) -> &[String] {
+        &self.inner.argv
+    }
+
+    pub fn inherit_env(&self) -> bool {
+        self.inner.inherit_env
+    }
+
+    pub fn set_inherit_env(&mut self, inherit_env: bool) -> crate::Result<()> {
+        self.inner.inherit_env = inherit_env;
+        Ok(())
+    }
+
+    pub fn env(&self) -> &BTreeMap<String, String> {
+        &self.inner.env
+    }
+
+    pub fn env_mut(&mut self) -> &mut BTreeMap<String, String> {
+        &mut self.inner.env
+    }
+
+    pub fn stdout_log(&self) -> Option<&StdoutLogConfig> {
+        self.inner.stdout_log.as_ref()
+    }
+
+    pub fn set_stdout_log(&mut self, stdout_log: Option<StdoutLogConfig>) -> crate::Result<()> {
+        self.inner.stdout_log = stdout_log;
+        Ok(())
+    }
+}
+
+impl<'a> UnixServerConfigRef<'a> {
+    pub fn unix_path(self) -> &'a Path {
+        self.inner.unix_path.as_path()
+    }
+}
+
+impl<'a> StreamableHttpServerConfigRef<'a> {
+    pub fn url(self) -> Option<&'a str> {
+        match &self.inner.urls {
+            StreamableHttpUrls::Single { url } => Some(url.as_str()),
+            StreamableHttpUrls::Split { .. } => None,
+        }
+    }
+
+    pub fn sse_url(self) -> Option<&'a str> {
+        match &self.inner.urls {
+            StreamableHttpUrls::Single { .. } => None,
+            StreamableHttpUrls::Split { sse_url, .. } => Some(sse_url.as_str()),
+        }
+    }
+
+    pub fn http_url(self) -> Option<&'a str> {
+        match &self.inner.urls {
+            StreamableHttpUrls::Single { .. } => None,
+            StreamableHttpUrls::Split { http_url, .. } => Some(http_url.as_str()),
+        }
+    }
+
+    pub fn bearer_token_env_var(self) -> Option<&'a str> {
+        self.inner.bearer_token_env_var.as_deref()
+    }
+
+    pub fn http_headers(self) -> &'a BTreeMap<String, String> {
+        &self.inner.http_headers
+    }
+
+    pub fn env_http_headers(self) -> &'a BTreeMap<String, String> {
+        &self.inner.env_http_headers
+    }
+}
+
+impl<'a> StreamableHttpServerConfigMut<'a> {
+    pub fn url(&self) -> Option<&str> {
+        StreamableHttpServerConfigRef { inner: self.inner }.url()
+    }
+
+    pub fn sse_url(&self) -> Option<&str> {
+        StreamableHttpServerConfigRef { inner: self.inner }.sse_url()
+    }
+
+    pub fn http_url(&self) -> Option<&str> {
+        StreamableHttpServerConfigRef { inner: self.inner }.http_url()
+    }
+
+    pub fn bearer_token_env_var(&self) -> Option<&str> {
+        self.inner.bearer_token_env_var.as_deref()
+    }
+
+    pub fn set_bearer_token_env_var(
+        &mut self,
+        bearer_token_env_var: Option<String>,
+    ) -> crate::Result<()> {
+        self.inner.bearer_token_env_var = bearer_token_env_var;
+        Ok(())
+    }
+
+    pub fn http_headers(&self) -> &BTreeMap<String, String> {
+        &self.inner.http_headers
+    }
+
+    pub fn http_headers_mut(&mut self) -> &mut BTreeMap<String, String> {
+        &mut self.inner.http_headers
+    }
+
+    pub fn env_http_headers(&self) -> &BTreeMap<String, String> {
+        &self.inner.env_http_headers
+    }
+
+    pub fn env_http_headers_mut(&mut self) -> &mut BTreeMap<String, String> {
+        &mut self.inner.env_http_headers
+    }
+}
+
 fn validate_argv(transport: Transport, argv: &[String]) -> anyhow::Result<()> {
     if argv.is_empty() {
-        anyhow::bail!(
-            "mcp server transport={}: argv must not be empty",
-            transport_tag(transport)
-        );
+        return Err(tagged_message(
+            ErrorKind::Config,
+            format!(
+                "mcp server transport={}: argv must not be empty",
+                transport_tag(transport)
+            ),
+        ));
     }
     for (idx, arg) in argv.iter().enumerate() {
         if arg.trim().is_empty() {
-            anyhow::bail!(
-                "mcp server transport={}: argv[{idx}] must not be empty",
-                transport_tag(transport)
-            );
+            return Err(tagged_message(
+                ErrorKind::Config,
+                format!(
+                    "mcp server transport={}: argv[{idx}] must not be empty",
+                    transport_tag(transport)
+                ),
+            ));
         }
     }
     Ok(())

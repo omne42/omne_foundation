@@ -11,6 +11,7 @@ use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::Child;
 
+use crate::error::{ErrorKind, tagged_message, wrap_kind};
 use crate::{
     Config, MCP_PROTOCOL_VERSION, McpNotification, McpRequest, Root, ServerConfig, ServerName,
     Session, TrustMode, UntrustedStreamableHttpPolicy,
@@ -46,9 +47,21 @@ pub(crate) use streamable_http_validation::should_disconnect_after_jsonrpc_error
 static NEXT_MANAGER_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_CONNECTION_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
-macro_rules! public_bail {
+macro_rules! config_bail {
     ($($arg:tt)*) => {
-        return Err(anyhow::anyhow!($($arg)*).into())
+        return Err(tagged_message(ErrorKind::Config, format!($($arg)*)).into())
+    };
+}
+
+macro_rules! manager_state_bail {
+    ($($arg:tt)*) => {
+        return Err(tagged_message(ErrorKind::ManagerState, format!($($arg)*)).into())
+    };
+}
+
+macro_rules! timeout_bail {
+    ($($arg:tt)*) => {
+        return Err(tagged_message(ErrorKind::Timeout, format!($($arg)*)).into())
     };
 }
 
@@ -373,12 +386,12 @@ impl Connection {
                             match child.try_wait() {
                                 Ok(Some(status)) => Some(status),
                                 Ok(None) => {
-                                    public_bail!(
+                                    timeout_bail!(
                                         "wait timed out after {timeout:?}; failed to kill detached child (id={child_id:?}): {kill_err}"
                                     )
                                 }
                                 Err(try_wait_err) => {
-                                    public_bail!(
+                                    timeout_bail!(
                                         "wait timed out after {timeout:?}; failed to kill detached child (id={child_id:?}): {kill_err}; try_wait failed: {try_wait_err}"
                                     )
                                 }
@@ -386,7 +399,7 @@ impl Connection {
                         } else {
                             match tokio::time::timeout(kill_timeout, child.wait()).await {
                                 Ok(status) => Some(status?),
-                                Err(_) => public_bail!(
+                                Err(_) => timeout_bail!(
                                     "wait timed out after {timeout:?}; killed detached child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
                                 ),
                             }
@@ -402,7 +415,7 @@ impl Connection {
                     Ok(status) => Some(status?),
                     Err(_) => match on_timeout {
                         mcp_jsonrpc::WaitOnTimeout::ReturnError => {
-                            public_bail!("wait timed out after {timeout:?}")
+                            timeout_bail!("wait timed out after {timeout:?}")
                         }
                         mcp_jsonrpc::WaitOnTimeout::Kill { kill_timeout } => {
                             let child_id = child.id();
@@ -410,12 +423,12 @@ impl Connection {
                                 match child.try_wait() {
                                     Ok(Some(status)) => Some(status),
                                     Ok(None) => {
-                                        public_bail!(
+                                        timeout_bail!(
                                             "wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}"
                                         )
                                     }
                                     Err(try_wait_err) => {
-                                        public_bail!(
+                                        timeout_bail!(
                                             "wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}; try_wait failed: {try_wait_err}"
                                         )
                                     }
@@ -423,7 +436,7 @@ impl Connection {
                             } else {
                                 match tokio::time::timeout(kill_timeout, child.wait()).await {
                                     Ok(status) => Some(status?),
-                                    Err(_) => public_bail!(
+                                    Err(_) => timeout_bail!(
                                         "wait timed out after {timeout:?}; killed child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
                                     ),
                                 }
@@ -458,8 +471,11 @@ impl Connection {
                 }
                 Err(_) => match on_timeout {
                     mcp_jsonrpc::WaitOnTimeout::ReturnError => {
-                        first_handler_task_error = Some(anyhow::anyhow!(
-                            "wait timed out after {timeout:?} while waiting for server handler task"
+                        first_handler_task_error = Some(tagged_message(
+                            ErrorKind::Timeout,
+                            format!(
+                                "wait timed out after {timeout:?} while waiting for server handler task"
+                            ),
                         ));
                         task.abort();
                         let cleanup_timeout = remaining_budget();
@@ -476,8 +492,11 @@ impl Connection {
                                 first_handler_task_error = Some(handler_task_join_error(err));
                             }
                             Err(_) => {
-                                first_handler_task_error = Some(anyhow::anyhow!(
-                                    "wait timed out after {timeout:?}; aborted server handler task but it did not stop within {kill_timeout:?}"
+                                first_handler_task_error = Some(tagged_message(
+                                    ErrorKind::Timeout,
+                                    format!(
+                                        "wait timed out after {timeout:?}; aborted server handler task but it did not stop within {kill_timeout:?}"
+                                    ),
                                 ));
                             }
                         }
@@ -800,17 +819,19 @@ impl Manager {
         requested: &ServerConfig,
     ) -> anyhow::Result<()> {
         let Some(connected) = self.connection_server_configs.get(server_name) else {
-            anyhow::bail!(
-                "mcp server {server_name} is already connected without reusable config metadata and cannot be reused from config (disconnect first)"
-            );
+            return Err(tagged_message(
+                ErrorKind::ManagerState,
+                "mcp server {server_name} is already connected without reusable config metadata and cannot be reused from config (disconnect first)",
+            ));
         };
         if connected == requested {
             return Ok(());
         }
 
-        anyhow::bail!(
-            "mcp server {server_name} is already connected with a different effective config and cannot be reused (disconnect first)"
-        );
+        Err(tagged_message(
+            ErrorKind::ManagerState,
+            "mcp server {server_name} is already connected with a different effective config and cannot be reused (disconnect first)",
+        ))
     }
 
     fn ensure_connection_cwd_matches(
@@ -827,11 +848,14 @@ impl Manager {
             return Ok(());
         }
 
-        anyhow::bail!(
-            "mcp server {server_name} is already connected under cwd={} and cannot be reused for cwd={} (disconnect first)",
-            connected_cwd.display(),
-            requested_cwd.display()
-        );
+        return Err(tagged_message(
+            ErrorKind::ManagerState,
+            format!(
+                "mcp server {server_name} is already connected under cwd={} and cannot be reused for cwd={} (disconnect first)",
+                connected_cwd.display(),
+                requested_cwd.display()
+            ),
+        ));
     }
 
     pub(crate) fn try_prepare_connected_client(
@@ -848,10 +872,12 @@ impl Manager {
             self.ensure_connection_cwd_matches(server_name, cwd, None)?;
         }
 
-        let conn = self
-            .conns
-            .get(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?;
+        let conn = self.conns.get(server_name).ok_or_else(|| {
+            tagged_message(
+                ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?;
         Ok(Some(PreparedConnectedClient {
             server_name: server_name.to_string(),
             connection_id: conn.id(),
@@ -880,9 +906,12 @@ impl Manager {
         server_name: &str,
         cwd: &Path,
     ) -> anyhow::Result<Option<PreparedTransportConnect>> {
-        let server_cfg = config
-            .server(server_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
+        let server_cfg = config.server(server_name).ok_or_else(|| {
+            tagged_message(
+                ErrorKind::Config,
+                format!("unknown mcp server: {server_name}"),
+            )
+        })?;
         let server_name_key = parse_server_name_anyhow(server_name)?;
         let config_root = config.thread_root();
         if self.is_connected_and_alive(server_name_key.as_str()) {
@@ -894,7 +923,8 @@ impl Manager {
 
         server_cfg
             .validate()
-            .with_context(|| format!("invalid mcp server config (server={server_name_key})"))?;
+            .with_context(|| format!("invalid mcp server config (server={server_name_key})"))
+            .map_err(|err| wrap_kind(ErrorKind::Config, err))?;
         let cwd = resolve_connection_cwd_with_base(config_root, cwd)?;
 
         Ok(Some(PreparedTransportConnect {
@@ -1009,7 +1039,7 @@ impl Manager {
         client: mcp_jsonrpc::Client,
     ) -> crate::Result<()> {
         if self.trust_mode == TrustMode::Untrusted {
-            public_bail!(
+            config_bail!(
                 "refusing to attach custom JSON-RPC client in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) or use Manager::connect_jsonrpc_unchecked)"
             );
         }
@@ -1072,7 +1102,7 @@ impl Manager {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         if self.trust_mode == TrustMode::Untrusted {
-            public_bail!(
+            config_bail!(
                 "refusing to attach custom JSON-RPC IO in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) or use Manager::connect_io_unchecked)"
             );
         }
@@ -1114,9 +1144,12 @@ impl Manager {
         server_name: &str,
         cwd: &Path,
     ) -> crate::Result<()> {
-        let server_cfg = config
-            .server(server_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
+        let server_cfg = config.server(server_name).ok_or_else(|| {
+            tagged_message(
+                ErrorKind::Config,
+                format!("unknown mcp server: {server_name}"),
+            )
+        })?;
         Ok(self
             .connect_with_builder(server_name, server_cfg, cwd, config.thread_root(), || {
                 parse_server_name_anyhow(server_name)
@@ -1130,9 +1163,12 @@ impl Manager {
         server_name: &ServerName,
         cwd: &Path,
     ) -> crate::Result<()> {
-        let server_cfg = config
-            .server_named(server_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
+        let server_cfg = config.server_named(server_name).ok_or_else(|| {
+            tagged_message(
+                ErrorKind::Config,
+                format!("unknown mcp server: {server_name}"),
+            )
+        })?;
         let server_name_key = server_name.clone();
         Ok(self
             .connect_with_builder(
@@ -1152,9 +1188,12 @@ impl Manager {
         cwd: &Path,
     ) -> crate::Result<Session> {
         self.get_or_connect(config, server_name, cwd).await?;
-        Ok(self
-            .take_session(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session(server_name).ok_or_else(|| {
+            tagged_message(
+                ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?)
     }
 
     pub async fn get_or_connect_session_named(
@@ -1164,9 +1203,12 @@ impl Manager {
         cwd: &Path,
     ) -> crate::Result<Session> {
         self.get_or_connect_named(config, server_name, cwd).await?;
-        Ok(self
-            .take_session_named(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session_named(server_name).ok_or_else(|| {
+            tagged_message(
+                ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?)
     }
 
     pub async fn connect_named(
@@ -1304,9 +1346,12 @@ impl Manager {
         cwd: &Path,
     ) -> crate::Result<Session> {
         self.connect(server_name, server_cfg, cwd).await?;
-        Ok(self
-            .take_session(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session(server_name).ok_or_else(|| {
+            tagged_message(
+                ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?)
     }
 
     pub async fn connect_session_named(
@@ -1316,9 +1361,12 @@ impl Manager {
         cwd: &Path,
     ) -> crate::Result<Session> {
         self.connect_named(server_name, server_cfg, cwd).await?;
-        Ok(self
-            .take_session_named(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session_named(server_name).ok_or_else(|| {
+            tagged_message(
+                ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?)
     }
 
     pub async fn connect_jsonrpc_session(
@@ -1327,9 +1375,12 @@ impl Manager {
         client: mcp_jsonrpc::Client,
     ) -> crate::Result<Session> {
         self.connect_jsonrpc(server_name, client).await?;
-        Ok(self
-            .take_session(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session(server_name).ok_or_else(|| {
+            tagged_message(
+                ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?)
     }
 
     pub async fn connect_jsonrpc_session_named(
@@ -1338,9 +1389,12 @@ impl Manager {
         client: mcp_jsonrpc::Client,
     ) -> crate::Result<Session> {
         self.connect_jsonrpc(server_name.as_str(), client).await?;
-        Ok(self
-            .take_session_named(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session_named(server_name).ok_or_else(|| {
+            tagged_message(
+                ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?)
     }
 
     pub async fn connect_io_session<R, W>(
@@ -1354,9 +1408,12 @@ impl Manager {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         self.connect_io(server_name, read, write).await?;
-        Ok(self
-            .take_session(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session(server_name).ok_or_else(|| {
+            tagged_message(
+                ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?)
     }
 
     pub async fn connect_io_session_named<R, W>(
@@ -1370,9 +1427,12 @@ impl Manager {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         self.connect_io(server_name.as_str(), read, write).await?;
-        Ok(self
-            .take_session_named(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?)
+        Ok(self.take_session_named(server_name).ok_or_else(|| {
+            tagged_message(
+                ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?)
     }
 
     pub async fn request(
@@ -1738,7 +1798,7 @@ impl Manager {
     ) -> crate::Result<Value> {
         let Some(prepared) = self.try_prepare_connected_client(server_name, None)? else {
             let server_name = normalize_server_name_lookup(server_name);
-            public_bail!("mcp server not connected: {server_name}");
+            manager_state_bail!("mcp server not connected: {server_name}");
         };
         let server_name = prepared.server_name;
         let result = Self::request_raw_handle(
@@ -1778,7 +1838,7 @@ impl Manager {
     ) -> crate::Result<()> {
         let Some(prepared) = self.try_prepare_connected_client(server_name, None)? else {
             let server_name = normalize_server_name_lookup(server_name);
-            public_bail!("mcp server not connected: {server_name}");
+            manager_state_bail!("mcp server not connected: {server_name}");
         };
         let server_name = prepared.server_name;
         let result = Self::notify_raw_handle(

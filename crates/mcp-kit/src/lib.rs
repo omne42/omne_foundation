@@ -35,12 +35,9 @@
 //! into connection setup/teardown paths.
 //!
 //! When you use config-driven connection helpers (`Manager::request`, `get_or_connect`, etc.),
-//! relative `cwd` values are resolved against the loaded `mcp.json` thread root when available,
-//! not against the ambient process directory.
-//!
-//! When you use config-driven connection helpers (`Manager::request`, `get_or_connect`, etc.),
-//! relative `cwd` values are resolved against the loaded `mcp.json` thread root when available,
-//! not against the ambient process directory.
+//! relative `cwd` values are resolved against the loaded `mcp.json` thread root when available.
+//! If there is no explicit absolute base, `mcp-kit` now rejects relative `cwd` values instead of
+//! falling back to the ambient process directory.
 //!
 //! ## Non-goals
 //!

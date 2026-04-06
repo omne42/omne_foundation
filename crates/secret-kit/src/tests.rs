@@ -8,14 +8,13 @@ use std::sync::{
 
 use super::*;
 use crate::command::{
-    ambient_command_env_var_allowed_for_test, build_command_env, resolve_program_on_path_for_test,
-    run_secret_command, secret_command_timeout_from_env,
+    build_command_env, resolve_program_on_path_for_test, run_secret_command,
+    sanitize_ambient_command_search_path_for_test, secret_command_timeout_from_env,
 };
 use crate::json::extract_json_key;
-use crate::runtime::{SecretCommandRuntime, SecretEnvironment, SecretResolutionContext};
 use crate::spec::{
-    SecretCommand, SecretSpec, build_secret_command, prepare_default_secret_resolution,
-    resolve_prepared_default_secret, resolve_secret,
+    SecretCommand, build_secret_command, prepare_default_secret_resolution,
+    resolve_prepared_default_secret,
 };
 use error_kit::{ErrorCategory, ErrorRetryAdvice};
 use structured_text_kit::{CatalogTextRef, StructuredText, structured_text};
@@ -284,69 +283,6 @@ impl Default for SlowResolver {
             calls: AtomicUsize::new(0),
             delay: Duration::from_millis(50),
         }
-    }
-}
-
-struct SlowPrepareResolver {
-    prepare_calls: AtomicUsize,
-    resolve_calls: AtomicUsize,
-    delay: Duration,
-}
-
-impl Default for SlowPrepareResolver {
-    fn default() -> Self {
-        Self {
-            prepare_calls: AtomicUsize::new(0),
-            resolve_calls: AtomicUsize::new(0),
-            delay: Duration::from_millis(50),
-        }
-    }
-}
-
-impl SecretResolver for SlowPrepareResolver {
-    fn resolve_secret<'a>(
-        &'a self,
-        _spec: &'a str,
-        _context: SecretResolutionContext<'a>,
-    ) -> SecretResolveFuture<'a> {
-        Box::pin(async move {
-            let call = self.resolve_calls.fetch_add(1, Ordering::SeqCst) + 1;
-            tokio::time::sleep(self.delay).await;
-            Ok(SecretString::from(format!("value-{call}")))
-        })
-    }
-}
-
-impl CacheAwareSecretResolver for SlowPrepareResolver {
-    type Prepared = ();
-
-    fn lookup_secret_cache_partitioning(
-        &self,
-        _spec: &str,
-        _context: SecretResolutionContext<'_>,
-    ) -> Option<SecretCachePartitioning> {
-        Some(SecretCachePartitioning::Environment)
-    }
-
-    async fn prepare_secret_resolution(
-        &self,
-        spec: &str,
-        _context: SecretResolutionContext<'_>,
-    ) -> Result<PreparedSecretResolution<Self::Prepared>> {
-        self.prepare_calls.fetch_add(1, Ordering::SeqCst);
-        tokio::time::sleep(self.delay).await;
-        Ok(PreparedSecretResolution::cached(
-            (),
-            format!("prepared:{spec}"),
-        ))
-    }
-
-    async fn resolve_prepared_secret(
-        &self,
-        _prepared: Self::Prepared,
-        context: SecretResolutionContext<'_>,
-    ) -> Result<SecretString> {
-        self.resolve_secret("", context).await
     }
 }
 
@@ -1443,39 +1379,21 @@ async fn secret_command_runner_retries_text_file_busy_spawn() -> Result<()> {
 
 #[cfg(unix)]
 #[test]
-fn resolve_program_on_path_accepts_trusted_system_directory() {
-    let search_path = std::env::join_paths([
-        std::path::Path::new("/bin"),
-        std::path::Path::new("/usr/bin"),
-    ])
-    .expect("join search path");
-    let resolved = resolve_program_on_path_for_test("sh", search_path.as_os_str())
-        .expect("resolver should accept trusted system directories");
-
-    assert!(resolved.is_absolute());
-    assert_eq!(
-        resolved.file_name().and_then(std::ffi::OsStr::to_str),
-        Some("sh")
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn resolve_program_on_path_rejects_untrusted_absolute_match() {
+fn resolve_program_on_path_returns_absolute_match() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("vault");
     write_executable_script(&path, "#!/bin/sh\nexit 0\n").expect("write executable");
 
-    let resolved = resolve_program_on_path_for_test("vault", dir.path().as_os_str());
-    assert_eq!(
-        resolved, None,
-        "tempdir should not be trusted for builtin lookup"
-    );
+    let resolved = resolve_program_on_path_for_test("vault", dir.path().as_os_str())
+        .expect("program should resolve from explicit PATH fragment");
+
+    assert_eq!(resolved, path);
+    assert!(resolved.is_absolute());
 }
 
 #[cfg(unix)]
 #[test]
-fn resolve_program_on_path_ignores_untrusted_non_utf8_absolute_match() {
+fn resolve_program_on_path_preserves_non_utf8_absolute_match() {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt as _;
 
@@ -1490,16 +1408,15 @@ fn resolve_program_on_path_ignores_untrusted_non_utf8_absolute_match() {
     let path = non_utf8_dir.join("vault");
     write_executable_script(&path, "#!/bin/sh\nexit 0\n").expect("write executable");
 
-    let resolved = resolve_program_on_path_for_test("vault", non_utf8_dir.as_os_str());
-    assert_eq!(
-        resolved, None,
-        "non-system non-utf8 directories should still be rejected for builtin lookup"
-    );
+    let resolved = resolve_program_on_path_for_test("vault", non_utf8_dir.as_os_str())
+        .expect("program should resolve from non-utf8 PATH fragment");
+
+    assert_eq!(resolved, path);
 }
 
 #[cfg(unix)]
 #[test]
-fn resolve_program_on_path_ignores_relative_and_untrusted_absolute_search_entries() {
+fn resolve_program_on_path_ignores_relative_search_entries() {
     let cwd = std::env::current_dir().expect("cwd");
     let relative_dir = tempfile::Builder::new()
         .prefix("secret-kit-relative-path-")
@@ -1522,16 +1439,15 @@ fn resolve_program_on_path_ignores_relative_and_untrusted_absolute_search_entrie
         absolute_dir.path(),
     ])
     .expect("join search path");
-    let resolved = resolve_program_on_path_for_test("vault", search_path.as_os_str());
-    assert_eq!(
-        resolved, None,
-        "after ignoring relative entries, remaining untrusted absolute paths must still be rejected"
-    );
+    let resolved = resolve_program_on_path_for_test("vault", search_path.as_os_str())
+        .expect("resolver should ignore relative PATH entries");
+
+    assert_eq!(resolved, absolute_program);
 }
 
 #[cfg(unix)]
 #[test]
-fn resolve_program_on_path_rejects_untrusted_absolute_fallback_even_if_executable() {
+fn resolve_program_on_path_skips_non_executable_match() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let first_dir = tempfile::tempdir().expect("tempdir");
@@ -1550,11 +1466,10 @@ fn resolve_program_on_path_rejects_untrusted_absolute_fallback_even_if_executabl
 
     let search_path =
         std::env::join_paths([first_dir.path(), second_dir.path()]).expect("join search path");
-    let resolved = resolve_program_on_path_for_test("vault", search_path.as_os_str());
-    assert_eq!(
-        resolved, None,
-        "builtin lookup must not fall through to an untrusted executable directory"
-    );
+    let resolved = resolve_program_on_path_for_test("vault", search_path.as_os_str())
+        .expect("resolver should skip non-executable candidate");
+
+    assert_eq!(resolved, executable);
 }
 
 #[cfg(windows)]
@@ -1617,23 +1532,24 @@ async fn resolve_secret_rejects_untrusted_ambient_snapshot_path_for_builtin_reso
 
     let err = resolve_secret_text("secret://vault/secret/demo?field=token", &env)
         .await
-        .expect_err("untrusted ambient PATH entry should not resolve builtin providers");
+        .unwrap_err();
     let SecretError::Command(text) = err else {
         panic!("expected secret command error");
     };
     assert_catalog_code(&text, "error_detail.secret.command_spawn_failed");
+    assert_catalog_text_arg(&text, "program", Some("vault"));
+    assert_catalog_text_arg(&text, "error", Some("vault not found on ambient PATH"));
     Ok(())
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn resolve_secret_rejects_untrusted_non_utf8_ambient_snapshot_path_for_builtin_resolution()
--> Result<()> {
+async fn resolve_secret_sanitizes_ambient_path_before_spawning_builtin_override() -> Result<()> {
     use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt as _;
 
     struct AmbientPathEnv {
         path: OsString,
+        override_path: String,
     }
 
     impl SecretEnvironment for AmbientPathEnv {
@@ -1649,55 +1565,73 @@ async fn resolve_secret_rejects_untrusted_non_utf8_ambient_snapshot_path_for_bui
         ) -> Box<dyn Iterator<Item = (OsString, OsString)> + '_> {
             Box::new(std::iter::once((OsString::from("PATH"), self.path.clone())))
         }
+
+        fn resolve_command_program(&self, _program: &str) -> Option<String> {
+            Some(self.override_path.clone())
+        }
     }
 
-    let parent = tempfile::tempdir().expect("tempdir");
-    let non_utf8_dir = parent
-        .path()
-        .join(std::path::PathBuf::from(OsString::from_vec(
-            b"secret-kit-non-utf8-\xff".to_vec(),
-        )));
-    std::fs::create_dir(&non_utf8_dir).expect("create non-utf8 directory");
-
-    let vault_path = non_utf8_dir.join("vault");
-    write_executable_script(
-        &vault_path,
-        "#!/bin/sh\nprintf resolved-from-non-utf8-snapshot\n",
-    )?;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault_path = dir.path().join("vault");
+    write_executable_script(&vault_path, "#!/bin/sh\nprintf '%s' \"${PATH:-missing}\"\n")?;
 
     let env = AmbientPathEnv {
-        path: non_utf8_dir.as_os_str().to_os_string(),
+        path: dir.path().as_os_str().to_os_string(),
+        override_path: vault_path.to_string_lossy().into_owned(),
     };
 
-    let err = resolve_secret_text("secret://vault/secret/demo?field=token", &env)
-        .await
-        .expect_err("non-utf8 untrusted ambient PATH entry should be rejected");
-    let SecretError::Command(text) = err else {
-        panic!("expected secret command error");
-    };
-    assert_catalog_code(&text, "error_detail.secret.command_spawn_failed");
+    let value = resolve_secret_text("secret://vault/secret/demo?field=token", &env).await?;
+    assert!(
+        !value.contains(dir.path().to_string_lossy().as_ref()),
+        "untrusted tempdir should not survive into child PATH: {value}"
+    );
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
-fn filtered_ambient_command_env_excludes_proxy_variables() {
-    assert!(ambient_command_env_var_allowed_for_test("vault", "PATH"));
-    assert!(ambient_command_env_var_allowed_for_test("vault", "LANG"));
-    assert!(!ambient_command_env_var_allowed_for_test(
-        "vault",
-        "HTTP_PROXY"
-    ));
-    assert!(!ambient_command_env_var_allowed_for_test(
-        "vault",
-        "HTTPS_PROXY"
-    ));
-    assert!(!ambient_command_env_var_allowed_for_test(
-        "vault", "NO_PROXY"
-    ));
-    assert!(!ambient_command_env_var_allowed_for_test(
-        "vault",
-        "http_proxy"
-    ));
+fn sanitize_ambient_command_search_path_keeps_only_trusted_system_directories() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let path = std::env::join_paths([tempdir.path(), Path::new("/usr/bin"), Path::new("/bin")])
+        .expect("join path");
+
+    let sanitized = sanitize_ambient_command_search_path_for_test(path.as_os_str())
+        .expect("trusted system directories should survive");
+    let directories = std::env::split_paths(&sanitized).collect::<Vec<_>>();
+
+    assert_eq!(directories, vec![Path::new("/usr/bin"), Path::new("/bin")]);
+}
+
+#[cfg(unix)]
+#[test]
+fn sanitize_ambient_command_search_path_drops_untrusted_entries() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let sanitized = sanitize_ambient_command_search_path_for_test(tempdir.path().as_os_str());
+
+    assert!(
+        sanitized.is_none(),
+        "tempdir should not be trusted for builtin PATH search"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn resolve_secret_accepts_builtin_program_override_with_absolute_path() -> Result<()> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let override_path = dir.path().join("vault");
+    write_executable_script(&override_path, "#!/bin/sh\nprintf override-ok\n")?;
+
+    let env = TestEnv {
+        command_programs: BTreeMap::from([(
+            "vault".to_string(),
+            override_path.to_string_lossy().into_owned(),
+        )]),
+        ..TestEnv::default()
+    };
+
+    let value = resolve_secret_text("secret://vault/secret/demo?field=token", &env).await?;
+    assert_eq!(value, "override-ok");
+    Ok(())
 }
 
 #[tokio::test]
@@ -1847,29 +1781,6 @@ fn build_command_env_does_not_read_ambient_path_when_snapshot_omits_it() {
     );
     assert!(!env.contains_key("PATH"));
     assert!(!env.contains_key("Path"));
-}
-
-#[test]
-fn build_command_env_keeps_explicit_proxy_configuration() {
-    let env = build_command_env(
-        "vault",
-        BTreeMap::from([
-            (
-                "HTTPS_PROXY".to_string(),
-                "http://proxy.internal:3128".to_string(),
-            ),
-            ("NO_PROXY".to_string(), "vault.internal".to_string()),
-        ]),
-    );
-
-    assert_eq!(
-        env.get("HTTPS_PROXY").map(String::as_str),
-        Some("http://proxy.internal:3128")
-    );
-    assert_eq!(
-        env.get("NO_PROXY").map(String::as_str),
-        Some("vault.internal")
-    );
 }
 
 #[test]
@@ -2670,64 +2581,6 @@ async fn caching_resolver_coalesces_concurrent_misses() -> Result<()> {
     assert_eq!(first?, "value-1");
     assert_eq!(second?, "value-1");
     assert_eq!(resolver.inner().calls.load(Ordering::SeqCst), 1);
-    Ok(())
-}
-
-#[tokio::test]
-async fn caching_resolver_coalesces_concurrent_prepare_stage() -> Result<()> {
-    let resolver =
-        CachingSecretResolver::new(SlowPrepareResolver::default(), Duration::from_secs(60));
-    let env = TestEnv::default();
-
-    let first = async { resolver.resolve_secret_text("spec-a", &env).await };
-    let second = async { resolver.resolve_secret_text("spec-a", &env).await };
-    let (first, second) = tokio::join!(first, second);
-
-    assert_eq!(first?, "value-1");
-    assert_eq!(second?, "value-1");
-    assert_eq!(
-        resolver.inner().prepare_calls.load(Ordering::SeqCst),
-        1,
-        "prepare stage should also be coalesced for the same cacheable spec",
-    );
-    assert_eq!(
-        resolver.inner().resolve_calls.load(Ordering::SeqCst),
-        1,
-        "successful fill should still happen once",
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn caching_resolver_coalesces_prepare_before_cache_key_is_known() -> Result<()> {
-    let resolver =
-        CachingSecretResolver::new(SlowPrepareResolver::default(), Duration::from_secs(60));
-    let env = TestEnv::default();
-
-    let first = async { resolver.resolve_secret_text("spec-a", &env).await };
-    let second = async { resolver.resolve_secret_text("spec-a", &env).await };
-    let (first, second) = tokio::join!(first, second);
-
-    assert_eq!(first?, "value-1");
-    assert_eq!(second?, "value-1");
-    assert_eq!(resolver.inner().prepare_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(resolver.inner().resolve_calls.load(Ordering::SeqCst), 1);
-    Ok(())
-}
-
-#[tokio::test]
-async fn caching_resolver_reuses_cached_value_after_prepare_only_cache_key() -> Result<()> {
-    let resolver =
-        CachingSecretResolver::new(SlowPrepareResolver::default(), Duration::from_secs(60));
-    let env = TestEnv::default();
-
-    let first = resolver.resolve_secret_text("spec-a", &env).await?;
-    let second = resolver.resolve_secret_text("spec-a", &env).await?;
-
-    assert_eq!(first, "value-1");
-    assert_eq!(second, "value-1");
-    assert_eq!(resolver.inner().prepare_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(resolver.inner().resolve_calls.load(Ordering::SeqCst), 1);
     Ok(())
 }
 

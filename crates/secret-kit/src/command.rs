@@ -12,13 +12,12 @@ use omne_process_primitives::{
 use structured_text_kit::{CatalogText, StructuredText, StructuredTextScalarArg};
 use zeroize::Zeroize;
 
-use crate::runtime::SecretCommandRuntime;
 use crate::spec::SecretCommand;
 use crate::{
     DEFAULT_SECRET_COMMAND_TIMEOUT_SECS, MAX_SECRET_COMMAND_OUTPUT_BYTES,
     MAX_SECRET_COMMAND_TIMEOUT_SECS, Result, SECRET_COMMAND_TIMEOUT_MS_ENV,
-    SECRET_COMMAND_TIMEOUT_SECS_ENV, SecretBytes, SecretError, SecretString, read_limited,
-    secret_string_from_bytes,
+    SECRET_COMMAND_TIMEOUT_SECS_ENV, SecretBytes, SecretCommandRuntime, SecretError, SecretString,
+    read_limited, secret_string_from_bytes,
 };
 
 struct SecretCommandChild {
@@ -106,11 +105,6 @@ struct PendingProcessTreeCleanup {
 }
 
 #[cfg(all(unix, target_os = "linux"))]
-struct LinuxCleanupDispatcher {
-    sender: std::sync::Mutex<Option<std::sync::mpsc::Sender<ProcessTreeCleanup>>>,
-}
-
-#[cfg(all(unix, target_os = "linux"))]
 impl PendingProcessTreeCleanup {
     fn new(cleanup: ProcessTreeCleanup) -> Self {
         Self {
@@ -124,11 +118,6 @@ impl PendingProcessTreeCleanup {
 #[cfg(all(test, unix, target_os = "linux"))]
 static LINUX_CLEANUP_WORKER_SPAWN_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
-#[cfg(all(test, unix, target_os = "linux"))]
-static LINUX_CLEANUP_WORKER_FORCED_SPAWN_FAILURES: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-#[cfg(all(test, unix, target_os = "linux"))]
-static LINUX_CLEANUP_LAST_WARNING: OnceLock<std::sync::Mutex<Option<String>>> = OnceLock::new();
 
 fn start_process_tree_cleanup(cleanup: ProcessTreeCleanup) {
     #[cfg(all(unix, target_os = "linux"))]
@@ -138,12 +127,7 @@ fn start_process_tree_cleanup(cleanup: ProcessTreeCleanup) {
             // Successful commands can still leave helpers alive briefly while `/proc` catches up
             // to the leader exit. Reuse a single worker thread for the retry window instead of
             // spawning one long-lived thread per command invocation.
-            if let Err(cleanup) = linux_cleanup_dispatcher().send(cleanup) {
-                cleanup.kill_tree();
-                report_linux_cleanup_dispatch_warning(
-                    "async retry dispatch unavailable; leaving cleanup at the synchronous best-effort pass",
-                );
-            }
+            let _ = linux_cleanup_dispatcher().send(cleanup);
         }
     }
 
@@ -152,117 +136,19 @@ fn start_process_tree_cleanup(cleanup: ProcessTreeCleanup) {
 }
 
 #[cfg(all(unix, target_os = "linux"))]
-impl LinuxCleanupDispatcher {
-    fn lock_sender(
-        &self,
-    ) -> std::sync::MutexGuard<'_, Option<std::sync::mpsc::Sender<ProcessTreeCleanup>>> {
-        match self.sender.lock() {
-            Ok(sender) => sender,
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
+fn linux_cleanup_dispatcher() -> &'static std::sync::mpsc::Sender<ProcessTreeCleanup> {
+    static DISPATCHER: OnceLock<std::sync::mpsc::Sender<ProcessTreeCleanup>> = OnceLock::new();
 
-    fn send(&self, cleanup: ProcessTreeCleanup) -> std::result::Result<(), ProcessTreeCleanup> {
-        let mut cleanup = cleanup;
-        for _ in 0..2 {
-            let sender = {
-                let mut sender = self.lock_sender();
-                if sender.is_none() {
-                    *sender = spawn_linux_cleanup_worker().ok();
-                }
-                sender.clone()
-            };
-
-            let Some(sender) = sender else {
-                return Err(cleanup);
-            };
-
-            match sender.send(cleanup) {
-                Ok(()) => return Ok(()),
-                Err(std::sync::mpsc::SendError(returned_cleanup)) => {
-                    cleanup = returned_cleanup;
-                    self.lock_sender().take();
-                }
-            }
-        }
-
-        Err(cleanup)
-    }
-}
-
-#[cfg(all(test, unix, target_os = "linux"))]
-impl LinuxCleanupDispatcher {
-    fn ensure_worker_for_test(&self) -> bool {
-        let mut sender = self.lock_sender();
-        if sender.is_none() {
-            *sender = spawn_linux_cleanup_worker().ok();
-        }
-        sender.is_some()
-    }
-
-    fn reset_for_test(&self) {
-        let previous = self.lock_sender().take();
-        drop(previous);
-    }
-}
-
-#[cfg(all(unix, target_os = "linux"))]
-fn linux_cleanup_dispatcher() -> &'static LinuxCleanupDispatcher {
-    static DISPATCHER: OnceLock<LinuxCleanupDispatcher> = OnceLock::new();
-
-    DISPATCHER.get_or_init(|| LinuxCleanupDispatcher {
-        sender: std::sync::Mutex::new(None),
+    DISPATCHER.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        #[cfg(test)]
+        LINUX_CLEANUP_WORKER_SPAWN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::thread::Builder::new()
+            .name("secret-kit-linux-cleanup".to_string())
+            .spawn(move || run_linux_cleanup_worker(receiver))
+            .expect("spawn secret-kit linux cleanup worker");
+        sender
     })
-}
-
-#[cfg(all(unix, target_os = "linux"))]
-fn spawn_linux_cleanup_worker() -> std::io::Result<std::sync::mpsc::Sender<ProcessTreeCleanup>> {
-    #[cfg(test)]
-    if LINUX_CLEANUP_WORKER_FORCED_SPAWN_FAILURES
-        .fetch_update(
-            std::sync::atomic::Ordering::Relaxed,
-            std::sync::atomic::Ordering::Relaxed,
-            |remaining| remaining.checked_sub(1),
-        )
-        .is_ok()
-    {
-        let err = std::io::Error::other("injected secret-kit linux cleanup worker spawn failure");
-        report_linux_cleanup_warning(&err);
-        return Err(err);
-    }
-
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::Builder::new()
-        .name("secret-kit-linux-cleanup".to_string())
-        .spawn(move || run_linux_cleanup_worker(receiver))
-        .inspect_err(report_linux_cleanup_warning)?;
-    #[cfg(test)]
-    LINUX_CLEANUP_WORKER_SPAWN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    Ok(sender)
-}
-
-#[cfg(all(unix, target_os = "linux"))]
-fn report_linux_cleanup_warning(err: &std::io::Error) {
-    eprintln!("secret-kit: linux cleanup worker unavailable: {err}");
-    #[cfg(test)]
-    {
-        let storage = LINUX_CLEANUP_LAST_WARNING.get_or_init(|| std::sync::Mutex::new(None));
-        *storage
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(err.to_string());
-    }
-}
-
-#[cfg(all(unix, target_os = "linux"))]
-fn report_linux_cleanup_dispatch_warning(message: &str) {
-    eprintln!("secret-kit: linux cleanup retry unavailable: {message}");
-    #[cfg(test)]
-    {
-        let storage = LINUX_CLEANUP_LAST_WARNING.get_or_init(|| std::sync::Mutex::new(None));
-        *storage
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(message.to_string());
-    }
 }
 
 #[cfg(all(unix, target_os = "linux"))]
@@ -329,26 +215,6 @@ fn linux_cleanup_worker_spawn_count() -> usize {
     LINUX_CLEANUP_WORKER_SPAWN_COUNT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-#[cfg(all(test, unix, target_os = "linux"))]
-fn force_linux_cleanup_worker_spawn_failures(count: usize) {
-    LINUX_CLEANUP_WORKER_FORCED_SPAWN_FAILURES.store(count, std::sync::atomic::Ordering::Relaxed);
-}
-
-#[cfg(all(test, unix, target_os = "linux"))]
-fn take_linux_cleanup_warning_for_test() -> Option<String> {
-    LINUX_CLEANUP_LAST_WARNING
-        .get_or_init(|| std::sync::Mutex::new(None))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
-}
-
-#[cfg(all(test, unix, target_os = "linux"))]
-fn linux_cleanup_test_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-}
-
 fn ensure_tokio_time_driver(program: &str) -> Result<()> {
     std::panic::catch_unwind(|| {
         drop(tokio::time::sleep(Duration::ZERO));
@@ -389,9 +255,14 @@ impl CommandEnvSnapshot {
         let timeout_ms = lookup_env_pair(explicit_pairs.as_slice(), SECRET_COMMAND_TIMEOUT_MS_ENV);
         let timeout_secs =
             lookup_env_pair(explicit_pairs.as_slice(), SECRET_COMMAND_TIMEOUT_SECS_ENV);
+        let provider = SecretCliProgram::from_program(program);
+        let ambient_pairs = env
+            .ambient_command_env_os_pairs(program)
+            .filter_map(|(key, value)| sanitize_ambient_command_env_pair(provider, key, value))
+            .collect();
 
         Self {
-            ambient_pairs: env.ambient_command_env_os_pairs(program).collect(),
+            ambient_pairs,
             explicit_pairs,
             timeout_ms,
             timeout_secs,
@@ -671,25 +542,12 @@ mod retry_tests {
     #[cfg(all(unix, target_os = "linux"))]
     #[test]
     fn linux_cleanup_dispatcher_reuses_single_worker() {
-        let _guard = linux_cleanup_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        linux_cleanup_dispatcher().reset_for_test();
-        force_linux_cleanup_worker_spawn_failures(0);
         let before = linux_cleanup_worker_spawn_count();
 
         let _ = linux_cleanup_dispatcher();
-        assert!(
-            linux_cleanup_dispatcher().ensure_worker_for_test(),
-            "dispatcher should initialize a worker"
-        );
         let after_first = linux_cleanup_worker_spawn_count();
 
         let _ = linux_cleanup_dispatcher();
-        assert!(
-            linux_cleanup_dispatcher().ensure_worker_for_test(),
-            "dispatcher should reuse the existing worker"
-        );
         let after_second = linux_cleanup_worker_spawn_count();
 
         assert!(after_first >= before, "worker count should not decrease");
@@ -700,158 +558,6 @@ mod retry_tests {
         assert_eq!(
             after_first, after_second,
             "repeated dispatcher access should reuse the same worker"
-        );
-    }
-
-    #[cfg(all(unix, target_os = "linux"))]
-    #[test]
-    fn linux_cleanup_dispatcher_retries_after_spawn_failure_without_panicking() {
-        let _guard = linux_cleanup_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        linux_cleanup_dispatcher().reset_for_test();
-        let _ = take_linux_cleanup_warning_for_test();
-        force_linux_cleanup_worker_spawn_failures(1);
-        let before = linux_cleanup_worker_spawn_count();
-
-        assert!(
-            !linux_cleanup_dispatcher().ensure_worker_for_test(),
-            "worker initialization should fail closed when the thread cannot start"
-        );
-        let after_failed_send = linux_cleanup_worker_spawn_count();
-        assert_eq!(
-            after_failed_send, before,
-            "failed spawn attempts should not report a started worker"
-        );
-        let warning = take_linux_cleanup_warning_for_test()
-            .expect("failed worker initialization should emit a warning");
-        assert!(warning.contains("spawn failure"), "{warning}");
-
-        force_linux_cleanup_worker_spawn_failures(0);
-        assert!(
-            linux_cleanup_dispatcher().ensure_worker_for_test(),
-            "dispatcher should retry worker creation on the next attempt"
-        );
-        assert_eq!(
-            linux_cleanup_worker_spawn_count(),
-            before + 1,
-            "the first successful retry should start exactly one worker"
-        );
-    }
-
-    #[cfg(all(unix, target_os = "linux"))]
-    #[test]
-    fn linux_cleanup_dispatcher_recovers_after_stale_sender_disconnect() {
-        let _guard = linux_cleanup_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        linux_cleanup_dispatcher().reset_for_test();
-        force_linux_cleanup_worker_spawn_failures(0);
-        let _ = take_linux_cleanup_warning_for_test();
-
-        let dispatcher = linux_cleanup_dispatcher();
-        let before = linux_cleanup_worker_spawn_count();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build tokio runtime");
-        let mut child = runtime
-            .block_on(async {
-                let mut command = tokio::process::Command::new("sh");
-                command.arg("-c").arg("exec sleep 5");
-                configure_command_for_process_tree(&mut command);
-                command.spawn()
-            })
-            .expect("spawn child");
-        let cleanup = ProcessTreeCleanup::new(&child).expect("capture cleanup");
-        {
-            let (sender, receiver) = std::sync::mpsc::channel();
-            drop(receiver);
-            *dispatcher.lock_sender() = Some(sender);
-        }
-
-        assert!(
-            dispatcher.send(cleanup).is_ok(),
-            "dispatcher should discard a disconnected sender and retry with a fresh worker"
-        );
-        runtime
-            .block_on(async { child.wait().await })
-            .expect("wait child after cleanup");
-        assert_eq!(
-            linux_cleanup_worker_spawn_count(),
-            before + 1,
-            "recovering from a disconnected sender should start exactly one replacement worker"
-        );
-        assert!(
-            take_linux_cleanup_warning_for_test().is_none(),
-            "successful recovery from a stale sender should not emit an availability warning"
-        );
-    }
-
-    #[cfg(all(unix, target_os = "linux"))]
-    #[test]
-    fn linux_cleanup_dispatcher_mutex_poison_recovers_without_panicking() {
-        let _guard = linux_cleanup_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        linux_cleanup_dispatcher().reset_for_test();
-        force_linux_cleanup_worker_spawn_failures(0);
-
-        let dispatcher = linux_cleanup_dispatcher();
-        let before = linux_cleanup_worker_spawn_count();
-        let _ = std::panic::catch_unwind(|| {
-            let _sender = dispatcher
-                .sender
-                .lock()
-                .expect("lock sender for poison test");
-            panic!("poison linux cleanup dispatcher mutex");
-        });
-
-        assert!(
-            dispatcher.ensure_worker_for_test(),
-            "poisoned best-effort cleanup state should recover instead of panicking"
-        );
-        assert_eq!(
-            linux_cleanup_worker_spawn_count(),
-            before + 1,
-            "the first post-poison recovery should start exactly one worker"
-        );
-    }
-
-    #[cfg(all(unix, target_os = "linux"))]
-    #[test]
-    fn start_process_tree_cleanup_reports_when_retry_dispatch_is_unavailable() {
-        let _guard = linux_cleanup_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        linux_cleanup_dispatcher().reset_for_test();
-        force_linux_cleanup_worker_spawn_failures(1);
-        let _ = take_linux_cleanup_warning_for_test();
-
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build tokio runtime");
-        let mut child = runtime
-            .block_on(async {
-                let mut command = tokio::process::Command::new("sh");
-                command.arg("-c").arg("exec sleep 5");
-                configure_command_for_process_tree(&mut command);
-                command.spawn()
-            })
-            .expect("spawn child");
-        let cleanup = ProcessTreeCleanup::new(&child).expect("capture cleanup");
-
-        start_process_tree_cleanup(cleanup);
-        runtime
-            .block_on(async { child.wait().await })
-            .expect("wait child after cleanup");
-
-        let warning = take_linux_cleanup_warning_for_test()
-            .expect("dispatch failure should emit an explicit warning");
-        assert!(
-            warning.contains("async retry dispatch unavailable"),
-            "{warning}"
         );
     }
 }
@@ -1137,12 +843,35 @@ pub(crate) fn filtered_ambient_command_env_os_pairs(
 ) -> Box<dyn Iterator<Item = (OsString, OsString)>> {
     let provider = SecretCliProgram::from_program(program);
     Box::new(std::env::vars_os().filter_map(move |(key, value)| {
-        let provider = provider?;
-        let allowed = key.to_str().is_some_and(|key| {
-            is_allowed_command_env_var(provider, CommandEnvSource::Ambient, key)
-        });
-        allowed.then_some((key, value))
+        sanitize_ambient_command_env_pair(Some(provider?), key, value)
     }))
+}
+
+fn sanitize_ambient_command_env_pair(
+    provider: Option<SecretCliProgram>,
+    key: OsString,
+    value: OsString,
+) -> Option<(OsString, OsString)> {
+    let Some(provider) = provider else {
+        return Some((key, value));
+    };
+
+    let allowed = key
+        .to_str()
+        .is_some_and(|key| is_allowed_command_env_var(provider, CommandEnvSource::Ambient, key));
+    if !allowed {
+        best_effort_zeroize_os_string(key);
+        best_effort_zeroize_os_string(value);
+        return None;
+    }
+
+    let is_search_path = key.to_str().is_some_and(is_command_search_path_env_var);
+    if !is_search_path {
+        return Some((key, value));
+    }
+
+    let sanitized = sanitize_ambient_command_search_path(value.as_os_str())?;
+    Some((key, sanitized))
 }
 
 fn is_allowed_command_env_var(
@@ -1152,10 +881,6 @@ fn is_allowed_command_env_var(
 ) -> bool {
     if matches!(source, CommandEnvSource::Explicit) && is_command_search_path_env_var(key) {
         return false;
-    }
-
-    if is_command_proxy_env_var(key) {
-        return matches!(source, CommandEnvSource::Explicit);
     }
 
     const COMMON_ALLOWED: &[&str] = &[
@@ -1188,6 +913,14 @@ fn is_allowed_command_env_var(
         "SSL_CERT_DIR",
         "REQUESTS_CA_BUNDLE",
         "CURL_CA_BUNDLE",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "all_proxy",
     ];
 
     if COMMON_ALLOWED
@@ -1219,30 +952,6 @@ fn is_command_search_path_env_var(key: &str) -> bool {
         .any(|candidate| env_var_name_matches(key, candidate))
 }
 
-#[cfg(test)]
-pub(crate) fn ambient_command_env_var_allowed_for_test(program: &str, key: &str) -> bool {
-    let Some(provider) = SecretCliProgram::from_program(program) else {
-        return true;
-    };
-
-    is_allowed_command_env_var(provider, CommandEnvSource::Ambient, key)
-}
-
-fn is_command_proxy_env_var(key: &str) -> bool {
-    [
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "NO_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "no_proxy",
-        "all_proxy",
-    ]
-    .iter()
-    .any(|candidate| env_var_name_matches(key, candidate))
-}
-
 #[cfg(not(windows))]
 fn resolve_builtin_program(
     snapshot: &CommandEnvSnapshot,
@@ -1270,10 +979,19 @@ fn resolve_builtin_program(
 
 #[cfg(not(windows))]
 fn resolve_program_on_path(program: &str, path: &OsStr) -> Option<PathBuf> {
+    resolve_program_on_path_with(program, path, trusted_builtin_search_directory)
+}
+
+#[cfg(not(windows))]
+fn resolve_program_on_path_with(
+    program: &str,
+    path: &OsStr,
+    mut trust_directory: impl FnMut(&Path) -> bool,
+) -> Option<PathBuf> {
     for directory in std::env::split_paths(path) {
-        let Some(directory) = trusted_command_search_directory(directory) else {
+        if !trust_directory(directory.as_path()) {
             continue;
-        };
+        }
         let candidates = [OsString::from(program)];
 
         for candidate_name in candidates {
@@ -1286,18 +1004,19 @@ fn resolve_program_on_path(program: &str, path: &OsStr) -> Option<PathBuf> {
     None
 }
 
-fn trusted_command_search_directory(directory: PathBuf) -> Option<PathBuf> {
-    if !directory.is_absolute() {
+fn sanitize_ambient_command_search_path(path: &OsStr) -> Option<OsString> {
+    let trusted_directories = std::env::split_paths(path)
+        .filter(|directory| trusted_builtin_search_directory(directory.as_path()))
+        .collect::<Vec<_>>();
+    if trusted_directories.is_empty() {
         return None;
     }
-
-    let canonical = std::fs::canonicalize(directory).ok()?;
-    is_trusted_command_search_directory(canonical.as_path()).then_some(canonical)
+    std::env::join_paths(trusted_directories).ok()
 }
 
-#[cfg(not(windows))]
-fn is_trusted_command_search_directory(directory: &Path) -> bool {
-    const TRUSTED_DIRECTORIES: &[&str] = &[
+#[cfg(unix)]
+fn trusted_builtin_search_directory(directory: &Path) -> bool {
+    const TRUSTED_DIRS: &[&str] = &[
         "/bin",
         "/sbin",
         "/usr/bin",
@@ -1305,21 +1024,50 @@ fn is_trusted_command_search_directory(directory: &Path) -> bool {
         "/usr/local/bin",
         "/usr/local/sbin",
         "/opt/homebrew/bin",
-        "/opt/homebrew/sbin",
         "/opt/local/bin",
-        "/opt/local/sbin",
-        "/nix/var/nix/profiles/default/bin",
-        "/run/current-system/sw/bin",
+        "/snap/bin",
     ];
 
-    TRUSTED_DIRECTORIES
-        .iter()
-        .any(|candidate| directory == Path::new(candidate))
+    directory.is_absolute()
+        && TRUSTED_DIRS
+            .iter()
+            .any(|candidate| directory == Path::new(candidate))
 }
 
 #[cfg(windows)]
-fn is_trusted_command_search_directory(directory: &Path) -> bool {
-    directory.is_absolute()
+fn trusted_builtin_search_directory(directory: &Path) -> bool {
+    if !directory.is_absolute() {
+        return false;
+    }
+
+    trusted_builtin_windows_roots()
+        .into_iter()
+        .any(|root| directory.starts_with(root))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn trusted_builtin_search_directory(_directory: &Path) -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn trusted_builtin_windows_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for key in [
+        "SystemRoot",
+        "SYSTEMROOT",
+        "ProgramFiles",
+        "PROGRAMFILES",
+        "ProgramFiles(x86)",
+        "PROGRAMFILES(X86)",
+        "ProgramW6432",
+        "PROGRAMW6432",
+    ] {
+        if let Some(root) = std::env::var_os(key).filter(|value| !value.is_empty()) {
+            roots.push(PathBuf::from(root));
+        }
+    }
+    roots
 }
 
 #[cfg(windows)]
@@ -1328,10 +1076,25 @@ fn resolve_program_on_path_with_extensions(
     path: &OsStr,
     path_extensions: &[String],
 ) -> Option<PathBuf> {
+    resolve_program_on_path_with_extensions_and_trust(
+        program,
+        path,
+        path_extensions,
+        trusted_builtin_search_directory,
+    )
+}
+
+#[cfg(windows)]
+fn resolve_program_on_path_with_extensions_and_trust(
+    program: &str,
+    path: &OsStr,
+    path_extensions: &[String],
+    mut trust_directory: impl FnMut(&Path) -> bool,
+) -> Option<PathBuf> {
     for directory in std::env::split_paths(path) {
-        let Some(directory) = trusted_command_search_directory(directory) else {
+        if !trust_directory(directory.as_path()) {
             continue;
-        };
+        }
         let candidates = command_path_candidates(program, path_extensions);
 
         for candidate_name in candidates {
@@ -1393,7 +1156,12 @@ fn is_launchable_program_path(path: &Path) -> bool {
 
 #[cfg(test)]
 pub(crate) fn resolve_program_on_path_for_test(program: &str, path: &OsStr) -> Option<PathBuf> {
-    resolve_program_on_path(program, path)
+    resolve_program_on_path_with(program, path, Path::is_absolute)
+}
+
+#[cfg(test)]
+pub(crate) fn sanitize_ambient_command_search_path_for_test(path: &OsStr) -> Option<OsString> {
+    sanitize_ambient_command_search_path(path)
 }
 
 #[cfg(all(test, windows))]
@@ -1403,7 +1171,12 @@ pub(crate) fn resolve_program_on_path_with_extensions_for_test(
     path_ext: Option<&OsStr>,
 ) -> Option<PathBuf> {
     let path_extensions = command_path_extensions(path_ext);
-    resolve_program_on_path_with_extensions(program, path, path_extensions.as_slice())
+    resolve_program_on_path_with_extensions_and_trust(
+        program,
+        path,
+        path_extensions.as_slice(),
+        Path::is_absolute,
+    )
 }
 
 fn best_effort_zeroize_os_string(value: OsString) {

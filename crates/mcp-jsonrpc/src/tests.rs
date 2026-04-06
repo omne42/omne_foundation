@@ -318,6 +318,7 @@ mod incoming_value_tests {
         let _guard = detached_runtime_test_guard()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::background_runtime::reset_detached_runtime_for_test();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -395,6 +396,7 @@ mod incoming_value_tests {
 
             drop(client);
         });
+        crate::background_runtime::reset_detached_runtime_for_test();
     }
 
     #[test]
@@ -402,6 +404,7 @@ mod incoming_value_tests {
         let _guard = detached_runtime_test_guard()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::background_runtime::reset_detached_runtime_for_test();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -457,6 +460,7 @@ mod incoming_value_tests {
 
             drop(client);
         });
+        crate::background_runtime::reset_detached_runtime_for_test();
     }
 
     #[test]
@@ -777,7 +781,7 @@ mod stats_tests {
         crate::background_runtime::reset_detached_runtime_for_test();
     }
 
-    fn detached_runtime_test_guard() -> &'static Mutex<()> {
+    fn detached_runtime_test_guard() -> &'static std::sync::Mutex<()> {
         super::detached_runtime_test_guard()
     }
 

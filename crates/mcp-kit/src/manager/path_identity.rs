@@ -23,10 +23,10 @@ pub(crate) fn resolve_connection_cwd_with_base(
         };
         base.join(cwd)
     };
-    Ok(stable_connection_cwd_identity(&resolved))
+    stable_connection_cwd_identity(&resolved)
 }
 
-pub(crate) fn stable_connection_cwd_identity(path: &Path) -> PathBuf {
+pub(crate) fn stable_connection_cwd_identity(path: &Path) -> anyhow::Result<PathBuf> {
     let mut normalized = PathBuf::new();
     let mut can_follow_existing_components = true;
 
@@ -46,17 +46,16 @@ pub(crate) fn stable_connection_cwd_identity(path: &Path) -> PathBuf {
 
                 match std::fs::symlink_metadata(&normalized) {
                     Ok(_) => {
-                        if let Ok(canonical) = std::fs::canonicalize(&normalized) {
-                            normalized = canonical;
-                        }
+                        normalized = std::fs::canonicalize(&normalized)?;
                     }
-                    Err(_) => {
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                         can_follow_existing_components = false;
                     }
+                    Err(err) => return Err(err.into()),
                 }
             }
         }
     }
 
-    normalized
+    Ok(normalized)
 }

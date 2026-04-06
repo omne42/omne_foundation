@@ -83,7 +83,8 @@ fn stable_connection_cwd_identity_preserves_symlink_parent_semantics() {
     std::os::unix::fs::symlink(&child, base.join("link")).expect("create symlink");
 
     let resolved =
-        super::path_identity::stable_connection_cwd_identity(&base.join("link/../sibling"));
+        super::path_identity::stable_connection_cwd_identity(&base.join("link/../sibling"))
+            .expect("resolve symlink parent semantics");
     assert_eq!(resolved, sibling);
 }
 
@@ -99,7 +100,8 @@ fn stable_connection_cwd_identity_keeps_symlink_target_for_missing_suffix() {
     std::os::unix::fs::symlink(&child, base.join("link")).expect("create symlink");
 
     let resolved =
-        super::path_identity::stable_connection_cwd_identity(&base.join("link/../missing/nested"));
+        super::path_identity::stable_connection_cwd_identity(&base.join("link/../missing/nested"))
+            .expect("resolve missing suffix through symlink target");
     assert_eq!(resolved, real.join("missing/nested"));
 }
 
@@ -107,8 +109,10 @@ fn stable_connection_cwd_identity_keeps_symlink_target_for_missing_suffix() {
 fn stable_connection_cwd_identity_collapses_missing_parent_segments_lexically() {
     let root = std::env::temp_dir().join("mcp-kit-missing-parent");
     let resolved =
-        super::path_identity::stable_connection_cwd_identity(&root.join("missing/../child"));
-    let expected = super::path_identity::stable_connection_cwd_identity(&root.join("child"));
+        super::path_identity::stable_connection_cwd_identity(&root.join("missing/../child"))
+            .expect("resolve missing parent lexically");
+    let expected = super::path_identity::stable_connection_cwd_identity(&root.join("child"))
+        .expect("resolve expected child");
     assert_eq!(resolved, expected);
 }
 
@@ -185,19 +189,19 @@ fn built_in_roots_list_returns_expected_shape() {
 #[test]
 fn stdout_log_path_within_root_accepts_relative_path() {
     let root = std::env::temp_dir().join("workspace");
-    assert!(stdout_log_path_within_root(
-        Path::new("logs/server.stdout.log"),
-        &root
-    ));
+    assert!(
+        stdout_log_path_within_root(Path::new("logs/server.stdout.log"), &root)
+            .expect("stdout_log within root")
+    );
 }
 
 #[test]
 fn stdout_log_path_within_root_rejects_relative_parent_escape() {
     let root = std::env::temp_dir().join("workspace");
-    assert!(!stdout_log_path_within_root(
-        Path::new("../outside.log"),
-        &root
-    ));
+    assert!(
+        !stdout_log_path_within_root(Path::new("../outside.log"), &root)
+            .expect("stdout_log parent escape should be rejected")
+    );
 }
 
 #[test]
@@ -205,7 +209,7 @@ fn stdout_log_path_within_root_accepts_absolute_path_after_root_absolutize() {
     let base = std::env::temp_dir();
     let root = absolutize_with_base(Path::new("workspace"), &base);
     let log_path = root.join("logs/server.stdout.log");
-    assert!(stdout_log_path_within_root(&log_path, &root));
+    assert!(stdout_log_path_within_root(&log_path, &root).expect("absolute path within root"));
 }
 
 #[cfg(unix)]
@@ -218,10 +222,10 @@ fn stdout_log_path_within_root_rejects_symlink_escape() {
     std::fs::create_dir_all(&outside).unwrap();
     std::os::unix::fs::symlink(&outside, root.join("logs")).unwrap();
 
-    assert!(!stdout_log_path_within_root(
-        Path::new("logs/server.stdout.log"),
-        &root
-    ));
+    assert!(
+        !stdout_log_path_within_root(Path::new("logs/server.stdout.log"), &root)
+            .expect("symlink escape should be rejected")
+    );
 }
 
 #[cfg(unix)]
@@ -233,10 +237,10 @@ fn stdout_log_path_within_root_accepts_symlink_that_stays_within_root() {
     std::fs::create_dir_all(&real_logs).unwrap();
     std::os::unix::fs::symlink(&real_logs, root.join("logs")).unwrap();
 
-    assert!(stdout_log_path_within_root(
-        Path::new("logs/server.stdout.log"),
-        &root
-    ));
+    assert!(
+        stdout_log_path_within_root(Path::new("logs/server.stdout.log"), &root)
+            .expect("symlink staying within root should be accepted")
+    );
 }
 
 #[test]
@@ -306,7 +310,7 @@ fn session_notify_returns_error_without_tokio_time_driver() {
 fn stdout_log_path_within_root_rejects_outside_absolute_path() {
     let root = std::env::temp_dir().join("workspace");
     let log_path = std::env::temp_dir().join("other/server.stdout.log");
-    assert!(!stdout_log_path_within_root(&log_path, &root));
+    assert!(!stdout_log_path_within_root(&log_path, &root).expect("outside absolute path"));
 }
 
 #[test]
@@ -314,7 +318,22 @@ fn stdout_log_path_within_root_accepts_equivalent_root_with_parent_segments() {
     let root = std::env::temp_dir().join("workspace");
     let root_with_parent = root.join("nested").join("..");
     let log_path = root.join("logs/server.stdout.log");
-    assert!(stdout_log_path_within_root(&log_path, &root_with_parent));
+    assert!(
+        stdout_log_path_within_root(&log_path, &root_with_parent)
+            .expect("equivalent root with parent segments")
+    );
+}
+
+#[test]
+fn stdout_log_path_within_root_propagates_non_not_found_errors() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let root = tempdir.path().join("workspace");
+    std::fs::create_dir_all(&root).expect("create root");
+    std::fs::write(root.join("logs"), b"not a directory").expect("create blocking file");
+
+    let err = stdout_log_path_within_root(Path::new("logs/server.stdout.log"), &root)
+        .expect_err("non-directory existing prefix should be reported");
+    assert_eq!(err.kind(), std::io::ErrorKind::NotADirectory);
 }
 
 #[test]
@@ -348,6 +367,19 @@ fn resolve_connection_cwd_with_base_rejects_relative_base() {
             .contains("relative MCP cwd base must be absolute"),
         "{err:#}"
     );
+}
+
+#[test]
+fn resolve_connection_cwd_with_base_propagates_non_not_found_errors() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let base = tempdir.path().join("workspace");
+    std::fs::create_dir_all(&base).expect("create base");
+    std::fs::write(base.join("file"), b"not a directory").expect("create blocking file");
+
+    let err = resolve_connection_cwd_with_base(Some(&base), Path::new("file/child"))
+        .expect_err("non-directory existing prefix should be reported");
+    let io_err = err.downcast_ref::<std::io::Error>().expect("io error");
+    assert_eq!(io_err.kind(), std::io::ErrorKind::NotADirectory);
 }
 
 #[test]

@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit`：connection cwd identity 与 `stdout_log.path` root 边界检查现在只把 `NotFound` 视为“缺失后缀”；`ENOTDIR`、`EACCES` 等真实文件系统错误会直接上抛，不再被误吞成合法路径前缀或普通越界。
 - `mcp-kit`：`stdio.env` 现在允许合法的空字符串值和纯空白值，恢复与进程环境变量语义一致的配置边界；仍然继续拒绝空 key。
 - `mcp-kit`：config 驱动 `stdio.stdout_log.path` 的 root 边界检查改为绑定 `mcp.json` thread root，而不是连接请求的 `cwd`；子目录请求不再把合法的 thread-root 日志路径误判为越界。
 - `mcp-kit`：`Connection::drop` 的 best-effort child 回收现在在没有 Tokio runtime 时也会切到独立线程执行 `wait()`；不再停留在只 `start_kill()` 不 reap 的状态，从而避免同步析构路径留下 zombie 子进程。

@@ -1,8 +1,9 @@
 use std::error::Error as StdError;
 use std::fmt::{self, Display, Formatter};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use i18n_kit::{Catalog, Locale, TranslationCatalog, TranslationResolution};
+use text_assets_kit::SharedRuntimeHandle;
 
 use crate::catalog_error::{CatalogInitError, CatalogLocaleError};
 use crate::{resolve_locale_from_argv, resolve_locale_from_cli_args};
@@ -18,7 +19,7 @@ use crate::{resolve_locale_from_argv, resolve_locale_from_cli_args};
 /// pretending the handle is itself a pure `Catalog`.
 pub struct GlobalCatalog {
     default_locale: Locale,
-    inner: RwLock<Option<Arc<dyn Catalog>>>,
+    inner: SharedRuntimeHandle<dyn Catalog>,
 }
 
 impl GlobalCatalog {
@@ -26,7 +27,7 @@ impl GlobalCatalog {
     pub const fn new(default_locale: Locale) -> Self {
         Self {
             default_locale,
-            inner: RwLock::new(None),
+            inner: SharedRuntimeHandle::new(),
         }
     }
 
@@ -34,7 +35,7 @@ impl GlobalCatalog {
     where
         C: Catalog + 'static,
     {
-        *write_unpoisoned(&self.inner) = Some(Arc::new(catalog));
+        self.inner.replace_shared(Arc::new(catalog));
     }
 
     #[must_use]
@@ -104,7 +105,7 @@ impl GlobalCatalog {
     }
 
     fn current_catalog(&self) -> Option<Arc<dyn Catalog>> {
-        read_unpoisoned(&self.inner).as_ref().map(Arc::clone)
+        self.inner.current()
     }
 }
 
@@ -126,14 +127,6 @@ impl Display for UninitializedCatalog {
 }
 
 impl StdError for UninitializedCatalog {}
-
-fn read_unpoisoned<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
-    lock.read().unwrap_or_else(|poison| poison.into_inner())
-}
-
-fn write_unpoisoned<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
-    lock.write().unwrap_or_else(|poison| poison.into_inner())
-}
 
 #[cfg(test)]
 mod tests {

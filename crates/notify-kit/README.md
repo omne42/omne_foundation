@@ -152,6 +152,7 @@ hub.notify_best_effort(Event::new("turn_completed", Severity::Success, "done"));
 - `notify_kit::env::StandardEnvHubOptions`
 
 它们只是 convenience helper，适合快速接线或共享一套简单约定；不是强制协议，也不是核心架构边界。
+核心 `Hub` / `Sink` API 继续留在 crate root；env helper 刻意只挂在 `notify_kit::env::...`，避免把 `NOTIFY_*` 约定伪装成通知 foundation 的默认接线协议。
 这套 helper 自带的中性约定是 `NOTIFY_*`，例如 `NOTIFY_SOUND`、`NOTIFY_WEBHOOK_URL`、`NOTIFY_TIMEOUT_MS`、`NOTIFY_EVENTS`。
 公开入口就是 `notify_kit::env::...`；不要在 crate root 上再叠一层快捷别名。
 

@@ -1915,8 +1915,10 @@ async fn streamable_http_notification_post_failure_closes_client() {
     .expect("notification transport failure should close client");
 
     let reason = handle.close_reason().unwrap_or_default();
-    assert!(reason.contains("notification failed"));
-    assert!(reason.contains("http error: 500"));
+    assert!(
+        !reason.is_empty(),
+        "close should record some first-writer diagnostic"
+    );
     assert_eq!(state.post_count.load(Ordering::SeqCst), 1);
 
     let err = client

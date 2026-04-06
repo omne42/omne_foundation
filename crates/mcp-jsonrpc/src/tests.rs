@@ -8,6 +8,98 @@ fn detached_runtime_test_guard() -> &'static std::sync::Mutex<()> {
     DETACHED_RUNTIME_TEST_GUARD.get_or_init(|| std::sync::Mutex::new(()))
 }
 
+mod close_tests {
+    use super::*;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
+    use std::time::Duration;
+
+    struct BlockingWrite {
+        entered: Arc<AtomicBool>,
+    }
+
+    impl tokio::io::AsyncWrite for BlockingWrite {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.entered.store(true, Ordering::Relaxed);
+            Poll::Pending
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Pending
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_with_timeout_drains_pending_before_close_stage_finishes() {
+        let entered = Arc::new(AtomicBool::new(false));
+        let writer = BlockingWrite {
+            entered: entered.clone(),
+        };
+        let (client_stream, _server_stream) = tokio::io::duplex(64);
+        let (client_read, _client_write) = tokio::io::split(client_stream);
+
+        let mut client = Client::connect_io(client_read, writer)
+            .await
+            .expect("client connect");
+        let handle = client.handle();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let mut pending = lock_pending(&handle.pending);
+            pending.insert(Id::Integer(1), tx);
+        }
+
+        let write_handle = handle.clone();
+        let write_task = tokio::spawn(async move {
+            let _ = write_handle
+                .notify("demo/stuck", Some(serde_json::json!({ "x": 1 })))
+                .await;
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !entered.load(Ordering::Relaxed) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("write task should enter write lock");
+
+        let err = client
+            .wait_with_timeout(Duration::from_millis(20), WaitOnTimeout::ReturnError)
+            .await
+            .expect_err("close stage should time out when write lock is held");
+        assert!(err.is_wait_timeout(), "err={err:?}");
+
+        let pending_err = tokio::time::timeout(Duration::from_secs(1), rx)
+            .await
+            .expect("pending request should be drained")
+            .expect("sender should resolve")
+            .expect_err("pending request should fail closed");
+        assert!(
+            matches!(
+                pending_err,
+                Error::Protocol(ProtocolError {
+                    kind: ProtocolErrorKind::Closed,
+                    ..
+                })
+            ),
+            "err={pending_err:?}"
+        );
+
+        write_task.abort();
+    }
+}
+
 mod line_limit_tests {
     use super::*;
 

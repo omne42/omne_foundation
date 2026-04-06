@@ -645,6 +645,26 @@ impl ClientHandle {
         self.close_with_reason(reason).await;
     }
 
+    fn mark_closed(&self, reason: &str, err: &Error) {
+        self.closed.store(true, Ordering::Relaxed);
+        let _ = self.close_reason.set(reason.to_string());
+        drain_pending(&self.pending, err);
+    }
+
+    async fn finish_close_write_end(&self) {
+        let mut write = self.write.lock().await;
+        let _ = write.shutdown().await;
+        // Many `AsyncWrite` impls (e.g. `tokio::process::ChildStdin`) only fully close on drop.
+        // Replacing the writer guarantees the underlying write end is closed.
+        let _ = std::mem::replace(&mut *write, Box::new(tokio::io::sink()));
+    }
+
+    fn finish_close_write_end_best_effort(&self) {
+        if let Ok(mut write) = self.write.try_lock() {
+            let _ = std::mem::replace(&mut *write, Box::new(tokio::io::sink()));
+        }
+    }
+
     fn schedule_close_once(&self, reason: String) {
         if self
             .closed
@@ -653,21 +673,19 @@ impl ClientHandle {
         {
             return;
         }
+        let err = Error::protocol(ProtocolErrorKind::Closed, reason.clone());
         let _ = self.close_reason.set(reason.clone()); // pre-commit: allow-let-underscore
+        drain_pending(&self.pending, &err);
         let handle = self.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             drop(runtime.spawn(async move {
-                handle.close_with_reason(reason).await;
+                handle.finish_close_write_end().await;
             }));
             return;
         }
 
         // No runtime available (e.g. sync context): avoid panicking and perform best-effort close.
-        let err = Error::protocol(ProtocolErrorKind::Closed, reason);
-        drain_pending(&handle.pending, &err);
-        if let Ok(mut write) = handle.write.try_lock() {
-            drop(std::mem::replace(&mut *write, Box::new(tokio::io::sink())));
-        }
+        handle.finish_close_write_end_best_effort();
     }
 
     fn check_closed(&self) -> Result<(), Error> {
@@ -693,16 +711,8 @@ impl ClientHandle {
 
     pub(crate) async fn close_with_error(&self, reason: impl Into<String>, err: Error) {
         let reason = reason.into();
-
-        self.closed.store(true, Ordering::Relaxed);
-        let _ = self.close_reason.set(reason);
-
-        drain_pending(&self.pending, &err);
-        let mut write = self.write.lock().await;
-        let _ = write.shutdown().await;
-        // Many `AsyncWrite` impls (e.g. `tokio::process::ChildStdin`) only fully close on drop.
-        // Replacing the writer guarantees the underlying write end is closed.
-        let _ = std::mem::replace(&mut *write, Box::new(tokio::io::sink()));
+        self.mark_closed(&reason, &err);
+        self.finish_close_write_end().await;
     }
 
     pub async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), Error> {
@@ -1205,7 +1215,10 @@ impl Client {
         for task in self.transport_tasks.drain(..) {
             task.abort();
         }
-        if tokio::time::timeout_at(deadline, self.handle.close_with_reason("client closed"))
+        let close_reason = "client closed".to_string();
+        let close_err = Error::protocol(ProtocolErrorKind::Closed, close_reason.clone());
+        self.handle.mark_closed(&close_reason, &close_err);
+        if tokio::time::timeout_at(deadline, self.handle.finish_close_write_end())
             .await
             .is_err()
         {

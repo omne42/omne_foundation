@@ -23,7 +23,6 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- --help
 
 - `--root <path>`：workspace root；用于相对路径解析，并作为 stdio server 的工作目录
 - `--config <path>`：覆盖配置文件路径（绝对或相对 `--root`；默认要求位于 `--root` 内）
-  - 一旦定位到具体 config 文件，文件内相对 `unix_path` / `stdout_log.path` 会按该 config 文件所在目录解析；默认发现到的是 `--root` 下的 `mcp.json`，所以常见场景里两者等价
 - `--json`：输出紧凑 JSON（默认 pretty JSON）
 - `--timeout-ms <ms>`：per-request 超时（默认 30000）
 
@@ -59,7 +58,7 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- list-servers
 说明：
 
 - 为了避免意外打印 secrets，`list-servers` 默认不输出 stdio `argv` 明文；如需查看，显式加 `--show-argv`。
-- 同样地，`list-servers` 对 `env/http_headers/secret_http_headers` 只输出 key 列表（`env_keys/http_header_keys/secret_http_header_keys`），不输出具体值；bearer auth 只暴露 `has_bearer_token_secret` 布尔位。
+- 同样地，`list-servers` 对 `env/http_headers/env_http_headers` 只输出 key 列表（`env_keys/http_header_keys/env_http_header_keys`），不输出具体值。
 
 ### list-tools / list-resources / list-prompts
 

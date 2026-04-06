@@ -17,7 +17,6 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 行为要点：
 
 - `cwd`：child 的工作目录是 `--root`（CLI）或你传入 `Manager::connect(..., cwd)` 的目录
-  direct `Manager` 连接入口要求这里是绝对路径；相对 `cwd` 只在 config/thread-root 驱动路径下解析
 - `stderr`：默认收口到空设备；`mcp-kit` 不会把 child 的 stderr 直接继承到宿主进程
 - `kill_on_drop = true`：连接被 drop 时，child 会被结束
 
@@ -40,7 +39,7 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 
 配置字段（仅 unix 支持）：
 
-- `unix_path`（必填）：socket 路径（相对路径会按当前 config 文件所在目录解析；默认发现的 config 位于 `--root` 下时，与“相对 `--root`”等价，且不能通过 `..` 静默逃逸该目录）
+- `unix_path`（必填）：socket 路径（相对路径会按 `--root` 解析）
 
 约束：
 
@@ -62,20 +61,15 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 
 - `url`（可选）：例如 `https://example.com/mcp`（同时用于 SSE 与 POST）
 - `sse_url` + `http_url`（可选）：分离的 SSE 与 POST URL（两者必须同时设置；不能与 `url` 同时出现）
-- `streamable_http_proxy_mode`（可选）：`ignore_system`（默认）或 `use_system`；控制是否读取系统代理环境变量
 - `http_headers`（可选）：静态 header（不涉及 secrets 时可在 Untrusted 下使用）
-- `bearer_token_secret`（可选）：通过 `secret-kit` 解析 secret spec 并注入 `Authorization: Bearer ...`（Untrusted 下拒绝）
-- `secret_http_headers`（可选）：通过 `secret-kit` 解析 header secret spec（Untrusted 下拒绝）
-- legacy `bearer_token_env_var` / `env_http_headers` 仍可读取，但会先规范化成 `secret://env/...`
+- `bearer_token_env_var`（可选）：从 env 读取 token 并注入 `Authorization: Bearer ...`（Untrusted 下拒绝）
+- `env_http_headers`（可选）：从 env 读取 header 值（Untrusted 下拒绝）
 
 行为要点：
 
 - 会自动添加 header：`MCP-Protocol-Version: <protocol_version>`
 - 默认不跟随 redirects（减少 SSRF 风险；可在 `mcp-jsonrpc` 里 opt-in）
-- 默认不读取系统代理环境变量；只有把 `streamable_http_proxy_mode` 设为 `use_system` 时，才会沿用 `HTTP_PROXY` / `HTTPS_PROXY`
 - `mcp-kit` 会把自己的 per-request timeout 设置到 `mcp-jsonrpc` 的 HTTP request timeout
-- Trusted 模式下 transport URL/header placeholder 只支持 `${MCP_ROOT}` / `${CLAUDE_PLUGIN_ROOT}`，不再支持 `${ENV}`
-- Trusted 模式下如需解析 secret-backed auth，还必须显式提供 `Manager::with_streamable_http_secret_context(...)`，或显式 opt-in `Manager::with_ambient_streamable_http_secrets()`
 
 更完整的实现细节（SSE 数据格式、`mcp-session-id`、POST 回包形态、timeout 语义）见 [`streamable_http 传输详解`](streamable_http.md) 与 [`调优与限制`](tuning.md)。
 

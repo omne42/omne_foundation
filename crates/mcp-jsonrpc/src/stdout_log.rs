@@ -94,7 +94,7 @@ impl LogState {
         let current_len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
         let next_part = next_rotating_log_part(&base_path).await.unwrap_or(1);
         if let Some(max_parts) = max_parts {
-            prune_rotating_log_parts(&base_path, max_parts).await?;
+            let _ = prune_rotating_log_parts(&base_path, max_parts).await;
         }
 
         Ok(Self {
@@ -122,7 +122,7 @@ impl LogState {
                 self.file.flush().await?;
                 self.next_part = rotate_log_file(&self.base_path, self.next_part).await?;
                 if let Some(max_parts) = self.max_parts {
-                    prune_rotating_log_parts(&self.base_path, max_parts).await?;
+                    let _ = prune_rotating_log_parts(&self.base_path, max_parts).await;
                 }
                 self.file = open_stdout_log_append(&self.base_path).await?;
                 self.current_len = 0;
@@ -265,19 +265,9 @@ pub(crate) async fn prune_rotating_log_parts(
     if max_parts == 0 {
         return Ok(());
     }
-    let parts = list_rotating_log_parts(base_path).await?;
-    prune_rotating_log_parts_from_list(parts, max_parts).await
-}
-
-async fn prune_rotating_log_parts_from_list(
-    mut parts: Vec<(u32, PathBuf)>,
-    max_parts: u32,
-) -> Result<(), std::io::Error> {
-    if max_parts == 0 {
-        return Ok(());
-    }
-
+    let mut parts = list_rotating_log_parts(base_path).await?;
     parts.sort_by_key(|(part, _)| *part);
+
     let keep = max_parts as usize;
     if parts.len() <= keep {
         return Ok(());
@@ -285,7 +275,7 @@ async fn prune_rotating_log_parts_from_list(
 
     let remove = parts.len().saturating_sub(keep);
     for (_part, path) in parts.into_iter().take(remove) {
-        tokio::fs::remove_file(path).await?;
+        let _ = tokio::fs::remove_file(path).await;
     }
 
     Ok(())
@@ -316,19 +306,6 @@ mod tests {
             parts.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
             vec![4, 5]
         );
-    }
-
-    #[tokio::test]
-    async fn prune_rotating_log_parts_propagates_delete_errors() {
-        let dir = tempfile::tempdir().unwrap();
-        let existing = dir.path().join("server.stdout.segment-0002.log");
-        tokio::fs::write(&existing, b"part-2\n").await.unwrap();
-        let missing = dir.path().join("server.stdout.segment-0001.log");
-
-        let err = prune_rotating_log_parts_from_list(vec![(1, missing), (2, existing)], 1)
-            .await
-            .expect_err("delete failures should propagate");
-        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 
     #[tokio::test]

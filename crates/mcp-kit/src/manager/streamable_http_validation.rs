@@ -1,5 +1,3 @@
-use std::net::IpAddr;
-
 use anyhow::Context;
 
 use crate::{ServerConfig, TrustMode, UntrustedStreamableHttpPolicy};
@@ -16,21 +14,15 @@ pub(super) fn validate_streamable_http_config(
         return Ok(());
     }
 
-    for header in server_cfg.http_headers_required().keys() {
+    validate_streamable_http_url_untrusted(policy, server_name, url_field, url)?;
+
+    for header in server_cfg.http_headers().keys() {
         if is_untrusted_sensitive_http_header(header) {
             anyhow::bail!(
                 "refusing to send sensitive http header in untrusted mode: {server_name} header={header} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
             );
         }
     }
-
-    if !policy.allow_custom_headers && !server_cfg.http_headers_required().is_empty() {
-        anyhow::bail!(
-            "refusing to send custom http headers in untrusted mode: {server_name} (set Manager::with_untrusted_streamable_http_policy(...) with allow_custom_headers=true or use TrustMode::Trusted to override)"
-        );
-    }
-
-    validate_streamable_http_url_untrusted(policy, server_name, url_field, url)?;
 
     Ok(())
 }
@@ -60,18 +52,7 @@ pub(super) fn validate_streamable_http_url_untrusted(
     }
 
     http_kit::validate_untrusted_outbound_url(&policy.outbound, &parsed)
-        .map_err(|err| map_untrusted_outbound_url_error(err, server_name, url_field))?;
-
-    if !policy.allow_public_hosts
-        && policy.outbound.allowed_hosts.is_empty()
-        && targets_public_host_without_explicit_untrusted_opt_in(policy, &parsed)?
-    {
-        anyhow::bail!(
-            "refusing to connect arbitrary public streamable http host in untrusted mode: {server_name} field={url_field} (set UntrustedStreamableHttpPolicy::allow_public_hosts=true, configure outbound.allowed_hosts, or use TrustMode::Trusted to override)"
-        );
-    }
-
-    Ok(())
+        .map_err(|err| map_untrusted_outbound_url_error(err, server_name, url_field))
 }
 
 pub(super) async fn validate_streamable_http_url_untrusted_dns(
@@ -103,63 +84,6 @@ fn is_untrusted_sensitive_http_header(header: &str) -> bool {
     header.eq_ignore_ascii_case("authorization")
         || header.eq_ignore_ascii_case("proxy-authorization")
         || header.eq_ignore_ascii_case("cookie")
-}
-
-fn targets_public_host_without_explicit_untrusted_opt_in(
-    policy: &UntrustedStreamableHttpPolicy,
-    url: &reqwest::Url,
-) -> anyhow::Result<bool> {
-    let host = url
-        .host_str()
-        .map(|host| host.trim_end_matches('.'))
-        .ok_or_else(|| anyhow::anyhow!("streamable http url must include a host"))?;
-    let host_for_ip = host.trim_start_matches('[').trim_end_matches(']');
-
-    if is_local_or_single_label_host(host, host_for_ip) {
-        return Ok(false);
-    }
-
-    if host_for_ip.parse::<IpAddr>().is_ok() {
-        if !policy.outbound.allow_private_ips {
-            return Ok(true);
-        }
-
-        let mut public_only_policy = policy.outbound.clone();
-        public_only_policy.allow_private_ips = false;
-        return match http_kit::validate_untrusted_outbound_url(&public_only_policy, url) {
-            Ok(()) => Ok(true),
-            Err(http_kit::UntrustedOutboundError::NonGlobalIpNotAllowed { .. }) => Ok(false),
-            Err(err) => Err(anyhow::anyhow!(
-                "classify untrusted streamable http host after validation: {err}"
-            )),
-        };
-    }
-
-    Ok(true)
-}
-
-fn is_loopback_hostname(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost")
-        || host.eq_ignore_ascii_case("localhost.localdomain")
-        || ends_with_ignore_ascii_case(host, ".localhost")
-}
-
-fn ends_with_ignore_ascii_case(haystack: &str, suffix: &str) -> bool {
-    if suffix.len() > haystack.len() {
-        return false;
-    }
-    haystack
-        .get(haystack.len() - suffix.len()..)
-        .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
-}
-
-fn is_local_or_single_label_host(host: &str, host_for_ip: &str) -> bool {
-    let is_ip_literal = host_for_ip.parse::<IpAddr>().is_ok();
-    let is_single_label = !is_ip_literal && !host.contains('.');
-    is_loopback_hostname(host)
-        || ends_with_ignore_ascii_case(host, ".local")
-        || ends_with_ignore_ascii_case(host, ".localdomain")
-        || is_single_label
 }
 
 fn map_untrusted_outbound_url_error(

@@ -15,13 +15,6 @@
 
 CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 
-当 `--config`（或库层 override path）最终指向了一个具体配置文件后，文件内 server 级相对路径会按“该 config 文件所在目录”解析：
-
-- `servers.<name>.unix_path`
-- `servers.<name>.stdout_log.path`
-
-默认发现到的 `.mcp.json` / `mcp.json` 就位于 `--root` 下，所以常见场景里它和“相对 `--root`”等价；只有显式加载嵌套目录或 `--root` 外部的 config 时，这个区别才会体现出来。
-
 > 保护性限制：为避免异常/恶意配置导致内存放大，`mcp.json`（以及 `.mcp.json`）文件大小上限为 **4MiB**；超过会 fail-closed 报错。
 >
 > 同时，出于安全考虑，配置文件必须是普通文件（regular file）：如果是 symlink/目录/特殊文件，会被拒绝加载。
@@ -88,9 +81,9 @@ CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
   - 兼容性提示：如果你的 server 依赖其它变量（如 `LANG/LC_*`、`XDG_*`、证书/代理相关变量等），请显式写入 `servers.<name>.env`（或保持 `inherit_env=true`）
 - `env`（可选）：KV 字典，注入到 child process
 - `stdout_log`（可选）：stdout 旋转落盘（便于排查协议输出）
-  - `path`（必填）：可为相对路径（相对当前 config 文件所在目录解析；默认发现的 config 位于 `--root` 下时，与“相对 `--root`”等价）
+  - `path`（必填）：可为相对路径（相对 `--root` 解析）
     - 额外约束：`path` 不允许包含 `..` 段（防止路径穿越）
-    - 额外约束：默认要求 `path` 位于当前 config 文件所在目录之下（需要写到该目录外时，CLI：`--allow-stdout-log-outside-root`；代码：`Manager::with_allow_stdout_log_outside_root(true)`）
+    - 额外约束：默认要求 `path` 位于 `--root` 之下（需要写到 root 外时，CLI：`--allow-stdout-log-outside-root`；代码：`Manager::with_allow_stdout_log_outside_root(true)`）
     - 额外约束：出于安全考虑，`path` 不允许包含任何 symlink 路径组件（含父目录/目标文件）
   - `max_bytes_per_part`（可选，默认 1MiB，最小 1）
   - `max_parts`（可选，默认 32，最小 1；`0` 表示不做保留上限：无限保留；手动构造 Rust `StdoutLogConfig` 时也接受 `Some(0)`，并按 unlimited 处理）
@@ -109,11 +102,10 @@ stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)
 
 字段：
 
-- `unix_path`（必填）：可为相对路径（相对当前 config 文件所在目录解析；默认发现的 config 位于 `--root` 下时，与“相对 `--root`”等价）
+- `unix_path`（必填）：可为相对路径（相对 `--root` 解析）
 
 约束：
 
-- `unix_path` 不能包含 `..` path segment；相对路径只能落在当前 config 文件所在目录内部，不允许静默逃逸到该目录外
 - 不支持 `argv/env/stdout_log`（仅用于连接已存在的 unix socket）
 
 安全：
@@ -126,10 +118,9 @@ stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)
 {
   "transport": "streamable_http",
   "url": "https://example.com/mcp",
-  "streamable_http_proxy_mode": "use_system",
   "http_headers": { "X-Client": "my-app" },
-  "bearer_token_secret": "secret://env/MCP_TOKEN",
-  "secret_http_headers": { "X-Api-Key": "secret://env/MCP_API_KEY" }
+  "bearer_token_env_var": "MCP_TOKEN",
+  "env_http_headers": { "X-Api-Key": "MCP_API_KEY" }
 }
 ```
 
@@ -137,27 +128,19 @@ stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)
 
 - `url`（可选）：远程 MCP server URL（同时用于 SSE 与 POST）
 - `sse_url` + `http_url`（可选）：分离的 SSE URL 与 POST URL（两者必须同时设置；不能与 `url` 同时出现）
-- `streamable_http_proxy_mode`（可选）：`"ignore_system"`（默认）或 `"use_system"`；决定是否读取 `HTTP_PROXY` / `HTTPS_PROXY` 等系统代理环境变量
 - `http_headers`（可选）：静态 header
-- `bearer_token_secret`（可选）：通过 `secret-kit` 解析 secret spec，并注入 `Authorization: Bearer ...`
-- `secret_http_headers`（可选）：通过 `secret-kit` 解析每个 header 的 secret spec
-
-兼容性：
-
-- 仍接受 legacy `bearer_token_env_var` / `env_http_headers`
-- 加载后会自动规范化成 `secret://env/...` 的 canonical secret spec 语义
+- `bearer_token_env_var`（可选）：从 env 读取 token，注入 `Authorization: Bearer ...`
+- `env_http_headers`（可选）：从 env 读取 header 值
 
 约束：
 
 - 不支持 `argv/unix_path/env/stdout_log`
-- Trusted 模式下，`url` / `sse_url` / `http_url` / `http_headers` 只允许 `${MCP_ROOT}` / `${CLAUDE_PLUGIN_ROOT}` 两种 root placeholder；不再允许 `${ENV}` 直接注入 transport 配置
-- Trusted 模式下如果要解析 `bearer_token_secret` / `secret_http_headers`，还必须显式提供 secret context：代码里用 `Manager::with_streamable_http_secret_context(...)`，或显式 opt-in `Manager::with_ambient_streamable_http_secrets()`；库默认不会偷偷读取进程环境
 
 安全（默认 Untrusted）：
 
 - 允许连接远程 `https` 且 host 看起来是公网域名的 `url`（默认拒绝 `localhost` / `localhost.localdomain` / `*.localhost`、`*.local` / `*.localdomain`、**单标签 host**、私网/loopback IP 字面量，以及 DNS 解析到非公网 IP 的 hostname）
 - 拒绝发送敏感 header：`Authorization/Cookie/Proxy-Authorization`
-- 拒绝解析 `bearer_token_secret` / `secret_http_headers`（包括 legacy env aliases）
+- 拒绝读取 `bearer_token_env_var` / `env_http_headers`（env secrets）
 
 详见 [`安全模型`](security.md)。
 

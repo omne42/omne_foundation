@@ -42,7 +42,7 @@ let mut manager = mcp_kit::Manager::from_config(
 
 它会把 `config.client().protocol_version / capabilities / roots` 自动灌入 `Manager`：
 
-- `protocol_version`：用于 MCP `initialize`，并在 `streamable_http` 下加到请求 header `MCP-Protocol-Version`。当前实现会对 initialize 返回的 `protocolVersion` 做严格一致性校验；字段缺失或值不一致都会在 strict 模式下 fail-closed 报错。
+- `protocol_version`：用于 MCP `initialize`，并在 `streamable_http` 下加到请求 header `MCP-Protocol-Version`。当前实现会对 initialize 返回的 `protocolVersion` 做严格一致性校验（mismatch 会 fail-closed 报错）。
 - `capabilities`：透传到 initialize；如果启用了 roots，会确保声明 `capabilities.roots`。
 - `roots`：启用后会内建响应 server→client 的 `roots/list`（见下文“server→client handler”）。
 
@@ -71,8 +71,6 @@ let tools = manager
 - `request*` 会自动 `connect + initialize`（若未连接）。
 - timeout 是 `Manager` 级别的 per-request 超时；可用 `.with_timeout(...)` 调整。
 - `mcp_kit::mcp` 只覆盖常用 MCP method 的子集；缺的部分继续用 `serde_json::Value` 即可。
-- direct `Manager` 连接 API 仍要求绝对 `cwd`；只有 config 驱动入口会把相对 `cwd` 锚定到 `Config::thread_root()`。
-- 这些相对 `cwd` 必须保持在显式 base/thread root 内部；包含 `.` / `..` segment 的路径会直接 fail-closed。
 
 ## 连接与会话：把 `Session` 交出去
 
@@ -106,7 +104,7 @@ let tools = session.list_tools().await?;
 
 如果你的 MCP server 会“反向调用”一些 client 侧能力（server→client request），通常需要两件事：
 
-1. 在 initialize 里声明你支持的 client capabilities（`Manager::with_capabilities(...)`，会先做 fail-fast 校验）
+1. 在 initialize 里声明你支持的 client capabilities（`Manager::with_capabilities(...)`）
 2. 实现对应的 request handler（`with_server_request_handler(...)`）
 
 例如（声明 capability + 处理对应的 server→client request；类似一些实现会用到的 `codex/sandbox-state/update`）：
@@ -121,7 +119,7 @@ manager = manager.with_capabilities(json!({
     "experimental": {
         "codex/sandbox-state": { "version": "1.0.0" }
     }
-}))?;
+}));
 
 manager = manager.with_server_request_handler(Arc::new(|ctx: ServerRequestContext| {
     Box::pin(async move {
@@ -167,37 +165,12 @@ use mcp_kit::TrustMode;
 manager = manager.with_trust_mode(TrustMode::Trusted);
 ```
 
-如果该 trusted `streamable_http` 配置还会用到 `bearer_token_secret` / `secret_http_headers`，再额外显式接一层 secret context：
-
-```rust
-use mcp_kit::{StreamableHttpSecretContext, TrustMode};
-use std::sync::Arc;
-
-manager = manager
-    .with_trust_mode(TrustMode::Trusted)
-    .with_streamable_http_secret_context(
-        StreamableHttpSecretContext::from_shared(Arc::new(my_secret_env)),
-    );
-```
-
-如果你明确要沿用 ambient env，也必须显式 opt-in：
-
-```rust
-use mcp_kit::TrustMode;
-manager = manager
-    .with_trust_mode(TrustMode::Trusted)
-    .with_ambient_streamable_http_secrets();
-```
-
 想在“不完全信任”的前提下收紧/放开远程规则，配置：
 
 ```rust
 use mcp_kit::UntrustedStreamableHttpPolicy;
 manager = manager.with_untrusted_streamable_http_policy(UntrustedStreamableHttpPolicy {
-    outbound: http_kit::UntrustedOutboundPolicy {
-        allowed_hosts: vec!["example.com".into()],
-        ..Default::default()
-    },
+    allowed_hosts: vec!["example.com".into()],
     ..Default::default()
 });
 ```
@@ -218,4 +191,4 @@ manager = manager.with_untrusted_streamable_http_policy(UntrustedStreamableHttpP
 - `Manager::connect_io_unchecked(...)`
 - `Manager::connect_jsonrpc_unchecked(...)`
 
-如果你需要调整 `mcp-jsonrpc` 的 `Limits` 或 streamable_http 的更细网络选项（例如 connect_timeout / redirects），推荐先用 `mcp-jsonrpc` 构建 `Client`，再用 `connect_jsonrpc` 接入；如果只是决定是否沿用系统代理环境，`mcp.json` 已经支持 `streamable_http_proxy_mode`。细节见 [`调优与限制`](tuning.md)。
+如果你需要调整 `mcp-jsonrpc` 的 `Limits` 或 streamable_http 的网络选项（例如 connect_timeout / redirects），推荐先用 `mcp-jsonrpc` 构建 `Client`，再用 `connect_jsonrpc` 接入；细节见 [`调优与限制`](tuning.md)。

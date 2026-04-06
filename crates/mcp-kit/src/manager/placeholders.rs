@@ -58,11 +58,7 @@ fn parse_placeholder_segments(template: &str) -> anyhow::Result<Vec<PlaceholderC
     Ok(chunks)
 }
 
-fn expand_placeholders_trusted_with_mode(
-    template: &str,
-    cwd: &Path,
-    allow_env_vars: bool,
-) -> anyhow::Result<String> {
+pub(super) fn expand_placeholders_trusted(template: &str, cwd: &Path) -> anyhow::Result<String> {
     if !template.contains("${") {
         return Ok(template.to_string());
     }
@@ -78,30 +74,13 @@ fn expand_placeholders_trusted_with_mode(
                             anyhow::anyhow!("placeholder `{name}` requires a UTF-8 cwd")
                         })?
                     }
-                    _ if allow_env_vars => {
-                        std::env::var(name).with_context(|| format!("read env var: {name}"))?
-                    }
-                    _ => anyhow::bail!(
-                        "placeholder `{name}` is not allowed in this transport field; only ${{MCP_ROOT}} and ${{CLAUDE_PLUGIN_ROOT}} are supported"
-                    ),
+                    _ => std::env::var(name).with_context(|| format!("read env var: {name}"))?,
                 };
                 out.push_str(&value);
             }
         }
     }
     Ok(out)
-}
-
-#[cfg(test)]
-pub(super) fn expand_placeholders_trusted(template: &str, cwd: &Path) -> anyhow::Result<String> {
-    expand_placeholders_trusted_with_mode(template, cwd, true)
-}
-
-pub(super) fn expand_root_placeholders_trusted(
-    template: &str,
-    cwd: &Path,
-) -> anyhow::Result<String> {
-    expand_placeholders_trusted_with_mode(template, cwd, false)
 }
 
 pub(super) fn expand_placeholders_trusted_os(

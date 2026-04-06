@@ -49,53 +49,15 @@ fn load_json_value_from_file(path: &Path) -> anyhow::Result<Value> {
         .into_value())
 }
 
-fn ensure_absolute_thread_root(thread_root: &Path) -> anyhow::Result<()> {
-    if thread_root.is_absolute() {
-        return Ok(());
-    }
-    anyhow::bail!(
-        "mcp config root must be absolute to avoid cwd-dependent path drift: {}",
-        thread_root.display()
-    );
-}
-
-fn ensure_candidate_discovery_root_exists(thread_root: &Path) -> anyhow::Result<()> {
-    match std::fs::symlink_metadata(thread_root) {
-        Ok(_) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(err).with_context(|| {
-            format!(
-                "inspect MCP config root before candidate discovery: {}",
-                thread_root.display()
-            )
-        }),
-        Err(err) => Err(err).with_context(|| {
-            format!(
-                "inspect MCP config root before candidate discovery: {}",
-                thread_root.display()
-            )
-        }),
-    }
-}
-
-fn canonicalize_existing_ancestor(path: &Path) -> anyhow::Result<Option<PathBuf>> {
+fn canonicalize_existing_ancestor(path: &Path) -> Option<PathBuf> {
     let mut cursor = Some(path);
     while let Some(candidate) = cursor {
-        match std::fs::canonicalize(candidate) {
-            Ok(canonical) => return Ok(Some(canonical)),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                cursor = candidate.parent();
-            }
-            Err(err) => {
-                return Err(err).with_context(|| {
-                    format!(
-                        "canonicalize existing ancestor for MCP config boundary check: {}",
-                        path.display()
-                    )
-                });
-            }
+        if let Ok(canonical) = std::fs::canonicalize(candidate) {
+            return Some(canonical);
         }
+        cursor = candidate.parent();
     }
-    Ok(None)
+    None
 }
 
 fn resolve_override_path(
@@ -113,19 +75,9 @@ fn resolve_override_path(
         return Ok(path);
     }
 
-    let canonical_root = match std::fs::canonicalize(thread_root) {
-        Ok(canonical_root) => canonical_root,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => thread_root.to_path_buf(),
-        Err(err) => {
-            return Err(err).with_context(|| {
-                format!(
-                    "canonicalize MCP config root for override boundary check: {}",
-                    thread_root.display()
-                )
-            });
-        }
-    };
-    if let Some(canonical_override_or_parent) = canonicalize_existing_ancestor(&path)?
+    let canonical_root =
+        std::fs::canonicalize(thread_root).unwrap_or_else(|_| thread_root.to_path_buf());
+    if let Some(canonical_override_or_parent) = canonicalize_existing_ancestor(&path)
         && !canonical_override_or_parent.starts_with(&canonical_root)
     {
         anyhow::bail!(
@@ -149,31 +101,28 @@ async fn load_initial_path_and_value(
             let value = load_json_value_from_file(&path)?;
             Ok(Some((path, value)))
         }
-        None => {
-            ensure_candidate_discovery_root_exists(thread_root)?;
-            Ok(SchemaConfigLoader::new()
-                .add_candidate_file_layer(
-                    "mcp config",
-                    thread_root,
-                    DEFAULT_CONFIG_CANDIDATES,
-                    schema_file_layer_options(false),
-                )
-                .load_optional::<Value>()?
-                .map(|loaded| {
-                    let path = loaded
-                        .layers()
-                        .last()
-                        .and_then(|layer| layer.path())
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "mcp config loader returned a candidate file layer without a path"
-                            )
-                        })?
-                        .to_path_buf();
-                    Ok::<_, anyhow::Error>((path, loaded.into_value()))
-                })
-                .transpose()?)
-        }
+        None => Ok(SchemaConfigLoader::new()
+            .add_candidate_file_layer(
+                "mcp config",
+                thread_root,
+                DEFAULT_CONFIG_CANDIDATES,
+                schema_file_layer_options(false),
+            )
+            .load_optional::<Value>()?
+            .map(|loaded| {
+                let path = loaded
+                    .layers()
+                    .last()
+                    .and_then(|layer| layer.path())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "mcp config loader returned a candidate file layer without a path"
+                        )
+                    })?
+                    .to_path_buf();
+                Ok::<_, anyhow::Error>((path, loaded.into_value()))
+            })
+            .transpose()?),
     }
 }
 
@@ -251,59 +200,6 @@ fn ensure_http_headers_auth_only_for_streamable_http(
     Ok(())
 }
 
-fn ensure_proxy_mode_only_for_streamable_http(
-    name: &str,
-    proxy_mode_present: bool,
-) -> anyhow::Result<()> {
-    if proxy_mode_present {
-        anyhow::bail!(
-            "mcp server {name}: streamable_http_proxy_mode is only valid for transport=streamable_http"
-        );
-    }
-    Ok(())
-}
-
-fn env_secret_spec(env_var: String) -> String {
-    format!("secret://env/{env_var}")
-}
-
-fn coalesce_bearer_token_secret(
-    name: &str,
-    bearer_token_secret: Option<String>,
-    bearer_token_env_var: Option<String>,
-) -> anyhow::Result<Option<String>> {
-    match (bearer_token_secret, bearer_token_env_var) {
-        (Some(_), Some(_)) => anyhow::bail!(
-            "mcp server {name}: set either bearer_token_secret or legacy bearer_token_env_var, not both"
-        ),
-        (Some(secret), None) => Ok(Some(secret)),
-        (None, Some(env_var)) => Ok(Some(env_secret_spec(env_var))),
-        (None, None) => Ok(None),
-    }
-}
-
-fn coalesce_secret_http_headers(
-    name: &str,
-    secret_http_headers: BTreeMap<String, String>,
-    env_http_headers: BTreeMap<String, String>,
-) -> anyhow::Result<BTreeMap<String, String>> {
-    let mut merged = secret_http_headers;
-    for (header, env_var) in env_http_headers {
-        match merged.entry(header) {
-            Entry::Occupied(entry) => {
-                anyhow::bail!(
-                    "mcp server {name}: set either secret_http_headers[{0}] or legacy env_http_headers[{0}], not both",
-                    entry.key()
-                );
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(env_secret_spec(env_var));
-            }
-        }
-    }
-    Ok(merged)
-}
-
 fn ensure_env_empty(name: &str, transport: Transport, env_nonempty: bool) -> anyhow::Result<()> {
     if !env_nonempty {
         return Ok(());
@@ -363,10 +259,6 @@ fn build_v1_config(
     path: Option<PathBuf>,
     cfg: ConfigFile,
 ) -> anyhow::Result<Config> {
-    let server_path_base = path
-        .as_deref()
-        .and_then(Path::parent)
-        .unwrap_or(thread_root);
     if cfg.version != MCP_CONFIG_VERSION {
         anyhow::bail!(
             "unsupported mcp.json version {} (expected {})",
@@ -412,7 +304,7 @@ fn build_v1_config(
         let stdout_log = match server.transport {
             Transport::Stdio => server
                 .stdout_log
-                .map(|log| parse_stdout_log_config(server_path_base, &name, log))
+                .map(|log| parse_stdout_log_config(thread_root, &name, log))
                 .transpose()?,
             Transport::Unix => {
                 ensure_stdout_log_supported(&name, Transport::Unix, server.stdout_log.is_some())?;
@@ -439,7 +331,7 @@ fn build_v1_config(
                 if unix_path.is_absolute() {
                     unix_path
                 } else {
-                    server_path_base.join(unix_path)
+                    thread_root.join(unix_path)
                 }
             }),
             _ => server.unix_path,
@@ -451,14 +343,8 @@ fn build_v1_config(
                 let has_url_fields =
                     server.url.is_some() || server.sse_url.is_some() || server.http_url.is_some();
                 ensure_url_fields_only_for_streamable_http(&name, has_url_fields)?;
-                ensure_proxy_mode_only_for_streamable_http(
-                    &name,
-                    server.streamable_http_proxy_mode.is_some(),
-                )?;
-                let has_auth_fields = server.bearer_token_secret.is_some()
-                    || server.bearer_token_env_var.is_some()
+                let has_auth_fields = server.bearer_token_env_var.is_some()
                     || !server.http_headers.is_empty()
-                    || !server.secret_http_headers.is_empty()
                     || !server.env_http_headers.is_empty();
                 ensure_http_headers_auth_only_for_streamable_http(&name, has_auth_fields)?;
 
@@ -472,16 +358,10 @@ fn build_v1_config(
                 let has_url_fields =
                     server.url.is_some() || server.sse_url.is_some() || server.http_url.is_some();
                 ensure_url_fields_only_for_streamable_http(&name, has_url_fields)?;
-                ensure_proxy_mode_only_for_streamable_http(
-                    &name,
-                    server.streamable_http_proxy_mode.is_some(),
-                )?;
                 let env_nonempty = !server.env.is_empty();
                 ensure_env_empty(&name, Transport::Unix, env_nonempty)?;
-                let has_auth_fields = server.bearer_token_secret.is_some()
-                    || server.bearer_token_env_var.is_some()
+                let has_auth_fields = server.bearer_token_env_var.is_some()
                     || !server.http_headers.is_empty()
-                    || !server.secret_http_headers.is_empty()
                     || !server.env_http_headers.is_empty();
                 ensure_http_headers_auth_only_for_streamable_http(&name, has_auth_fields)?;
 
@@ -510,20 +390,9 @@ fn build_v1_config(
                         anyhow::bail!("mcp server {name}: sse_url and http_url must both be set")
                     }
                 };
-                server_cfg.set_bearer_token_secret(coalesce_bearer_token_secret(
-                    &name,
-                    server.bearer_token_secret,
-                    server.bearer_token_env_var,
-                )?)?;
-                server_cfg.set_streamable_http_proxy_mode(
-                    server.streamable_http_proxy_mode.unwrap_or_default(),
-                )?;
+                server_cfg.set_bearer_token_env_var(server.bearer_token_env_var)?;
                 *server_cfg.http_headers_mut()? = server.http_headers;
-                *server_cfg.secret_http_headers_mut()? = coalesce_secret_http_headers(
-                    &name,
-                    server.secret_http_headers,
-                    server.env_http_headers,
-                )?;
+                *server_cfg.env_http_headers_mut()? = server.env_http_headers;
                 server_cfg
             }
         };
@@ -594,13 +463,10 @@ impl Config {
     ) -> crate::Result<Self> {
         let cfg = Self::load_with_policy(thread_root, override_path, policy).await?;
         if cfg.path().is_none() {
-            return Err(crate::error::tagged_message(
-                crate::error::ErrorKind::Config,
-                format!(
-                    "mcp config not found under root {} (tried: {})",
-                    thread_root.display(),
-                    DEFAULT_CONFIG_CANDIDATES.join(", ")
-                ),
+            return Err(anyhow::anyhow!(
+                "mcp config not found under root {} (tried: {})",
+                thread_root.display(),
+                DEFAULT_CONFIG_CANDIDATES.join(", ")
             )
             .into());
         }
@@ -621,20 +487,8 @@ impl Config {
         override_path: Option<PathBuf>,
         policy: ConfigLoadPolicy,
     ) -> crate::Result<Self> {
-        ensure_absolute_thread_root(thread_root).map_err(|err| {
-            crate::Error::from(crate::error::tag_anyhow(
-                crate::error::ErrorKind::Config,
-                err,
-            ))
-        })?;
-        let Some((path, json)) = load_initial_path_and_value(thread_root, override_path, policy)
-            .await
-            .map_err(|err| {
-                crate::Error::from(crate::error::tag_anyhow(
-                    crate::error::ErrorKind::Config,
-                    err,
-                ))
-            })?
+        let Some((path, json)) =
+            load_initial_path_and_value(thread_root, override_path, policy).await?
         else {
             return Ok(Self {
                 path: None,
@@ -642,63 +496,7 @@ impl Config {
                 servers: BTreeMap::new(),
             });
         };
-        let cfg = parse_config_file(Some(path.as_path()), json).map_err(|err| {
-            crate::Error::from(crate::error::tag_anyhow(
-                crate::error::ErrorKind::Config,
-                err,
-            ))
-        })?;
-        build_v1_config(thread_root, Some(path), cfg).map_err(|err| {
-            crate::Error::from(crate::error::tag_anyhow(
-                crate::error::ErrorKind::Config,
-                err,
-            ))
-        })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[cfg(not(windows))]
-    use std::path::PathBuf;
-
-    #[cfg(not(windows))]
-    use super::{ConfigLoadPolicy, canonicalize_existing_ancestor, resolve_override_path};
-
-    #[cfg(not(windows))]
-    #[test]
-    fn canonicalize_existing_ancestor_reports_non_not_found_errors() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("blocked");
-        std::fs::write(&path, b"not a directory").unwrap();
-
-        let err = canonicalize_existing_ancestor(&path.join("mcp.json"))
-            .expect_err("non-directory ancestor should not be treated as missing");
-        assert!(err.chain().any(|cause| {
-            cause
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotADirectory)
-        }));
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn resolve_override_path_reports_non_not_found_boundary_errors() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let root = tempdir.path().join("workspace");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("blocked"), b"not a directory").unwrap();
-
-        let err = resolve_override_path(
-            &root,
-            PathBuf::from("blocked/mcp.json"),
-            ConfigLoadPolicy::default(),
-        )
-        .expect_err("non-directory override prefix should not be treated as missing");
-        assert!(err.chain().any(|cause| {
-            cause
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotADirectory)
-        }));
+        let cfg = parse_config_file(Some(path.as_path()), json)?;
+        Ok(build_v1_config(thread_root, Some(path), cfg)?)
     }
 }

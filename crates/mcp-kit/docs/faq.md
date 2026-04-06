@@ -16,13 +16,11 @@
 
 ## Q：Untrusted 下可以用 token/auth 吗？
 
-不可以。`bearer_token_secret` 和 `secret_http_headers` 会触发本地 secret 解析；legacy `bearer_token_env_var` / `env_http_headers` 也会先规范化成 `secret://env/...`。在 Untrusted 下这些路径都会被拒绝。
+不可以。`bearer_token_env_var` 和 `env_http_headers` 会读取本地环境变量（secrets），在 Untrusted 下会被拒绝。
 
 如果你确实要用认证 header：
 
 - 用 `--trust --yes-trust`（或 `TrustMode::Trusted`）
-- 代码侧再显式提供 `Manager::with_streamable_http_secret_context(...)`
-- 如果你明确接受 ambient env，也可以显式用 `Manager::with_ambient_streamable_http_secrets()`
 - 或者在你自己的上层代码里自行注入 header（但同样建议只在可信环境启用）
 
 ## Q：`mcp_kit::mcp` 的 typed wrapper 为什么不全？
@@ -34,11 +32,7 @@
 
 ## Q：是否支持自动重连/守护进程？
 
-`mcp-kit` 不提供后台自动重连/守护进程。
-
-但如果你走的是 `Manager::request` / `get_or_connect` / `SharedManager::request` 这类 config 驱动入口，同名连接在当前实例里已经关闭后，crate 会按需重新建连。
-
-需要 keepalive、退避、长期守护或跨实例重连时，仍然应该由上层实现。
+v1 不做。上层可以通过 drop/重建 `Manager` 或 `Session` 实现重连策略。
 
 ## Q：如何把连接交给其他库持有？
 

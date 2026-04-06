@@ -3,7 +3,6 @@ use std::time::Duration;
 use anyhow::Context;
 use serde_json::Value;
 
-use crate::convenience;
 use crate::{Connection, McpNotification, McpRequest, ServerName};
 
 pub struct Session {
@@ -46,6 +45,15 @@ impl Session {
     /// you specifically need access to the underlying JSON-RPC client or child process handle.
     pub fn connection(&self) -> &Connection {
         &self.connection
+    }
+
+    /// Returns the underlying connection (mutable).
+    ///
+    /// Warning: mutating the underlying client can bypass `Session`'s timeout wrappers and can
+    /// make lifecycle/ownership less clear. If you take over lifecycle control, you are
+    /// responsible for closing and waiting for any associated child process.
+    pub fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.connection
     }
 
     /// Consumes this session and returns the underlying connection.
@@ -181,76 +189,62 @@ impl Session {
     }
 
     pub async fn ping(&self) -> crate::Result<Value> {
-        self.request(convenience::PING_METHOD, None).await
+        self.request("ping", None).await
     }
 
     pub async fn list_tools(&self) -> crate::Result<Value> {
-        self.request(convenience::TOOLS_LIST_METHOD, None).await
+        self.request("tools/list", None).await
     }
 
     pub async fn list_resources(&self) -> crate::Result<Value> {
-        self.request(convenience::RESOURCES_LIST_METHOD, None).await
+        self.request("resources/list", None).await
     }
 
     pub async fn list_resource_templates(&self) -> crate::Result<Value> {
-        self.request(convenience::RESOURCES_TEMPLATES_LIST_METHOD, None)
-            .await
+        self.request("resources/templates/list", None).await
     }
 
     pub async fn read_resource(&self, uri: &str) -> crate::Result<Value> {
-        self.request(
-            convenience::RESOURCES_READ_METHOD,
-            Some(convenience::uri_params(uri)),
-        )
-        .await
+        let params = serde_json::json!({ "uri": uri });
+        self.request("resources/read", Some(params)).await
     }
 
     pub async fn subscribe_resource(&self, uri: &str) -> crate::Result<Value> {
-        self.request(
-            convenience::RESOURCES_SUBSCRIBE_METHOD,
-            Some(convenience::uri_params(uri)),
-        )
-        .await
+        let params = serde_json::json!({ "uri": uri });
+        self.request("resources/subscribe", Some(params)).await
     }
 
     pub async fn unsubscribe_resource(&self, uri: &str) -> crate::Result<Value> {
-        self.request(
-            convenience::RESOURCES_UNSUBSCRIBE_METHOD,
-            Some(convenience::uri_params(uri)),
-        )
-        .await
+        let params = serde_json::json!({ "uri": uri });
+        self.request("resources/unsubscribe", Some(params)).await
     }
 
     pub async fn list_prompts(&self) -> crate::Result<Value> {
-        self.request(convenience::PROMPTS_LIST_METHOD, None).await
+        self.request("prompts/list", None).await
     }
 
     pub async fn get_prompt(&self, prompt: &str, arguments: Option<Value>) -> crate::Result<Value> {
-        self.request(
-            convenience::PROMPTS_GET_METHOD,
-            Some(convenience::prompt_get_params(prompt, arguments)),
-        )
-        .await
+        let mut params = serde_json::json!({ "name": prompt });
+        if let Some(arguments) = arguments {
+            params["arguments"] = arguments;
+        }
+        self.request("prompts/get", Some(params)).await
     }
 
     pub async fn call_tool(&self, tool: &str, arguments: Option<Value>) -> crate::Result<Value> {
-        self.request(
-            convenience::TOOLS_CALL_METHOD,
-            Some(convenience::tool_call_params(tool, arguments)),
-        )
-        .await
+        let mut params = serde_json::json!({ "name": tool });
+        if let Some(arguments) = arguments {
+            params["arguments"] = arguments;
+        }
+        self.request("tools/call", Some(params)).await
     }
 
     pub async fn set_logging_level(&self, level: &str) -> crate::Result<Value> {
-        self.request(
-            convenience::LOGGING_SET_LEVEL_METHOD,
-            Some(convenience::logging_level_params(level)),
-        )
-        .await
+        let params = serde_json::json!({ "level": level });
+        self.request("logging/setLevel", Some(params)).await
     }
 
     pub async fn complete(&self, params: Value) -> crate::Result<Value> {
-        self.request(convenience::COMPLETION_COMPLETE_METHOD, Some(params))
-            .await
+        self.request("completion/complete", Some(params)).await
     }
 }

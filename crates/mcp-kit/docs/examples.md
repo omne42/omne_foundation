@@ -67,10 +67,7 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- --allow-host example.com lis
 ```rust
 use mcp_kit::UntrustedStreamableHttpPolicy;
 manager = manager.with_untrusted_streamable_http_policy(UntrustedStreamableHttpPolicy {
-    outbound: http_kit::UntrustedOutboundPolicy {
-        allowed_hosts: vec!["example.com".into()],
-        ..Default::default()
-    },
+    allowed_hosts: vec!["example.com".into()],
     ..Default::default()
 });
 ```

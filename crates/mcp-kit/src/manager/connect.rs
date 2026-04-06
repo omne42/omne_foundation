@@ -17,6 +17,8 @@ use super::streamable_http_validation::{
     validate_streamable_http_config, validate_streamable_http_url_untrusted_dns,
 };
 
+const STREAMABLE_HTTP_SESSION_ID_HEADER: &str = "mcp-session-id";
+
 macro_rules! config_bail {
     ($($arg:tt)*) => {
         return Err(tagged_message(ErrorKind::Config, format!($($arg)*)))
@@ -355,6 +357,7 @@ fn build_streamable_http_headers(
 
 fn is_reserved_streamable_http_header(header: &str) -> bool {
     header.eq_ignore_ascii_case(MCP_PROTOCOL_VERSION_HEADER)
+        || header.eq_ignore_ascii_case(STREAMABLE_HTTP_SESSION_ID_HEADER)
 }
 
 fn is_reserved_streamable_http_env_header(header: &str) -> bool {
@@ -444,6 +447,42 @@ mod tests {
 
         let err = build_streamable_http_headers(&ctx, "srv", &server_cfg, Path::new("."))
             .expect_err("reserved Authorization env header should be rejected");
+        assert!(
+            err.to_string()
+                .contains("http header env var targets a reserved transport header"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn http_headers_cannot_override_transport_owned_session_header() {
+        let ctx = trusted_connect_context();
+        let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+        server_cfg
+            .http_headers_mut()
+            .unwrap()
+            .insert("Mcp-Session-Id".to_string(), "forged-session".to_string());
+
+        let err = build_streamable_http_headers(&ctx, "srv", &server_cfg, Path::new("."))
+            .expect_err("reserved session header should be rejected");
+        assert!(
+            err.to_string()
+                .contains("http header is reserved by transport"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn env_http_headers_cannot_override_transport_owned_session_header() {
+        let ctx = trusted_connect_context();
+        let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+        server_cfg
+            .env_http_headers_mut()
+            .unwrap()
+            .insert("mcp-session-id".to_string(), "MCP_SESSION_ID".to_string());
+
+        let err = build_streamable_http_headers(&ctx, "srv", &server_cfg, Path::new("."))
+            .expect_err("reserved session env header should be rejected");
         assert!(
             err.to_string()
                 .contains("http header env var targets a reserved transport header"),

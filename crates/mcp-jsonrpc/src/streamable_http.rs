@@ -134,6 +134,10 @@ const SSE_EVENT_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 const HTTP_RESPONSE_INITIAL_CAP_BYTES: usize = 64 * 1024;
 const HTTP_RESPONSE_UNKNOWN_LENGTH_INITIAL_CAP_BYTES: usize = 4 * 1024;
 
+fn is_transport_owned_streamable_http_header(header: &str) -> bool {
+    header.eq_ignore_ascii_case(crate::STREAMABLE_HTTP_SESSION_ID_HEADER)
+}
+
 impl Client {
     pub async fn connect_streamable_http(url: &str) -> Result<Self, Error> {
         Self::connect_streamable_http_with_options(
@@ -250,6 +254,12 @@ impl Client {
 
         let mut headers = reqwest::header::HeaderMap::new();
         for (key, value) in http_options.headers {
+            if is_transport_owned_streamable_http_header(&key) {
+                return Err(Error::protocol(
+                    ProtocolErrorKind::InvalidInput,
+                    format!("http header is reserved by streamable http transport: {key}"),
+                ));
+            }
             let name = reqwest::header::HeaderName::from_bytes(key.as_bytes()).map_err(|_| {
                 Error::protocol(
                     ProtocolErrorKind::InvalidInput,
@@ -1197,7 +1207,7 @@ async fn write_error_response(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
 
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1651,6 +1661,31 @@ mod tests {
         client.close("test complete").await;
         let _ = close_tx.send(());
         server.await.expect("server task should join");
+    }
+
+    #[tokio::test]
+    async fn streamable_http_rejects_transport_owned_session_header_override() {
+        let err = Client::connect_streamable_http_split_with_options(
+            "http://127.0.0.1:1/sse",
+            "http://127.0.0.1:1/post",
+            StreamableHttpOptions {
+                headers: HashMap::from([(
+                    "Mcp-Session-Id".to_string(),
+                    "forged-session".to_string(),
+                )]),
+                ..Default::default()
+            },
+            SpawnOptions::default(),
+        )
+        .await
+        .err()
+        .expect("transport-owned session header should be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("http header is reserved by streamable http transport"),
+            "{err:#}"
+        );
     }
 
     #[derive(Debug)]

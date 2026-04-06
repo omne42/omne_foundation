@@ -48,6 +48,7 @@ pub type StdoutLogRedactor = Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
 const DEFAULT_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 const REUSABLE_LINE_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 const READ_LINE_INITIAL_CAP_BYTES: usize = 4 * 1024;
+pub const STREAMABLE_HTTP_SESSION_ID_HEADER: &str = "mcp-session-id";
 const TOKIO_TIME_DRIVER_ERROR: &str =
     "tokio runtime time driver is not enabled; build the runtime with enable_time()";
 
@@ -107,6 +108,8 @@ impl Default for SpawnOptions {
 #[derive(Debug, Clone)]
 pub struct StreamableHttpOptions {
     /// Extra HTTP headers to include on all requests.
+    ///
+    /// Transport-owned headers such as `mcp-session-id` are rejected.
     pub headers: HashMap<String, String>,
     /// Whether untrusted transports must pin the validated public IP set into the actual socket.
     pub enforce_public_ip: bool,

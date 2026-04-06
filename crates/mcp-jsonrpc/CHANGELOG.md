@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：`StreamableHttpOptions.headers` 现在会 fail-fast 拒绝 transport-owned 的 `mcp-session-id`，直接调用 transport 也不能预先伪造或固定会话头。
 - `mcp-jsonrpc`：将 `Error` / `ProtocolError*` 与 error-record 映射、detached runtime 后台 worker，以及 crate-local `#[cfg(test)]` 模块分别拆到独立源码文件，显著收窄 `src/lib.rs` 的职责边界而不改变公开 API。
 - `mcp-jsonrpc`：detached runtime 的共享后台 worker 现在在任务 panic 或 worker 初始化失败后会显式重建；如果共享 worker 仍不可用，会退化到单任务 fallback runtime，而不是继续把后续 dropped-request / batch-flush 补偿任务静默丢弃。
 - `Limits::max_message_bytes` 现在重新同时约束出站 request / notification / response 的序列化大小；超限帧会在写入前 fail-fast 返回稳定错误，避免配置名和实际行为继续脱节。

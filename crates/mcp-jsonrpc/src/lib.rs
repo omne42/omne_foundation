@@ -587,6 +587,10 @@ impl RequestResponder {
             ));
         }
 
+        self.write_transport_response(response).await
+    }
+
+    async fn write_transport_response(&self, response: Value) -> Result<(), Error> {
         match &self.target {
             RequestResponseTarget::Direct(handle) => handle.write_json_line(&response).await,
             RequestResponseTarget::Batch(batch) => batch.push_reserved_response(response).await,
@@ -917,10 +921,18 @@ impl ClientHandle {
         self.check_closed()?;
         ensure_serialized_message_within_limit(line, self.max_message_bytes)?;
         let mut write = self.write.lock().await;
-        write.write_all(line).await?;
-        write.flush().await?;
+        let write_result = match write.write_all(line).await {
+            Ok(()) => write.flush().await,
+            Err(err) => Err(err),
+        };
         drop(write);
-        Ok(())
+        match write_result {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.schedule_close_once(format!("client transport write failed: {err}"));
+                Err(Error::Io(err))
+            }
+        }
     }
 }
 
@@ -1421,28 +1433,22 @@ impl Drop for IncomingRequest {
         };
 
         match &self.responder.target {
-            RequestResponseTarget::Direct(handle) => {
-                let handle = handle.clone();
-                let handle_for_task = handle.clone();
-                if let Err(err) = spawn_detached("direct dropped request response", async move {
-                    drop(handle_for_task.write_json_line(&response).await);
-                }) {
-                    handle.schedule_close_once(format!(
-                        "failed to schedule dropped request response: {err}"
-                    ));
-                }
-            }
+            RequestResponseTarget::Direct(_) => schedule_background_response_write(
+                self.responder.clone(),
+                response,
+                format!("{DROPPED_REQUEST_MESSAGE}: method={}", self.method),
+                "direct dropped request response",
+                "failed to schedule dropped request response".to_string(),
+            ),
             RequestResponseTarget::Batch(batch) => {
                 if tokio::runtime::Handle::try_current().is_ok() {
-                    let batch = batch.clone();
-                    let batch_for_task = batch.clone();
-                    if let Err(err) = spawn_detached("batch dropped request response", async move {
-                        drop(batch_for_task.push_reserved_response(response).await);
-                    }) {
-                        batch.state.handle.schedule_close_once(format!(
-                            "failed to schedule batch dropped request response: {err}"
-                        ));
-                    }
+                    schedule_background_response_write(
+                        self.responder.clone(),
+                        response,
+                        format!("{DROPPED_REQUEST_MESSAGE}: method={}", self.method),
+                        "batch dropped request response",
+                        "failed to schedule batch dropped request response".to_string(),
+                    );
                 } else {
                     batch.push_reserved_response_without_runtime(response);
                 }
@@ -1593,6 +1599,36 @@ fn schedule_request_dispatch_error(
         request
             .responder
             .schedule_transport_close(format!("{schedule_failure_reason}: {err}"));
+    }
+}
+
+fn schedule_background_response_write(
+    responder: RequestResponder,
+    response: Value,
+    close_reason: String,
+    task_name: &'static str,
+    schedule_failure_reason: String,
+) {
+    let close_reason_for_task = close_reason.clone();
+    let responder_for_task = responder.clone();
+    if let Err(err) = spawn_detached(task_name, async move {
+        match tokio::time::timeout(
+            REQUEST_DISPATCH_ERROR_TIMEOUT,
+            responder_for_task.write_transport_response(response),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                responder_for_task
+                    .schedule_transport_close(format!("{close_reason_for_task}: {err}"))
+            }
+            Err(_) => responder_for_task.schedule_transport_close(format!(
+                "{close_reason_for_task}: timed out after {REQUEST_DISPATCH_ERROR_TIMEOUT:?} while writing response"
+            )),
+        }
+    }) {
+        responder.schedule_transport_close(format!("{schedule_failure_reason}: {err}"));
     }
 }
 

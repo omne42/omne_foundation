@@ -121,7 +121,7 @@ impl BarkSink {
         group: Option<&str>,
         max_chars: usize,
     ) -> serde_json::Value {
-        let title = truncate_chars(&event.title, 256);
+        let title = truncate_chars(event.title(), 256);
         let body = format_event_body_and_tags_limited(event, TextLimits::new(max_chars));
 
         let mut obj = serde_json::Map::with_capacity(4);

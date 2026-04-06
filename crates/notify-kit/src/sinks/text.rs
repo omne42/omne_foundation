@@ -222,31 +222,32 @@ fn render_structured_text<'a>(
 }
 
 fn event_title_text(event: &Event) -> Option<Cow<'_, str>> {
-    render_structured_text(&event.title_text, Some(event.title.as_str()))
-        .or_else(|| (!event.title.is_empty()).then_some(Cow::Borrowed(event.title.as_str())))
+    render_structured_text(event.title_text(), Some(event.title()))
+        .or_else(|| (!event.title().is_empty()).then_some(Cow::Borrowed(event.title())))
 }
 
 fn event_body_text(event: &Event) -> Option<Cow<'_, str>> {
     event
-        .body_text
-        .as_ref()
-        .and_then(|text| render_structured_text(text, event.body.as_deref()))
-        .or_else(|| event.body.as_deref().map(Cow::Borrowed))
+        .body_text()
+        .and_then(|text| render_structured_text(text, event.body()))
+        .or_else(|| event.body().map(Cow::Borrowed))
 }
 
 fn event_tag_texts<'a>(event: &'a Event) -> impl Iterator<Item = (&'a str, Cow<'a, str>)> + 'a {
     let mut keys = BTreeSet::new();
-    keys.extend(event.tags.keys().map(String::as_str));
-    keys.extend(event.tag_texts.keys().map(String::as_str));
+    keys.extend(event.tags().keys().map(String::as_str));
+    keys.extend(event.tag_texts().keys().map(String::as_str));
 
     keys.into_iter().filter_map(|key| {
         let value = event
-            .tag_texts
+            .tag_texts()
             .get(key)
-            .and_then(|text| render_structured_text(text, event.tags.get(key).map(String::as_str)))
+            .and_then(|text| {
+                render_structured_text(text, event.tags().get(key).map(String::as_str))
+            })
             .or_else(|| {
                 event
-                    .tags
+                    .tags()
                     .get(key)
                     .filter(|value| !value.is_empty())
                     .map(|value| Cow::Borrowed(value.as_str()))

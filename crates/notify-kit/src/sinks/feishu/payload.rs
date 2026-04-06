@@ -56,8 +56,7 @@ impl FeishuWebhookSink {
         }
 
         let Some(body) = event
-            .body
-            .as_deref()
+            .body()
             .map(str::trim)
             .filter(|value| !value.is_empty())
         else {
@@ -150,7 +149,7 @@ impl FeishuWebhookSink {
             }
         }
 
-        for (key, value) in &event.tags {
+        for (key, value) in event.tags() {
             if remaining == 0 {
                 break;
             }
@@ -176,7 +175,7 @@ impl FeishuWebhookSink {
             ));
         }
 
-        let title = truncate_chars(event.title.trim(), 256);
+        let title = truncate_chars(event.title().trim(), 256);
         let mut obj = Self::base_payload(timestamp, sign);
         obj.insert("msg_type".to_string(), serde_json::json!("post"));
         obj.insert(

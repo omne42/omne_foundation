@@ -1,3 +1,4 @@
+use futures_util::FutureExt;
 use std::future::Future;
 use std::pin::Pin;
 #[cfg(test)]
@@ -7,7 +8,7 @@ use std::sync::{Mutex, OnceLock, mpsc as std_mpsc};
 type DetachedTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 struct DetachedRuntime {
-    worker_tx: Mutex<Option<std_mpsc::Sender<DetachedTask>>>,
+    worker_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<DetachedTask>>>,
 }
 
 impl DetachedRuntime {
@@ -91,11 +92,11 @@ pub(super) fn spawn_detached(
 
     match detached_runtime().try_spawn(task_name, Box::pin(task)) {
         Ok(()) => Ok(()),
-        Err(err) => run_detached_task(err.task).map_err(|inline_err| {
+        Err(err) => spawn_fallback_detached_task(task_name, err.task).map_err(|fallback_err| {
             std::io::Error::new(
-                inline_err.kind(),
+                fallback_err.kind(),
                 format!(
-                    "schedule detached task failed for {task_name}: shared worker unavailable ({source}); inline runtime unavailable ({inline_err})",
+                    "schedule detached task failed for {task_name}: shared worker unavailable ({source}); fallback runtime unavailable ({fallback_err})",
                     source = err.source
                 ),
             )
@@ -112,7 +113,7 @@ fn detached_runtime() -> &'static DetachedRuntime {
 
 fn spawn_detached_runtime_worker(
     task_name: &str,
-) -> std::io::Result<std_mpsc::Sender<DetachedTask>> {
+) -> std::io::Result<tokio::sync::mpsc::UnboundedSender<DetachedTask>> {
     #[cfg(test)]
     if FORCE_SHARED_WORKER_SPAWN_FAILURES
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
@@ -125,7 +126,7 @@ fn spawn_detached_runtime_worker(
         )));
     }
 
-    let (tx, rx) = std_mpsc::channel::<DetachedTask>();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<DetachedTask>();
     let (ready_tx, ready_rx) = std_mpsc::channel::<std::io::Result<()>>();
     let spawn_result = std::thread::Builder::new()
         .name("mcp-jsonrpc-detached".to_string())
@@ -149,7 +150,7 @@ fn spawn_detached_runtime_worker(
 }
 
 fn run_detached_runtime_worker(
-    rx: std_mpsc::Receiver<DetachedTask>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<DetachedTask>,
     ready_tx: std_mpsc::Sender<std::io::Result<()>>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -163,12 +164,18 @@ fn run_detached_runtime_worker(
         }
     };
     let _ = ready_tx.send(Ok(()));
-    while let Ok(task) = rx.recv() {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(task)));
-    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.block_on(async move {
+            while let Some(task) = rx.recv().await {
+                drop(tokio::spawn(async move {
+                    let _ = std::panic::AssertUnwindSafe(task).catch_unwind().await;
+                }));
+            }
+        });
+    }));
 }
 
-fn run_detached_task(task: DetachedTask) -> std::io::Result<()> {
+fn spawn_fallback_detached_task(task_name: &str, task: DetachedTask) -> std::io::Result<()> {
     #[cfg(test)]
     if FORCE_INLINE_RUNTIME_BUILD_FAILURES
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
@@ -181,11 +188,40 @@ fn run_detached_task(task: DetachedTask) -> std::io::Result<()> {
         ));
     }
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(task)));
-    Ok(())
+    let (ready_tx, ready_rx) = std_mpsc::channel::<std::io::Result<()>>();
+    let spawn_result = std::thread::Builder::new()
+        .name("mcp-jsonrpc-detached-fallback".to_string())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(err) => {
+                    let _ = ready_tx.send(Err(err));
+                    return;
+                }
+            };
+            let _ = ready_tx.send(Ok(()));
+            let _ =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(task)));
+        });
+    let _task = spawn_result.map_err(|err| {
+        std::io::Error::new(
+            err.kind(),
+            format!("spawn detached fallback runtime ({task_name}): {err}"),
+        )
+    })?;
+    match ready_rx.recv() {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(std::io::Error::new(
+            err.kind(),
+            format!("build detached fallback runtime ({task_name}): {err}"),
+        )),
+        Err(_) => Err(std::io::Error::other(format!(
+            "detached fallback runtime worker exited before initialization ({task_name})"
+        ))),
+    }
 }
 
 #[cfg(test)]

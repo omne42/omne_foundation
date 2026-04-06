@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `secret-kit`：Linux process-tree cleanup 的共享后台 worker 在线程创建失败时不再 panic；库现在保留首次 `kill_tree()` 的 best-effort 清理并跳过重试分发，避免把清理退路放大成调用方可见崩溃。
 - 明确内建 provider 的 ambient CLI 发现边界：默认只信任 ambient allowlist 中的系统目录级 `PATH` 项，并把转发给 builtin CLI 子进程的 `PATH` 同步裁剪到同一可信目录集合；工作区 shim 或用户目录二进制仍需通过显式绝对路径 override 接入。
 - `secret-kit` 现在把内建 provider 的 parse/command 细节下沉到 `spec/providers.rs` 私有模块，`spec.rs` 只保留通用 `secret://` 入口、env/file 语义和共享 helper，从而把核心流程与 provider 专属 CLI 策略分层开来而不改变公开 `SecretSpec`/`secret://` 契约。
 - `SecretResolver` 现在返回 boxed future 并保持 object-safe，调用方可以用 `Arc<dyn SecretResolver>` 之类的动态组装边界而不必锁死在静态泛型上；同时补了 trait-object 回归测试。

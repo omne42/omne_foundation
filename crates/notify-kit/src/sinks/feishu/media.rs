@@ -62,23 +62,61 @@ impl Drop for TenantAccessTokenRefreshGuard {
             return;
         }
 
-        let state = std::sync::Arc::clone(&self.state);
-        let notify = std::sync::Arc::clone(&self.notify);
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            drop(handle.spawn(async move {
-                let mut guard = state.lock().await;
-                if matches!(
-                    &*guard,
-                    super::TenantAccessTokenState::Refreshing(current)
-                        if std::sync::Arc::ptr_eq(current, &notify)
-                ) {
-                    *guard = super::TenantAccessTokenState::Empty;
-                }
-                drop(guard);
-                notify.notify_waiters();
-            }));
-        }
+        reset_tenant_access_token_refresh_state(
+            std::sync::Arc::clone(&self.state),
+            std::sync::Arc::clone(&self.notify),
+        );
     }
+}
+
+async fn clear_tenant_access_token_refresh_state(
+    state: std::sync::Arc<tokio::sync::Mutex<super::TenantAccessTokenState>>,
+    notify: std::sync::Arc<tokio::sync::Notify>,
+) {
+    let mut guard = state.lock().await;
+    if matches!(
+        &*guard,
+        super::TenantAccessTokenState::Refreshing(current)
+            if std::sync::Arc::ptr_eq(current, &notify)
+    ) {
+        *guard = super::TenantAccessTokenState::Empty;
+    }
+    drop(guard);
+    notify.notify_waiters();
+}
+
+fn reset_tenant_access_token_refresh_state(
+    state: std::sync::Arc<tokio::sync::Mutex<super::TenantAccessTokenState>>,
+    notify: std::sync::Arc<tokio::sync::Notify>,
+) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        drop(handle.spawn(clear_tenant_access_token_refresh_state(state, notify)));
+        return;
+    }
+
+    if let Ok(mut guard) = state.try_lock() {
+        if matches!(
+            &*guard,
+            super::TenantAccessTokenState::Refreshing(current)
+                if std::sync::Arc::ptr_eq(current, &notify)
+        ) {
+            *guard = super::TenantAccessTokenState::Empty;
+        }
+        drop(guard);
+        notify.notify_waiters();
+        return;
+    }
+
+    let _ = std::thread::Builder::new()
+        .name("notify-kit-feishu-refresh-reset".to_string())
+        .spawn(move || {
+            if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                runtime.block_on(clear_tenant_access_token_refresh_state(state, notify));
+            }
+        });
 }
 
 fn tenant_access_token_refresh_waiter(
@@ -743,9 +781,10 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        ensure_local_image_path_has_no_symlink_components, normalize_local_image_base_dir,
-        normalize_local_image_roots, resolve_local_image_path, resolve_local_image_path_with_base,
-        tenant_access_token_cache_ttl, tenant_access_token_refresh_waiter,
+        TenantAccessTokenRefreshGuard, ensure_local_image_path_has_no_symlink_components,
+        normalize_local_image_base_dir, normalize_local_image_roots, resolve_local_image_path,
+        resolve_local_image_path_with_base, tenant_access_token_cache_ttl,
+        tenant_access_token_refresh_waiter,
     };
 
     #[tokio::test]
@@ -758,6 +797,79 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(50), wait)
             .await
             .expect("enabled waiter should observe notify_waiters before await");
+    }
+
+    #[test]
+    fn tenant_access_token_refresh_guard_resets_state_without_runtime() {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let wait = tenant_access_token_refresh_waiter(Arc::clone(&notify));
+        let state = Arc::new(tokio::sync::Mutex::new(
+            super::super::TenantAccessTokenState::Refreshing(Arc::clone(&notify)),
+        ));
+
+        drop(TenantAccessTokenRefreshGuard::new(
+            Arc::clone(&state),
+            Arc::clone(&notify),
+        ));
+
+        let guard = state.blocking_lock();
+        assert!(
+            matches!(&*guard, super::super::TenantAccessTokenState::Empty),
+            "guard drop without runtime should clear Refreshing state"
+        );
+        drop(guard);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_millis(50), wait)
+                .await
+                .expect("guard drop should notify waiters without a runtime");
+        });
+    }
+
+    #[test]
+    fn tenant_access_token_refresh_guard_waits_for_locked_state_without_runtime() {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let wait = tenant_access_token_refresh_waiter(Arc::clone(&notify));
+        let state = Arc::new(tokio::sync::Mutex::new(
+            super::super::TenantAccessTokenState::Refreshing(Arc::clone(&notify)),
+        ));
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        let held_guard = state.blocking_lock();
+
+        drop(TenantAccessTokenRefreshGuard::new(
+            Arc::clone(&state),
+            Arc::clone(&notify),
+        ));
+
+        assert!(
+            matches!(
+                &*held_guard,
+                super::super::TenantAccessTokenState::Refreshing(current)
+                    if Arc::ptr_eq(current, &notify)
+            ),
+            "held lock should keep the refresh state unchanged until released"
+        );
+        drop(held_guard);
+
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(1), wait)
+                .await
+                .expect("background reset should notify waiters after the lock is released");
+
+            let guard = state.lock().await;
+            assert!(
+                matches!(&*guard, super::super::TenantAccessTokenState::Empty),
+                "background reset should clear Refreshing state once the lock becomes available"
+            );
+        });
     }
 
     #[test]

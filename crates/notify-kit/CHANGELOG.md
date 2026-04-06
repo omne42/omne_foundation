@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Fixed
+- `FeishuWebhookSink` 的 tenant access token 刷新 guard 现在在无 Tokio runtime 和非 Tokio 取消路径上也会可靠清空 `Refreshing` 状态并唤醒等待者，避免一次失败的刷新把后续图片上传永久卡死；并补上失败后重试的回归覆盖。
 - `GitHubCommentSink` 现在适配 `github-kit` 收紧后的 header helper 边界，由 helper 直接校验真实 request target 再附带 bearer token；即使调用链参数漂移，也不会因为“校验 URL”和“发送 URL”不一致而绕过共享 GitHub 凭证边界。
 - `notify-kit` crate root 不再直接 re-export `secret_kit::SecretString`；secret 领域类型回到各 sink/config 的显式依赖边界，避免通知 crate 的公开 API 再把 secret 语义直接污染到 root namespace。
 - `Hub::notify_best_effort` 现在成为显式命名的 best-effort fire-and-forget 入口；原 `Hub::notify` 仅保留为兼容别名并标记弃用，避免默认 API 名称继续伪装成可观测投递语义。

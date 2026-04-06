@@ -46,6 +46,7 @@ impl Event {
         }
     }
 
+    /// Renders the canonical title text into the plain-text view sinks consume.
     #[must_use]
     pub fn title(&self) -> Cow<'_, str> {
         render_text(&self.title_text)
@@ -56,6 +57,7 @@ impl Event {
         &self.title_text
     }
 
+    /// Renders the canonical body text into the plain-text view sinks consume.
     #[must_use]
     pub fn body(&self) -> Option<Cow<'_, str>> {
         self.body_text.as_ref().map(render_text)
@@ -66,6 +68,7 @@ impl Event {
         self.body_text.as_ref()
     }
 
+    /// Iterates rendered plain-text tags derived from the canonical structured tags.
     pub fn tags(&self) -> impl Iterator<Item = (&str, Cow<'_, str>)> + '_ {
         self.tag_texts
             .iter()

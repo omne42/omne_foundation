@@ -414,6 +414,7 @@ async fn connect_transport_stdio_null_routes_stderr_to_devnull() {
         trust_mode: TrustMode::Trusted,
         untrusted_streamable_http_policy: UntrustedStreamableHttpPolicy::default(),
         allow_stdout_log_outside_root: false,
+        stdout_log_root: None,
         protocol_version: MCP_PROTOCOL_VERSION.to_string(),
         request_timeout: Duration::from_secs(1),
     };

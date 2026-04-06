@@ -236,7 +236,7 @@ async fn load_denies_stdio_env_with_empty_key() {
 }
 
 #[tokio::test]
-async fn load_denies_stdio_env_with_empty_value() {
+async fn load_allows_stdio_env_with_empty_value() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(
         dir.path().join("mcp.json"),
@@ -245,11 +245,9 @@ async fn load_denies_stdio_env_with_empty_value() {
     .await
     .unwrap();
 
-    let err = Config::load(dir.path(), None).await.unwrap_err();
-    assert!(
-        err.to_string().contains("env[X] must not be empty"),
-        "err={err:#}"
-    );
+    let cfg = Config::load(dir.path(), None).await.unwrap();
+    let server = cfg.servers().get("a").unwrap();
+    assert_eq!(server.env().get("X").map(String::as_str), Some(""));
 }
 
 #[test]

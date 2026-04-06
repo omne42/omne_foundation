@@ -30,7 +30,7 @@ pub struct GitHubCommentConfig {
 impl std::fmt::Debug for GitHubCommentConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GitHubCommentConfig")
-            .field("api_base", &self.api_base)
+            .field("api_base", &http_kit::redact_url_str(&self.api_base))
             .field("owner", &self.owner)
             .field("repo", &self.repo)
             .field("issue_number", &self.issue_number)
@@ -313,6 +313,19 @@ mod tests {
         assert!(!sink_dbg.contains("tok_secret"), "{sink_dbg}");
         assert!(sink_dbg.contains("api.github.com"), "{sink_dbg}");
         assert!(sink_dbg.contains("<redacted>"), "{sink_dbg}");
+    }
+
+    #[test]
+    fn debug_redacts_api_base_credentials_and_query() {
+        let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok_secret")
+            .with_api_base("https://user:pass@github.example.com/api/v3?token=top-secret");
+
+        let cfg_dbg = format!("{cfg:?}");
+        assert!(!cfg_dbg.contains("user"), "{cfg_dbg}");
+        assert!(!cfg_dbg.contains("pass"), "{cfg_dbg}");
+        assert!(!cfg_dbg.contains("token=top-secret"), "{cfg_dbg}");
+        assert!(!cfg_dbg.contains("/api/v3"), "{cfg_dbg}");
+        assert!(cfg_dbg.contains("github.example.com"), "{cfg_dbg}");
     }
 
     #[test]

@@ -37,6 +37,7 @@
 - `GitHubRelease`
 - `GitHubReleaseAsset`
 - `fetch_latest_release(...)`
+- `fetch_latest_release_with_profile(...)`
 
 不覆盖：
 
@@ -50,6 +51,7 @@
   - GitHub API 请求头默认值、request options 与 bearer-token 目标校验
 - `src/release.rs`
   - latest release DTO、repository/base URL 归一化与获取
+  - bearer-token 请求绑定到 `http-kit::HttpClientProfile` 的真实 DNS/public-IP/pinned-client 路径
 - `src/error.rs`
   - 稳定错误类型
 

@@ -10,4 +10,6 @@ pub use client::{
     validate_github_api_request_url, validate_github_api_request_url_dns,
 };
 pub use error::{GitHubApiError, Result};
-pub use release::{GitHubRelease, GitHubReleaseAsset, fetch_latest_release};
+pub use release::{
+    GitHubRelease, GitHubReleaseAsset, fetch_latest_release, fetch_latest_release_with_profile,
+};

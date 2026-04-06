@@ -3,8 +3,12 @@ use std::collections::BTreeMap;
 
 use structured_text_kit::StructuredText;
 
-fn plain_fallback(text: &StructuredText) -> Option<String> {
+fn derive_plain_fallback(text: &StructuredText) -> Option<String> {
     text.freeform_text().map(ToOwned::to_owned)
+}
+
+fn updated_plain_fallback(previous: Option<String>, text: &StructuredText) -> Option<String> {
+    derive_plain_fallback(text).or(previous)
 }
 
 fn render_text<'a>(plain: Option<&'a str>, text: &'a StructuredText) -> Cow<'a, str> {
@@ -26,11 +30,11 @@ pub enum Severity {
 pub struct Event {
     pub kind: String,
     pub severity: Severity,
-    title: Option<String>,
+    title_plain_fallback: Option<String>,
     title_text: StructuredText,
-    body: Option<String>,
+    body_plain_fallback: Option<String>,
     body_text: Option<StructuredText>,
-    tags: BTreeMap<String, String>,
+    tag_plain_fallbacks: BTreeMap<String, String>,
     tag_texts: BTreeMap<String, StructuredText>,
 }
 
@@ -47,11 +51,11 @@ impl Event {
         Self {
             kind: kind.into(),
             severity,
-            title: plain_fallback(&title_text),
+            title_plain_fallback: derive_plain_fallback(&title_text),
             title_text,
-            body: None,
+            body_plain_fallback: None,
             body_text: None,
-            tags: BTreeMap::new(),
+            tag_plain_fallbacks: BTreeMap::new(),
             tag_texts: BTreeMap::new(),
         }
     }
@@ -59,7 +63,7 @@ impl Event {
     /// Renders the canonical title text into the plain-text view sinks consume.
     #[must_use]
     pub fn title(&self) -> Cow<'_, str> {
-        render_text(self.title.as_deref(), &self.title_text)
+        render_text(self.title_plain_fallback.as_deref(), &self.title_text)
     }
 
     #[must_use]
@@ -72,7 +76,7 @@ impl Event {
     pub fn body(&self) -> Option<Cow<'_, str>> {
         self.body_text
             .as_ref()
-            .map(|body_text| render_text(self.body.as_deref(), body_text))
+            .map(|body_text| render_text(self.body_plain_fallback.as_deref(), body_text))
     }
 
     #[must_use]
@@ -85,7 +89,7 @@ impl Event {
         self.tag_texts.iter().map(|(key, value)| {
             (
                 key.as_str(),
-                render_text(self.tags.get(key).map(String::as_str), value),
+                render_text(self.tag_plain_fallbacks.get(key).map(String::as_str), value),
             )
         })
     }
@@ -97,32 +101,30 @@ impl Event {
 
     pub fn set_title(&mut self, title: impl Into<String>) {
         let title = title.into();
-        self.title = Some(title.clone());
+        self.title_plain_fallback = Some(title.clone());
         self.title_text = StructuredText::freeform(title);
     }
 
     pub fn set_title_text(&mut self, title_text: StructuredText) {
-        if let Some(title) = plain_fallback(&title_text) {
-            self.title = Some(title);
-        }
+        self.title_plain_fallback =
+            updated_plain_fallback(self.title_plain_fallback.take(), &title_text);
         self.title_text = title_text;
     }
 
     pub fn set_body(&mut self, body: impl Into<String>) {
         let body = body.into();
-        self.body = Some(body.clone());
+        self.body_plain_fallback = Some(body.clone());
         self.body_text = Some(StructuredText::freeform(body));
     }
 
     pub fn clear_body(&mut self) {
-        self.body = None;
+        self.body_plain_fallback = None;
         self.body_text = None;
     }
 
     pub fn set_body_text(&mut self, body_text: StructuredText) {
-        if let Some(body) = plain_fallback(&body_text) {
-            self.body = Some(body);
-        }
+        self.body_plain_fallback =
+            updated_plain_fallback(self.body_plain_fallback.take(), &body_text);
         self.body_text = Some(body_text);
     }
 
@@ -132,14 +134,15 @@ impl Event {
 
     pub fn insert_tag_text(&mut self, key: impl Into<String>, value: StructuredText) {
         let key = key.into();
-        if let Some(value_text) = plain_fallback(&value) {
-            self.tags.insert(key.clone(), value_text);
+        let plain_fallback = updated_plain_fallback(self.tag_plain_fallbacks.remove(&key), &value);
+        if let Some(value_text) = plain_fallback {
+            self.tag_plain_fallbacks.insert(key.clone(), value_text);
         }
         self.tag_texts.insert(key, value);
     }
 
     pub fn remove_tag(&mut self, key: &str) {
-        self.tags.remove(key);
+        self.tag_plain_fallbacks.remove(key);
         self.tag_texts.remove(key);
     }
 

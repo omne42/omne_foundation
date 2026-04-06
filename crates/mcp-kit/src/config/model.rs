@@ -705,6 +705,16 @@ fn transport_tag(transport: Transport) -> &'static str {
     }
 }
 
+fn absolutize_config_path(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&path))
+            .unwrap_or(path)
+    }
+}
+
 impl Config {
     pub fn new(client: ClientConfig, servers: BTreeMap<ServerName, ServerConfig>) -> Self {
         Self {
@@ -715,7 +725,7 @@ impl Config {
     }
 
     pub fn with_path(mut self, path: PathBuf) -> Self {
-        self.path = Some(path);
+        self.path = Some(absolutize_config_path(path));
         self
     }
 

@@ -97,6 +97,10 @@ fn resolve_override_path(
     Ok(path)
 }
 
+fn config_base_dir<'a>(thread_root: &'a Path, path: Option<&'a Path>) -> &'a Path {
+    path.and_then(Path::parent).unwrap_or(thread_root)
+}
+
 async fn load_initial_path_and_value(
     thread_root: &Path,
     override_path: Option<PathBuf>,
@@ -269,6 +273,7 @@ fn build_v1_config(
     path: Option<PathBuf>,
     cfg: ConfigFile,
 ) -> anyhow::Result<Config> {
+    let config_base_dir = config_base_dir(thread_root, path.as_deref());
     if cfg.version != MCP_CONFIG_VERSION {
         config_bail!(
             "unsupported mcp.json version {} (expected {})",
@@ -314,7 +319,7 @@ fn build_v1_config(
         let stdout_log = match server.transport {
             Transport::Stdio => server
                 .stdout_log
-                .map(|log| parse_stdout_log_config(thread_root, &name, log))
+                .map(|log| parse_stdout_log_config(config_base_dir, &name, log))
                 .transpose()?,
             Transport::Unix => {
                 ensure_stdout_log_supported(&name, Transport::Unix, server.stdout_log.is_some())?;
@@ -341,7 +346,7 @@ fn build_v1_config(
                 if unix_path.is_absolute() {
                     unix_path
                 } else {
-                    thread_root.join(unix_path)
+                    config_base_dir.join(unix_path)
                 }
             }),
             _ => server.unix_path,
@@ -425,7 +430,7 @@ fn build_v1_config(
 }
 
 fn parse_stdout_log_config(
-    thread_root: &Path,
+    config_base_dir: &Path,
     name: &str,
     log: StdoutLogConfigFile,
 ) -> anyhow::Result<StdoutLogConfig> {
@@ -450,7 +455,7 @@ fn parse_stdout_log_config(
     })?;
 
     if !cfg.path.is_absolute() {
-        cfg.path = thread_root.join(&cfg.path);
+        cfg.path = config_base_dir.join(&cfg.path);
     }
 
     Ok(cfg)

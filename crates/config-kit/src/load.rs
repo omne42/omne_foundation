@@ -191,14 +191,19 @@ pub fn canonicalize_path_in_root(
 ) -> Result<PathBuf> {
     let root = root.as_ref();
     let path = path.as_ref();
+    let rooted_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
     let canonical_root = std::fs::canonicalize(root).map_err(|err| Error::Io {
         action: "canonicalize",
         path: root.to_path_buf(),
         source: err,
     })?;
-    let canonical_path = std::fs::canonicalize(path).map_err(|err| Error::Io {
+    let canonical_path = std::fs::canonicalize(&rooted_path).map_err(|err| Error::Io {
         action: "canonicalize",
-        path: path.to_path_buf(),
+        path: rooted_path,
         source: err,
     })?;
     if !canonical_path.starts_with(&canonical_root) {
@@ -541,6 +546,25 @@ mod tests {
         let err = canonicalize_path_in_root(root.path(), link.join("config.json"))
             .expect_err("escape must fail");
         assert!(err.to_string().contains("escapes root"));
+    }
+
+    #[test]
+    fn canonicalize_relative_paths_against_root_instead_of_process_cwd() {
+        let root = tempfile::tempdir().expect("root");
+        let outside = tempfile::tempdir().expect("outside");
+        let config = root.path().join("config.json");
+        std::fs::write(&config, "{}").expect("write config");
+
+        let original_cwd = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(outside.path()).expect("enter outside cwd");
+        let canonical = canonicalize_path_in_root(root.path(), Path::new("config.json"))
+            .expect("canonicalize relative path from root");
+        std::env::set_current_dir(original_cwd).expect("restore cwd");
+
+        assert_eq!(
+            canonical,
+            std::fs::canonicalize(config).expect("canonical config path")
+        );
     }
 
     #[cfg(unix)]

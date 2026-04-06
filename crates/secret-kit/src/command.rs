@@ -105,6 +105,11 @@ struct PendingProcessTreeCleanup {
 }
 
 #[cfg(all(unix, target_os = "linux"))]
+struct LinuxCleanupDispatcher {
+    sender: std::sync::Mutex<Option<std::sync::mpsc::Sender<ProcessTreeCleanup>>>,
+}
+
+#[cfg(all(unix, target_os = "linux"))]
 impl PendingProcessTreeCleanup {
     fn new(cleanup: ProcessTreeCleanup) -> Self {
         Self {
@@ -118,6 +123,11 @@ impl PendingProcessTreeCleanup {
 #[cfg(all(test, unix, target_os = "linux"))]
 static LINUX_CLEANUP_WORKER_SPAWN_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+#[cfg(all(test, unix, target_os = "linux"))]
+static LINUX_CLEANUP_WORKER_FORCED_SPAWN_FAILURES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(all(test, unix, target_os = "linux"))]
+static LINUX_CLEANUP_LAST_WARNING: OnceLock<std::sync::Mutex<Option<String>>> = OnceLock::new();
 
 fn start_process_tree_cleanup(cleanup: ProcessTreeCleanup) {
     #[cfg(all(unix, target_os = "linux"))]
@@ -127,7 +137,12 @@ fn start_process_tree_cleanup(cleanup: ProcessTreeCleanup) {
             // Successful commands can still leave helpers alive briefly while `/proc` catches up
             // to the leader exit. Reuse a single worker thread for the retry window instead of
             // spawning one long-lived thread per command invocation.
-            let _ = linux_cleanup_dispatcher().send(cleanup);
+            if let Err(cleanup) = linux_cleanup_dispatcher().send(cleanup) {
+                cleanup.kill_tree();
+                report_linux_cleanup_dispatch_warning(
+                    "async retry dispatch unavailable; leaving cleanup at the synchronous best-effort pass",
+                );
+            }
         }
     }
 
@@ -136,19 +151,128 @@ fn start_process_tree_cleanup(cleanup: ProcessTreeCleanup) {
 }
 
 #[cfg(all(unix, target_os = "linux"))]
-fn linux_cleanup_dispatcher() -> &'static std::sync::mpsc::Sender<ProcessTreeCleanup> {
-    static DISPATCHER: OnceLock<std::sync::mpsc::Sender<ProcessTreeCleanup>> = OnceLock::new();
+impl LinuxCleanupDispatcher {
+    fn lock_sender(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Option<std::sync::mpsc::Sender<ProcessTreeCleanup>>> {
+        match self.sender.lock() {
+            Ok(sender) => sender,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
 
-    DISPATCHER.get_or_init(|| {
-        let (sender, receiver) = std::sync::mpsc::channel();
-        #[cfg(test)]
-        LINUX_CLEANUP_WORKER_SPAWN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    fn send(&self, cleanup: ProcessTreeCleanup) -> std::result::Result<(), ProcessTreeCleanup> {
+        let mut cleanup = cleanup;
+        for _ in 0..2 {
+            let sender = {
+                let mut sender = self.lock_sender();
+                if sender.is_none() {
+                    *sender = spawn_linux_cleanup_dispatcher_worker().ok();
+                }
+                sender.clone()
+            };
+
+            let Some(sender) = sender else {
+                return Err(cleanup);
+            };
+
+            match sender.send(cleanup) {
+                Ok(()) => return Ok(()),
+                Err(std::sync::mpsc::SendError(returned_cleanup)) => {
+                    cleanup = returned_cleanup;
+                    self.lock_sender().take();
+                }
+            }
+        }
+
+        Err(cleanup)
+    }
+}
+
+#[cfg(all(test, unix, target_os = "linux"))]
+impl LinuxCleanupDispatcher {
+    fn ensure_worker_for_test(&self) -> bool {
+        let mut sender = self.lock_sender();
+        if sender.is_none() {
+            *sender = spawn_linux_cleanup_dispatcher_worker().ok();
+        }
+        sender.is_some()
+    }
+
+    fn reset_for_test(&self) {
+        let previous = self.lock_sender().take();
+        drop(previous);
+    }
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn linux_cleanup_dispatcher() -> &'static LinuxCleanupDispatcher {
+    static DISPATCHER: OnceLock<LinuxCleanupDispatcher> = OnceLock::new();
+
+    DISPATCHER.get_or_init(|| LinuxCleanupDispatcher {
+        sender: std::sync::Mutex::new(None),
+    })
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn spawn_linux_cleanup_dispatcher_worker()
+-> std::io::Result<std::sync::mpsc::Sender<ProcessTreeCleanup>> {
+    #[cfg(test)]
+    if LINUX_CLEANUP_WORKER_FORCED_SPAWN_FAILURES
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |remaining| remaining.checked_sub(1),
+        )
+        .is_ok()
+    {
+        let err = std::io::Error::other("injected secret-kit linux cleanup worker spawn failure");
+        report_linux_cleanup_warning(&err);
+        return Err(err);
+    }
+
+    build_linux_cleanup_dispatcher(|receiver| {
         std::thread::Builder::new()
             .name("secret-kit-linux-cleanup".to_string())
             .spawn(move || run_linux_cleanup_worker(receiver))
-            .expect("spawn secret-kit linux cleanup worker");
-        sender
+            .inspect_err(report_linux_cleanup_warning)
+            .map(|_| ())
     })
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn build_linux_cleanup_dispatcher(
+    start_worker: impl FnOnce(std::sync::mpsc::Receiver<ProcessTreeCleanup>) -> std::io::Result<()>,
+) -> std::io::Result<std::sync::mpsc::Sender<ProcessTreeCleanup>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    start_worker(receiver)?;
+    #[cfg(test)]
+    LINUX_CLEANUP_WORKER_SPAWN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok(sender)
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn report_linux_cleanup_warning(err: &std::io::Error) {
+    eprintln!("secret-kit: linux cleanup worker unavailable: {err}");
+    #[cfg(test)]
+    {
+        let storage = LINUX_CLEANUP_LAST_WARNING.get_or_init(|| std::sync::Mutex::new(None));
+        *storage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(err.to_string());
+    }
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn report_linux_cleanup_dispatch_warning(message: &str) {
+    eprintln!("secret-kit: linux cleanup retry unavailable: {message}");
+    #[cfg(test)]
+    {
+        let storage = LINUX_CLEANUP_LAST_WARNING.get_or_init(|| std::sync::Mutex::new(None));
+        *storage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(message.to_string());
+    }
 }
 
 #[cfg(all(unix, target_os = "linux"))]
@@ -213,6 +337,26 @@ fn drain_due_linux_cleanup_retries(pending: &mut Vec<PendingProcessTreeCleanup>)
 #[cfg(all(test, unix, target_os = "linux"))]
 fn linux_cleanup_worker_spawn_count() -> usize {
     LINUX_CLEANUP_WORKER_SPAWN_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(all(test, unix, target_os = "linux"))]
+fn force_linux_cleanup_worker_spawn_failures(count: usize) {
+    LINUX_CLEANUP_WORKER_FORCED_SPAWN_FAILURES.store(count, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(all(test, unix, target_os = "linux"))]
+fn take_linux_cleanup_warning_for_test() -> Option<String> {
+    LINUX_CLEANUP_LAST_WARNING
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
+
+#[cfg(all(test, unix, target_os = "linux"))]
+fn linux_cleanup_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
 fn ensure_tokio_time_driver(program: &str) -> Result<()> {
@@ -542,12 +686,20 @@ mod retry_tests {
     #[cfg(all(unix, target_os = "linux"))]
     #[test]
     fn linux_cleanup_dispatcher_reuses_single_worker() {
+        let _guard = linux_cleanup_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dispatcher = linux_cleanup_dispatcher();
+        dispatcher.reset_for_test();
+        force_linux_cleanup_worker_spawn_failures(0);
+        let _ = take_linux_cleanup_warning_for_test();
+
         let before = linux_cleanup_worker_spawn_count();
 
-        let _ = linux_cleanup_dispatcher();
+        assert!(dispatcher.ensure_worker_for_test());
         let after_first = linux_cleanup_worker_spawn_count();
 
-        let _ = linux_cleanup_dispatcher();
+        assert!(dispatcher.ensure_worker_for_test());
         let after_second = linux_cleanup_worker_spawn_count();
 
         assert!(after_first >= before, "worker count should not decrease");
@@ -558,6 +710,31 @@ mod retry_tests {
         assert_eq!(
             after_first, after_second,
             "repeated dispatcher access should reuse the same worker"
+        );
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[test]
+    fn linux_cleanup_dispatcher_gracefully_handles_worker_spawn_failure() {
+        let _guard = linux_cleanup_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dispatcher = linux_cleanup_dispatcher();
+        dispatcher.reset_for_test();
+        force_linux_cleanup_worker_spawn_failures(1);
+        let _ = take_linux_cleanup_warning_for_test();
+
+        assert!(
+            !dispatcher.ensure_worker_for_test(),
+            "cleanup dispatcher should degrade gracefully when worker spawn fails"
+        );
+        let warning = take_linux_cleanup_warning_for_test()
+            .expect("forced spawn failure should record a warning");
+        assert!(warning.contains("spawn failure"));
+
+        assert!(
+            dispatcher.ensure_worker_for_test(),
+            "dispatcher should recover once worker spawn succeeds again"
         );
     }
 }

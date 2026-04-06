@@ -1263,7 +1263,7 @@ async fn streamable_http_request_timeout_does_not_abort_long_lived_post_sse_resp
                         let _ = socket.flush().await;
 
                         for _ in 0..3 {
-                            tokio::time::sleep(Duration::from_millis(40)).await;
+                            tokio::time::sleep(Duration::from_millis(100)).await;
                             let _ = socket.write_all(b": keep-alive\n\n").await;
                             let _ = socket.flush().await;
                         }
@@ -1292,7 +1292,7 @@ async fn streamable_http_request_timeout_does_not_abort_long_lived_post_sse_resp
     let client = mcp_jsonrpc::Client::connect_streamable_http_with_options(
         &url,
         mcp_jsonrpc::StreamableHttpOptions {
-            request_timeout: Some(Duration::from_millis(50)),
+            request_timeout: Some(Duration::from_millis(150)),
             ..Default::default()
         },
         mcp_jsonrpc::SpawnOptions::default(),
@@ -1355,7 +1355,7 @@ async fn streamable_http_post_sse_is_not_bounded_by_request_timeout() {
                             )
                             .await;
                         let _ = socket.flush().await;
-                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        tokio::time::sleep(Duration::from_millis(400)).await;
 
                         let mut sse = Vec::new();
                         sse.extend_from_slice(b"data: ");
@@ -1381,7 +1381,7 @@ async fn streamable_http_post_sse_is_not_bounded_by_request_timeout() {
     let client = mcp_jsonrpc::Client::connect_streamable_http_with_options(
         &url,
         mcp_jsonrpc::StreamableHttpOptions {
-            request_timeout: Some(Duration::from_millis(50)),
+            request_timeout: Some(Duration::from_millis(150)),
             ..Default::default()
         },
         mcp_jsonrpc::SpawnOptions::default(),

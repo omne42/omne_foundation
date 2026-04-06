@@ -615,6 +615,7 @@ pub struct ClientHandle {
     write: Arc<tokio::sync::Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
     next_id: Arc<AtomicI64>,
     pending: PendingRequests,
+    max_message_bytes: usize,
     max_pending_requests: usize,
     cancelled_request_ids: CancelledRequestIds,
     stats: Arc<ClientStatsInner>,
@@ -673,6 +674,23 @@ fn serialize_json_line(value: &impl Serialize) -> Result<Vec<u8>, Error> {
     let mut line = serde_json::to_vec(value)?;
     line.push(b'\n');
     Ok(line)
+}
+
+fn ensure_serialized_message_within_limit(
+    line: &[u8],
+    max_message_bytes: usize,
+) -> Result<(), Error> {
+    if line.len() <= max_message_bytes {
+        return Ok(());
+    }
+
+    Err(Error::protocol(
+        ProtocolErrorKind::InvalidInput,
+        format!(
+            "outbound jsonrpc message too large: {} bytes exceeds max_message_bytes={max_message_bytes}",
+            line.len()
+        ),
+    ))
 }
 
 fn serialize_json_value(value: &impl Serialize) -> Result<Value, Error> {
@@ -1231,6 +1249,7 @@ impl ClientHandle {
 
     async fn write_line(&self, line: &[u8]) -> Result<(), Error> {
         self.check_closed()?;
+        ensure_serialized_message_within_limit(line, self.max_message_bytes)?;
         let mut write = self.write.lock().await;
         write.write_all(line).await?;
         write.flush().await?;
@@ -1390,6 +1409,7 @@ impl Client {
             write,
             next_id: Arc::new(AtomicI64::new(1)),
             pending: pending.clone(),
+            max_message_bytes: normalize_max_message_bytes(limits.max_message_bytes),
             max_pending_requests,
             cancelled_request_ids: cancelled_request_ids.clone(),
             stats: stats.clone(),
@@ -3315,6 +3335,7 @@ mod background_close_tests {
             )),
             next_id: Arc::new(AtomicI64::new(1)),
             pending: pending.clone(),
+            max_message_bytes: Limits::default().max_message_bytes,
             max_pending_requests: 1,
             cancelled_request_ids: Arc::new(Mutex::new(CancelledRequestIdsState::default())),
             stats: Arc::new(ClientStatsInner::default()),
@@ -3344,6 +3365,60 @@ mod background_close_tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn outbound_notify_request_and_response_respect_max_message_bytes() {
+        let handle = ClientHandle {
+            write: Arc::new(tokio::sync::Mutex::new(
+                Box::new(tokio::io::sink()) as Box<dyn AsyncWrite + Send + Unpin>
+            )),
+            next_id: Arc::new(AtomicI64::new(1)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            max_message_bytes: 64,
+            max_pending_requests: 4,
+            cancelled_request_ids: Arc::new(Mutex::new(CancelledRequestIdsState::default())),
+            stats: Arc::new(ClientStatsInner::default()),
+            diagnostics: None,
+            closed: Arc::new(AtomicBool::new(false)),
+            close_reason: Arc::new(OnceLock::new()),
+            stdout_log_write_error: Arc::new(OnceLock::new()),
+        };
+
+        let oversized = serde_json::json!({
+            "payload": "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"
+        });
+
+        let notify_err = handle
+            .notify("demo/notify", Some(oversized.clone()))
+            .await
+            .expect_err("oversized notify should fail before write");
+        assert!(
+            notify_err
+                .to_string()
+                .contains("outbound jsonrpc message too large")
+        );
+
+        let request_err = handle
+            .request("demo/request", oversized.clone())
+            .await
+            .expect_err("oversized request should fail before write");
+        assert!(
+            request_err
+                .to_string()
+                .contains("outbound jsonrpc message too large")
+        );
+        assert!(lock_pending(&handle.pending).is_empty());
+
+        let response_err = handle
+            .respond_ok(Id::Integer(1), oversized)
+            .await
+            .expect_err("oversized response should fail before write");
+        assert!(
+            response_err
+                .to_string()
+                .contains("outbound jsonrpc message too large")
+        );
     }
 }
 

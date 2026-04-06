@@ -1,6 +1,7 @@
 use http_kit::{
     UntrustedOutboundPolicy, validate_untrusted_outbound_url, validate_untrusted_outbound_url_dns,
 };
+use reqwest::Request;
 use reqwest::RequestBuilder;
 use reqwest::header::{ACCEPT, USER_AGENT};
 
@@ -92,16 +93,31 @@ impl<'a> GitHubApiRequestOptions<'a> {
 }
 
 fn apply_github_api_headers_unchecked(
-    mut request: RequestBuilder,
+    mut request: Request,
     options: GitHubApiRequestOptions<'_>,
-) -> RequestBuilder {
-    request = request
-        .header(ACCEPT, GITHUB_API_ACCEPT)
-        .header(USER_AGENT, options.user_agent)
-        .header("X-GitHub-Api-Version", options.api_version);
+) -> Request {
+    request.headers_mut().insert(
+        ACCEPT,
+        reqwest::header::HeaderValue::from_static(GITHUB_API_ACCEPT),
+    );
+    request.headers_mut().insert(
+        USER_AGENT,
+        reqwest::header::HeaderValue::from_str(options.user_agent)
+            .expect("user agent should already be a valid header value"),
+    );
+    request.headers_mut().insert(
+        reqwest::header::HeaderName::from_static("x-github-api-version"),
+        reqwest::header::HeaderValue::from_str(options.api_version)
+            .expect("api version should already be a valid header value"),
+    );
 
     if let Some(token) = options.bearer_token {
-        request = request.bearer_auth(token);
+        let bearer = format!("Bearer {token}");
+        request.headers_mut().insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_str(&bearer)
+                .expect("bearer token should already be a valid header value"),
+        );
     }
 
     request
@@ -109,11 +125,17 @@ fn apply_github_api_headers_unchecked(
 
 pub fn apply_github_api_headers(
     request: RequestBuilder,
-    url: &reqwest::Url,
     options: GitHubApiRequestOptions<'_>,
 ) -> Result<RequestBuilder> {
-    validate_github_api_request_url(url, options)?;
-    Ok(apply_github_api_headers_unchecked(request, options))
+    let (client, request) = request.build_split();
+    let request = request.map_err(|err| GitHubApiError::InvalidApiBase {
+        details: format!("invalid github api request builder: {err}"),
+    })?;
+    validate_github_api_request_url(request.url(), options)?;
+    Ok(RequestBuilder::from_parts(
+        client,
+        apply_github_api_headers_unchecked(request, options),
+    ))
 }
 
 pub fn build_github_api_url<I, S>(api_base: &str, segments: I) -> Result<reqwest::Url>
@@ -257,12 +279,9 @@ mod tests {
     #[test]
     fn apply_headers_rejects_untrusted_bearer_target() {
         let client = reqwest::Client::new();
-        let url =
-            reqwest::Url::parse("https://example.invalid/api/v3/repos/omne42/repo").expect("url");
 
         let err = apply_github_api_headers(
-            client.get(url.clone()),
-            &url,
+            client.get("https://example.invalid/api/v3/repos/omne42/repo"),
             GitHubApiRequestOptions::new().with_bearer_token(Some("secret-token")),
         )
         .expect_err("untrusted bearer target should fail");
@@ -274,11 +293,9 @@ mod tests {
     #[test]
     fn apply_headers_attaches_bearer_for_trusted_target() {
         let client = reqwest::Client::new();
-        let url = reqwest::Url::parse("https://api.github.com/repos/omne42/repo").expect("url");
 
         let request = apply_github_api_headers(
-            client.get(url.clone()),
-            &url,
+            client.get("https://api.github.com/repos/omne42/repo"),
             GitHubApiRequestOptions::new().with_bearer_token(Some("secret-token")),
         )
         .expect("canonical target should be allowed")

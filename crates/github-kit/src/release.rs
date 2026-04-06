@@ -57,7 +57,7 @@ pub async fn fetch_latest_release<S: AsRef<str>>(
             continue;
         }
 
-        let request = match apply_github_api_headers(client.get(url.clone()), &url, options) {
+        let request = match apply_github_api_headers(client.get(url.clone()), options) {
             Ok(request) => request,
             Err(err) => {
                 errors.push(format!("{redacted_url} -> {err}"));

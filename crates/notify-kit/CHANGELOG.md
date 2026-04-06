@@ -7,7 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Fixed
-- `GitHubCommentSink` 现在适配 `github-kit` 收紧后的 header helper 签名，由 helper 自身在附带 bearer token 前重新校验目标 URL，避免调用链绕过共享 GitHub 凭证边界。
+- `GitHubCommentSink` 现在适配 `github-kit` 收紧后的 header helper 边界，由 helper 直接校验真实 request target 再附带 bearer token；即使调用链参数漂移，也不会因为“校验 URL”和“发送 URL”不一致而绕过共享 GitHub 凭证边界。
 - `notify-kit::env` 的标准 helper 现在默认把 Hub 外层 hard timeout 设为 `sink timeout + slack`，不再把两层超时默认绑成同一个值；显式 `NOTIFY_HUB_TIMEOUT_MS` 若不大于生效的 sink timeout 也会 fail closed，避免 helper 自己制造伪超时。
 - docs: `docs/integration.md` 与聚合 `llms.txt` 现在同步写明标准 env helper 的 timeout 约定，避免继续暗示 legacy `NOTIFY_TIMEOUT_MS` 会同时直接驱动 sink 与 Hub 两层硬超时。
 - docs: `docs/sinks/custom.md` 的自定义 sink 示例改为使用 `Event::title()`，并同步刷新 `llms.txt`，避免文档继续示范对已封装私有字段的直接访问。

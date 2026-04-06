@@ -244,7 +244,6 @@ impl Sink for GitHubCommentSink {
             let payload = Self::build_payload(event, self.max_chars);
             let request = apply_github_api_headers(
                 client.post(self.api_url.as_str()).json(&payload),
-                &self.api_url,
                 request_options,
             )
             .map_err(anyhow::Error::new)?;

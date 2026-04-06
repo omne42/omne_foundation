@@ -209,6 +209,7 @@ fn format_event_text_parts_limited(
     out.finish()
 }
 
+// Pure text sinks should prefer freeform structured text, then any caller-provided plain fallback.
 fn render_structured_text<'a>(
     text: &'a StructuredText,
     fallback: Option<&'a str>,

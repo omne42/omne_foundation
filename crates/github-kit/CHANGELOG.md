@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- make `apply_github_api_headers(...)` validate the target URL before attaching a bearer token so the public helper itself cannot leak credentials to an untrusted custom GitHub API host
 - remove the legacy `with_allow_custom_bearer_api_base(true)` bypass so bearer-token requests now require either the canonical GitHub API host or an explicit trusted-host allowlist
 - add runtime DNS validation for bearer-token GitHub API requests so trusted custom API bases fail closed on poisoned or unresolvable targets instead of relying on host-string checks alone
 - require bearer-token release requests to stay on the canonical GitHub API host unless callers explicitly trust a custom public host allowlist, and keep DNS/private-target validation fail-closed

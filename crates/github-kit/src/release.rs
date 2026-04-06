@@ -57,12 +57,15 @@ pub async fn fetch_latest_release<S: AsRef<str>>(
             continue;
         }
 
-        let response = match send_reqwest(
-            apply_github_api_headers(client.get(url.clone()), options),
-            "github latest release",
-        )
-        .await
-        {
+        let request = match apply_github_api_headers(client.get(url.clone()), &url, options) {
+            Ok(request) => request,
+            Err(err) => {
+                errors.push(format!("{redacted_url} -> {err}"));
+                continue;
+            }
+        };
+
+        let response = match send_reqwest(request, "github latest release").await {
             Ok(response) => response,
             Err(err) => {
                 errors.push(format!("{redacted_url} -> {err}"));

@@ -91,7 +91,7 @@ impl<'a> GitHubApiRequestOptions<'a> {
     }
 }
 
-pub fn apply_github_api_headers(
+fn apply_github_api_headers_unchecked(
     mut request: RequestBuilder,
     options: GitHubApiRequestOptions<'_>,
 ) -> RequestBuilder {
@@ -105,6 +105,15 @@ pub fn apply_github_api_headers(
     }
 
     request
+}
+
+pub fn apply_github_api_headers(
+    request: RequestBuilder,
+    url: &reqwest::Url,
+    options: GitHubApiRequestOptions<'_>,
+) -> Result<RequestBuilder> {
+    validate_github_api_request_url(url, options)?;
+    Ok(apply_github_api_headers_unchecked(request, options))
 }
 
 pub fn build_github_api_url<I, S>(api_base: &str, segments: I) -> Result<reqwest::Url>
@@ -194,6 +203,7 @@ pub async fn validate_github_api_request_url_dns(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::header::{AUTHORIZATION, HeaderValue};
 
     #[test]
     fn allows_explicitly_trusted_public_custom_host() {
@@ -242,5 +252,42 @@ mod tests {
 
         let message = err.to_string();
         assert!(message.contains("dns lookup"), "{message}");
+    }
+
+    #[test]
+    fn apply_headers_rejects_untrusted_bearer_target() {
+        let client = reqwest::Client::new();
+        let url =
+            reqwest::Url::parse("https://example.invalid/api/v3/repos/omne42/repo").expect("url");
+
+        let err = apply_github_api_headers(
+            client.get(url.clone()),
+            &url,
+            GitHubApiRequestOptions::new().with_bearer_token(Some("secret-token")),
+        )
+        .expect_err("untrusted bearer target should fail");
+
+        let message = err.to_string();
+        assert!(message.contains("canonical GitHub API base"), "{message}");
+    }
+
+    #[test]
+    fn apply_headers_attaches_bearer_for_trusted_target() {
+        let client = reqwest::Client::new();
+        let url = reqwest::Url::parse("https://api.github.com/repos/omne42/repo").expect("url");
+
+        let request = apply_github_api_headers(
+            client.get(url.clone()),
+            &url,
+            GitHubApiRequestOptions::new().with_bearer_token(Some("secret-token")),
+        )
+        .expect("canonical target should be allowed")
+        .build()
+        .expect("request");
+
+        assert_eq!(
+            request.headers().get(AUTHORIZATION),
+            Some(&HeaderValue::from_static("Bearer secret-token"))
+        );
     }
 }

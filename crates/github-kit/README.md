@@ -12,7 +12,7 @@
 
 负责：
 
-- GitHub API 请求头默认值与可选 bearer token 注入
+- GitHub API 请求头默认值与可选 bearer token 注入；公开 helper 会先校验目标 URL，再决定是否允许附带凭证
 - bearer token 默认只发往 canonical GitHub API host；自定义 host 必须显式进入 trusted allowlist，且仍要通过公共出站校验
 - bearer-token 请求目标的静态校验与运行时 DNS fail-closed 校验
 - `owner/repo` 形式的 repository 标识校验

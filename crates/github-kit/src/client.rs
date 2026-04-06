@@ -17,7 +17,6 @@ pub struct GitHubApiRequestOptions<'a> {
     bearer_token: Option<&'a str>,
     user_agent: &'a str,
     api_version: &'a str,
-    allow_custom_bearer_api_base: bool,
     trusted_bearer_token_hosts: &'a [&'a str],
 }
 
@@ -27,7 +26,6 @@ impl<'a> Default for GitHubApiRequestOptions<'a> {
             bearer_token: None,
             user_agent: DEFAULT_GITHUB_USER_AGENT,
             api_version: DEFAULT_GITHUB_API_VERSION,
-            allow_custom_bearer_api_base: false,
             trusted_bearer_token_hosts: &[],
         }
     }
@@ -73,14 +71,6 @@ impl<'a> GitHubApiRequestOptions<'a> {
         self
     }
 
-    #[must_use]
-    pub fn with_allow_custom_bearer_api_base(mut self, allow: bool) -> Self {
-        // Compatibility shim for existing callers that trust a specific non-canonical base URL at
-        // the call site. Prefer `with_trusted_bearer_token_hosts(...)` for new code.
-        self.allow_custom_bearer_api_base = allow;
-        self
-    }
-
     pub(crate) fn has_bearer_token(&self) -> bool {
         self.bearer_token.is_some()
     }
@@ -91,8 +81,7 @@ impl<'a> GitHubApiRequestOptions<'a> {
     }
 
     pub(crate) fn bearer_token_host_is_trusted(&self, host: &str) -> bool {
-        self.allow_custom_bearer_api_base
-            || host.eq_ignore_ascii_case(CANONICAL_GITHUB_API_HOST)
+        host.eq_ignore_ascii_case(CANONICAL_GITHUB_API_HOST)
             || self
                 .trusted_bearer_token_hosts
                 .iter()
@@ -246,7 +235,7 @@ mod tests {
             &url,
             GitHubApiRequestOptions::new()
                 .with_bearer_token(Some("secret-token"))
-                .with_allow_custom_bearer_api_base(true),
+                .with_trusted_bearer_token_hosts(&["github.example.invalid"]),
         )
         .await
         .expect_err("unresolvable target should fail closed");

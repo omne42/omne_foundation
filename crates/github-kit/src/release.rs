@@ -343,7 +343,7 @@ mod tests {
             "cli/cli",
             GitHubApiRequestOptions::new()
                 .with_bearer_token(Some("secret-token"))
-                .with_allow_custom_bearer_api_base(true),
+                .with_trusted_bearer_token_hosts(&["github.example.invalid"]),
         )
         .await
         .expect_err("failed dns should stop bearer token request");

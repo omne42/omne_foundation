@@ -7,21 +7,6 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Added
-- Added a `core` integration regression test that verifies structured `Event` payloads reach sinks through `title()` / `body()` / `tags()` string projections instead of re-exposing writable dual string fields.
-
-### Changed
-- `GitHubCommentSink`：携带 bearer token 时现在会在构造阶段复用 `github-kit` 的 API URL 校验，拒绝非 HTTPS、带 URL credentials 或非公网的自定义 `api_base`；`GitHubCommentConfig` 的 `Debug` 也改为脱敏 `api_base`。
-- `notify-kit`：`standard-env` convenience helper 的公开入口现在从 `notify_kit::env::...` 收口到 `notify_kit::integration::standard_env::...`，把这组 `NOTIFY_*` bootstrap 约定明确标成 integration wiring，而不是核心通知抽象边界。
-- `notify-kit`：将 `Hub` 按 `runtime` / `backpressure` / `fanout` 子模块收口，并把 `FeishuWebhookSink` 的 config / constructor / send 逻辑拆到更窄文件，降低热点文件复杂度而不改变公开 API。
-- `FeishuWebhookSink`：严格模式 helper 现在复用显式 `validate_public_ip_sync()` / `validate_public_ip().await` 校验入口；对象构造本身不再被“必须同步/异步校验一次”的运行时约束绑死，调用方可以先构造再按宿主环境选择何时做公网 IP 校验。
-- `FeishuWebhookSink`：图片上传只会在明确的认证失效场景（如 `401/403` 或响应文本明确指向 token 失效）下清空缓存 tenant token；普通上游故障不会再触发持续刷新风暴。
-- `notify_kit::integration::standard_env::build_hub_from_standard_env(...)`：恢复兼容 `NOTIFY_SINK_TIMEOUT_MS` / `NOTIFY_HUB_TIMEOUT_MS`，并保留 `NOTIFY_TIMEOUT_MS` 作为共享默认值；当未显式提供 hub timeout 时，helper 仍会自动给外层 `Hub` 留 slack，避免 Hub 先于内部 HTTP sink 超时。
-- `notify-kit::Error`：公开错误种类现在额外区分 `Config` / `Transport` / `Io` / `InvalidResponse`，不再把这几类边界全部压成 `Other(anyhow)`。
-- `Event` 的双视图字段（`title` / `title_text` / `body` / `body_text` / `tags` / `tag_texts`）现在收口为 crate 内部状态；外部调用方改用只读 accessors 和 builder，避免制造结构化文本与字符串投影失配的不变量破坏。
-- Clarified the examples so `Hub::notify(...)` is documented as fire-and-forget without `Result` handling, while `try_notify(...)` remains the explicit error-reporting path.
-- 自定义 sink 文档示例改为通过 `Event::title()` 读取标题，保持公开 API 示例与新的只读 accessor 边界一致，并修复 mdBook/rustdoc 门禁。
-- `FeishuWebhookSink` 的本地图片相对路径回归测试现在会显式切换进程 `cwd`，锁住“无 `local_image_base_dir` 必须失败、显式 base dir 优先于 cwd”的路径契约，避免 foundation 级语义重新退回到 ambient `current_dir()`。
-### Added
 - `Event::new_structured` / `with_title_text` / `with_body_text` / `with_tag_text`，并在 `Event` 上新增 `title_text` / `body_text` / `tag_texts`，让通知边界可以保留 `structured-text-kit` 语义而不必提前压平成裸字符串。
 - `log-kit` 集成：关键 warning 路径开始以稳定 `log_code` + 结构化字段形式发射到 `tracing`。
 - `Hub::try_notify`：当缺少 Tokio runtime 时返回错误（避免静默丢通知）。
@@ -39,9 +24,6 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `bots/opencode-discord`：OpenCode 风格的 Discord bot 示例（channel/thread → session）。
 - `bots/opencode-telegram`：OpenCode 风格的 Telegram bot 示例（chat → session，long polling）。
 - `bots/_shared/session_store`：支持设置根目录（`rootDir`；bots 可用 `OPENCODE_SESSION_STORE_ROOT`）以限制 session store 文件路径。
-
-### Fixed
-- `GenericWebhookSink::new(...)` 现在与文档契约一致：默认构造路径下只要显式提供 `allowed_hosts`，就可以在保留 host/path 边界的前提下关闭 DNS 公网 IP 校验；未显式提供时仍 fail closed。
 - `bots/_shared/opencode`：抽取 bots 共享逻辑（`assertEnv`/response 文本拼装/tool update 解析）。
 - `bots/_shared/log`：提供 `ignoreError`（best-effort 忽略错误）与 `OPENCODE_BOT_VERBOSE` 可选日志输出。
 - `bots/_shared/bootstrap`：抽取 bots 通用初始化（limiter + session store）。
@@ -67,24 +49,15 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `FeishuWebhookSink::new_strict` / `new_with_secret_strict`：在构造阶段额外做一次 DNS 公网 IP 校验。
 
 ### Changed
-- README: 明确 `notify-kit` 当前是 `publish = false` 的 workspace/Git 复用契约，不再把 crates.io 安装写成可直接使用的主路径。
-- `notify-kit`：默认 features 现在收窄为 `standard-env`，不再默认把全部内置 vendor sinks 一次性编进 foundation；需要旧的“全量 sinks”行为时可显式启用新的 `all-sinks` feature。
-- `notify-kit`：默认 feature 收窄后，按 sink feature 暴露的示例与 text helper 现在也同步受对应 `cfg(feature = "...")` 保护，避免默认构建或 mdBook 文档测试因为未启用 vendor sink 而失败。
-- `notify_kit::env::build_hub_from_standard_env(...)` 现在直接返回 `notify_kit::Result` / `notify_kit::Error`，不再把 convenience env helper 暴露成单独的 `anyhow::Result` 错误边界。
-- 内建 text sinks 现在会优先从 `Event::{title_text,body_text,tag_texts}` 渲染消息；结构化字段不再只停留在 `Event` 上当“看起来存在、实际未消费”的影子契约。
-- `notify-kit`：内置 vendor sinks 与 `env` helper 现在按 feature flags 暴露；调用方可通过 `default-features = false` 只拿 core `Hub` / `Event` / `Sink` 抽象，不再被迫吞下整套 HTTP/vendor 依赖面。
-- `notify_kit::env::build_hub_from_standard_env(...)`：`NOTIFY_SOUND` 现在会严格校验布尔值，非法输入直接返回错误，不再静默回退到默认值。
-- `Hub::notify` / `Hub::try_notify` / `Hub::send`：发送前会统一规范化 `Event` 的 structured/string 视图，确保 sinks 在 hub 路径上看到的字符串字段与 `title_text` / `body_text` / `tag_texts` 保持同步。
-- `notify-kit::SecretString`：公开 secret 契约现在由 `notify-kit` 自己持有；内部仍复用 `secret-kit` 的安全容器实现，但不再把外部领域边界直接绑到 `secret-kit::SecretString`。
-- `notify-kit::Error` / `SinkFailure`：标准 `source()` 链现在会保留第一条 sink 失败及其底层原因，通用错误工具可以继续沿链下钻。
-- `FeishuWebhookSink`：远程 Markdown 图片下载现在与 webhook 主请求共享同一套 `with_public_ip_check(...)` 语义，避免配置名义和实际行为分裂。
+- `FeishuWebhookSink`：本地图片相对路径现在必须显式配置 `with_local_image_base_dir(...)`；库不再把 ambient `cwd` 当成图片解析输入，避免 foundation 边界漂移到进程级全局状态。
+- `FeishuWebhookSink`：远程 Markdown 图片下载现在始终强制做 DNS 公网 IP 校验，不再跟随 webhook 主请求的 `with_public_ip_check(false)` 放宽，避免正文图片路径引入 SSRF 到内网 / special-use HTTPS 目标。
 - `FeishuWebhookSink`：本地图片 opt-in 从“只开布尔开关”收紧为“显式开启 + 显式 `local_image_root(s)` allowlist”；加载前会先做绝对路径归一、root 边界检查，并拒绝 `..` 逃逸、symlink 组件和其他特殊路径。
 - `notify-kit::Error` 现在保留结构化错误种类与 `sink_failures()` 访问面；`Hub` 的多 sink 失败不再只压平成一段字符串，下游可以稳定检查失败 sink 的索引、名称与原始错误。
 - `GitHubCommentSink` / `TelegramBotSink` 现在和其他严格 sink 一样复用 `http-kit::HttpClientProfile::select_for_url(...)`，默认启用公网 IP 校验，并新增 `with_public_ip_check(...)` 配置入口。
 - `notify-kit` crate 发布包现在只包含 Rust 库发布所需的 `src/`、`Cargo.toml`、`README.md` 与 `CHANGELOG.md`，不再把 bots、文档和脚本一并打进 package。
 - `GitHubCommentSink` 现在复用 `github-kit` 提供的 GitHub API base/header/url helper，并新增 `GitHubCommentConfig::with_api_base(...)`，让 GitHub Enterprise 之类的自定义 API base 不再被 sink 内部硬编码挡住。
-- `TelegramBotConfig` / `GitHubCommentConfig` / `FeishuWebhookConfig` 及对应 sinks 现在用 `notify-kit::SecretString` 持有长期凭证；内部仍复用 `secret-kit` 的安全容器，`FeishuWebhookSink` 的 webhook secret、tenant access token 与 app secret 也切到同一安全容器，减少 foundation 层把敏感值长期留在普通 `String` 中的路径。
-- `notify-kit`：其余长期凭证持有也统一收口到 `notify-kit::SecretString`。`Bark.device_key`、`DingTalk.secret`、`PushPlus.token`、`ServerChan.send_key` 不再以裸 `String` 长期保存在 config/sink 里；`ServerChan` 还把 send key 从持久化 URL 中拆出，改为按发送请求临时拼装目标 URL。
+- `TelegramBotConfig` / `GitHubCommentConfig` / `FeishuWebhookConfig` 及对应 sinks 现在用 `secret-kit::SecretString` 持有长期凭证；`FeishuWebhookSink` 的 webhook secret、tenant access token 与 app secret 也切到同一安全容器，减少 foundation 层把敏感值长期留在普通 `String` 中的路径。
+- `notify-kit`：其余长期凭证持有也统一收口到 `secret-kit::SecretString`。`Bark.device_key`、`DingTalk.secret`、`PushPlus.token`、`ServerChan.send_key` 不再以裸 `String` 长期保存在 config/sink 里；`ServerChan` 还把 send key 从持久化 URL 中拆出，改为按发送请求临时拼装目标 URL。
 - `GenericWebhookSink::new` 现在默认按目标 URL 自动推导 host/path 边界并走 strict-by-default 校验；调用方不再需要额外记住 `new_strict(...)` 才能拿到安全默认值，而显式 `new_strict(...)` 仍保留给需要自定义 allow-list/path 前缀的场景。
 - `notify-kit`：`Hub::send`/`notify` 现在会在真正进入 `tokio::time` 超时路径前先验证 time driver；如果 runtime 缺少 timer，不再 panic，而是返回可解释错误并把契约写进 rustdoc。
 - Webhook/API sinks: 内部统一迁移到 `HttpClientProfile`，不再依赖已删除的 `http-kit::select_http_client(...)` timeout-only 入口，从而避免 public-IP pinning 路径静默丢失 `reqwest::Client` 隐式配置。
@@ -95,12 +68,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `FeishuWebhookSink`：本地图片读取改为先做 `symlink_metadata` 常规文件校验，再打开文件；Unix 下额外使用 `O_NOFOLLOW`，拒绝 symlink 与其他特殊路径，避免本地图片 opt-in 语义被绕过。
 - `FeishuWebhookSink`：Unix 本地图片路径现在会逐段拒绝祖先 symlink，最终文件继续使用 `O_NOFOLLOW` 打开，避免同一路径同时绕过祖先目录与最终文件边界；租户 token 缓存不再把服务端更短 TTL 延长成本地更长有效期；图片上传被上游拒绝后会丢弃匹配的缓存 token，避免持续复用坏凭证。
 - `FeishuWebhookSink`：租户 token 刷新状态机现在具备取消安全，刷新 future 被取消时会回退到 `Empty` 并唤醒 waiters，避免一次超时后永久卡在 `Refreshing`；并补充重试恢复回归测试。
-- `FeishuWebhookSink`：租户 token 刷新守卫在没有当前 Tokio runtime 的 drop 路径下也会同步回退到 `Empty` 并唤醒 waiters，避免状态永久卡在 `Refreshing`。
-- `FeishuWebhookSink`：本地图片相对路径现在必须显式配置 `local_image_base_dir`，不再隐式依赖进程 `current_dir()` 解析 foundation 级路径语义。
-- `notify_kit::env::build_hub_from_standard_env(...)`：`NOTIFY_TIMEOUT_MS` 现在优先驱动各 HTTP sink 的内部 timeout，并自动给 `HubConfig.per_sink_timeout` 留额外 slack，避免外层 `Hub` 在 DNS / preflight 或请求收尾前伪超时。
 - env helper: 公开路径统一为 `notify_kit::env::build_hub_from_standard_env(...)` / `notify_kit::env::StandardEnvHubOptions`，不再保留 crate root 兼容 re-export。
 - docs: 明确 env helper 是 convenience helper，而不是库级强制 env 协议。
-- docs: 补充 `FeishuWebhookSink` 本地图片相对路径示例，明确相对路径必须显式配置绝对 `local_image_base_dir`，不会退回 ambient `current_dir()`.
 - Webhook/API sinks: `select_http_client` 在命中过期 `pinned client` 条目时会先清理再进入刷新流程，减少失败重建场景下的无效缓存驻留与后续冗余检查。
 - `DiscordWebhookSink` / `GenericWebhookSink` / `GitHubCommentSink`：在成功响应路径增加“有界响应体排空”（仅在可判定小响应体时），提升 HTTP 连接复用率并减少高频发送场景下的额外建连开销。
 - `Hub`：内部 `enabled_kinds` 索引从 `BTreeSet` 查找切换为 `HashSet`（保持对外配置类型不变），降低高频 `notify/send` kind 过滤路径的查找复杂度。

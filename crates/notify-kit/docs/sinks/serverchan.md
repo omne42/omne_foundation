@@ -12,13 +12,10 @@
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
-# #[cfg(feature = "sink-serverchan")]
-# {
 use notify_kit::{ServerChanConfig, ServerChanSink};
 
 let cfg = ServerChanConfig::new("SCTxxxxxxxxxxxxxxxx");
 let sink = ServerChanSink::new(cfg)?;
-# }
 # Ok(())
 # }
 ```

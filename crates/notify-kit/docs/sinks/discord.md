@@ -7,8 +7,6 @@
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
-# #[cfg(feature = "sink-discord")]
-# {
 use std::time::Duration;
 
 use notify_kit::{DiscordWebhookConfig, DiscordWebhookSink};
@@ -20,7 +18,6 @@ let cfg = DiscordWebhookConfig::new("https://discord.com/api/webhooks/xxx")
     .with_public_ip_check(false);
 
 let sink = DiscordWebhookSink::new(cfg)?;
-# }
 # Ok(())
 # }
 ```

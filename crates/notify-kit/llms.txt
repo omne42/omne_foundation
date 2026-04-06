@@ -39,8 +39,6 @@ This file is an LLM-friendly bundle of the `notify-kit` documentation and exampl
 - `dingtalk`：钉钉群机器人 webhook（text，可选签名）
 - `wecom`：企业微信群机器人 webhook（text）
 
-这些内置 sinks 仍然包含在默认 features 里；如果你只想依赖核心 `Hub` / `Event` / `Sink` 抽象，可以用 `default-features = false` 关闭它们，再按需启用 `sink-*` features。
-
 ## 适用场景
 
 - CLI 工具：任务完成/失败时提示音 + 群通知
@@ -130,7 +128,6 @@ This file is an LLM-friendly bundle of the `notify-kit` documentation and exampl
 - **可扩展**：通过 `Sink` 抽象接入任意通知渠道
 - **不阻塞**：默认 `notify()` 不影响主流程；`send()` 也有 per-sink timeout 兜底
 - **安全意识**：对 webhook 做限制；避免在日志中泄露敏感信息
-- **边界清晰**：核心 `Hub` / `Event` / `Sink` 抽象不再强制携带全部 vendor sink 依赖面
 
 ## 非目标
 
@@ -139,10 +136,9 @@ This file is an LLM-friendly bundle of the `notify-kit` documentation and exampl
 
 补充说明：
 
-- 库中提供的 `notify_kit::integration::standard_env::build_hub_from_standard_env(...)` / `notify_kit::integration::standard_env::StandardEnvHubOptions` 只是 convenience helper，用于快速接线或复用一套简单约定。
+- 库中提供的 `notify_kit::env::build_hub_from_standard_env(...)` / `notify_kit::env::StandardEnvHubOptions` 只是 convenience helper，用于快速接线或复用一套简单约定。
 - 它们不改变整体分层：配置协议依然属于 integration layer，而不是 `notify-kit` 的核心职责。
-- 公开入口统一使用 `notify_kit::integration::standard_env::...` 路径，不在 crate root 再叠兼容入口。
-- 默认 features 仍保留当前内置 sinks；需要更窄依赖面时，可通过 `default-features = false` 只拿 core，再按需打开 `sink-*` / `standard-env`。
+- 公开入口统一使用 `notify_kit::env::...` 路径，不在 crate root 再叠兼容入口。
 
 ## 并发模型
 
@@ -326,21 +322,14 @@ Based on the above documentation, answer the following:
 
 ## 安装
 
-如果你通过 crates.io 使用：
-
-```toml
-[dependencies]
-notify-kit = "0.1"
-```
-
-如果你通过 Git / monorepo 引用：
+当前 `notify-kit` 通过 Git / monorepo 引用：
 
 ```toml
 [dependencies]
 notify-kit = { path = "/path/to/omne_foundation/crates/notify-kit" }
 ```
 
-> 以上版本与路径仅为示例；请按你的项目实际情况调整。
+> 路径仅为示例；请按你的项目实际情况调整。
 
 ## 一个可运行的 `main.rs` 示例
 
@@ -570,12 +559,11 @@ hub.notify(Event::new("debug_noise", Severity::Info, "ignored"));
 
 如果你只想快速接线，库里也提供了：
 
-- `notify_kit::integration::standard_env::build_hub_from_standard_env(...)`
-- `notify_kit::integration::standard_env::StandardEnvHubOptions`
+- `notify_kit::env::build_hub_from_standard_env(...)`
+- `notify_kit::env::StandardEnvHubOptions`
 
 它们是 convenience helper，不是强制协议，也不改变推荐分层。
-公开入口固定为 `notify_kit::integration::standard_env::...`。
-如果你关闭了默认 features，需要额外启用 `standard-env` feature 才会编译这组 helper。
+公开入口固定为 `notify_kit::env::...`。
 
 ## 一个推荐的配置层结构
 
@@ -596,7 +584,6 @@ your-app
 
 - `HubConfig` 放过滤、超时这类语义配置
 - `HubLimits` 放 inflight 上限、sink fan-out 并行度这类执行期限制
-- 如果某个 sink 自己也有 HTTP timeout，`HubConfig.per_sink_timeout` 最好比它更大，并留一点 DNS / preflight slack；否则外层 `Hub` 可能会先超时
 
 ## 一个参考的 env/CLI 协议（示例）
 
@@ -620,13 +607,6 @@ use notify_kit::{
 };
 
 fn build_hub_from_env() -> notify_kit::Result<Hub> {
-    let http_timeout = std::env::var("MYAPP_NOTIFY_TIMEOUT_MS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(Duration::from_millis)
-        .unwrap_or(Duration::from_secs(5));
-    let per_sink_timeout = http_timeout + Duration::from_millis(500);
-
     let mut sinks: Vec<Arc<dyn Sink>> = Vec::new();
 
     if std::env::var("MYAPP_NOTIFY_SOUND").ok().as_deref() == Some("1") {
@@ -634,13 +614,18 @@ fn build_hub_from_env() -> notify_kit::Result<Hub> {
     }
 
     if let Ok(url) = std::env::var("MYAPP_NOTIFY_FEISHU_WEBHOOK_URL") {
-        let cfg = FeishuWebhookConfig::new(url).with_timeout(http_timeout);
-        sinks.push(Arc::new(FeishuWebhookSink::new(cfg)?));
+        sinks.push(Arc::new(FeishuWebhookSink::new(FeishuWebhookConfig::new(url))?));
     }
 
     let enabled_kinds = std::env::var("MYAPP_NOTIFY_EVENTS")
         .ok()
         .map(|s| s.split(',').filter(|x| !x.trim().is_empty()).map(|x| x.trim().to_string()).collect::<BTreeSet<_>>());
+
+    let per_sink_timeout = std::env::var("MYAPP_NOTIFY_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(5));
 
     Ok(Hub::new_with_limits(
         HubConfig {
@@ -653,12 +638,7 @@ fn build_hub_from_env() -> notify_kit::Result<Hub> {
 }
 ```
 
-如果你采用库自带的 `notify_kit::integration::standard_env::build_hub_from_standard_env(...)` helper，`NOTIFY_TIMEOUT_MS` 会先作为各 HTTP sink 的内部 timeout，再自动为 `HubConfig.per_sink_timeout` 留一段额外 slack，避免外层 `Hub` 比内层 HTTP request 更早超时。
-`NOTIFY_SOUND` 现在也会做严格布尔校验；非法值会直接返回错误，而不是静默回退到默认值。
-
-如果你在 integration layer 里接 `FeishuWebhookSink` 且正文会出现相对本地图片路径，记得同时显式配置绝对 `with_local_image_root(...)` 和绝对 `with_local_image_base_dir(...)`；`notify-kit` 不会再退回进程 `current_dir()` 解释这类路径。
-
-如果你采用库自带的 env helper，建议通过 `notify_kit::integration::standard_env::build_hub_from_standard_env(...)` 访问，并把它当成 bootstrap helper：能减少样板代码，但不妨碍你在自己的 integration layer 继续包装、替换或扩展。
+如果你采用库自带的 env helper，建议通过 `notify_kit::env::build_hub_from_standard_env(...)` 访问，并把它当成 bootstrap helper：能减少样板代码，但不妨碍你在自己的 integration layer 继续包装、替换或扩展。
 它使用一套中性的 `NOTIFY_*` 约定，而不是业务前缀协议。
 
 ## 标准 helper 示例
@@ -885,8 +865,7 @@ let event = Event::new_structured(
 兼容约束：
 
 - `Event::new` / `with_body` / `with_tag` 继续可用
-- 旧的字符串字段仍保留，作为兼容镜像视图存在
-- 内建 sinks 现在会优先读取结构化字段；如果拿到的是 catalog text，但当前 sink 又只支持纯文本，就会用稳定诊断串做降级，而不是偷偷回退到过期的字符串镜像
+- 旧的字符串字段仍保留，便于现有 sinks 直接渲染
 - 新的结构化字段用于在通知边界上保留 catalog key / args 等语义，避免调用方被迫过早压平成裸字符串
 
 ## 组合建议
@@ -1084,17 +1063,7 @@ let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook
 let sink = FeishuWebhookSink::new(cfg)?;
 ```
 
-默认发送前会做 DNS 公网 IP 校验。如果你希望显式提前校验一次，可以在构造后主动调用：
-
-```rust,no_run,edition2024
-use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
-
-let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx");
-let sink = FeishuWebhookSink::new(cfg)?;
-sink.validate_public_ip_sync()?;
-```
-
-如果你仍然希望沿用“构造阶段顺手校验一次”的 helper，可以继续用：
+默认发送前会做 DNS 公网 IP 校验；如果你希望在 **构造阶段** 也校验一次（可能导致无网络时构造失败），可以用：
 
 ```rust,no_run,edition2024
 use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
@@ -1116,7 +1085,7 @@ let sink = FeishuWebhookSink::new_with_secret(cfg, "your_secret")?;
 
 每次发送会自动填充 `timestamp` / `sign` 字段，并且不会在 `Debug`/错误信息中泄露 secret 或完整 webhook URL。
 
-如果你需要同时启用签名 + DNS 公网 IP 校验，并且希望在构造阶段也顺手校验一次，可以用：
+如果你需要同时启用签名 + DNS 公网 IP 校验，并且希望在 **构造阶段** 也校验一次，可以用：
 
 ```rust,no_run,edition2024
 use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
@@ -1204,7 +1173,7 @@ let sink = FeishuWebhookSink::new(cfg)?;
 说明：
 
 - 远程图片 URL 默认禁用；如确实需要，可显式调用 `.with_remote_image_urls(true)` 后再允许下载并上传
-- 远程图片下载沿用同一个 `with_public_ip_check(...)` 配置；默认仍启用 DNS 公网 IP 校验，只有在调用方显式关闭后才会放宽到更宽的网络环境
+- 远程图片下载始终强制做 DNS 公网 IP 校验；即使 webhook 主请求显式关闭了 `with_public_ip_check(false)`，图片下载也不会因此放宽到内网 / special-use 目标
 - 图片 URL 仅支持 `https`
 - 本地文件路径默认禁用；如确实需要，需要同时显式配置：
 
@@ -1214,25 +1183,13 @@ use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
 let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx")
     .with_app_credentials("cli_xxx", "app_secret_xxx")
     .with_local_image_files(true)
+    .with_local_image_base_dir("/abs/path/to/exported-images")
     .with_local_image_root("/abs/path/to/exported-images");
 let sink = FeishuWebhookSink::new(cfg)?;
 ```
 
-- `local_image_root(s)` 只是 allowlist，不负责给相对路径选基准目录；如果 Markdown 里写的是相对图片路径（例如 `![img](./exported-images/a.png)`），还必须显式配置绝对 `local_image_base_dir`
-
-```rust,no_run,edition2024
-use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
-
-let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx")
-    .with_app_credentials("cli_xxx", "app_secret_xxx")
-    .with_local_image_files(true)
-    .with_local_image_root("/abs/path/to/project/exported-images")
-    .with_local_image_base_dir("/abs/path/to/project");
-let sink = FeishuWebhookSink::new(cfg)?;
-```
-
 - 只会读取显式 `local_image_root(s)` 之下的文件；超出 root、`..` 逃逸、symlink 组件和其他特殊路径都会 fail closed
-- 未配置 `local_image_base_dir` 时，相对图片路径会直接报错，而不是退回进程 `current_dir()`
+- 绝对路径可以直接读取；如果消息正文里使用相对本地路径，必须显式配置 `with_local_image_base_dir(...)`，库不会使用 ambient `cwd` 解析
 - 非 Unix 平台如果无法提供安全的 no-follow 打开语义，会直接拒绝本地图片读取，而不是退化成跟随 symlink/reparse point
 - 上传失败时不会中断整条消息，自动回退为文本链接表示
 
@@ -1711,7 +1668,7 @@ impl Sink for StderrSink {
         event: &'a Event,
     ) -> Pin<Box<dyn Future<Output = notify_kit::Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            eprintln!("[{}] {}", event.kind, event.title());
+            eprintln!("[{}] {}", event.kind, event.title);
             Ok(())
         })
     }

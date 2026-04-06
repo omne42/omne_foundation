@@ -322,7 +322,9 @@ mod tests {
             .with_secret("  s3cr3t  ");
         let sink = DingTalkWebhookSink::new(cfg).expect("build sink");
         assert_eq!(
-            sink.secret.as_ref().map(SecretString::expose_secret),
+            sink.secret
+                .as_ref()
+                .map(secret_kit::SecretString::expose_secret),
             Some("s3cr3t")
         );
     }

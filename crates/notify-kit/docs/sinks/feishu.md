@@ -10,7 +10,6 @@
 
 ```rust,no_run,edition2024
 # extern crate notify_kit;
-# extern crate tokio;
 # fn main() -> notify_kit::Result<()> {
 use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
 
@@ -20,21 +19,7 @@ let sink = FeishuWebhookSink::new(cfg)?;
 # }
 ```
 
-默认发送前会做 DNS 公网 IP 校验。如果你希望显式提前校验一次，可以在构造后主动调用：
-
-```rust,no_run,edition2024
-# extern crate notify_kit;
-# fn main() -> notify_kit::Result<()> {
-use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
-
-let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx");
-let sink = FeishuWebhookSink::new(cfg)?;
-sink.validate_public_ip_sync()?;
-# Ok(())
-# }
-```
-
-如果你仍然希望沿用“构造阶段顺手校验一次”的 helper，可以继续用：
+默认发送前会做 DNS 公网 IP 校验；如果你希望在 **构造阶段** 也校验一次（可能导致无网络时构造失败），可以用：
 
 ```rust,no_run,edition2024
 # extern crate notify_kit;
@@ -64,7 +49,7 @@ let sink = FeishuWebhookSink::new_with_secret(cfg, "your_secret")?;
 
 每次发送会自动填充 `timestamp` / `sign` 字段，并且不会在 `Debug`/错误信息中泄露 secret 或完整 webhook URL。
 
-如果你需要同时启用签名 + DNS 公网 IP 校验，并且希望在构造阶段也顺手校验一次，可以用：
+如果你需要同时启用签名 + DNS 公网 IP 校验，并且希望在 **构造阶段** 也校验一次，可以用：
 
 ```rust,no_run,edition2024
 # extern crate notify_kit;
@@ -168,7 +153,7 @@ let sink = FeishuWebhookSink::new(cfg)?;
 说明：
 
 - 远程图片 URL 默认禁用；如确实需要，可显式调用 `.with_remote_image_urls(true)` 后再允许下载并上传
-- 远程图片下载沿用同一个 `with_public_ip_check(...)` 配置；默认仍启用 DNS 公网 IP 校验，只有在调用方显式关闭后才会放宽到更宽的网络环境
+- 远程图片下载始终强制做 DNS 公网 IP 校验；即使 webhook 主请求显式关闭了 `with_public_ip_check(false)`，图片下载也不会因此放宽到内网 / special-use 目标
 - 图片 URL 仅支持 `https`
 - 本地文件路径默认禁用；如确实需要，需要同时显式配置：
 
@@ -180,31 +165,15 @@ use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
 let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx")
     .with_app_credentials("cli_xxx", "app_secret_xxx")
     .with_local_image_files(true)
+    .with_local_image_base_dir("/abs/path/to/exported-images")
     .with_local_image_root("/abs/path/to/exported-images");
 let sink = FeishuWebhookSink::new(cfg)?;
 # Ok(())
 # }
 ```
 
-- `local_image_root(s)` 只是 allowlist，不负责给相对路径选基准目录；如果 Markdown 里写的是相对图片路径（例如 `![img](./exported-images/a.png)`），还必须显式配置绝对 `local_image_base_dir`
-
-```rust,no_run,edition2024
-# extern crate notify_kit;
-# fn main() -> notify_kit::Result<()> {
-use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
-
-let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx")
-    .with_app_credentials("cli_xxx", "app_secret_xxx")
-    .with_local_image_files(true)
-    .with_local_image_root("/abs/path/to/project/exported-images")
-    .with_local_image_base_dir("/abs/path/to/project");
-let sink = FeishuWebhookSink::new(cfg)?;
-# Ok(())
-# }
-```
-
 - 只会读取显式 `local_image_root(s)` 之下的文件；超出 root、`..` 逃逸、symlink 组件和其他特殊路径都会 fail closed
-- 未配置 `local_image_base_dir` 时，相对图片路径会直接报错，而不是退回进程 `current_dir()`
+- 绝对路径可以直接读取；如果消息正文里使用相对本地路径，必须显式配置 `with_local_image_base_dir(...)`，库不会使用 ambient `cwd` 解析
 - 非 Unix 平台如果无法提供安全的 no-follow 打开语义，会直接拒绝本地图片读取，而不是退化成跟随 symlink/reparse point
 - 上传失败时不会中断整条消息，自动回退为文本链接表示
 

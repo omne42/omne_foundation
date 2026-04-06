@@ -14,12 +14,12 @@ pub enum Severity {
 pub struct Event {
     pub kind: String,
     pub severity: Severity,
-    pub(crate) title: String,
-    pub(crate) title_text: StructuredText,
-    pub(crate) body: Option<String>,
-    pub(crate) body_text: Option<StructuredText>,
-    pub(crate) tags: BTreeMap<String, String>,
-    pub(crate) tag_texts: BTreeMap<String, StructuredText>,
+    pub title: String,
+    pub title_text: StructuredText,
+    pub body: Option<String>,
+    pub body_text: Option<StructuredText>,
+    pub tags: BTreeMap<String, String>,
+    pub tag_texts: BTreeMap<String, StructuredText>,
 }
 
 impl Event {
@@ -52,68 +52,6 @@ impl Event {
             tags: BTreeMap::new(),
             tag_texts: BTreeMap::new(),
         }
-    }
-
-    #[must_use]
-    pub fn title(&self) -> &str {
-        &self.title
-    }
-
-    #[must_use]
-    pub fn title_text(&self) -> &StructuredText {
-        &self.title_text
-    }
-
-    #[must_use]
-    pub fn body(&self) -> Option<&str> {
-        self.body.as_deref()
-    }
-
-    #[must_use]
-    pub fn body_text(&self) -> Option<&StructuredText> {
-        self.body_text.as_ref()
-    }
-
-    #[must_use]
-    pub fn tags(&self) -> &BTreeMap<String, String> {
-        &self.tags
-    }
-
-    #[must_use]
-    pub fn tag_texts(&self) -> &BTreeMap<String, StructuredText> {
-        &self.tag_texts
-    }
-
-    #[must_use]
-    pub fn tag(&self, key: &str) -> Option<&str> {
-        self.tags.get(key).map(String::as_str)
-    }
-
-    pub(crate) fn normalize_delivery_views(&mut self) {
-        self.title = self.title_text.to_string();
-
-        match self.body_text.as_ref() {
-            Some(body_text) => {
-                self.body = Some(body_text.to_string());
-            }
-            None => {
-                if let Some(body) = self.body.as_ref() {
-                    self.body_text = Some(StructuredText::freeform(body.clone()));
-                }
-            }
-        }
-
-        for (key, value) in self.tags.clone() {
-            self.tag_texts
-                .entry(key)
-                .or_insert_with(|| StructuredText::freeform(value));
-        }
-
-        self.tags = self
-            .tag_texts
-            .iter()
-            .map(|(key, value)| (key.clone(), value.to_string()))
-            .collect();
     }
 
     #[must_use]
@@ -198,39 +136,6 @@ mod tests {
         assert_eq!(event.title_text, title);
         assert_eq!(event.body_text, Some(body));
         assert_eq!(event.tag_texts.get("thread_id"), Some(&tag));
-        assert_eq!(event.title, event.title_text.to_string());
-        assert_eq!(
-            event.body.as_deref(),
-            event.body_text.as_ref().map(ToString::to_string).as_deref()
-        );
-        assert_eq!(
-            event.tags.get("thread_id"),
-            event
-                .tag_texts
-                .get("thread_id")
-                .map(ToString::to_string)
-                .as_ref()
-        );
-    }
-
-    #[test]
-    fn normalize_delivery_views_prefers_structured_fields() {
-        let mut event = Event::new("kind", Severity::Info, "plain");
-        event.title = "stale-title".to_string();
-        event.body = Some("stale-body".to_string());
-        event
-            .tags
-            .insert("thread_id".to_string(), "stale".to_string());
-        event = event
-            .with_title_text(structured_text!("notify.title", "repo" => "omne"))
-            .with_body_text(structured_text!("notify.body", "step" => "review"))
-            .with_tag_text(
-                "thread_id",
-                structured_text!("notify.tag", "value" => "fresh"),
-            );
-
-        event.normalize_delivery_views();
-
         assert_eq!(event.title, event.title_text.to_string());
         assert_eq!(
             event.body.as_deref(),

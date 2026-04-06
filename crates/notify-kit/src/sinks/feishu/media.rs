@@ -77,19 +77,7 @@ impl Drop for TenantAccessTokenRefreshGuard {
                 drop(guard);
                 notify.notify_waiters();
             }));
-            return;
         }
-
-        let mut guard = state.blocking_lock();
-        if matches!(
-            &*guard,
-            super::TenantAccessTokenState::Refreshing(current)
-                if std::sync::Arc::ptr_eq(current, &notify)
-        ) {
-            *guard = super::TenantAccessTokenState::Empty;
-        }
-        drop(guard);
-        notify.notify_waiters();
     }
 }
 
@@ -148,8 +136,8 @@ impl FeishuWebhookSink {
 
         let resolved_path = resolve_allowed_local_image_path(
             src,
-            &self.local_image_roots,
             self.local_image_base_dir.as_deref(),
+            &self.local_image_roots,
         )?;
         let bytes =
             read_local_image_file(resolved_path.clone(), self.image_upload_max_bytes).await?;
@@ -178,10 +166,7 @@ impl FeishuWebhookSink {
 
     pub(super) async fn load_remote_image(&self, src: &str) -> crate::Result<LoadedImage> {
         let url = parse_and_validate_https_url_basic(src)?;
-        let client = self
-            .http
-            .select_for_url(&url, self.enforce_public_ip)
-            .await?;
+        let client = self.http.select_for_url(&url, true).await?;
 
         let resp = send_reqwest(client.get(url.clone()), "feishu image download").await?;
         let status = resp.status();
@@ -255,23 +240,19 @@ impl FeishuWebhookSink {
 
         let status = resp.status();
         if !status.is_success() {
+            self.invalidate_tenant_access_token(&access_token).await;
             let body = read_text_body_limited(resp, DEFAULT_MAX_RESPONSE_BODY_BYTES)
                 .await
                 .map_err(|err| {
                     response_body_read_error("feishu image upload http error", status, &err)
                 })?;
-            if should_invalidate_cached_tenant_token_http_error(status, &body) {
-                self.invalidate_tenant_access_token(&access_token).await;
-            }
             return Err(http_status_text_error("feishu image upload", status, &body).into());
         }
 
         let body = read_json_body_limited(resp, DEFAULT_MAX_RESPONSE_BODY_BYTES).await?;
         let code = body["code"].as_i64().unwrap_or(-1);
         if code != 0 {
-            if should_invalidate_cached_tenant_token_api_error(&body) {
-                self.invalidate_tenant_access_token(&access_token).await;
-            }
+            self.invalidate_tenant_access_token(&access_token).await;
             return Err(anyhow::anyhow!("feishu image upload api error: code={code}").into());
         }
 
@@ -432,30 +413,6 @@ impl FeishuWebhookSink {
     }
 }
 
-fn should_invalidate_cached_tenant_token_http_error(
-    status: reqwest::StatusCode,
-    body: &str,
-) -> bool {
-    status == reqwest::StatusCode::UNAUTHORIZED
-        || status == reqwest::StatusCode::FORBIDDEN
-        || body_mentions_tenant_token_failure(body)
-}
-
-fn should_invalidate_cached_tenant_token_api_error(body: &serde_json::Value) -> bool {
-    body.get("msg")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| body.get("message").and_then(serde_json::Value::as_str))
-        .is_some_and(body_mentions_tenant_token_failure)
-}
-
-fn body_mentions_tenant_token_failure(message: &str) -> bool {
-    let lowered = message.to_ascii_lowercase();
-    lowered.contains("token")
-        && ["invalid", "expired", "reject", "unauthoriz", "auth"]
-            .iter()
-            .any(|needle| lowered.contains(needle))
-}
-
 pub(super) fn normalize_local_image_roots(
     allow_local_image_files: bool,
     roots: Vec<PathBuf>,
@@ -474,14 +431,21 @@ pub(super) fn normalize_local_image_roots(
 }
 
 pub(super) fn normalize_local_image_base_dir(
-    allow_local_image_files: bool,
     base_dir: Option<PathBuf>,
 ) -> crate::Result<Option<PathBuf>> {
-    if !allow_local_image_files {
-        return Ok(None);
+    base_dir.map(normalize_local_image_base).transpose()
+}
+
+fn normalize_local_image_base(base_dir: PathBuf) -> crate::Result<PathBuf> {
+    if !base_dir.is_absolute() {
+        return Err(anyhow::anyhow!(
+            "local image base dir must be absolute: {}",
+            base_dir.display()
+        )
+        .into());
     }
 
-    base_dir.map(normalize_local_image_root).transpose()
+    Ok(normalize_path(&base_dir))
 }
 
 fn normalize_local_image_root(root: PathBuf) -> crate::Result<PathBuf> {
@@ -514,8 +478,8 @@ fn normalize_local_image_root(root: PathBuf) -> crate::Result<PathBuf> {
 
 fn resolve_allowed_local_image_path(
     src: &str,
-    roots: &[PathBuf],
     base_dir: Option<&Path>,
+    roots: &[PathBuf],
 ) -> crate::Result<PathBuf> {
     if roots.is_empty() {
         return Err(anyhow::anyhow!(
@@ -538,12 +502,24 @@ fn resolve_allowed_local_image_path(
 
 fn resolve_local_image_path(path: &Path, base_dir: Option<&Path>) -> crate::Result<PathBuf> {
     if path.is_absolute() {
-        return Ok(resolve_local_image_path_with_base(Path::new("/"), path));
+        return Ok(normalize_path(path));
     }
 
     let Some(base_dir) = base_dir else {
-        return Err(anyhow::anyhow!("relative local image paths require explicit base dir").into());
+        return Err(anyhow::anyhow!(
+            "relative local image paths require explicit local image base dir"
+        )
+        .into());
     };
+
+    if !base_dir.is_absolute() {
+        return Err(anyhow::anyhow!(
+            "local image base dir must be absolute: {}",
+            base_dir.display()
+        )
+        .into());
+    }
+
     Ok(resolve_local_image_path_with_base(base_dir, path))
 }
 
@@ -763,50 +739,14 @@ fn normalize_optional_secret(
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex, OnceLock};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use super::{
-        TenantAccessTokenRefreshGuard, ensure_local_image_path_has_no_symlink_components,
-        normalize_local_image_base_dir, normalize_local_image_roots, resolve_local_image_path,
-        resolve_local_image_path_with_base, should_invalidate_cached_tenant_token_api_error,
-        should_invalidate_cached_tenant_token_http_error, tenant_access_token_cache_ttl,
-        tenant_access_token_refresh_waiter,
+        ensure_local_image_path_has_no_symlink_components, normalize_local_image_base_dir,
+        normalize_local_image_roots, resolve_local_image_path, resolve_local_image_path_with_base,
+        tenant_access_token_cache_ttl, tenant_access_token_refresh_waiter,
     };
-
-    struct ProcessCwdGuard {
-        original: PathBuf,
-    }
-
-    impl ProcessCwdGuard {
-        fn switch_to(path: &Path) -> Self {
-            let original = std::env::current_dir().expect("capture current dir");
-            std::env::set_current_dir(path).expect("set current dir");
-            Self { original }
-        }
-    }
-
-    impl Drop for ProcessCwdGuard {
-        fn drop(&mut self) {
-            std::env::set_current_dir(&self.original).expect("restore current dir");
-        }
-    }
-
-    fn cwd_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    fn unique_temp_dir(label: &str) -> PathBuf {
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "notify-kit-feishu-media-{label}-{}-{suffix}",
-            std::process::id()
-        ))
-    }
 
     #[tokio::test]
     async fn tenant_access_token_refresh_waiter_handles_notify_before_await() {
@@ -825,56 +765,6 @@ mod tests {
         assert_eq!(tenant_access_token_cache_ttl(30), Duration::ZERO);
         assert_eq!(tenant_access_token_cache_ttl(120), Duration::from_secs(60));
         assert_eq!(tenant_access_token_cache_ttl(-1), Duration::ZERO);
-    }
-
-    #[test]
-    fn cached_token_invalidation_helpers_only_match_auth_failures() {
-        assert!(should_invalidate_cached_tenant_token_http_error(
-            reqwest::StatusCode::UNAUTHORIZED,
-            "temporary upstream failure"
-        ));
-        assert!(should_invalidate_cached_tenant_token_http_error(
-            reqwest::StatusCode::BAD_REQUEST,
-            "tenant access token rejected"
-        ));
-        assert!(!should_invalidate_cached_tenant_token_http_error(
-            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-            "temporary upstream failure"
-        ));
-        assert!(should_invalidate_cached_tenant_token_api_error(
-            &serde_json::json!({"code": 1, "msg": "tenant access token expired"})
-        ));
-        assert!(!should_invalidate_cached_tenant_token_api_error(
-            &serde_json::json!({"code": 1, "msg": "temporary upstream failure"})
-        ));
-    }
-
-    #[test]
-    fn refresh_guard_drop_without_runtime_resets_refreshing_state() {
-        let notify = Arc::new(tokio::sync::Notify::new());
-        let state = Arc::new(tokio::sync::Mutex::new(
-            super::super::TenantAccessTokenState::Refreshing(Arc::clone(&notify)),
-        ));
-        let wait = tenant_access_token_refresh_waiter(Arc::clone(&notify));
-
-        let refresh_guard =
-            TenantAccessTokenRefreshGuard::new(Arc::clone(&state), Arc::clone(&notify));
-        drop(refresh_guard);
-
-        assert!(matches!(
-            &*state.blocking_lock(),
-            super::super::TenantAccessTokenState::Empty
-        ));
-
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build runtime");
-        runtime.block_on(async {
-            tokio::time::timeout(Duration::from_millis(50), wait)
-                .await
-                .expect("refresh guard should notify waiters even without current runtime");
-        });
     }
 
     #[test]
@@ -898,72 +788,23 @@ mod tests {
 
     #[test]
     fn normalize_local_image_base_dir_rejects_relative_paths() {
-        let err = normalize_local_image_base_dir(true, Some(PathBuf::from("relative-root")))
-            .expect_err("relative base dir should be rejected");
-        assert!(err.to_string().contains("absolute paths"), "{err:#}");
-    }
-
-    #[test]
-    fn normalize_local_image_base_dir_ignores_base_dir_when_local_files_are_disabled() {
-        let base_dir = normalize_local_image_base_dir(false, Some(PathBuf::from("relative-root")))
-            .expect("disabled local files should ignore base dir");
-        assert!(base_dir.is_none());
-    }
-
-    #[test]
-    fn resolve_local_image_path_requires_explicit_base_dir_for_relative_paths() {
-        let err = resolve_local_image_path(Path::new("image.png"), None)
-            .expect_err("relative path without base dir should fail");
+        let err = normalize_local_image_base_dir(Some(PathBuf::from("relative-base")))
+            .expect_err("relative base dirs should be rejected");
         assert!(
-            err.to_string()
-                .contains("relative local image paths require explicit base dir"),
+            err.to_string().contains("base dir must be absolute"),
             "{err:#}"
         );
     }
 
     #[test]
-    fn resolve_local_image_path_does_not_fallback_to_process_cwd_without_base_dir() {
-        let _lock = cwd_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = unique_temp_dir("cwd-fallback");
-        let cwd = temp.join("cwd");
-        std::fs::create_dir_all(&cwd).expect("create cwd");
-        std::fs::write(cwd.join("image.png"), b"png").expect("write image");
-        let _cwd = ProcessCwdGuard::switch_to(&cwd);
-
+    fn resolve_local_image_path_requires_explicit_base_for_relative_paths() {
         let err = resolve_local_image_path(Path::new("image.png"), None)
-            .expect_err("relative path should still require an explicit base dir");
+            .expect_err("relative local image path should require explicit base");
         assert!(
             err.to_string()
-                .contains("relative local image paths require explicit base dir"),
+                .contains("relative local image paths require explicit local image base dir"),
             "{err:#}"
         );
-
-        drop(_cwd);
-        let _ = std::fs::remove_dir_all(&temp);
-    }
-
-    #[test]
-    fn resolve_local_image_path_uses_explicit_base_dir_instead_of_process_cwd() {
-        let _lock = cwd_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = unique_temp_dir("cwd-independence");
-        let cwd = temp.join("cwd");
-        let base = temp.join("base");
-        std::fs::create_dir_all(&cwd).expect("create cwd");
-        std::fs::create_dir_all(&base).expect("create base dir");
-        std::fs::write(cwd.join("image.png"), b"cwd").expect("write cwd image");
-        std::fs::write(base.join("image.png"), b"base").expect("write base image");
-        let _cwd = ProcessCwdGuard::switch_to(&cwd);
-
-        let resolved = resolve_local_image_path(Path::new("image.png"), Some(&base))
-            .expect("explicit base dir should resolve relative image path");
-        assert_eq!(resolved, base.join("image.png"));
-
-        drop(_cwd);
-        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[cfg(unix)]

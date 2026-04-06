@@ -1,9 +1,6 @@
-use std::collections::BTreeSet;
-
 use std::borrow::Cow;
 
 use crate::Event;
-use structured_text_kit::StructuredText;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TextLimits {
@@ -150,15 +147,14 @@ fn format_event_text_parts_limited(
     }
 
     if include_title {
-        let rendered_title = render_structured_text(&event.title_text, Some(event.title.as_str()));
-        let title = truncate_chars_cow(rendered_title.as_ref(), limits.max_title_chars);
+        let title = truncate_chars_cow(&event.title, limits.max_title_chars);
         out.push_str(title.as_ref());
         if out.is_full() {
             return out.finish();
         }
     }
 
-    if let Some(body) = event_body_text(event) {
+    if let Some(body) = event.body.as_deref() {
         let body = body.trim();
         if !body.is_empty() {
             if !out.is_empty() {
@@ -179,7 +175,7 @@ fn format_event_text_parts_limited(
         }
     }
 
-    for (idx, (k, v)) in event_tag_texts(event).enumerate() {
+    for (idx, (k, v)) in event.tags.iter().enumerate() {
         if idx >= limits.max_tags || out.is_full() {
             break;
         }
@@ -202,61 +198,17 @@ fn format_event_text_parts_limited(
         if out.is_full() {
             break;
         }
-        let value = truncate_chars_cow(v.as_ref(), limits.max_tag_value_chars);
+        let value = truncate_chars_cow(v, limits.max_tag_value_chars);
         out.push_str(value.as_ref());
     }
 
     out.finish()
 }
 
-fn render_structured_text<'a>(text: &'a StructuredText, fallback: Option<&'a str>) -> Cow<'a, str> {
-    match text.freeform_text() {
-        Some(text) => Cow::Borrowed(text),
-        None => match fallback {
-            Some(fallback) if fallback == text.to_string() => Cow::Borrowed(fallback),
-            Some(_) | None => Cow::Owned(text.to_string()),
-        },
-    }
-}
-
-fn event_body_text(event: &Event) -> Option<Cow<'_, str>> {
-    event
-        .body_text
-        .as_ref()
-        .map(|text| render_structured_text(text, event.body.as_deref()))
-        .or_else(|| event.body.as_deref().map(Cow::Borrowed))
-}
-
-fn event_tag_texts<'a>(event: &'a Event) -> impl Iterator<Item = (&'a str, Cow<'a, str>)> + 'a {
-    let mut keys = BTreeSet::new();
-    keys.extend(event.tags.keys().map(String::as_str));
-    keys.extend(event.tag_texts.keys().map(String::as_str));
-
-    keys.into_iter().map(|key| {
-        let value = event
-            .tag_texts
-            .get(key)
-            .map(|text| render_structured_text(text, event.tags.get(key).map(String::as_str)))
-            .or_else(|| {
-                event
-                    .tags
-                    .get(key)
-                    .map(|value| Cow::Borrowed(value.as_str()))
-            })
-            .unwrap_or(Cow::Borrowed(""));
-        (key, value)
-    })
-}
-
 pub(crate) fn format_event_text_limited(event: &Event, limits: TextLimits) -> String {
     format_event_text_parts_limited(event, limits, true)
 }
 
-#[cfg(any(
-    feature = "sink-bark",
-    feature = "sink-pushplus",
-    feature = "sink-serverchan"
-))]
 pub(crate) fn format_event_body_and_tags_limited(event: &Event, limits: TextLimits) -> String {
     format_event_text_parts_limited(event, limits, false)
 }
@@ -325,7 +277,6 @@ pub(crate) fn truncate_chars(input: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use crate::Severity;
-    use structured_text_kit::structured_text;
 
     #[test]
     fn truncate_chars_is_utf8_safe() {
@@ -437,31 +388,5 @@ mod tests {
             },
         );
         assert_eq!(out, "a");
-    }
-
-    #[test]
-    fn format_event_text_limited_prefers_structured_fields_over_string_mirror() {
-        let mut event = Event::new("k", Severity::Info, "stale-title")
-            .with_body("stale-body")
-            .with_tag("thread_id", "stale");
-        event.title = "plain-title".to_string();
-        event.body = Some("plain-body".to_string());
-        event
-            .tags
-            .insert("thread_id".to_string(), "plain".to_string());
-        event.title_text = structured_text!("notify.title", "repo" => "omne");
-        event.body_text = Some(structured_text!("notify.body", "step" => "review"));
-        event.tag_texts.insert(
-            "thread_id".to_string(),
-            structured_text!("notify.tag", "value" => "fresh"),
-        );
-
-        let out = format_event_text_limited(&event, TextLimits::default());
-        assert!(out.contains("notify.title"), "{out}");
-        assert!(out.contains("notify.body"), "{out}");
-        assert!(out.contains("thread_id=notify.tag"), "{out}");
-        assert!(!out.contains("plain-title"), "{out}");
-        assert!(!out.contains("plain-body"), "{out}");
-        assert!(!out.contains("thread_id=plain"), "{out}");
     }
 }

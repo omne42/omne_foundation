@@ -98,7 +98,12 @@ impl<T: ?Sized, E> LazyValue<T, E> {
         loop {
             let mut guard = lock_unpoisoned(&self.state);
             match &mut *guard {
-                LazyState::Initialized(value) => return Ok(Arc::clone(value)),
+                LazyState::Initialized(value) => {
+                    if waiting_for_current_attempt {
+                        finish_lazy_wait(thread_id, lazy_id);
+                    }
+                    return Ok(Arc::clone(value));
+                }
                 LazyState::Initializing {
                     thread_id: owner_thread_id,
                     waiting_threads,
@@ -119,15 +124,14 @@ impl<T: ?Sized, E> LazyValue<T, E> {
                         waiting_for_current_attempt = true;
                     }
 
-                    guard = wait_unpoisoned(&self.ready, guard);
-                    finish_lazy_wait(thread_id, lazy_id);
-                    drop(guard);
+                    drop(wait_unpoisoned(&self.ready, guard));
                 }
                 LazyState::Failed {
                     error,
                     waiting_threads,
                 } => {
                     if waiting_for_current_attempt {
+                        finish_lazy_wait(thread_id, lazy_id);
                         let error = Arc::clone(error);
                         if *waiting_threads > 0 {
                             *waiting_threads -= 1;
@@ -146,6 +150,9 @@ impl<T: ?Sized, E> LazyValue<T, E> {
                     }
                 }
                 LazyState::Uninitialized => {
+                    if waiting_for_current_attempt {
+                        finish_lazy_wait(thread_id, lazy_id);
+                    }
                     *guard = LazyState::Initializing {
                         thread_id,
                         waiting_threads: 0,
@@ -367,6 +374,14 @@ fn current_thread_is_initializing_lazy(lazy_id: u64) -> bool {
 #[cfg(test)]
 fn reset_lazy_wait_graph_for_test() {
     *lock_unpoisoned(lazy_wait_graph()) = LazyWaitGraph::default();
+}
+
+#[cfg(test)]
+fn thread_waiting_on_lazy_for_test(thread_id: ThreadId) -> Option<u64> {
+    lock_unpoisoned(lazy_wait_graph())
+        .threads
+        .get(&thread_id)
+        .and_then(|state| state.waiting_on)
 }
 
 fn next_lazy_id() -> u64 {
@@ -593,6 +608,76 @@ mod tests {
             .expect("retry after panic should succeed");
         assert_eq!(*value, 5);
         assert!(is_initialized(&lazy));
+    }
+
+    #[test]
+    fn spurious_notify_keeps_wait_edge_until_attempt_finishes() {
+        let _guard = lazy_value_test_lock()
+            .lock()
+            .expect("lazy value test mutex poisoned");
+        reset_lazy_wait_graph_for_test();
+        let lazy = Arc::new(LazyValue::<u32, &'static str>::new());
+        let lazy_id = lazy.id();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let initializing = Arc::clone(&lazy);
+
+        let init_handle = thread::spawn(move || {
+            initializing
+                .get_or_init(|| -> Result<Arc<u32>, &'static str> {
+                    entered_tx.send(()).expect("signal initializer entered");
+                    release_rx.recv().expect("release initializer");
+                    Ok(Arc::new(11))
+                })
+                .expect("initialization should succeed");
+        });
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("initializer should start");
+
+        let waiting = Arc::clone(&lazy);
+        let (waiter_id_tx, waiter_id_rx) = mpsc::channel();
+        let waiter_handle = thread::spawn(move || {
+            waiter_id_tx
+                .send(thread::current().id())
+                .expect("publish waiter thread id");
+            let value = waiting
+                .get_or_init(|| -> Result<Arc<u32>, &'static str> {
+                    panic!("waiter must not rerun initializer")
+                })
+                .expect("waiter should observe initialized value");
+            assert_eq!(*value, 11);
+        });
+
+        let waiter_thread_id = waiter_id_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("waiter should publish thread id");
+        let start = std::time::Instant::now();
+        while thread_waiting_on_lazy_for_test(waiter_thread_id) != Some(lazy_id) {
+            assert!(
+                start.elapsed() < Duration::from_secs(1),
+                "waiter should register wait edge before spurious notify",
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let check = catch_unwind(AssertUnwindSafe(|| {
+            for _ in 0..5 {
+                lazy.ready.notify_all();
+                thread::sleep(Duration::from_millis(20));
+                assert_eq!(
+                    thread_waiting_on_lazy_for_test(waiter_thread_id),
+                    Some(lazy_id),
+                    "spurious notify must not clear the wait edge before the attempt settles",
+                );
+            }
+        }));
+
+        release_tx.send(()).expect("release initializer");
+        init_handle.join().expect("join initializer thread");
+        waiter_handle.join().expect("join waiter thread");
+        check.expect("spurious notify should keep wait edge registered");
     }
 
     #[test]

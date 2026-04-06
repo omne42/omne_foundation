@@ -277,6 +277,7 @@ pub(crate) fn truncate_chars(input: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use crate::Severity;
+    use structured_text_kit::structured_text;
 
     #[test]
     fn truncate_chars_is_utf8_safe() {
@@ -388,5 +389,21 @@ mod tests {
             },
         );
         assert_eq!(out, "a");
+    }
+
+    #[test]
+    fn format_event_text_limited_skips_catalog_debug_projection() {
+        let event = Event::new_structured(
+            "k",
+            Severity::Info,
+            structured_text!("notify.title", "repo" => "omne"),
+        )
+        .with_body_text(structured_text!("notify.body", "step" => "review"))
+        .with_tag_text("thread_id", structured_text!("notify.tag", "value" => "t1"));
+
+        let out = format_event_text_limited(&event, TextLimits::default());
+        assert!(out.is_empty(), "{out}");
+        assert!(!out.contains("notify.title"), "{out}");
+        assert!(!out.contains("step=\"review\""), "{out}");
     }
 }

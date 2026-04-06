@@ -49,6 +49,9 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `FeishuWebhookSink::new_strict` / `new_with_secret_strict`：在构造阶段额外做一次 DNS 公网 IP 校验。
 
 ### Changed
+- `GitHubCommentSink` 现在对携带 bearer token 的 `api_base` 默认执行 fail-closed 校验：只有 canonical GitHub API host 或显式 allowlist 的 host 才允许发 token，发送前还会重新做 DNS 公网校验；默认不再把凭证交给任意自定义 API base。
+- `notify-kit::env` 现在对非法布尔值 fail closed，并恢复对旧的 `NOTIFY_SINK_TIMEOUT_MS` / `NOTIFY_HUB_TIMEOUT_MS` 拆分超时变量的兼容读取。
+- `Event::new_structured` / `with_*_text` 不再把 catalog text 的诊断显示偷偷同步到字符串字段；未本地化的结构化文本会保留在 `*_text` 字段里，现有纯文本 sinks 不再输出 `code {arg="..."}` 这类调试串。
 - `FeishuWebhookSink`：本地图片相对路径现在必须显式配置 `with_local_image_base_dir(...)`；库不再把 ambient `cwd` 当成图片解析输入，避免 foundation 边界漂移到进程级全局状态。
 - `FeishuWebhookSink`：远程 Markdown 图片下载现在始终强制做 DNS 公网 IP 校验，不再跟随 webhook 主请求的 `with_public_ip_check(false)` 放宽，避免正文图片路径引入 SSRF 到内网 / special-use HTTPS 目标。
 - `FeishuWebhookSink`：本地图片 opt-in 从“只开布尔开关”收紧为“显式开启 + 显式 `local_image_root(s)` allowlist”；加载前会先做绝对路径归一、root 边界检查，并拒绝 `..` 逃逸、symlink 组件和其他特殊路径。

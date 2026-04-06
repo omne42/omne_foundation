@@ -2,6 +2,10 @@ use std::collections::BTreeMap;
 
 use structured_text_kit::StructuredText;
 
+fn plain_text_projection(text: &StructuredText) -> Option<String> {
+    text.freeform_text().map(ToString::to_string)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
     Info,
@@ -45,7 +49,7 @@ impl Event {
         Self {
             kind: kind.into(),
             severity,
-            title: title_text.to_string(),
+            title: plain_text_projection(&title_text).unwrap_or_default(),
             title_text,
             body: None,
             body_text: None,
@@ -64,14 +68,14 @@ impl Event {
 
     #[must_use]
     pub fn with_title_text(mut self, title_text: StructuredText) -> Self {
-        self.title = title_text.to_string();
+        self.title = plain_text_projection(&title_text).unwrap_or_default();
         self.title_text = title_text;
         self
     }
 
     #[must_use]
     pub fn with_body_text(mut self, body_text: StructuredText) -> Self {
-        self.body = Some(body_text.to_string());
+        self.body = plain_text_projection(&body_text);
         self.body_text = Some(body_text);
         self
     }
@@ -89,7 +93,11 @@ impl Event {
     #[must_use]
     pub fn with_tag_text(mut self, key: impl Into<String>, value: StructuredText) -> Self {
         let key = key.into();
-        self.tags.insert(key.clone(), value.to_string());
+        if let Some(value_text) = plain_text_projection(&value) {
+            self.tags.insert(key.clone(), value_text);
+        } else {
+            self.tags.remove(&key);
+        }
         self.tag_texts.insert(key, value);
         self
     }
@@ -136,18 +144,23 @@ mod tests {
         assert_eq!(event.title_text, title);
         assert_eq!(event.body_text, Some(body));
         assert_eq!(event.tag_texts.get("thread_id"), Some(&tag));
-        assert_eq!(event.title, event.title_text.to_string());
-        assert_eq!(
-            event.body.as_deref(),
-            event.body_text.as_ref().map(ToString::to_string).as_deref()
-        );
-        assert_eq!(
-            event.tags.get("thread_id"),
-            event
-                .tag_texts
-                .get("thread_id")
-                .map(ToString::to_string)
-                .as_ref()
-        );
+        assert!(event.title.is_empty());
+        assert_eq!(event.body, None);
+        assert_eq!(event.tags.get("thread_id"), None);
+    }
+
+    #[test]
+    fn structured_freeform_builders_keep_plain_text_projection() {
+        let title = StructuredText::freeform("title");
+        let body = StructuredText::freeform("body");
+        let tag = StructuredText::freeform("t1");
+
+        let event = Event::new_structured("kind", Severity::Warning, title)
+            .with_body_text(body)
+            .with_tag_text("thread_id", tag);
+
+        assert_eq!(event.title, "title");
+        assert_eq!(event.body.as_deref(), Some("body"));
+        assert_eq!(event.tags.get("thread_id").map(String::as_str), Some("t1"));
     }
 }

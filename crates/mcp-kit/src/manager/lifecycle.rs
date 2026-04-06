@@ -287,7 +287,7 @@ impl PreparedDisconnect {
     }
 }
 
-fn reap_stale_child_best_effort(mut child: Child) {
+pub(super) fn reap_stale_child_best_effort(mut child: Child) {
     const REAP_TIMEOUT: Duration = Duration::from_millis(200);
 
     if child.try_wait().ok().flatten().is_some() {

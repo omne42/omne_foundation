@@ -3117,6 +3117,97 @@ async fn untrusted_manager_refuses_custom_jsonrpc_attachments() {
     assert!(err.to_string().contains("connect_io_unchecked"));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn connect_jsonrpc_rejects_duplicate_live_connection_and_reaps_rejected_child() {
+    async fn pid_is_alive(pid: u32) -> bool {
+        tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("kill -0 {pid} 2>/dev/null"))
+            .status()
+            .await
+            .is_ok_and(|status| status.success())
+    }
+
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["method"], "initialize");
+        let id = init_value["id"].clone();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "marker": 1 },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let note_line = lines.next_line().await.unwrap().unwrap();
+        let note_value: Value = serde_json::from_str(&note_line).unwrap();
+        assert_eq!(note_value["method"], "notifications/initialized");
+
+        let eof = lines.next_line().await.unwrap();
+        assert!(eof.is_none(), "expected EOF after disconnect");
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c").arg("exec sleep 10");
+    let duplicate_client = mcp_jsonrpc::Client::spawn_command(cmd).await.unwrap();
+    let child_id = duplicate_client
+        .child_id()
+        .expect("duplicate client child pid should exist");
+    assert!(pid_is_alive(child_id).await);
+
+    let err = manager
+        .connect_jsonrpc("srv", duplicate_client)
+        .await
+        .expect_err("duplicate custom client should be rejected");
+    let message = err.to_string();
+    assert!(message.contains("already connected"), "{message}");
+    assert!(message.contains("disconnect first"), "{message}");
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if !pid_is_alive(child_id).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("rejected duplicate client child should be reaped");
+
+    let status = manager
+        .disconnect_and_wait(
+            "srv",
+            Duration::from_secs(1),
+            mcp_jsonrpc::WaitOnTimeout::ReturnError,
+        )
+        .await
+        .unwrap();
+    assert!(status.is_none());
+    server_task.await.unwrap();
+}
+
 #[tokio::test]
 async fn untrusted_manager_refuses_unix_connect() {
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));

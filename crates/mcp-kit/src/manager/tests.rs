@@ -84,6 +84,48 @@ impl Drop for CurrentDirRestoreGuard {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn stable_connection_cwd_identity_preserves_symlink_parent_semantics() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let real = tempdir.path().join("real");
+    let base = tempdir.path().join("base");
+    let child = real.join("child");
+    let sibling = real.join("sibling");
+    std::fs::create_dir_all(&child).expect("create child");
+    std::fs::create_dir_all(&sibling).expect("create sibling");
+    std::fs::create_dir_all(&base).expect("create base");
+    std::os::unix::fs::symlink(&child, base.join("link")).expect("create symlink");
+
+    let resolved =
+        super::path_identity::stable_connection_cwd_identity(&base.join("link/../sibling"));
+    assert_eq!(resolved, sibling);
+}
+
+#[cfg(unix)]
+#[test]
+fn stable_connection_cwd_identity_keeps_symlink_target_for_missing_suffix() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let real = tempdir.path().join("real");
+    let base = tempdir.path().join("base");
+    let child = real.join("child");
+    std::fs::create_dir_all(&child).expect("create child");
+    std::fs::create_dir_all(&base).expect("create base");
+    std::os::unix::fs::symlink(&child, base.join("link")).expect("create symlink");
+
+    let resolved =
+        super::path_identity::stable_connection_cwd_identity(&base.join("link/../missing/nested"));
+    assert_eq!(resolved, real.join("missing/nested"));
+}
+
+#[test]
+fn stable_connection_cwd_identity_collapses_missing_parent_segments_lexically() {
+    let root = std::env::temp_dir().join("mcp-kit-missing-parent");
+    let resolved =
+        super::path_identity::stable_connection_cwd_identity(&root.join("missing/../child"));
+    assert_eq!(resolved, root.join("child"));
+}
+
 #[test]
 fn roots_capability_is_inserted() {
     let mut capabilities = serde_json::json!({});

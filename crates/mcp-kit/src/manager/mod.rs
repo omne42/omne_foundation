@@ -20,6 +20,7 @@ use crate::{
 mod connect;
 mod handlers;
 mod lifecycle;
+mod path_identity;
 mod placeholders;
 mod streamable_http_validation;
 
@@ -42,6 +43,7 @@ use streamable_http_validation::validate_streamable_http_url_untrusted_dns;
 
 pub(crate) use connect::{ConnectContext, connect_transport};
 pub(crate) use handlers::is_in_manager_handler_scope;
+pub(crate) use path_identity::{resolve_connection_cwd, resolve_connection_cwd_with_base};
 pub(crate) use streamable_http_validation::should_disconnect_after_jsonrpc_error;
 
 static NEXT_MANAGER_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
@@ -76,69 +78,6 @@ fn parse_server_name_anyhow(server_name: &str) -> anyhow::Result<ServerName> {
 
 fn normalize_server_name_lookup(server_name: &str) -> &str {
     server_name.trim()
-}
-
-pub(crate) fn resolve_connection_cwd(cwd: &Path) -> anyhow::Result<PathBuf> {
-    resolve_connection_cwd_with_base(None, cwd)
-}
-
-pub(crate) fn resolve_connection_cwd_with_base(
-    base: Option<&Path>,
-    cwd: &Path,
-) -> anyhow::Result<PathBuf> {
-    let resolved = if cwd.is_absolute() {
-        cwd.to_path_buf()
-    } else {
-        let base = match base {
-            Some(base) if base.is_absolute() => base.to_path_buf(),
-            Some(base) => std::env::current_dir()
-                .context("determine current working directory for relative MCP cwd base")?
-                .join(base),
-            None => std::env::current_dir()
-                .context("determine current working directory for relative MCP cwd")?,
-        };
-        base.join(cwd)
-    };
-    Ok(stable_connection_cwd_identity(&resolved))
-}
-
-fn stable_connection_cwd_identity(path: &Path) -> PathBuf {
-    let normalized = normalize_connection_path(path);
-    let mut existing = normalized.as_path();
-    let mut missing_components = Vec::new();
-
-    while std::fs::symlink_metadata(existing).is_err() {
-        let Some(component) = existing.file_name() else {
-            return normalized;
-        };
-        missing_components.push(component.to_os_string());
-        let Some(parent) = existing.parent() else {
-            return normalized;
-        };
-        existing = parent;
-    }
-
-    let mut canonical = std::fs::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
-    for component in missing_components.iter().rev() {
-        canonical.push(component);
-    }
-    canonical
-}
-
-fn normalize_connection_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            std::path::Component::RootDir => normalized.push(component.as_os_str()),
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                normalized.pop();
-            }
-            std::path::Component::Normal(part) => normalized.push(part),
-        }
-    }
-    normalized
 }
 
 pub(crate) fn contains_wait_timeout(err: &anyhow::Error) -> bool {
@@ -277,6 +216,34 @@ pub(crate) struct PreparedConnectedClient {
     pub connection_id: u64,
     pub timeout: Duration,
     pub client: mcp_jsonrpc::ClientHandle,
+}
+
+impl PreparedConnectedClient {
+    pub(crate) async fn request(
+        &self,
+        method: &str,
+        params: Option<Value>,
+    ) -> anyhow::Result<Value> {
+        Manager::request_raw_handle(
+            self.timeout,
+            &self.server_name,
+            &self.client,
+            method,
+            params,
+        )
+        .await
+    }
+
+    pub(crate) async fn notify(&self, method: &str, params: Option<Value>) -> anyhow::Result<()> {
+        Manager::notify_raw_handle(
+            self.timeout,
+            &self.server_name,
+            &self.client,
+            method,
+            params,
+        )
+        .await
+    }
 }
 
 pub(crate) struct PreparedTransportConnect {
@@ -1800,15 +1767,8 @@ impl Manager {
             let server_name = normalize_server_name_lookup(server_name);
             manager_state_bail!("mcp server not connected: {server_name}");
         };
-        let server_name = prepared.server_name;
-        let result = Self::request_raw_handle(
-            prepared.timeout,
-            &server_name,
-            &prepared.client,
-            method,
-            params,
-        )
-        .await;
+        let server_name = prepared.server_name.clone();
+        let result = prepared.request(method, params).await;
 
         if let Err(err) = &result {
             if should_disconnect_after_jsonrpc_error(err) {
@@ -1840,15 +1800,8 @@ impl Manager {
             let server_name = normalize_server_name_lookup(server_name);
             manager_state_bail!("mcp server not connected: {server_name}");
         };
-        let server_name = prepared.server_name;
-        let result = Self::notify_raw_handle(
-            prepared.timeout,
-            &server_name,
-            &prepared.client,
-            method,
-            params,
-        )
-        .await;
+        let server_name = prepared.server_name.clone();
+        let result = prepared.notify(method, params).await;
 
         if let Err(err) = &result {
             if should_disconnect_after_jsonrpc_error(err) || contains_wait_timeout(err) {

@@ -99,6 +99,20 @@ pub(crate) fn ensure_tokio_time_driver(operation: &'static str) -> anyhow::Resul
     })
 }
 
+pub(crate) fn resolve_config_connection_cwd(
+    config_root: Option<&Path>,
+    cwd: &Path,
+) -> anyhow::Result<PathBuf> {
+    if cwd.is_relative() && config_root.is_none() {
+        return Err(tagged_message(
+            ErrorKind::Config,
+            "relative MCP cwd requires a loaded config path/thread root; pass an absolute cwd or load mcp.json from disk",
+        ));
+    }
+
+    resolve_connection_cwd_with_base(config_root, cwd)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProtocolVersionCheck {
     /// Fail closed (default): reject servers whose `initialize` result includes a different
@@ -881,8 +895,9 @@ impl Manager {
         })?;
         let server_name_key = parse_server_name_anyhow(server_name)?;
         let config_root = config.thread_root();
+        let cwd = resolve_config_connection_cwd(config_root, cwd)?;
         if self.is_connected_and_alive(server_name_key.as_str()) {
-            self.ensure_connection_cwd_matches(server_name_key.as_str(), cwd, config_root)?;
+            self.ensure_connection_cwd_matches(server_name_key.as_str(), &cwd, None)?;
             self.ensure_connection_server_config_matches(server_name_key.as_str(), server_cfg)?;
             return Ok(None);
         }
@@ -892,7 +907,6 @@ impl Manager {
             .validate()
             .with_context(|| format!("invalid mcp server config (server={server_name_key})"))
             .map_err(|err| wrap_kind(ErrorKind::Config, err))?;
-        let cwd = resolve_connection_cwd_with_base(config_root, cwd)?;
 
         Ok(Some(PreparedTransportConnect {
             server_name: server_name.to_string(),

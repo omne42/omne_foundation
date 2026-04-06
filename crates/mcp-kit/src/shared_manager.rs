@@ -198,7 +198,7 @@ impl SharedManager {
         server_name: &str,
         cwd: &Path,
     ) -> anyhow::Result<()> {
-        let cwd = crate::manager::resolve_connection_cwd_with_base(config.thread_root(), cwd)?;
+        let cwd = crate::manager::resolve_config_connection_cwd(config.thread_root(), cwd)?;
 
         if self
             .try_prepare_reusable_connected_client(operation, config, server_name, Some(&cwd))
@@ -276,7 +276,7 @@ impl SharedManager {
         server_name: &str,
         cwd: &Path,
     ) -> anyhow::Result<PreparedSharedClient> {
-        let cwd = crate::manager::resolve_connection_cwd_with_base(config.thread_root(), cwd)?;
+        let cwd = crate::manager::resolve_config_connection_cwd(config.thread_root(), cwd)?;
         let read_gate = self.lock_connect_gate_read(operation, server_name).await?;
 
         if let Some(prepared) = self

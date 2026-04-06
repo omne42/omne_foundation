@@ -1581,8 +1581,7 @@ fn schedule_request_dispatch_error(
             Ok(Ok(())) => {}
             Ok(Err(err)) => responder.schedule_transport_close(format!("{close_reason}: {err}")),
             Err(_) => responder.schedule_transport_close(format!(
-                "{close_reason}: timed out after {:?} while writing error response",
-                REQUEST_DISPATCH_ERROR_TIMEOUT
+                "{close_reason}: timed out after {REQUEST_DISPATCH_ERROR_TIMEOUT:?} while writing error response"
             )),
         }
     }) {

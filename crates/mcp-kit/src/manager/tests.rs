@@ -325,9 +325,31 @@ fn resolve_config_connection_cwd_rejects_relative_cwd_without_thread_root() {
 }
 
 #[test]
+fn resolve_connection_cwd_rejects_relative_cwd_without_explicit_base() {
+    let err = resolve_connection_cwd(Path::new("relative"))
+        .expect_err("relative cwd should require an explicit absolute base");
+    assert!(
+        err.to_string()
+            .contains("relative MCP cwd requires an explicit absolute base"),
+        "{err:#}"
+    );
+}
+
+#[test]
 fn resolve_connection_cwd_with_base_rejects_relative_base() {
     let err = resolve_connection_cwd_with_base(Some(Path::new("relative-base")), Path::new("cwd"))
         .expect_err("relative base should be rejected");
+    assert!(
+        err.to_string()
+            .contains("relative MCP cwd base must be absolute"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn resolve_config_connection_cwd_rejects_relative_thread_root() {
+    let err = resolve_config_connection_cwd(Some(Path::new("relative-root")), Path::new("cwd"))
+        .expect_err("relative config root should be rejected");
     assert!(
         err.to_string()
             .contains("relative MCP cwd base must be absolute"),

@@ -17,6 +17,7 @@
 
 ### Changed
 - `mcp-kit`：连接阶段解析相对 `cwd` 时现在必须拿到显式绝对 base（例如已加载 `mcp.json` 的 thread root）；`Manager` / `SharedManager` 不再在运行时偷偷回退到进程级 `current_dir()`，避免连接身份与复用语义继续依赖 ambient process state。
+- `mcp-kit`：底层 `resolve_connection_cwd*` helper 也改为对“relative cwd + missing base”直接 fail-closed，并把相对 thread root/base 视为稳定配置错误，避免后续入口重新引入 ambient `current_dir()` fallback。
 - `mcp-kit`：`absolute_test_cwd()` 测试 helper 继续在 Windows 构建里可见，避免 mcp cross-platform CI 在引用这批 helper 的 manager 测试上编译失败；不改变产品行为。
 - `mcp-kit`：`Manager` 与 `SharedManager` 现在都通过 `PreparedConnectedClient` 的共享 request/notify helper 执行借用连接上的 JSON-RPC I/O；`SharedManager` 额外把错误后的 cleanup 编排收口到内部统一 helper，减少同一套 prepared-client 边界在两类入口之间继续漂移。
 - `mcp-kit` 现在显式标记 `publish = false`，因为当前实现直接依赖 `config-kit` 等 workspace-only foundation crate；crate manifest 不再暗示可独立 crates.io 发布。

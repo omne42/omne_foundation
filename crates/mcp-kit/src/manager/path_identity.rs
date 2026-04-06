@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, bail};
+use anyhow::bail;
 
 pub(crate) fn resolve_connection_cwd(cwd: &Path) -> anyhow::Result<PathBuf> {
     resolve_connection_cwd_with_base(None, cwd)
@@ -16,8 +16,10 @@ pub(crate) fn resolve_connection_cwd_with_base(
         let base = match base {
             Some(base) if base.is_absolute() => base.to_path_buf(),
             Some(base) => bail!("relative MCP cwd base must be absolute: {}", base.display()),
-            None => std::env::current_dir()
-                .context("determine current working directory for relative MCP cwd")?,
+            None => bail!(
+                "relative MCP cwd requires an explicit absolute base: {}",
+                cwd.display()
+            ),
         };
         base.join(cwd)
     };

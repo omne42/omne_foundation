@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Replace the public `http-kit::Error` wrapper's opaque `anyhow::Error` storage with a structured `kind + message + optional source` boundary, so downstream crates can match stable failure classes without inheriting `anyhow` as the effective public contract.
 - Accept `localhost` DNS answers in the IPv4 `0/8` host-local range when both `allow_localhost=true` and `allow_private_ips=true`, while still rejecting those answers for non-localhost hostnames and IP literals.
 - Keep `allow_private_ips=true` consistent with untrusted host/IP validation by allowing loopback IP literals and `localhost` / `*.localhost` DNS answers, while still rejecting always-disallowed addresses and loopback rebinding from non-localhost hostnames.
 - drain bounded successful responses even when `Content-Length` is absent so chunked keep-alive callers can still return connections to the pool

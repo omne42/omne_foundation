@@ -197,13 +197,9 @@ pub fn build_http_client(timeout: Duration) -> crate::Result<reqwest::Client> {
 pub fn build_http_client_with_options(
     options: &HttpClientOptions,
 ) -> crate::Result<reqwest::Client> {
-    build_http_client_builder(options).build().map_err(|err| {
-        error::tag_anyhow(
-            ErrorKind::InvalidInput,
-            anyhow::anyhow!("build reqwest client: {err}"),
-        )
-        .into()
-    })
+    build_http_client_builder(options)
+        .build()
+        .map_err(|err| error::tagged_source(ErrorKind::InvalidInput, "build reqwest client", err))
 }
 
 pub fn build_http_client_profile(options: &HttpClientOptions) -> crate::Result<HttpClientProfile> {
@@ -233,14 +229,14 @@ pub async fn send_reqwest(
     context: &str,
 ) -> crate::Result<reqwest::Response> {
     builder.send().await.map_err(|err| {
-        error::tag_anyhow(
+        error::tagged_source(
             ErrorKind::Transport,
-            anyhow::anyhow!(
+            format!(
                 "{context} request failed ({})",
                 sanitize_reqwest_error(&err)
             ),
+            err,
         )
-        .into()
     })
 }
 
@@ -277,33 +273,20 @@ async fn resolve_url_to_public_addrs_async(
             shared_state.dns_lookup_semaphore().acquire(),
         )
         .await
-        .map_err(|_| {
-            error::tag_anyhow(
-                ErrorKind::Transport,
-                anyhow::anyhow!(dns_lookup_timeout_message()),
-            )
+        .map_err(|err| {
+            error::tagged_source(ErrorKind::Transport, dns_lookup_timeout_message(), err)
         })?
-        .map_err(|_| {
-            error::tag_anyhow(ErrorKind::Transport, anyhow::anyhow!("dns lookup failed"))
-        })?;
+        .map_err(|err| error::tagged_source(ErrorKind::Transport, "dns lookup failed", err))?;
 
         tokio::time::timeout(
             remaining_dns_timeout(deadline)?,
             tokio::net::lookup_host((host, port)),
         )
         .await
-        .map_err(|_| {
-            error::tag_anyhow(
-                ErrorKind::Transport,
-                anyhow::anyhow!(dns_lookup_timeout_message()),
-            )
-        })?
         .map_err(|err| {
-            error::tag_anyhow(
-                ErrorKind::Transport,
-                anyhow::anyhow!("dns lookup failed: {err}"),
-            )
+            error::tagged_source(ErrorKind::Transport, dns_lookup_timeout_message(), err)
         })?
+        .map_err(|err| error::tagged_source(ErrorKind::Transport, "dns lookup failed", err))?
     };
 
     validate_public_addrs(lookup)
@@ -349,13 +332,7 @@ fn build_http_client_pinned_with_addrs(
     )
     .resolve_to_addrs(host, &addrs)
     .build()
-    .map_err(|err| {
-        error::tag_anyhow(
-            ErrorKind::InvalidInput,
-            anyhow::anyhow!("build reqwest client: {err}"),
-        )
-        .into()
-    })
+    .map_err(|err| error::tagged_source(ErrorKind::InvalidInput, "build reqwest client", err))
 }
 
 async fn build_http_client_pinned_async(

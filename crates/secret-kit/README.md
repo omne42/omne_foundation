@@ -8,13 +8,6 @@
 
 它把 secret 输入统一到 `secret://` 语法下，并在读取、命令执行、JSON 提取和内存持有阶段尽量减少泄露面。
 
-根命名空间只保留 `SecretString` / `SecretError` / `Result` 这类值对象；解析规范和运行时契约要求显式从子模块导入：
-
-- `secret_kit::spec`
-- `secret_kit::runtime`
-- `secret_kit::types`
-- `secret_kit::value`
-
 ## 边界
 
 负责：
@@ -46,6 +39,7 @@
 同时覆盖：
 
 - CLI provider 调用
+- 内建 provider 的系统目录级 PATH 发现、子进程 PATH 裁剪与显式绝对路径 override
 - JSON 字段提取
 - 输出大小与命令超时限制
 - `SECRET_COMMAND_TIMEOUT_MS` / `SECRET_COMMAND_TIMEOUT_SECS` 超时调优入口
@@ -58,19 +52,16 @@
 ## 结构设计
 
 - `src/lib.rs`
-  - crate 级地图与 resolver 组合根
-- `src/runtime.rs`
-  - `SecretEnvironment` / `SecretCommandRuntime` / `SecretResolutionContext`
-- `src/types.rs`
-  - `SecretError` / `Result`
-- `src/value.rs`
-  - `SecretString` 和受限明文持有
+  - `SecretString`
+  - `SecretError`
+  - 运行时 trait
+  - 默认 resolver 主体
 - `src/spec.rs`
   - `secret://` 解析、provider 分派、命令构建
 - `src/file.rs`
   - 受限 secret 文件读取与 symlink 约束
 - `src/command.rs`
-  - 外部命令执行、超时、stdout/stderr 限制、进程清理
+  - 外部命令执行、trusted PATH 解析、stdout/stderr 限制、进程清理
 - `src/json.rs`
   - JSON secret 字段提取与中间值 zeroize
 
@@ -79,3 +70,10 @@
 - 依赖 [`structured-text-kit`](../structured-text-kit/README.md) 表达结构化错误文本
 - 依赖 [`error-kit`](../error-kit/README.md) 提供稳定错误码、类别和重试语义映射
 - 与 `text-assets-kit`、`i18n-runtime-kit`、`prompt-kit`、`mcp-kit`、`notify-kit` 没有强耦合
+
+## CLI 发现边界
+
+- 内建 `vault` / `aws` / `gcloud` / `az` provider 不会信任任意 ambient `PATH` 项。
+- 默认只会在 ambient allowlist 里保留下来的系统目录级 `PATH` 项中搜索内建 CLI。
+- 显式 `command_env_pairs()` 不能把新的 `PATH` 搜索目录注入进来。
+- 如果调用方需要使用工作区、自定义 shim 或用户目录里的二进制，应通过 `resolve_command_program(...)` 提供绝对路径 override，而不是依赖 ambient `PATH`。

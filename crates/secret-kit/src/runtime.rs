@@ -102,9 +102,10 @@ pub trait SecretCommandRuntime: Send + Sync {
     ///
     /// Built-in providers only accept absolute override paths whose basename still matches the
     /// original provider binary (for example `/tmp/vault` for `vault`). Without an override they
-    /// resolve the program from trusted system directories in the ambient allowlisted `PATH`
-    /// snapshot, not from arbitrary absolute search entries or explicit `command_env_pairs`
-    /// injection.
+    /// resolve the program from absolute entries in the ambient allowlisted `PATH` snapshot, but
+    /// only when those entries point at trusted system directories. The forwarded child `PATH`
+    /// uses that same trusted subset; explicit `command_env_pairs` injection still cannot widen
+    /// that search boundary.
     fn resolve_command_program(&self, _program: &str) -> Option<String> {
         None
     }

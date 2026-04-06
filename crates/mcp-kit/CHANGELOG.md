@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit`：`Connection::drop` 的 best-effort child 回收现在在没有 Tokio runtime 时也会切到独立线程执行 `wait()`；不再停留在只 `start_kill()` 不 reap 的状态，从而避免同步析构路径留下 zombie 子进程。
 - `mcp-kit`：`Manager::connect_jsonrpc*` 遇到已连接的同名 server 时不再静默吞掉传入的 custom `mcp_jsonrpc::Client`；现在会显式报错，并对被拒绝 client 触发 best-effort close/child reap，避免 attach 被跳过时把 child 生命周期直接漏给 `Client::Drop`。
 - `mcp-kit`：复用/配置边界相关回归测试不再把 Unix 风格 `"/workspace/..."` 字面量当成跨平台绝对路径，Windows 现在也会用真实绝对测试路径覆盖同一组行为断言。
 - `mcp-kit`：Windows 构建下的 manager 测试现在补齐 `absolute_test_cwd()` 所需的 `OnceLock` 条件导入，避免 cross-platform CI 因测试辅助代码缺失导入而编译失败。

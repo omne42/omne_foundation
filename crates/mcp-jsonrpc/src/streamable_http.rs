@@ -1570,6 +1570,7 @@ mod tests {
                 "200 OK",
                 &[
                     ("content-type", "text/event-stream"),
+                    ("connection", "close"),
                     ("mcp-session-id", "session-1"),
                 ],
             )

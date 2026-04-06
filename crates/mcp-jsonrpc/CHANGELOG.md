@@ -33,4 +33,4 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Added direct-request regression coverage for the sync/no-runtime drop path so dropping a handler-owned request outside a current Tokio runtime still returns the expected JSON-RPC internal error.
 - Added regression coverage for the `streamable_http` path where an already-open SSE stream must drop the stale connection, reconnect after a POST response rolls the session id, and continue delivering server notifications on the new session.
 - `mcp-jsonrpc` now finishes batch-response flushes even when the last dropped request is released from a sync/no-runtime context, so sibling responses do not hang behind a leaked final flush.
-- Stabilized the graceful-EOF SSE reconnect regression test by forcing the initial SSE response to advertise `Connection: close` and by using a less timing-sensitive wait window on slower CI runners.
+- Stabilized the streamable-HTTP SSE reconnect regression coverage by forcing the initial SSE responses in both graceful-EOF and session-rollover tests to advertise `Connection: close`, alongside a less timing-sensitive wait window on slower CI runners.

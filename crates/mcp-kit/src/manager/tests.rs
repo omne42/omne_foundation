@@ -123,7 +123,8 @@ fn stable_connection_cwd_identity_collapses_missing_parent_segments_lexically() 
     let root = std::env::temp_dir().join("mcp-kit-missing-parent");
     let resolved =
         super::path_identity::stable_connection_cwd_identity(&root.join("missing/../child"));
-    assert_eq!(resolved, root.join("child"));
+    let expected = super::path_identity::stable_connection_cwd_identity(&root.join("child"));
+    assert_eq!(resolved, expected);
 }
 
 #[test]

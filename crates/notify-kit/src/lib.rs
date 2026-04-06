@@ -1,5 +1,10 @@
 #![forbid(unsafe_code)]
 
+/// Convenience env wiring helpers.
+///
+/// This module stays separate from the crate root Hub/Sink surface on purpose: `notify-kit` does
+/// not define a mandatory env protocol, and projects that need product-specific configuration
+/// should keep that wiring in their own integration layer.
 pub mod env;
 mod error;
 mod event;

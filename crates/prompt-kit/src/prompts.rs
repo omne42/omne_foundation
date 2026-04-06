@@ -2,14 +2,14 @@
 
 use std::io;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use text_assets_kit::{
     BootstrapLoadError, ResourceManifest, TextDirectory, bootstrap_text_resources_then_load,
     bootstrap_text_resources_then_load_with_base,
 };
 #[allow(deprecated)]
-use text_assets_kit::{LazyInitError, LazyValue};
+use text_assets_kit::{LazyInitError, LazyValue, SharedRuntimeHandle};
 
 #[derive(Debug)]
 pub struct PromptBootstrapCleanupError {
@@ -134,28 +134,28 @@ fn prompt_bootstrap_cleanup_error(load: io::Error, rollback: io::Error) -> io::E
 /// reads without blocking on first-use initialization. Replacements swap the
 /// visible snapshot atomically and keep prior readers on their cloned `Arc`.
 pub struct PromptDirectoryHandle {
-    inner: RwLock<Option<Arc<TextDirectory>>>,
+    inner: SharedRuntimeHandle<TextDirectory>,
 }
 
 impl PromptDirectoryHandle {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            inner: RwLock::new(None),
+            inner: SharedRuntimeHandle::new(),
         }
     }
 
     pub fn replace(&self, directory: TextDirectory) {
-        self.replace_shared(Arc::new(directory));
+        self.inner.replace(directory);
     }
 
     pub fn replace_shared(&self, directory: Arc<TextDirectory>) {
-        *write_unpoisoned(&self.inner) = Some(directory);
+        self.inner.replace_shared(directory);
     }
 
     #[must_use]
     pub fn current_directory(&self) -> Option<Arc<TextDirectory>> {
-        read_unpoisoned(&self.inner).as_ref().map(Arc::clone)
+        self.inner.current()
     }
 
     #[must_use]
@@ -259,14 +259,6 @@ fn shared_prompt_error_detail(error: LazyInitError<io::Error>) -> Arc<io::Error>
 #[allow(deprecated)]
 fn shared_prompt_error(error: LazyInitError<io::Error>) -> PromptDirectoryError {
     PromptDirectoryError::new(shared_prompt_error_detail(error))
-}
-
-fn read_unpoisoned<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
-    lock.read().unwrap_or_else(|poison| poison.into_inner())
-}
-
-fn write_unpoisoned<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
-    lock.write().unwrap_or_else(|poison| poison.into_inner())
 }
 
 #[cfg(test)]

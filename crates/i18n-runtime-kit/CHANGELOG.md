@@ -17,6 +17,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `i18n-runtime-kit` 现在补齐了显式 base 驱动的公共入口：`bootstrap_i18n_catalog_with_base(...)`、`load_i18n_catalog_from_directory_with_base(...)`、`reload_i18n_catalog_from_directory_with_base(...)`，让调用方在已知 workspace/root 时不必继续依赖 ambient `current_dir()`。
 - `LazyCatalog` 现在把检测到的线程级跨线程初始化环路收敛成显式错误，而不是把兼容层调用者永久卡死。
 - `LazyCatalog` 现在会把“同线程但并非当前递归调用”的初始化冲突单独映射成显式错误，避免 deprecated blocking shim 继续把这类冲突误报成 reentrant 初始化。
+- `GlobalCatalog` 现在复用 `text-assets-kit::SharedRuntimeHandle<dyn Catalog>`，不再在 crate 内部维护第二套几乎同构的 runtime handle 实现。
 
 ### Fixed
 - Kept the unix socket entry regression test under a short non-symlink temp root so pre-commit and CI still exercise directory validation instead of failing on host socket path-length limits.

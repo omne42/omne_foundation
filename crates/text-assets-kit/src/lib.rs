@@ -5,6 +5,7 @@ mod lazy_value;
 mod managed_bootstrap;
 mod resource_bootstrap;
 mod resource_path;
+mod runtime_handle;
 mod secure_fs;
 mod text_directory;
 mod text_resource;
@@ -35,6 +36,7 @@ pub use resource_bootstrap::{
     rollback_created_resources,
 };
 pub use resource_path::{materialize_resource_root, materialize_resource_root_with_base};
+pub use runtime_handle::SharedRuntimeHandle;
 pub use secure_fs::{
     MAX_TEXT_DIRECTORY_TOTAL_BYTES, MAX_TEXT_RESOURCE_BYTES, scan_text_directory,
     scan_text_directory_with_base,

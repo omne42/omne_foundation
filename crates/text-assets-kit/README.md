@@ -41,6 +41,7 @@
 - 通用文本资源 manifest bootstrap
 - 同一 root 的 bootstrap/load 尝试串行化，以及同次尝试后续失败时的 best-effort 清理
 - 已加载文本目录快照与树扫描
+- 共享 runtime handle 原语（`SharedRuntimeHandle<T>`），供更高层 runtime adapter 复用“热切换 snapshot 句柄”而不重复实现同一套 `RwLock<Option<Arc<_>>>`
 - `materialize_resource_root(...)`
 - `scan_text_directory(...)`
 

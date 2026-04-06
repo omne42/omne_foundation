@@ -157,7 +157,8 @@ impl Session {
                 );
 
                 // Best-effort close: schedule only once so repeated timeout calls do not spawn
-                // unbounded close tasks under sustained transport lock contention.
+                // unbounded close tasks, and abort the client's background reader/transport
+                // tasks so the timed-out session does not stay half-open.
                 self.connection
                     .client()
                     .close_in_background_once(timeout_message.clone());

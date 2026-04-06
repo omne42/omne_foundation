@@ -1924,6 +1924,95 @@ async fn session_notify_timeout_marks_closed_once_with_first_reason() {
 }
 
 #[tokio::test]
+async fn session_notify_timeout_aborts_background_reader_task() {
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
+
+    struct BlockingRead {
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl tokio::io::AsyncRead for BlockingRead {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    impl Drop for BlockingRead {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Relaxed);
+        }
+    }
+
+    struct BlockingWrite;
+
+    impl tokio::io::AsyncWrite for BlockingWrite {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Pending
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    let reader_dropped = Arc::new(AtomicBool::new(false));
+    let client = mcp_jsonrpc::Client::connect_io(
+        BlockingRead {
+            dropped: Arc::clone(&reader_dropped),
+        },
+        BlockingWrite,
+    )
+    .await
+    .unwrap();
+
+    let connection = Connection {
+        id: next_connection_id(),
+        child: None,
+        client,
+        handler_tasks: Vec::new(),
+    };
+    let session = crate::Session::new(
+        ServerName::parse("srv").unwrap(),
+        connection,
+        serde_json::json!({}),
+        Duration::from_millis(20),
+    );
+
+    let err = session
+        .notify("demo/notify", Some(serde_json::json!({ "x": 1 })))
+        .await
+        .expect_err("notify should time out");
+    assert!(
+        contains_wait_timeout(err.as_anyhow()),
+        "timeout should preserve structured wait-timeout error, err={err:#}"
+    );
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !reader_dropped.load(Ordering::Relaxed) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("timeout-driven background close should abort the reader task");
+}
+
+#[tokio::test]
 async fn connect_io_session_without_handler_timeout_does_not_track_timeout_counter() {
     let (client_stream, server_stream) = tokio::io::duplex(1024);
     let (client_read, client_write) = tokio::io::split(client_stream);

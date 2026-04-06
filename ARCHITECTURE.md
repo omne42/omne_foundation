@@ -147,7 +147,6 @@ mcp-jsonrpc           -> http-kit
 mcp-kit               -> config-kit
 mcp-kit               -> error-kit
 mcp-kit               -> http-kit
-mcp-kit               -> secret-kit
 mcp-kit              -> structured-text-kit
 mcp-kit              -> mcp-jsonrpc
 
@@ -170,7 +169,6 @@ notify-kit           -> structured-text-kit
 - `i18n-runtime-kit` 建立在 `text-assets-kit`、`i18n-kit` 和 `structured-text-kit` 之上，承接目录型 i18n adapter 与 lazy/global handle。
 - `prompt-kit` 建立在 `text-assets-kit` 之上，当前只承接 prompt 目录 bootstrap 与惰性访问这一窄适配层，不是 prompt 模板、版本和缓存的统一抽象。
 - `mcp-jsonrpc` 与 `mcp-kit` 共享 `http-kit`，并依赖 `error-kit` / `structured-text-kit` 提供稳定错误与文本语义，而不是各自重复实现这些基础表示。
-- `mcp-kit` 在 `streamable_http` 的 env-backed auth 兼容路径上复用 `secret-kit` 做 `secret://` 解析与环境读取收口，而不是在 transport 层继续直接读 ambient secret。
 - `notify-kit` 依赖 `http-kit`、`github-kit`、`log-kit`、`secret-kit` 和 `structured-text-kit`，但通知域语义仍独立于 MCP 和 i18n。
 - `mcp-jsonrpc` 是 transport 层，`mcp-kit` 在其上增加 MCP 语义和配置管理。
 - `i18n-kit` 依赖的是结构化文本原语；`secret-kit` 额外复用 `error-kit` 以暴露稳定错误语义，并通过 `omne-runtime` 提供的 process/fs primitives 复用主机侧 building blocks。

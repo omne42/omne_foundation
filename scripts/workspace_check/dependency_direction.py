@@ -21,7 +21,6 @@ ALLOWED_INTERNAL_DEPS: dict[str, set[str]] = {
         "error-kit",
         "http-kit",
         "mcp-jsonrpc",
-        "secret-kit",
         "structured-text-kit",
     },
     "notify-kit": {

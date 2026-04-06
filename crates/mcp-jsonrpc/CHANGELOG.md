@@ -7,19 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
-- `mcp-jsonrpc`：sync/no-runtime 的 dropped-request 回归测试现在统一挂到 detached-runtime test guard，避免并行测试下的故障注入状态互相污染，把本地 hook/CI 门禁稳定下来；不改变运行时行为。
-- `mcp-jsonrpc`：`Client::wait_with_timeout()` 现在对无 child client 区分两条路径：有 Tokio time driver 时继续把本地 close 阶段纳入 `timeout`，没有 time driver 时走 best-effort fail-closed 并返回 `Ok(None)`；同时补上无 child / 有 child 两条回归测试，锁住 API 契约。
-- `mcp-jsonrpc`：为 detached-runtime 相关单测补齐统一 test guard，避免并行测试时共享故障注入状态互相污染，保持 `local` 门禁稳定可重复。
-- `mcp-jsonrpc`：将 `src/lib.rs` 收敛为入口与 re-export，把 client 主体、reader/入站分发、错误映射与测试按稳定职责拆到独立模块，降低单文件复杂度并保持公开 API 不变。
-- `mcp-jsonrpc`：`lib.rs` 里的旧 detached runtime 降级路径已收口到统一的稳健实现；后台 runtime 初始化/派发失败不再 `panic!` 或静默吞掉 batch flush / dropped-request 补偿，而是 fail-closed 并保留关闭原因。
-- `mcp-jsonrpc`：补上 direct dropped-request 在 sync/no-runtime 且 detached runtime 初始化失败时的端到端回归测试，锁住 fail-closed 行为与关闭原因发布，防止未来重构重新把补偿路径退回静默丢失。
-- `mcp-jsonrpc`：`streamable_http` 的 notification POST 超时不再关闭整条 transport；没有 JSON-RPC `id` 的单次超时现在只丢弃该通知，后续 request/notification 仍可继续复用同一连接。
-- `mcp-jsonrpc`：notification-timeout 回归测试改成直接用结构体字面量初始化 `StreamableHttpOptions`，保持 `clippy::field_reassign_with_default` 门禁持续为绿。
-- `mcp-jsonrpc`：`ClientHandle::close_reason()` 现在会在 `is_closed()` 对外变为 true 之前先发布最终原因，避免慢速/macOS 调度下观察到“已关闭但原因仍为空”的竞态。
-- `mcp-jsonrpc`：`streamable_http` 的 graceful SSE EOF 重连现在带最小间隔、轻量抖动并按连续 EOF 指数回退，避免在慢速/macOS 环境里与对端的优雅收尾互相踩出早退重连；session rollover 触发的主动 SSE 切换仍保持立即重连。
-- `mcp-jsonrpc`：`streamable_http` 的 SSE 唤醒现在改成有界合并队列；连续 `202 Accepted` / session rollover 不会再把 wake 信号无界堆积，同时仍保持 `SessionChanged` 优先于普通 `Connect`。
-- `mcp-jsonrpc`：加固了 graceful SSE EOF 重连回归测试，在初始 SSE 头之后先发送一条注释帧、校验最小重连间隔，并统一放宽阶段/通知等待窗口，避免慢速/macOS CI 上把“EOF 后应重连”的真通过误判成超时。
-- `mcp-jsonrpc`：`StreamableHttpOptions.proxy_mode` 现在真正贯通到底层 HTTP client；显式选择 `UseSystem` 时会读取系统代理环境，只有 `enforce_public_ip` 的 pinned socket 路径仍会继续禁用代理。
+- `mcp-jsonrpc`：`ClientHandle::close_reason()` 的文档现在明确它只暴露 first-writer best-effort close diagnostics；并发关闭路径里哪一个 source 先写入并不构成稳定契约。
 - `mcp-jsonrpc`：`streamable_http` 的独立 SSE 读侧现在会在正常 EOF 后自动重连，而不是把整个 transport 直接关闭；会 idle-close/轮换 SSE 的服务端不会再把客户端无谓打死。
 - `mcp-jsonrpc`：`streamable_http` 的 SSE 唤醒信号改为无丢失传递，`SessionChanged` 不会再被排队中的 `Connect` 挤掉，活跃 SSE 在 session rollover 后会可靠切到新会话。
 - `mcp-jsonrpc`：入站 server notification 在本地通知队列过载或接收端已关闭时不再静默丢弃；transport 现在会记录 stats 并主动关闭连接，把数据丢失显式暴露给调用方。

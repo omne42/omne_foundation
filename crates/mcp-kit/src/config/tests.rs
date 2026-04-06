@@ -1,6 +1,4 @@
 use super::*;
-use crate::ServerName;
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[tokio::test]
@@ -102,17 +100,6 @@ async fn load_defaults_to_empty_when_missing() {
 }
 
 #[tokio::test]
-async fn load_rejects_relative_thread_root() {
-    let err = Config::load(std::path::Path::new("relative-root"), None)
-        .await
-        .expect_err("relative thread_root should fail closed");
-    assert!(
-        err.to_string().contains("must be absolute"),
-        "unexpected error: {err:#}"
-    );
-}
-
-#[tokio::test]
 async fn load_required_errors_when_missing() {
     let dir = tempfile::tempdir().unwrap();
     let err = Config::load_required(dir.path(), None).await.unwrap_err();
@@ -175,105 +162,6 @@ async fn load_discovers_mcp_json_when_dot_mcp_json_missing() {
 }
 
 #[tokio::test]
-async fn load_override_outside_root_resolves_relative_server_paths_from_config_dir() {
-    let root = tempfile::tempdir().unwrap();
-    let external = tempfile::tempdir().unwrap();
-    let config_path = external.path().join("mcp.json");
-    tokio::fs::write(
-        &config_path,
-        r#"
-        {
-          "version": 1,
-          "servers": {
-            "stdio": {
-              "transport": "stdio",
-              "argv": ["mcp-stdio"],
-              "stdout_log": { "path": "logs/stdout.log" }
-            },
-            "unix": {
-              "transport": "unix",
-              "unix_path": "sockets/mcp.sock"
-            }
-          }
-        }
-        "#,
-    )
-    .await
-    .unwrap();
-
-    let expected_stdout_log = external.path().join("logs/stdout.log");
-    let expected_unix_path = external.path().join("sockets/mcp.sock");
-    let cfg = Config::load_with_policy(
-        root.path(),
-        Some(config_path.clone()),
-        ConfigLoadPolicy::default().allow_override_outside_root(true),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(cfg.path(), Some(config_path.as_path()));
-    assert_eq!(cfg.thread_root(), Some(external.path()));
-    assert_eq!(
-        cfg.server("stdio")
-            .and_then(ServerConfig::stdout_log)
-            .map(|log| log.path.as_path()),
-        Some(expected_stdout_log.as_path())
-    );
-    assert_eq!(
-        cfg.server("unix").and_then(ServerConfig::unix_path),
-        Some(expected_unix_path.as_path())
-    );
-}
-
-#[tokio::test]
-async fn load_override_inside_root_resolves_relative_server_paths_from_nested_config_dir() {
-    let root = tempfile::tempdir().unwrap();
-    let nested = root.path().join("nested");
-    tokio::fs::create_dir_all(&nested).await.unwrap();
-    let config_path = nested.join("custom-mcp.json");
-    tokio::fs::write(
-        &config_path,
-        r#"
-        {
-          "version": 1,
-          "servers": {
-            "stdio": {
-              "transport": "stdio",
-              "argv": ["mcp-stdio"],
-              "stdout_log": { "path": "logs/stdout.log" }
-            },
-            "unix": {
-              "transport": "unix",
-              "unix_path": "sockets/mcp.sock"
-            }
-          }
-        }
-        "#,
-    )
-    .await
-    .unwrap();
-
-    let expected_stdout_log = nested.join("logs/stdout.log");
-    let expected_unix_path = nested.join("sockets/mcp.sock");
-    let cfg = Config::load(root.path(), Some(PathBuf::from("nested/custom-mcp.json")))
-        .await
-        .unwrap();
-
-    assert_eq!(cfg.path(), Some(config_path.as_path()));
-    assert_eq!(cfg.thread_root(), Some(nested.as_path()));
-    assert_eq!(
-        cfg.server("stdio")
-            .and_then(ServerConfig::stdout_log)
-            .map(|log| log.path.as_path()),
-        Some(expected_stdout_log.as_path())
-    );
-    assert_eq!(
-        cfg.server("unix").and_then(ServerConfig::unix_path),
-        Some(expected_unix_path.as_path())
-    );
-}
-
-#[tokio::test]
 async fn load_parses_valid_file() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(
@@ -289,9 +177,9 @@ async fn load_parses_valid_file() {
     let server = cfg.servers().get("rg").unwrap();
     assert_eq!(
         server.argv(),
-        Some(&["mcp-rg".to_string(), "--stdio".to_string()][..])
+        &["mcp-rg".to_string(), "--stdio".to_string()]
     );
-    assert!(server.env().is_some_and(|env| env.contains_key("NO_COLOR")));
+    assert!(server.env().contains_key("NO_COLOR"));
     assert!(server.stdout_log().is_none());
     assert!(server.unix_path().is_none());
 }
@@ -334,7 +222,7 @@ async fn load_denies_stdio_env_with_empty_value() {
 fn server_config_validate_rejects_stdio_http_auth_fields() {
     let mut cfg = ServerConfig::stdio(vec!["mcp-a".to_string()]).unwrap();
     assert!(
-        cfg.set_bearer_token_secret(Some("secret://env/MCP_TOKEN".to_string()))
+        cfg.set_bearer_token_env_var(Some("MCP_TOKEN".to_string()))
             .is_err()
     );
 }
@@ -368,32 +256,6 @@ fn client_config_validate_rejects_empty_protocol_version() {
 }
 
 #[test]
-fn server_config_constructor_rejects_streamable_http_url_without_http_scheme() {
-    let err = ServerConfig::streamable_http("ws://example.com/mcp").unwrap_err();
-    assert!(
-        err.to_string().contains("must use http or https"),
-        "err={err:#}"
-    );
-}
-
-#[test]
-fn server_config_constructor_rejects_streamable_http_url_without_host() {
-    let err = ServerConfig::streamable_http("http://:80/mcp").unwrap_err();
-    assert!(err.to_string().contains("invalid url"), "err={err:#}");
-}
-
-#[test]
-fn server_config_constructor_rejects_split_streamable_http_url_without_http_scheme() {
-    let err =
-        ServerConfig::streamable_http_split("https://example.com/sse", "ftp://example.com/mcp")
-            .unwrap_err();
-    assert!(
-        err.to_string().contains("http_url must use http or https"),
-        "err={err:#}"
-    );
-}
-
-#[test]
 fn client_config_validate_rejects_non_object_capabilities() {
     let cfg = ClientConfig {
         capabilities: Some(serde_json::json!(1)),
@@ -413,40 +275,6 @@ fn config_validate_rejects_invalid_client_roots() {
     };
     let cfg = Config::new(client, std::collections::BTreeMap::new());
     assert!(cfg.validate().is_err());
-}
-
-#[test]
-fn config_with_path_rejects_relative_path() {
-    let err = Config::new(ClientConfig::default(), std::collections::BTreeMap::new())
-        .with_path(PathBuf::from("mcp.json"))
-        .expect_err("relative config path should fail fast");
-    assert!(err.to_string().contains("must be absolute"), "err={err:#}");
-}
-
-#[test]
-fn config_with_path_accepts_absolute_path() {
-    let path = std::env::temp_dir().join("mcp.json");
-    let cfg = Config::new(ClientConfig::default(), std::collections::BTreeMap::new())
-        .with_path(path.clone())
-        .expect("absolute config path should succeed");
-    assert_eq!(cfg.path(), Some(path.as_path()));
-}
-
-#[test]
-fn config_server_lookup_normalizes_trimmed_server_name() {
-    let mut servers = std::collections::BTreeMap::new();
-    servers.insert(
-        ServerName::parse("remote").expect("server name"),
-        ServerConfig::stdio(vec!["mcp-remote".to_string()]).expect("server config"),
-    );
-    let cfg = Config::new(ClientConfig::default(), servers);
-
-    assert!(cfg.server("remote").is_some());
-    assert!(cfg.server(" remote ").is_some());
-    assert!(
-        cfg.server_named(&ServerName::parse(" remote ").expect("normalized server name"))
-            .is_some()
-    );
 }
 
 #[test]
@@ -497,7 +325,7 @@ async fn load_parses_stdio_inherit_env() {
 
     let cfg = Config::load(dir.path(), None).await.unwrap();
     let server = cfg.servers().get("a").unwrap();
-    assert_eq!(server.inherit_env(), Some(false));
+    assert!(!server.inherit_env());
 }
 
 #[tokio::test]
@@ -672,27 +500,10 @@ async fn load_parses_unix_transport_and_resolves_relative_path() {
     let cfg = Config::load(dir.path(), None).await.unwrap();
     let server = cfg.servers().get("sock").unwrap();
     assert_eq!(server.transport(), Transport::Unix);
-    assert_eq!(server.argv(), None);
+    assert!(server.argv().is_empty());
     assert_eq!(
         server.unix_path().as_ref().unwrap(),
         &dir.path().join("./sock/mcp.sock")
-    );
-}
-
-#[tokio::test]
-async fn load_denies_unix_transport_parent_dir_escape() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{ "version": 1, "servers": { "sock": { "transport": "unix", "unix_path": "../sock/mcp.sock" } } }"#,
-    )
-    .await
-    .unwrap();
-
-    let err = Config::load(dir.path(), None).await.unwrap_err();
-    assert!(
-        err.to_string().contains("unix_path") && err.to_string().contains("`..`"),
-        "unexpected error: {err}"
     );
 }
 
@@ -709,141 +520,16 @@ async fn load_parses_streamable_http_transport() {
     let cfg = Config::load(dir.path(), None).await.unwrap();
     let server = cfg.servers().get("remote").unwrap();
     assert_eq!(server.transport(), Transport::StreamableHttp);
-    assert_eq!(server.argv(), None);
+    assert!(server.argv().is_empty());
     assert!(server.unix_path().is_none());
     assert_eq!(server.url(), Some("https://example.com/mcp"));
     assert!(server.sse_url().is_none());
     assert!(server.http_url().is_none());
-    assert!(server.bearer_token_secret().is_none());
-    assert_eq!(
-        server.streamable_http_proxy_mode(),
-        Some(StreamableHttpProxyMode::IgnoreSystem)
-    );
-    assert!(server.http_headers().is_some_and(BTreeMap::is_empty));
-    assert!(server.secret_http_headers().is_some_and(BTreeMap::is_empty));
-    assert_eq!(server.env(), None);
+    assert!(server.bearer_token_env_var().is_none());
+    assert!(server.http_headers().is_empty());
+    assert!(server.env_http_headers().is_empty());
+    assert!(server.env().is_empty());
     assert!(server.stdout_log().is_none());
-}
-
-#[tokio::test]
-async fn load_parses_streamable_http_proxy_mode() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{
-  "version": 1,
-  "servers": {
-    "remote": {
-      "transport": "streamable_http",
-      "url": "https://example.com/mcp",
-      "streamable_http_proxy_mode": "use_system"
-    }
-  }
-}"#,
-    )
-    .await
-    .unwrap();
-
-    let cfg = Config::load(dir.path(), None).await.unwrap();
-    let server = cfg.servers().get("remote").unwrap();
-    assert_eq!(
-        server.streamable_http_proxy_mode(),
-        Some(StreamableHttpProxyMode::UseSystem)
-    );
-}
-
-#[tokio::test]
-async fn load_normalizes_legacy_env_auth_fields_to_secret_specs() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{
-  "version": 1,
-  "servers": {
-    "remote": {
-      "transport": "streamable_http",
-      "url": "https://example.com/mcp",
-      "bearer_token_env_var": "MCP_TOKEN",
-      "env_http_headers": { "X-Api-Key": "MCP_API_KEY" }
-    }
-  }
-}"#,
-    )
-    .await
-    .unwrap();
-
-    let cfg = Config::load(dir.path(), None).await.unwrap();
-    let server = cfg.servers().get("remote").unwrap();
-    assert_eq!(server.bearer_token_secret(), Some("secret://env/MCP_TOKEN"));
-    assert_eq!(
-        server
-            .secret_http_headers()
-            .and_then(|headers| headers.get("X-Api-Key").map(String::as_str)),
-        Some("secret://env/MCP_API_KEY")
-    );
-}
-
-#[tokio::test]
-async fn load_coalesces_legacy_env_auth_fields_into_secret_specs() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{
-  "version": 1,
-  "servers": {
-    "remote": {
-      "transport": "streamable_http",
-      "url": "https://example.com/mcp",
-      "bearer_token_env_var": "MCP_TOKEN",
-      "env_http_headers": {
-        "X-Api-Key": "MCP_API_KEY"
-      }
-    }
-  }
-}"#,
-    )
-    .await
-    .unwrap();
-
-    let cfg = Config::load(dir.path(), None).await.unwrap();
-    let server = cfg.servers().get("remote").unwrap();
-
-    assert_eq!(server.bearer_token_secret(), Some("secret://env/MCP_TOKEN"));
-    assert_eq!(
-        server
-            .secret_http_headers()
-            .and_then(|headers| headers.get("X-Api-Key"))
-            .map(String::as_str),
-        Some("secret://env/MCP_API_KEY")
-    );
-}
-
-#[tokio::test]
-async fn load_rejects_mixing_secret_and_legacy_bearer_token_fields() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{
-  "version": 1,
-  "servers": {
-    "remote": {
-      "transport": "streamable_http",
-      "url": "https://example.com/mcp",
-      "bearer_token_secret": "secret://env/NEW_TOKEN",
-      "bearer_token_env_var": "OLD_TOKEN"
-    }
-  }
-}"#,
-    )
-    .await
-    .unwrap();
-
-    let err = Config::load(dir.path(), None).await.unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("set either bearer_token_secret or legacy bearer_token_env_var"),
-        "err={err:#}"
-    );
 }
 
 #[tokio::test]
@@ -876,61 +562,13 @@ async fn load_parses_streamable_http_transport_with_split_urls() {
     let cfg = Config::load(dir.path(), None).await.unwrap();
     let server = cfg.servers().get("remote").unwrap();
     assert_eq!(server.transport(), Transport::StreamableHttp);
-    assert_eq!(server.argv(), None);
+    assert!(server.argv().is_empty());
     assert!(server.unix_path().is_none());
     assert!(server.url().is_none());
     assert_eq!(server.sse_url(), Some("https://example.com/sse"));
     assert_eq!(server.http_url(), Some("https://example.com/mcp"));
-    assert_eq!(
-        server.streamable_http_proxy_mode(),
-        Some(StreamableHttpProxyMode::IgnoreSystem)
-    );
 }
 
-#[tokio::test]
-async fn load_denies_streamable_http_with_invalid_url_syntax() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "url": "https://exa mple.com/mcp" } } }"#,
-    )
-    .await
-    .unwrap();
-
-    let err = Config::load(dir.path(), None).await.unwrap_err();
-    assert!(err.to_string().contains("invalid url"), "err={err:#}");
-}
-
-#[tokio::test]
-async fn load_denies_streamable_http_with_non_http_scheme() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "url": "ws://example.com/mcp" } } }"#,
-    )
-    .await
-    .unwrap();
-
-    let err = Config::load(dir.path(), None).await.unwrap_err();
-    assert!(
-        err.to_string().contains("must use http or https"),
-        "err={err:#}"
-    );
-}
-
-#[tokio::test]
-async fn load_denies_streamable_http_split_url_without_host() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "sse_url": "https://example.com/sse", "http_url": "https://user@:443/mcp" } } }"#,
-    )
-    .await
-    .unwrap();
-
-    let err = Config::load(dir.path(), None).await.unwrap_err();
-    assert!(err.to_string().contains("invalid http_url"), "err={err:#}");
-}
 #[tokio::test]
 async fn load_denies_streamable_http_with_url_and_split_urls() {
     let dir = tempfile::tempdir().unwrap();
@@ -985,33 +623,6 @@ async fn load_denies_streamable_http_with_env() {
 
     let err = Config::load(dir.path(), None).await.unwrap_err();
     assert!(err.to_string().contains("transport=streamable_http"));
-}
-
-#[tokio::test]
-async fn load_denies_streamable_http_proxy_mode_on_stdio_transport() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{
-  "version": 1,
-  "servers": {
-    "local": {
-      "transport": "stdio",
-      "argv": ["demo"],
-      "streamable_http_proxy_mode": "use_system"
-    }
-  }
-}"#,
-    )
-    .await
-    .unwrap();
-
-    let err = Config::load(dir.path(), None).await.unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("streamable_http_proxy_mode is only valid for transport=streamable_http"),
-        "err={err:#}"
-    );
 }
 
 #[tokio::test]
@@ -1116,7 +727,7 @@ async fn load_denies_streamable_http_with_invalid_env_http_header_name() {
 
     let err = Config::load(dir.path(), None).await.unwrap_err();
     assert!(
-        err.to_string().contains("invalid secret_http_headers key"),
+        err.to_string().contains("invalid env_http_headers key"),
         "err={err:#}"
     );
 }
@@ -1149,67 +760,6 @@ async fn load_denies_streamable_http_with_reserved_http_header_name() {
 }
 
 #[tokio::test]
-async fn load_denies_streamable_http_with_transport_owned_http_headers() {
-    for header in ["Accept", "Content-Type", "mcp-session-id"] {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            format!(
-                r#"{{
-  "version": 1,
-  "servers": {{
-    "litellm": {{
-      "transport": "streamable_http",
-      "url": "https://example.com/mcp",
-      "http_headers": {{ "{header}": "override" }}
-    }}
-  }}
-}}"#
-            ),
-        )
-        .await
-        .unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("http_headers key is reserved by transport"),
-            "header={header} err={err:#}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn load_denies_streamable_http_with_duplicate_http_header_names_after_case_normalization() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{
-  "version": 1,
-  "servers": {
-    "litellm": {
-      "transport": "streamable_http",
-      "url": "https://example.com/mcp",
-      "http_headers": {
-        "X-Api-Key": "first",
-        "x-api-key": "second"
-      }
-    }
-  }
-}"#,
-    )
-    .await
-    .unwrap();
-
-    let err = Config::load(dir.path(), None).await.unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("duplicate http header name after case normalization"),
-        "err={err:#}"
-    );
-}
-
-#[tokio::test]
 async fn load_denies_streamable_http_with_reserved_env_http_header_name() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(
@@ -1231,39 +781,7 @@ async fn load_denies_streamable_http_with_reserved_env_http_header_name() {
     let err = Config::load(dir.path(), None).await.unwrap_err();
     assert!(
         err.to_string()
-            .contains("secret_http_headers key is reserved by transport"),
-        "err={err:#}"
-    );
-}
-
-#[tokio::test]
-async fn load_denies_streamable_http_with_duplicate_secret_header_names_after_case_normalization() {
-    let dir = tempfile::tempdir().unwrap();
-    tokio::fs::write(
-        dir.path().join("mcp.json"),
-        r#"{
-  "version": 1,
-  "servers": {
-    "litellm": {
-      "transport": "streamable_http",
-      "url": "https://example.com/mcp",
-      "http_headers": {
-        "X-Api-Key": "first"
-      },
-      "secret_http_headers": {
-        "x-api-key": "secret://env/PATH"
-      }
-    }
-  }
-}"#,
-    )
-    .await
-    .unwrap();
-
-    let err = Config::load(dir.path(), None).await.unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("duplicate http header name after case normalization"),
+            .contains("env_http_headers key is reserved by transport"),
         "err={err:#}"
     );
 }
@@ -1290,40 +808,9 @@ async fn load_denies_streamable_http_with_reserved_authorization_env_header_name
     let err = Config::load(dir.path(), None).await.unwrap_err();
     assert!(
         err.to_string()
-            .contains("secret_http_headers key is reserved by transport"),
+            .contains("env_http_headers key is reserved by transport"),
         "err={err:#}"
     );
-}
-
-#[tokio::test]
-async fn load_denies_streamable_http_with_transport_owned_env_http_headers() {
-    for header in ["Accept", "Content-Type", "mcp-session-id"] {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            format!(
-                r#"{{
-  "version": 1,
-  "servers": {{
-    "litellm": {{
-      "transport": "streamable_http",
-      "url": "https://example.com/mcp",
-      "env_http_headers": {{ "{header}": "MCP_TOKEN" }}
-    }}
-  }}
-}}"#
-            ),
-        )
-        .await
-        .unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("secret_http_headers key is reserved by transport"),
-            "header={header} err={err:#}"
-        );
-    }
 }
 
 #[tokio::test]
@@ -1513,24 +1000,6 @@ async fn load_override_path_is_fail_closed() {
 }
 
 #[tokio::test]
-async fn load_fails_closed_when_candidate_discovery_root_is_missing() {
-    let tempdir = tempfile::tempdir().unwrap();
-    let missing_root = tempdir.path().join("missing-root");
-    drop(tempdir);
-
-    let err = Config::load(&missing_root, None).await.unwrap_err();
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("inspect MCP config root before candidate discovery"),
-        "err={msg}"
-    );
-    assert!(
-        msg.contains(&missing_root.display().to_string()),
-        "err={msg}"
-    );
-}
-
-#[tokio::test]
 async fn load_rejects_relative_override_path_outside_root() {
     let root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
@@ -1547,42 +1016,6 @@ async fn load_rejects_relative_override_path_outside_root() {
         .unwrap_err();
     let msg = format!("{err:#}");
     assert!(msg.contains("must be within root"), "err={msg}");
-}
-
-#[tokio::test]
-async fn load_rejects_override_path_that_escapes_after_entering_root() {
-    let root = tempfile::tempdir().unwrap();
-    let inside = root.path().join("inside");
-    let outside = tempfile::tempdir().unwrap();
-    let outside_config = outside.path().join("outside.json");
-
-    tokio::fs::create_dir_all(&inside).await.unwrap();
-    tokio::fs::write(
-        &outside_config,
-        r#"{ "version": 1, "servers": { "a": { "transport": "stdio", "argv": ["mcp-a"] } } }"#,
-    )
-    .await
-    .unwrap();
-
-    let err = Config::load(
-        root.path(),
-        Some(PathBuf::from(format!(
-            "inside/../../{}/outside.json",
-            outside
-                .path()
-                .file_name()
-                .expect("outside tempdir basename")
-                .to_string_lossy()
-        ))),
-    )
-    .await
-    .unwrap_err();
-    let msg = format!("{err:#}");
-    assert!(msg.contains("must be within root"), "err={msg}");
-    assert!(
-        msg.contains("inside/../../"),
-        "error should retain the escaping override path: {msg}"
-    );
 }
 
 #[tokio::test]

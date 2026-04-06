@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -14,95 +13,15 @@ use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc;
 use tokio_util::io::StreamReader;
 
-use crate::{
-    Client, ClientHandle, Error, ProtocolErrorKind, SpawnOptions, StreamableHttpOptions,
-    StreamableHttpProxyMode,
-};
+use crate::{Client, ClientHandle, Error, ProtocolErrorKind, SpawnOptions, StreamableHttpOptions};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SseWakeReason {
     Connect,
     SessionChanged,
-}
-
-impl SseWakeReason {
-    const fn priority(self) -> u8 {
-        match self {
-            Self::Connect => 1,
-            Self::SessionChanged => 2,
-        }
-    }
-
-    const fn from_priority(priority: u8) -> Option<Self> {
-        match priority {
-            1 => Some(Self::Connect),
-            2 => Some(Self::SessionChanged),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug)]
-struct SseWakeQueue {
-    pending: AtomicU8,
-    notify: tokio::sync::Notify,
-}
-
-impl SseWakeQueue {
-    fn new() -> Self {
-        Self {
-            pending: AtomicU8::new(0),
-            notify: tokio::sync::Notify::new(),
-        }
-    }
-
-    fn send(&self, reason: SseWakeReason) {
-        let reason_priority = reason.priority();
-        let mut current = self.pending.load(Ordering::Acquire);
-        loop {
-            let merged = current.max(reason_priority);
-            match self.pending.compare_exchange(
-                current,
-                merged,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(previous) => {
-                    if previous == 0 {
-                        self.notify.notify_one();
-                    }
-                    return;
-                }
-                Err(observed) => current = observed,
-            }
-        }
-    }
-
-    async fn recv(&self) -> Option<SseWakeReason> {
-        loop {
-            if let Some(reason) =
-                SseWakeReason::from_priority(self.pending.swap(0, Ordering::AcqRel))
-            {
-                return Some(reason);
-            }
-
-            let notified = self.notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if let Some(reason) =
-                SseWakeReason::from_priority(self.pending.swap(0, Ordering::AcqRel))
-            {
-                return Some(reason);
-            }
-            notified.await;
-        }
-    }
-}
-
-fn streamable_http_no_proxy(proxy_mode: StreamableHttpProxyMode) -> bool {
-    matches!(proxy_mode, StreamableHttpProxyMode::IgnoreSystem)
 }
 
 fn ends_with_ignore_ascii_case(haystack: &str, suffix: &str) -> bool {
@@ -214,57 +133,6 @@ fn jsonrpc_request_id_from_line(line: &[u8]) -> Result<Option<crate::Id>, serde_
 const SSE_EVENT_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 const HTTP_RESPONSE_INITIAL_CAP_BYTES: usize = 64 * 1024;
 const HTTP_RESPONSE_UNKNOWN_LENGTH_INITIAL_CAP_BYTES: usize = 4 * 1024;
-const SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS: u64 = 100;
-const SSE_GRACEFUL_EOF_RECONNECT_MAX_DELAY_MS: u64 = 1_000;
-const SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS: u64 = 25;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SseReconnectReason {
-    GracefulEof,
-    SessionChanged,
-}
-
-#[derive(Default)]
-struct SseReconnectBackoff {
-    graceful_eof_streak: u32,
-}
-
-impl SseReconnectBackoff {
-    fn delay_for(&mut self, reason: SseReconnectReason) -> Option<Duration> {
-        match reason {
-            SseReconnectReason::SessionChanged => {
-                self.graceful_eof_streak = 0;
-                None
-            }
-            SseReconnectReason::GracefulEof => {
-                let shift = self.graceful_eof_streak.min(4);
-                self.graceful_eof_streak = self.graceful_eof_streak.saturating_add(1);
-                let base_delay = (SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS << shift)
-                    .min(SSE_GRACEFUL_EOF_RECONNECT_MAX_DELAY_MS);
-                let jitter = sse_reconnect_jitter_millis();
-                Some(Duration::from_millis(
-                    base_delay
-                        .saturating_add(jitter)
-                        .min(SSE_GRACEFUL_EOF_RECONNECT_MAX_DELAY_MS),
-                ))
-            }
-        }
-    }
-}
-
-fn sse_reconnect_jitter_millis() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    if SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS == 0 {
-        return 0;
-    }
-
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| u64::from(duration.subsec_nanos()))
-        .unwrap_or(0);
-    nanos % (SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS + 1)
-}
 
 impl Client {
     pub async fn connect_streamable_http(url: &str) -> Result<Self, Error> {
@@ -376,16 +244,9 @@ impl Client {
         let follow_redirects = http_options.follow_redirects;
         let error_body_preview_bytes = http_options.error_body_preview_bytes;
         let enforce_public_ip = http_options.enforce_public_ip;
-        let proxy_mode = http_options.proxy_mode;
         if connect_timeout.is_some() || request_timeout.is_some() {
             crate::ensure_tokio_time_driver("Client::connect_streamable_http*_with_options")?;
         }
-        // Preserve compatibility with runtimes that do not enable Tokio's time
-        // driver by treating graceful-EOF backoff as best-effort.
-        let sse_reconnect_backoff_enabled = crate::ensure_tokio_time_driver(
-            "Client::connect_streamable_http*_with_options SSE reconnect backoff",
-        )
-        .is_ok();
 
         let mut headers = reqwest::header::HeaderMap::new();
         for (key, value) in http_options.headers {
@@ -408,7 +269,8 @@ impl Client {
             connect_timeout,
             default_headers: headers,
             follow_redirects,
-            no_proxy: streamable_http_no_proxy(proxy_mode),
+            // Avoid automatic proxy environment variable loading by default.
+            no_proxy: true,
             ..Default::default()
         };
 
@@ -442,7 +304,7 @@ impl Client {
         let session_id: Arc<tokio::sync::Mutex<Option<String>>> =
             Arc::new(tokio::sync::Mutex::new(None));
 
-        let sse_wake = Arc::new(SseWakeQueue::new());
+        let (sse_wake_tx, sse_wake_rx) = mpsc::unbounded_channel::<SseWakeReason>();
         let sse_client = http_client_profile
             .select_for_url(&sse_url, enforce_public_ip)
             .await
@@ -458,7 +320,7 @@ impl Client {
         let http_client_profile_post = http_client_profile.clone();
         let writer_post = writer.clone();
         let session_id_post = session_id.clone();
-        let sse_wake_post = Arc::clone(&sse_wake);
+        let sse_wake_post = sse_wake_tx.clone();
         let request_timeout_post = request_timeout;
         let error_body_preview_bytes_post = error_body_preview_bytes;
         let handle_post = transport_handle.clone();
@@ -487,15 +349,14 @@ impl Client {
         let http_client_profile_sse = http_client_profile.clone();
         let handle_sse = transport_handle;
         let sse_task = tokio::spawn(async move {
-            let wake_queue = sse_wake;
+            let mut wake_rx = sse_wake_rx;
             let mut current_resp = sse_resp;
-            let mut reconnect_backoff = SseReconnectBackoff::default();
 
             loop {
                 let resp = match current_resp.take() {
                     Some(resp) => resp,
                     None => {
-                        let Some(_) = wake_queue.recv().await else {
+                        let Some(_) = wake_rx.recv().await else {
                             return;
                         };
                         let sse_client = match http_client_profile_sse
@@ -536,7 +397,7 @@ impl Client {
                     }
                 };
 
-                let reconnect_reason = {
+                let reconnect = {
                     let writer = writer_sse.clone();
                     let mut pump_fut =
                         std::pin::pin!(pump_sse_response(resp, writer, max_message_bytes));
@@ -547,7 +408,7 @@ impl Client {
                                 Ok(()) => {
                                     // Treat graceful SSE EOF as a recoverable read-side event:
                                     // reconnect instead of tearing down the whole transport.
-                                    break Some(SseReconnectReason::GracefulEof);
+                                    break true;
                                 }
                                 Err(err) => {
                                     close_post_bridge(
@@ -559,12 +420,12 @@ impl Client {
                                     return;
                                 }
                             },
-                            wake = wake_queue.recv() => {
+                            wake = wake_rx.recv() => {
                                 match wake {
                                     Some(SseWakeReason::SessionChanged) => {
                                         // Exiting this scope drops the stale SSE pump before the
                                         // reconnect path selects a new socket.
-                                        break Some(SseReconnectReason::SessionChanged);
+                                        break true;
                                     }
                                     Some(SseWakeReason::Connect) => {}
                                     None => {
@@ -594,14 +455,8 @@ impl Client {
                     }
                 };
 
-                let Some(reconnect_reason) = reconnect_reason else {
+                if !reconnect {
                     continue;
-                };
-                let reconnect_delay = reconnect_backoff.delay_for(reconnect_reason);
-                if sse_reconnect_backoff_enabled {
-                    if let Some(delay) = reconnect_delay {
-                        tokio::time::sleep(delay).await;
-                    }
                 }
 
                 let sse_client = match http_client_profile_sse
@@ -648,25 +503,6 @@ impl Client {
     }
 }
 
-#[cfg(test)]
-mod proxy_mode_tests {
-    use super::*;
-
-    #[test]
-    fn use_system_proxy_keeps_proxy_loading_enabled() {
-        assert!(!streamable_http_no_proxy(
-            StreamableHttpProxyMode::UseSystem
-        ));
-    }
-
-    #[test]
-    fn ignore_system_proxy_disables_proxy_loading() {
-        assert!(streamable_http_no_proxy(
-            StreamableHttpProxyMode::IgnoreSystem
-        ));
-    }
-}
-
 struct HttpPostBridge {
     bridge_read: tokio::io::ReadHalf<tokio::io::DuplexStream>,
     writer: Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::io::DuplexStream>>>,
@@ -674,7 +510,7 @@ struct HttpPostBridge {
     http_client_profile: HttpClientProfile,
     post_url: reqwest::Url,
     session_id: Arc<tokio::sync::Mutex<Option<String>>>,
-    sse_wake: Arc<SseWakeQueue>,
+    sse_wake: mpsc::UnboundedSender<SseWakeReason>,
     max_message_bytes: usize,
     request_timeout: Option<Duration>,
     error_body_preview_bytes: usize,
@@ -815,7 +651,7 @@ impl HttpPostBridge {
                 }
             }
             if let Some(reason) = wake_reason {
-                sse_wake.send(reason);
+                let _ = sse_wake.send(reason);
             }
 
             let status = resp.status();
@@ -1120,9 +956,13 @@ async fn emit_wait_timeout_from_line(
     };
 
     let Some(id) = id else {
-        // Notifications have no reply path, so a single slow POST must not tear down the whole
-        // transport. Drop the timed-out notification and keep the bridge alive for later traffic.
-        return true;
+        close_post_bridge(
+            writer,
+            handle,
+            format!("streamable http notification timed out: {message}"),
+        )
+        .await;
+        return false;
     };
 
     if let Some(tx) = crate::lock_pending(&handle.pending).remove(&id) {
@@ -1425,38 +1265,6 @@ mod tests {
         assert!(!is_json_content_type("application/notjson+jsone"));
     }
 
-    #[tokio::test]
-    async fn sse_wake_queue_coalesces_reasons_and_preserves_session_change_priority() {
-        let queue = SseWakeQueue::new();
-        queue.send(SseWakeReason::Connect);
-        queue.send(SseWakeReason::Connect);
-        queue.send(SseWakeReason::SessionChanged);
-        queue.send(SseWakeReason::Connect);
-
-        assert_eq!(queue.recv().await, Some(SseWakeReason::SessionChanged));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), queue.recv())
-                .await
-                .is_err(),
-            "coalesced wake queue should drain the whole pending batch at once"
-        );
-    }
-
-    #[tokio::test]
-    async fn sse_wake_queue_delivers_connect_without_extra_queue_growth() {
-        let queue = Arc::new(SseWakeQueue::new());
-        let receiver = {
-            let queue = Arc::clone(&queue);
-            tokio::spawn(async move { queue.recv().await })
-        };
-
-        queue.send(SseWakeReason::Connect);
-        assert_eq!(
-            receiver.await.expect("receiver task should join"),
-            Some(SseWakeReason::Connect)
-        );
-    }
-
     #[test]
     fn body_preview_text_is_bounded_by_max_bytes() {
         let body = b"abcdefghijklmnopqrstuvwxyz";
@@ -1522,65 +1330,6 @@ mod tests {
         assert_eq!(
             normalized,
             br#"{"id":1,"jsonrpc":"2.0","result":{"ok":true}}"#
-        );
-    }
-
-    #[test]
-    fn sse_reconnect_backoff_applies_min_interval_jitter_and_reset() {
-        let mut backoff = SseReconnectBackoff::default();
-
-        let first = backoff
-            .delay_for(SseReconnectReason::GracefulEof)
-            .expect("graceful eof should reconnect");
-        assert!(
-            first >= Duration::from_millis(SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS),
-            "first reconnect delay should honor the minimum interval: {first:?}"
-        );
-        assert!(
-            first
-                <= Duration::from_millis(
-                    SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS
-                        + SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS
-                ),
-            "first reconnect delay should stay within the jitter window: {first:?}"
-        );
-
-        let second = backoff
-            .delay_for(SseReconnectReason::GracefulEof)
-            .expect("second graceful eof should reconnect");
-        assert!(
-            second >= Duration::from_millis(SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS * 2),
-            "second reconnect delay should back off exponentially: {second:?}"
-        );
-        assert!(
-            second
-                <= Duration::from_millis(
-                    (SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS * 2)
-                        + SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS
-                ),
-            "second reconnect delay should stay within the jitter window: {second:?}"
-        );
-
-        let session_change = backoff.delay_for(SseReconnectReason::SessionChanged);
-        assert_eq!(
-            session_change, None,
-            "session rollover reconnect should stay immediate"
-        );
-
-        let reset = backoff
-            .delay_for(SseReconnectReason::GracefulEof)
-            .expect("graceful eof after session rollover should reconnect");
-        assert!(
-            reset >= Duration::from_millis(SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS),
-            "session rollover should reset the EOF streak: {reset:?}"
-        );
-        assert!(
-            reset
-                <= Duration::from_millis(
-                    SSE_GRACEFUL_EOF_RECONNECT_MIN_INTERVAL_MS
-                        + SSE_GRACEFUL_EOF_RECONNECT_JITTER_MS
-                ),
-            "reset reconnect delay should return to the base jitter window: {reset:?}"
         );
     }
 
@@ -1802,9 +1551,6 @@ mod tests {
 
     #[tokio::test]
     async fn streamable_http_reconnects_after_graceful_sse_eof() {
-        const TEST_STAGE_TIMEOUT: Duration = Duration::from_secs(10);
-        const MIN_RECONNECT_DELAY: Duration = Duration::from_millis(80);
-
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind listener");
@@ -1829,21 +1575,12 @@ mod tests {
             .await
             .expect("write initial SSE headers");
             stage_tx.send("initial-sse-open").expect("send stage");
-            write_chunk(&mut initial_sse, b": heartbeat\n\n")
-                .await
-                .expect("write initial SSE comment");
-            let eof_closed_at = std::time::Instant::now();
             finish_chunked_response(&mut initial_sse)
                 .await
                 .expect("finish initial SSE response");
             drop(initial_sse);
 
             let (mut reconnected_sse, _) = listener.accept().await.expect("accept reconnect SSE");
-            assert!(
-                eof_closed_at.elapsed() >= MIN_RECONNECT_DELAY,
-                "graceful EOF reconnect happened too quickly: {:?}",
-                eof_closed_at.elapsed()
-            );
             let reconnect_request = read_http_request(&mut reconnected_sse)
                 .await
                 .expect("read reconnect GET");
@@ -1886,18 +1623,18 @@ mod tests {
             .take_notifications()
             .expect("take notifications receiver");
 
-        let stage = tokio::time::timeout(TEST_STAGE_TIMEOUT, stage_rx.recv())
+        let stage = tokio::time::timeout(Duration::from_secs(2), stage_rx.recv())
             .await
             .expect("initial SSE stage should arrive before timeout")
             .expect("stage channel open");
         assert_eq!(stage, "initial-sse-open");
-        let stage = tokio::time::timeout(TEST_STAGE_TIMEOUT, stage_rx.recv())
+        let stage = tokio::time::timeout(Duration::from_secs(2), stage_rx.recv())
             .await
             .expect("reconnect SSE stage should arrive before timeout")
             .expect("stage channel open");
         assert_eq!(stage, "reconnected-sse-open");
 
-        let notification = tokio::time::timeout(TEST_STAGE_TIMEOUT, notifications.recv())
+        let notification = tokio::time::timeout(Duration::from_secs(2), notifications.recv())
             .await
             .expect("notification should arrive before timeout")
             .expect("notification stream open");
@@ -1906,142 +1643,6 @@ mod tests {
             notification.params,
             Some(serde_json::json!({ "session": "session-1" }))
         );
-
-        client.close("test complete").await;
-        let _ = close_tx.send(());
-        server.await.expect("server task should join");
-    }
-
-    #[tokio::test]
-    async fn streamable_http_notification_timeout_does_not_close_transport() {
-        const REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
-        const TEST_STAGE_TIMEOUT: Duration = Duration::from_secs(2);
-
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("listener addr");
-        let base_url = format!("http://{addr}");
-        let (stage_tx, mut stage_rx) = mpsc::unbounded_channel();
-        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
-
-        let server = tokio::spawn(async move {
-            let (mut sse_stream, _) = listener.accept().await.expect("accept initial SSE");
-            let sse_request = read_http_request(&mut sse_stream).await.expect("read GET");
-            assert_eq!(sse_request.method, "GET");
-            assert_eq!(sse_request.path, "/sse");
-            write_chunked_response_headers(
-                &mut sse_stream,
-                "200 OK",
-                &[
-                    ("content-type", "text/event-stream"),
-                    ("mcp-session-id", "session-1"),
-                ],
-            )
-            .await
-            .expect("write SSE headers");
-            stage_tx.send("sse-open").expect("send stage");
-
-            let (mut slow_post, _) = listener.accept().await.expect("accept timed-out POST");
-            let notify_request = read_http_request(&mut slow_post)
-                .await
-                .expect("read notify POST");
-            assert_eq!(notify_request.method, "POST");
-            assert_eq!(notify_request.path, "/post");
-            assert!(
-                String::from_utf8(notify_request.body)
-                    .expect("utf8 notify body")
-                    .contains("\"method\":\"demo/notify-timeout\""),
-                "unexpected notify body"
-            );
-            stage_tx.send("notify-post-received").expect("send stage");
-            tokio::time::sleep(REQUEST_TIMEOUT + Duration::from_millis(20)).await;
-            drop(slow_post);
-
-            let (mut request_post, _) = listener.accept().await.expect("accept request POST");
-            let request = read_http_request(&mut request_post)
-                .await
-                .expect("read request POST");
-            assert_eq!(request.method, "POST");
-            assert_eq!(request.path, "/post");
-            assert!(
-                String::from_utf8(request.body)
-                    .expect("utf8 request body")
-                    .contains("\"method\":\"demo/ping\""),
-                "unexpected request body"
-            );
-
-            let response_body = serde_json::to_vec(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "result": { "ok": true }
-            }))
-            .expect("serialize response");
-            write_fixed_response(
-                &mut request_post,
-                "200 OK",
-                &[
-                    ("content-type", "application/json"),
-                    ("mcp-session-id", "session-1"),
-                    ("connection", "close"),
-                ],
-                &response_body,
-            )
-            .await
-            .expect("write request response");
-            stage_tx.send("request-post-responded").expect("send stage");
-            drop(request_post);
-            let _ = close_rx.await;
-            drop(sse_stream);
-        });
-
-        let http_options = StreamableHttpOptions {
-            request_timeout: Some(REQUEST_TIMEOUT),
-            ..Default::default()
-        };
-        let client = Client::connect_streamable_http_split_with_options(
-            &format!("{base_url}/sse"),
-            &format!("{base_url}/post"),
-            http_options,
-            SpawnOptions::default(),
-        )
-        .await
-        .expect("connect streamable http");
-
-        let stage = tokio::time::timeout(TEST_STAGE_TIMEOUT, stage_rx.recv())
-            .await
-            .expect("SSE stage should arrive before timeout")
-            .expect("stage channel open");
-        assert_eq!(stage, "sse-open");
-
-        client
-            .notify("demo/notify-timeout", None)
-            .await
-            .expect("send notify");
-
-        let stage = tokio::time::timeout(TEST_STAGE_TIMEOUT, stage_rx.recv())
-            .await
-            .expect("notify POST should arrive before timeout")
-            .expect("stage channel open");
-        assert_eq!(stage, "notify-post-received");
-
-        tokio::time::sleep(REQUEST_TIMEOUT + Duration::from_millis(40)).await;
-        assert!(
-            !client.is_closed(),
-            "timed-out notification must not close the transport"
-        );
-
-        let response = client
-            .request("demo/ping", serde_json::json!({}))
-            .await
-            .expect("request after timed-out notification should succeed");
-        assert_eq!(response, serde_json::json!({ "ok": true }));
-
-        let stage = tokio::time::timeout(TEST_STAGE_TIMEOUT, stage_rx.recv())
-            .await
-            .expect("request response stage should arrive before timeout")
-            .expect("stage channel open");
-        assert_eq!(stage, "request-post-responded");
 
         client.close("test complete").await;
         let _ = close_tx.send(());

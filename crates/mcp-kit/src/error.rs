@@ -1,5 +1,3 @@
-use error_kit::{ErrorCategory, ErrorCode, ErrorRecord, ErrorRetryAdvice};
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     Other,
@@ -8,42 +6,6 @@ pub enum ErrorKind {
     Protocol,
     Timeout,
     ManagerState,
-}
-
-#[derive(Debug)]
-pub(crate) struct TaggedError {
-    kind: ErrorKind,
-    source: anyhow::Error,
-}
-
-impl TaggedError {
-    fn new(kind: ErrorKind, source: anyhow::Error) -> Self {
-        Self { kind, source }
-    }
-
-    fn kind(&self) -> ErrorKind {
-        self.kind
-    }
-}
-
-impl std::fmt::Display for TaggedError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.source)
-    }
-}
-
-impl std::error::Error for TaggedError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.source.as_ref())
-    }
-}
-
-pub(crate) fn tag_anyhow(kind: ErrorKind, err: anyhow::Error) -> anyhow::Error {
-    anyhow::Error::new(TaggedError::new(kind, err))
-}
-
-pub(crate) fn tagged_message(kind: ErrorKind, message: impl Into<String>) -> anyhow::Error {
-    tag_anyhow(kind, anyhow::anyhow!(message.into()))
 }
 
 #[derive(Debug)]
@@ -76,10 +38,7 @@ impl Error {
 
     #[must_use]
     pub fn context(self, context: impl std::fmt::Display + Send + Sync + 'static) -> Self {
-        Self {
-            kind: self.kind,
-            inner: self.inner.context(context),
-        }
+        Self::from(self.inner.context(context))
     }
 
     #[must_use]
@@ -88,42 +47,10 @@ impl Error {
         C: std::fmt::Display + Send + Sync + 'static,
         F: FnOnce() -> C,
     {
-        Self {
-            kind: self.kind,
-            inner: self.inner.context(f()),
-        }
-    }
-
-    fn classify_mcp_jsonrpc_protocol_error(protocol: &mcp_jsonrpc::ProtocolError) -> ErrorKind {
-        match protocol.kind {
-            mcp_jsonrpc::ProtocolErrorKind::Closed
-            | mcp_jsonrpc::ProtocolErrorKind::StreamableHttp => ErrorKind::Connection,
-            mcp_jsonrpc::ProtocolErrorKind::WaitTimeout => ErrorKind::Timeout,
-            mcp_jsonrpc::ProtocolErrorKind::InvalidMessage
-            | mcp_jsonrpc::ProtocolErrorKind::InvalidInput
-            | mcp_jsonrpc::ProtocolErrorKind::Other
-            | _ => ErrorKind::Protocol,
-        }
-    }
-
-    fn classify_mcp_jsonrpc_error(err: &mcp_jsonrpc::Error) -> ErrorKind {
-        match err {
-            mcp_jsonrpc::Error::Io(_) => ErrorKind::Connection,
-            mcp_jsonrpc::Error::Protocol(protocol) => {
-                Self::classify_mcp_jsonrpc_protocol_error(protocol)
-            }
-            mcp_jsonrpc::Error::Json(_) | mcp_jsonrpc::Error::Rpc { .. } => ErrorKind::Protocol,
-        }
+        Self::from(self.inner.context(f()))
     }
 
     fn classify(err: &anyhow::Error) -> ErrorKind {
-        if let Some(tag) = err
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<TaggedError>())
-        {
-            return tag.kind();
-        }
-
         if err.chain().any(|cause| {
             cause
                 .downcast_ref::<mcp_jsonrpc::Error>()
@@ -132,12 +59,11 @@ impl Error {
             return ErrorKind::Timeout;
         }
 
-        if let Some(kind) = err
+        if err
             .chain()
-            .find_map(|cause| cause.downcast_ref::<mcp_jsonrpc::Error>())
-            .map(Self::classify_mcp_jsonrpc_error)
+            .any(|cause| cause.downcast_ref::<mcp_jsonrpc::Error>().is_some())
         {
-            return kind;
+            return ErrorKind::Protocol;
         }
 
         if err.chain().any(|cause| {
@@ -155,60 +81,40 @@ impl Error {
             return ErrorKind::Config;
         }
 
+        let mut chain_text = String::new();
+        for cause in err.chain() {
+            if !chain_text.is_empty() {
+                chain_text.push_str(" | ");
+            }
+            chain_text.push_str(&cause.to_string());
+        }
+        let chain_text = chain_text.to_ascii_lowercase();
+
+        if chain_text.contains("not connected")
+            || chain_text.contains("cannot be reused for cwd")
+            || chain_text.contains("reentrantly")
+            || chain_text.contains("became unavailable before")
+        {
+            return ErrorKind::ManagerState;
+        }
+
+        if chain_text.contains("mcp config")
+            || chain_text.contains("invalid mcp server config")
+            || chain_text.contains("unknown mcp server")
+            || chain_text.contains("override config path")
+            || chain_text.contains("transport=")
+            || chain_text.contains("stdout_log")
+            || chain_text.contains("client.protocol_version")
+            || chain_text.contains("client.capabilities")
+            || chain_text.contains("client.roots")
+            || chain_text.contains("bearer_token_env_var")
+            || chain_text.contains("unix_path")
+            || chain_text.contains("untrusted mode")
+        {
+            return ErrorKind::Config;
+        }
+
         ErrorKind::Other
-    }
-
-    #[must_use]
-    pub fn error_code(&self) -> ErrorCode {
-        literal_error_code(match self.kind {
-            ErrorKind::Other => "mcp_kit.other",
-            ErrorKind::Config => "mcp_kit.config",
-            ErrorKind::Connection => "mcp_kit.connection",
-            ErrorKind::Protocol => "mcp_kit.protocol",
-            ErrorKind::Timeout => "mcp_kit.timeout",
-            ErrorKind::ManagerState => "mcp_kit.manager_state",
-        })
-    }
-
-    #[must_use]
-    pub fn error_category(&self) -> ErrorCategory {
-        match self.kind {
-            ErrorKind::Config => ErrorCategory::InvalidInput,
-            ErrorKind::Connection | ErrorKind::Protocol => ErrorCategory::ExternalDependency,
-            ErrorKind::Timeout => ErrorCategory::Timeout,
-            ErrorKind::ManagerState | ErrorKind::Other => ErrorCategory::Internal,
-        }
-    }
-
-    #[must_use]
-    pub fn retry_advice(&self) -> ErrorRetryAdvice {
-        match self.kind {
-            ErrorKind::Connection | ErrorKind::Timeout => ErrorRetryAdvice::Retryable,
-            ErrorKind::Config
-            | ErrorKind::Protocol
-            | ErrorKind::ManagerState
-            | ErrorKind::Other => ErrorRetryAdvice::DoNotRetry,
-        }
-    }
-
-    #[must_use]
-    pub fn error_record(&self) -> ErrorRecord {
-        ErrorRecord::new_freeform(self.error_code(), kind_user_text(self.kind))
-            .with_category(self.error_category())
-            .with_retry_advice(self.retry_advice())
-            .with_freeform_diagnostic_text(self.inner.to_string())
-    }
-
-    #[must_use]
-    pub fn into_error_record(self) -> ErrorRecord {
-        let code = self.error_code();
-        let category = self.error_category();
-        let retry_advice = self.retry_advice();
-        let diagnostic = self.inner.to_string();
-        ErrorRecord::new_freeform(code, kind_user_text(self.kind))
-            .with_category(category)
-            .with_retry_advice(retry_advice)
-            .with_freeform_diagnostic_text(diagnostic)
     }
 }
 
@@ -271,40 +177,15 @@ impl From<crate::ServerNameError> for Error {
     }
 }
 
-impl From<Error> for ErrorRecord {
-    fn from(error: Error) -> Self {
-        error.into_error_record()
-    }
-}
-
-fn literal_error_code(code: &'static str) -> ErrorCode {
-    ErrorCode::try_new(code).expect("literal error code should validate")
-}
-
-fn kind_user_text(kind: ErrorKind) -> &'static str {
-    match kind {
-        ErrorKind::Other => "mcp-kit operation failed",
-        ErrorKind::Config => "mcp-kit configuration is invalid",
-        ErrorKind::Connection => "mcp server connection failed",
-        ErrorKind::Protocol => "mcp server spoke an invalid protocol sequence",
-        ErrorKind::Timeout => "mcp operation timed out",
-        ErrorKind::ManagerState => "mcp manager state rejected the operation",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use anyhow::anyhow;
-    use error_kit::{ErrorCategory, ErrorRetryAdvice};
 
-    use super::{Error, ErrorKind, tag_anyhow, tagged_message};
+    use super::{Error, ErrorKind};
 
     #[test]
     fn classifies_config_errors() {
-        let err = Error::from(tagged_message(
-            ErrorKind::Config,
-            "mcp config not found under root /tmp",
-        ));
+        let err = Error::from(anyhow!("mcp config not found under root /tmp"));
         assert_eq!(err.kind(), ErrorKind::Config);
     }
 
@@ -313,15 +194,6 @@ mod tests {
         let err = Error::from(anyhow::Error::new(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
             "dial failed",
-        )));
-        assert_eq!(err.kind(), ErrorKind::Connection);
-    }
-
-    #[test]
-    fn classifies_wrapped_jsonrpc_io_errors_as_connection_errors() {
-        let err = Error::from(mcp_jsonrpc::Error::from(std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            "transport closed",
         )));
         assert_eq!(err.kind(), ErrorKind::Connection);
     }
@@ -336,24 +208,6 @@ mod tests {
     }
 
     #[test]
-    fn classifies_closed_jsonrpc_errors_as_connection_errors() {
-        let err = Error::from(mcp_jsonrpc::Error::protocol(
-            mcp_jsonrpc::ProtocolErrorKind::Closed,
-            "transport closed",
-        ));
-        assert_eq!(err.kind(), ErrorKind::Connection);
-    }
-
-    #[test]
-    fn classifies_streamable_http_protocol_errors_as_connection_errors() {
-        let err = Error::from(mcp_jsonrpc::Error::protocol(
-            mcp_jsonrpc::ProtocolErrorKind::StreamableHttp,
-            "streamable http transport failed",
-        ));
-        assert_eq!(err.kind(), ErrorKind::Connection);
-    }
-
-    #[test]
     fn classifies_timeout_errors() {
         let err = Error::from(mcp_jsonrpc::Error::protocol(
             mcp_jsonrpc::ProtocolErrorKind::WaitTimeout,
@@ -364,78 +218,7 @@ mod tests {
 
     #[test]
     fn classifies_manager_state_errors() {
-        let err = Error::from(tagged_message(
-            ErrorKind::ManagerState,
-            "mcp server not connected: demo",
-        ));
+        let err = Error::from(anyhow!("mcp server not connected: demo"));
         assert_eq!(err.kind(), ErrorKind::ManagerState);
-    }
-
-    #[test]
-    fn preserves_kind_across_context_layers() {
-        let err = Error::from(tag_anyhow(
-            ErrorKind::Config,
-            anyhow!("base config failure"),
-        ))
-        .context("outer context")
-        .with_context(|| "lazy context");
-        assert_eq!(err.kind(), ErrorKind::Config);
-    }
-
-    #[test]
-    fn preserves_tagged_kind_through_anyhow_context_before_conversion() {
-        let err = tag_anyhow(ErrorKind::ManagerState, anyhow!("server already connected"))
-            .context("outer anyhow context")
-            .context("second anyhow context");
-
-        assert_eq!(Error::from(err).kind(), ErrorKind::ManagerState);
-    }
-
-    #[test]
-    fn classifies_typed_jsonrpc_errors_through_anyhow_context_layers() {
-        let err = anyhow::Error::new(mcp_jsonrpc::Error::protocol(
-            mcp_jsonrpc::ProtocolErrorKind::WaitTimeout,
-            "timed out",
-        ))
-        .context("close session");
-
-        assert_eq!(Error::from(err).kind(), ErrorKind::Timeout);
-    }
-
-    #[test]
-    fn classifies_closed_jsonrpc_errors_through_anyhow_context_layers() {
-        let err = anyhow::Error::new(mcp_jsonrpc::Error::protocol(
-            mcp_jsonrpc::ProtocolErrorKind::Closed,
-            "transport closed",
-        ))
-        .context("close session");
-
-        assert_eq!(Error::from(err).kind(), ErrorKind::Connection);
-    }
-
-    #[test]
-    fn timeout_errors_map_to_retryable_timeout_records() {
-        let err = Error::from(mcp_jsonrpc::Error::protocol(
-            mcp_jsonrpc::ProtocolErrorKind::WaitTimeout,
-            "timed out",
-        ));
-        let record = err.error_record();
-
-        assert_eq!(record.code().as_str(), "mcp_kit.timeout");
-        assert_eq!(record.category(), ErrorCategory::Timeout);
-        assert_eq!(record.retry_advice(), ErrorRetryAdvice::Retryable);
-    }
-
-    #[test]
-    fn manager_state_errors_map_to_internal_records() {
-        let record = Error::from(tagged_message(
-            ErrorKind::ManagerState,
-            "mcp server not connected: demo",
-        ))
-        .into_error_record();
-
-        assert_eq!(record.code().as_str(), "mcp_kit.manager_state");
-        assert_eq!(record.category(), ErrorCategory::Internal);
-        assert_eq!(record.retry_advice(), ErrorRetryAdvice::DoNotRetry);
     }
 }

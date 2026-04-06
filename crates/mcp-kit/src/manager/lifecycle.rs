@@ -8,12 +8,9 @@ use tokio::process::Child;
 use crate::{ServerConfig, ServerName};
 
 use super::{
-    CachedConnection, Connection, Manager, PreparedTransportConnect, ProtocolVersionCheck,
-    ProtocolVersionMismatch, handlers::HandlerAttachSnapshot,
+    Connection, Manager, ProtocolVersionCheck, ProtocolVersionMismatch,
+    handlers::HandlerAttachSnapshot,
 };
-
-const BEST_EFFORT_REAP_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const BEST_EFFORT_REAP_TIMEOUT: Duration = Duration::from_millis(200);
 
 enum ProtocolVersionMismatchUpdate {
     None,
@@ -62,16 +59,10 @@ impl InitializeSnapshot {
         client: &mcp_jsonrpc::Client,
     ) -> anyhow::Result<(Value, ProtocolVersionMismatchUpdate)> {
         if self.protocol_version.trim().is_empty() {
-            return Err(crate::error::tagged_message(
-                crate::error::ErrorKind::Config,
-                "mcp protocol version must not be empty",
-            ));
+            anyhow::bail!("mcp protocol version must not be empty");
         }
         if !self.capabilities.is_object() {
-            return Err(crate::error::tagged_message(
-                crate::error::ErrorKind::Config,
-                "mcp client capabilities must be a JSON object",
-            ));
+            anyhow::bail!("mcp client capabilities must be a JSON object");
         }
 
         let initialize_params = serde_json::json!({
@@ -119,19 +110,7 @@ impl InitializeSnapshot {
                     ProtocolVersionCheck::Ignore => ProtocolVersionMismatchUpdate::None,
                 }
             }
-            None => match self.protocol_version_check {
-                ProtocolVersionCheck::Strict => {
-                    anyhow::bail!(
-                        "mcp initialize missing protocolVersion in result (server={}): client={}",
-                        server_name.as_str(),
-                        self.protocol_version
-                    );
-                }
-                ProtocolVersionCheck::Warn | ProtocolVersionCheck::Ignore => {
-                    ProtocolVersionMismatchUpdate::Clear
-                }
-            },
-            Some(_) => ProtocolVersionMismatchUpdate::Clear,
+            Some(_) | None => ProtocolVersionMismatchUpdate::Clear,
         };
 
         Manager::notify_raw(
@@ -297,6 +276,8 @@ impl PreparedDisconnect {
 }
 
 fn reap_stale_child_best_effort(mut child: Child) {
+    const REAP_TIMEOUT: Duration = Duration::from_millis(200);
+
     if child.try_wait().ok().flatten().is_some() {
         return;
     }
@@ -308,46 +289,12 @@ fn reap_stale_child_best_effort(mut child: Child) {
 
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         drop(handle.spawn(async move {
-            let _ = tokio::time::timeout(BEST_EFFORT_REAP_TIMEOUT, child.wait()).await; // pre-commit: allow-let-underscore
+            let _ = tokio::time::timeout(REAP_TIMEOUT, child.wait()).await; // pre-commit: allow-let-underscore
         }));
-        return;
     }
-
-    start_background_child_reap(child);
-}
-
-fn start_background_child_reap(mut child: Child) {
-    let _ = std::thread::Builder::new()
-        .name("mcp-kit-child-reap".to_string())
-        .spawn(move || {
-            let deadline = std::time::Instant::now() + BEST_EFFORT_REAP_TIMEOUT;
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) | Err(_) => return,
-                    Ok(None) => {
-                        if std::time::Instant::now() >= deadline {
-                            return;
-                        }
-                    }
-                }
-                std::thread::sleep(BEST_EFFORT_REAP_POLL_INTERVAL);
-            }
-        });
 }
 
 impl Manager {
-    pub(crate) async fn connect_prepared_transport(
-        prepared: &PreparedTransportConnect,
-    ) -> anyhow::Result<(mcp_jsonrpc::Client, Option<Child>)> {
-        super::connect_transport(
-            &prepared.ctx,
-            &prepared.server_name,
-            &prepared.server_cfg,
-            &prepared.cwd,
-        )
-        .await
-    }
-
     pub(crate) fn prepare_connection_install(
         &self,
         server_name: &ServerName,
@@ -383,20 +330,6 @@ impl Manager {
         self.clear_connection_side_state(server_name.as_str(), false);
     }
 
-    pub(crate) fn finish_transport_install_attempt(
-        &mut self,
-        server_name: &ServerName,
-        result: anyhow::Result<CompletedTransportInstall>,
-    ) -> anyhow::Result<()> {
-        match result {
-            Ok(completed) => self.commit_transport_install(completed),
-            Err(err) => {
-                self.cleanup_failed_connection_install(server_name);
-                Err(err)
-            }
-        }
-    }
-
     pub(crate) fn commit_connection_install(&mut self, completed: CompletedConnectionInstall) {
         match completed.mismatch_update {
             ProtocolVersionMismatchUpdate::None => {}
@@ -416,11 +349,10 @@ impl Manager {
             }
         }
 
-        self.connections.insert(
-            completed.server_name,
-            CachedConnection::new(completed.connection)
-                .with_initialize_result(completed.init_result),
-        );
+        self.init_results
+            .insert(completed.server_name.clone(), completed.init_result);
+        self.conns
+            .insert(completed.server_name, completed.connection);
     }
 
     pub(crate) fn commit_transport_install(
@@ -430,14 +362,14 @@ impl Manager {
         let server_name = completed.completed.server_name.clone();
         self.commit_connection_install(completed.completed);
         self.record_connection_server_config(server_name.as_str(), &completed.server_config)?;
-        self.record_resolved_connection_cwd(server_name, completed.cwd)?;
+        self.record_connection_cwd(server_name.as_str(), &completed.cwd)?;
         Ok(())
     }
 
     pub(crate) fn prepare_disconnect_for_wait(&mut self, server_name: &str) -> PreparedDisconnect {
         let server_name = super::normalize_server_name_lookup(server_name).to_string();
         let connection = self.remove_cached_connection(&server_name);
-        self.clear_connection_side_state(&server_name, false);
+        self.clear_connection_side_state(&server_name, connection.is_some());
         PreparedDisconnect {
             server_name,
             connection,
@@ -452,7 +384,7 @@ impl Manager {
         let server_name = super::normalize_server_name_lookup(server_name).to_string();
         let connection = self.remove_cached_connection_if_matches(&server_name, connection_id);
         if connection.is_some() {
-            self.clear_connection_side_state(&server_name, false);
+            self.clear_connection_side_state(&server_name, true);
         }
         PreparedDisconnect {
             server_name,
@@ -466,18 +398,14 @@ impl Manager {
         clear_init_result: bool,
     ) {
         if clear_init_result {
-            if let Some(cached) = self.connections.get_mut(server_name) {
-                cached.initialize_result = None;
-            }
+            self.init_results.remove(server_name);
         }
         self.server_handler_timeout_counts.remove(server_name);
         self.remove_protocol_version_mismatch(server_name);
     }
 
     pub(super) fn remove_cached_connection(&mut self, server_name: &str) -> Option<Connection> {
-        self.connections
-            .remove(server_name)
-            .map(|cached| cached.connection)
+        self.conns.remove(server_name)
     }
 
     fn remove_cached_connection_if_matches(
@@ -486,14 +414,11 @@ impl Manager {
         connection_id: u64,
     ) -> Option<Connection> {
         let should_remove = self
-            .connections
+            .conns
             .get(server_name)
-            .is_some_and(|cached| cached.connection.id() == connection_id);
+            .is_some_and(|conn| conn.id() == connection_id);
         if should_remove {
-            return self
-                .connections
-                .remove(server_name)
-                .map(|cached| cached.connection);
+            return self.conns.remove(server_name);
         }
         None
     }
@@ -519,16 +444,16 @@ impl Manager {
     }
 
     pub(super) fn connection_exited(&mut self, server_name: &str) -> Option<bool> {
-        let conn = self.connections.get_mut(server_name)?;
-        let exited = match &mut conn.connection.child {
+        let conn = self.conns.get_mut(server_name)?;
+        let exited = match &mut conn.child {
             Some(child) => {
                 if child.try_wait().ok().flatten().is_some() {
                     true
                 } else {
-                    conn.connection.client.is_closed()
+                    conn.client.is_closed()
                 }
             }
-            None => conn.connection.client.is_closed(),
+            None => conn.client.is_closed(),
         };
 
         if exited {
@@ -536,7 +461,6 @@ impl Manager {
         }
 
         if conn
-            .connection
             .handler_tasks
             .iter()
             .any(tokio::task::JoinHandle::is_finished)
@@ -570,69 +494,5 @@ impl Manager {
         self.prepare_disconnect_for_wait(server_name)
             .wait_for_jsonrpc_error_cleanup()
             .await;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use serde_json::json;
-
-    use super::{InitializeSnapshot, ProtocolVersionCheck};
-    use crate::{ErrorKind, ServerName};
-
-    async fn test_client() -> mcp_jsonrpc::Client {
-        let (client_stream, _server_stream) = tokio::io::duplex(64);
-        let (client_read, client_write) = tokio::io::split(client_stream);
-        mcp_jsonrpc::Client::connect_io(client_read, client_write)
-            .await
-            .expect("construct test client")
-    }
-
-    #[tokio::test]
-    async fn invalid_initialize_protocol_version_is_classified_as_config() {
-        let client = test_client().await;
-        let snapshot = InitializeSnapshot {
-            client_name: "test-client".to_string(),
-            client_version: "0.0.0".to_string(),
-            protocol_version: "   ".to_string(),
-            protocol_version_check: ProtocolVersionCheck::Strict,
-            capabilities: json!({}),
-            request_timeout: Duration::from_secs(1),
-        };
-
-        let err = match snapshot
-            .run(&ServerName::parse("demo").expect("server name"), &client)
-            .await
-        {
-            Ok(_) => panic!("empty protocol version should fail"),
-            Err(err) => err,
-        };
-
-        assert_eq!(crate::Error::from(err).kind(), ErrorKind::Config);
-    }
-
-    #[tokio::test]
-    async fn invalid_initialize_capabilities_are_classified_as_config() {
-        let client = test_client().await;
-        let snapshot = InitializeSnapshot {
-            client_name: "test-client".to_string(),
-            client_version: "0.0.0".to_string(),
-            protocol_version: "2025-06-18".to_string(),
-            protocol_version_check: ProtocolVersionCheck::Strict,
-            capabilities: json!(1),
-            request_timeout: Duration::from_secs(1),
-        };
-
-        let err = match snapshot
-            .run(&ServerName::parse("demo").expect("server name"), &client)
-            .await
-        {
-            Ok(_) => panic!("non-object capabilities should fail"),
-            Err(err) => err,
-        };
-
-        assert_eq!(crate::Error::from(err).kind(), ErrorKind::Config);
     }
 }

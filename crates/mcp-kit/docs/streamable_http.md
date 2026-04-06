@@ -80,7 +80,7 @@ data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}
 `StreamableHttpOptions`：
 
 - `connect_timeout`：只用于建立 SSE/HTTP 连接（默认 10s）
-- `request_timeout`：用于单次 POST 的非 SSE JSON body / error body 读取；如果 POST 最终返回 `text/event-stream`，等待这次 SSE 响应头以及后续持续产出的 SSE 流都不受这个超时上限约束。不要用于限制主 SSE（GET）长连接
+- `request_timeout`：用于单次 POST 的 send/response（包括 POST 返回 SSE 时的响应流）；不要用于限制主 SSE（GET）长连接
 
 请求级别行为：
 
@@ -92,10 +92,9 @@ data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}
 为了降低 SSRF 风险与行为不确定性：
 
 - `follow_redirects` 默认 `false`（不跟随 30x）
-- 默认禁用“自动读取系统代理环境变量”
-- 在 `mcp-kit` 的 `mcp.json` 里，可通过 `streamable_http_proxy_mode = "use_system"` 显式沿用 `HTTP_PROXY` / `HTTPS_PROXY`；未配置时默认仍是 `ignore_system`
+- 默认禁用“自动读取系统代理环境变量”（`reqwest::Client::builder().no_proxy()`）
 
-如果你需要更进一步的网络策略（例如自定义 `connect_timeout` 或允许 redirects），仍然需要在上层自行构建 `mcp_jsonrpc::Client` 并接入 `mcp-kit`（见 [`作为库使用`](library.md) 的自定义 transport 章节）。
+如果你需要不同的网络策略（例如走企业代理或允许 redirects），可以在上层自行构建 `mcp_jsonrpc::Client` 并接入 `mcp-kit`（见 [`作为库使用`](library.md) 的自定义 transport 章节）。
 
 ## 与 mcp-kit 的关系
 
@@ -104,6 +103,6 @@ data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}
 - 只允许 `https://`（除非显式放开）
 - 拒绝 localhost/私网 IP 字面量（除非显式放开）
 - 拒绝敏感 header（Authorization/Cookie/Proxy-Authorization）
-- 拒绝解析 secret-backed auth（`bearer_token_secret` / `secret_http_headers`，以及 legacy env aliases）
+- 拒绝读取 env secrets（`bearer_token_env_var` / `env_http_headers`）
 
 详见 [`安全模型`](security.md) 与 [`配置`](config.md)。

@@ -2,6 +2,12 @@ use super::*;
 use error_kit::{ErrorCategory, ErrorRetryAdvice};
 use structured_text_kit::StructuredText;
 
+fn detached_runtime_test_guard() -> &'static std::sync::Mutex<()> {
+    static DETACHED_RUNTIME_TEST_GUARD: std::sync::OnceLock<std::sync::Mutex<()>> =
+        std::sync::OnceLock::new();
+    DETACHED_RUNTIME_TEST_GUARD.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 mod line_limit_tests {
     use super::*;
 
@@ -309,6 +315,9 @@ mod incoming_value_tests {
 
     #[test]
     fn dropped_batch_request_without_runtime_still_flushes_remaining_batch_response() {
+        let _guard = detached_runtime_test_guard()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -390,6 +399,9 @@ mod incoming_value_tests {
 
     #[test]
     fn dropped_direct_request_without_runtime_still_emits_internal_error() {
+        let _guard = detached_runtime_test_guard()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -445,6 +457,69 @@ mod incoming_value_tests {
 
             drop(client);
         });
+    }
+
+    #[test]
+    fn dropped_direct_request_without_runtime_closes_client_when_detached_runtime_is_unavailable() {
+        let _guard = detached_runtime_test_guard()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::background_runtime::reset_detached_runtime_for_test();
+        crate::background_runtime::force_detached_runtime_spawn_failures(2, 1);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build setup runtime");
+
+        let (request, client) = runtime.block_on(async {
+            let (client_stream, server_stream) = tokio::io::duplex(2048);
+            let (client_read, client_write) = tokio::io::split(client_stream);
+            let (_server_read, mut server_write) = tokio::io::split(server_stream);
+
+            let mut client = Client::connect_io(client_read, client_write)
+                .await
+                .expect("connect client");
+            let mut requests = client.take_requests().expect("request receiver");
+
+            server_write
+                .write_all(br#"{"jsonrpc":"2.0","id":1,"method":"first"}"#)
+                .await
+                .expect("write request");
+            server_write.write_all(b"\n").await.expect("write newline");
+            server_write.flush().await.expect("flush request");
+
+            let request = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+                .await
+                .expect("request timeout")
+                .expect("request");
+
+            (request, client)
+        });
+        drop(runtime);
+
+        let handle = client.handle();
+        drop(request);
+
+        let close_reason = std::time::Instant::now() + Duration::from_secs(1);
+        let close_reason = loop {
+            if let Some(reason) = handle.close_reason() {
+                break reason;
+            }
+            assert!(
+                std::time::Instant::now() < close_reason,
+                "close reason recorded"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(
+            close_reason.contains("failed to schedule dropped request response"),
+            "{close_reason}"
+        );
+        assert!(handle.is_closed(), "client should fail closed");
+
+        drop(client);
+        crate::background_runtime::reset_detached_runtime_for_test();
     }
 
     #[tokio::test]
@@ -618,7 +693,7 @@ mod stats_tests {
     fn spawn_detached_runs_tasks_without_tokio_runtime() {
         let _guard = detached_runtime_test_guard()
             .lock()
-            .expect("detached runtime test mutex");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::background_runtime::reset_detached_runtime_for_test();
         let counter = Arc::new(AtomicU64::new(0));
         let counter_for_task = Arc::clone(&counter);
@@ -627,7 +702,8 @@ mod stats_tests {
         spawn_detached("test detached runtime", async move {
             counter_for_task.fetch_add(1, AtomicOrdering::Relaxed);
             done_tx.send(()).unwrap();
-        });
+        })
+        .expect("detached runtime should accept queued task");
 
         done_rx
             .recv_timeout(Duration::from_secs(1))
@@ -636,28 +712,34 @@ mod stats_tests {
     }
 
     #[test]
-    fn spawn_detached_does_not_panic_when_worker_and_fallback_threads_fail() {
+    fn spawn_detached_reports_error_when_worker_and_inline_runtime_are_unavailable() {
         let _guard = detached_runtime_test_guard()
             .lock()
-            .expect("detached runtime test mutex");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::background_runtime::reset_detached_runtime_for_test();
-        crate::background_runtime::force_detached_runtime_spawn_failures(1, 1);
+        crate::background_runtime::force_detached_runtime_spawn_failures(2, 1);
 
         let counter = Arc::new(AtomicU64::new(0));
         let counter_for_task = Arc::clone(&counter);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
 
-        spawn_detached("test detached runtime double spawn failure", async move {
+        let err = spawn_detached("test detached runtime double spawn failure", async move {
             counter_for_task.fetch_add(1, AtomicOrdering::Relaxed);
             done_tx
                 .send(())
                 .expect("signal inline fallback task completion");
-        });
+        })
+        .expect_err("double detached-runtime failure should be reported");
 
-        done_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("inline fallback should still execute queued task");
-        assert_eq!(counter.load(AtomicOrdering::Relaxed), 1);
+        assert!(
+            err.to_string().contains("inline runtime unavailable"),
+            "{err}"
+        );
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "failed detached-runtime scheduling must not silently run the task"
+        );
+        assert_eq!(counter.load(AtomicOrdering::Relaxed), 0);
         crate::background_runtime::reset_detached_runtime_for_test();
     }
 
@@ -665,14 +747,15 @@ mod stats_tests {
     fn spawn_detached_recovers_after_worker_panic() {
         let _guard = detached_runtime_test_guard()
             .lock()
-            .expect("detached runtime test mutex");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::background_runtime::reset_detached_runtime_for_test();
         let (panic_done_tx, panic_done_rx) = std::sync::mpsc::channel();
 
         spawn_detached("test detached runtime panic", async move {
             panic_done_tx.send(()).expect("signal panic task start");
             panic!("boom");
-        });
+        })
+        .expect("panic task should still schedule");
         panic_done_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("panic task should start");
@@ -684,7 +767,8 @@ mod stats_tests {
         spawn_detached("test detached runtime restart", async move {
             counter_for_task.fetch_add(1, AtomicOrdering::Relaxed);
             done_tx.send(()).expect("signal recovery task completion");
-        });
+        })
+        .expect("detached runtime should recover after panic");
 
         done_rx
             .recv_timeout(Duration::from_secs(1))
@@ -694,8 +778,7 @@ mod stats_tests {
     }
 
     fn detached_runtime_test_guard() -> &'static Mutex<()> {
-        static DETACHED_RUNTIME_TEST_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-        DETACHED_RUNTIME_TEST_GUARD.get_or_init(|| Mutex::new(()))
+        super::detached_runtime_test_guard()
     }
 
     #[test]

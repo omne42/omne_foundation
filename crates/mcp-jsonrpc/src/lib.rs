@@ -483,9 +483,13 @@ impl BatchResponseWriter {
 
     fn flush_if_ready_without_runtime(&self) {
         let batch = self.clone();
-        spawn_detached("batch flush without runtime", async move {
+        if let Err(err) = spawn_detached("batch flush without runtime", async move {
             let _ = batch.flush_if_ready().await;
-        });
+        }) {
+            self.state.handle.schedule_close_once(format!(
+                "failed to schedule batch flush without runtime: {err}"
+            ));
+        }
     }
 
     async fn finish(&self) -> Result<(), Error> {
@@ -1398,16 +1402,26 @@ impl Drop for IncomingRequest {
         match &self.responder.target {
             RequestResponseTarget::Direct(handle) => {
                 let handle = handle.clone();
-                spawn_detached("direct dropped request response", async move {
-                    drop(handle.write_json_line(&response).await);
-                });
+                let handle_for_task = handle.clone();
+                if let Err(err) = spawn_detached("direct dropped request response", async move {
+                    drop(handle_for_task.write_json_line(&response).await);
+                }) {
+                    handle.schedule_close_once(format!(
+                        "failed to schedule dropped request response: {err}"
+                    ));
+                }
             }
             RequestResponseTarget::Batch(batch) => {
                 if tokio::runtime::Handle::try_current().is_ok() {
                     let batch = batch.clone();
-                    spawn_detached("batch dropped request response", async move {
-                        drop(batch.push_reserved_response(response).await);
-                    });
+                    let batch_for_task = batch.clone();
+                    if let Err(err) = spawn_detached("batch dropped request response", async move {
+                        drop(batch_for_task.push_reserved_response(response).await);
+                    }) {
+                        batch.state.handle.schedule_close_once(format!(
+                            "failed to schedule batch dropped request response: {err}"
+                        ));
+                    }
                 } else {
                     batch.push_reserved_response_without_runtime(response);
                 }

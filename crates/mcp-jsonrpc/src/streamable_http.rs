@@ -678,20 +678,21 @@ impl HttpPostBridge {
                         .map(|chunk| chunk.map_err(io::Error::other));
                     let reader = StreamReader::new(stream);
                     let mut reader = tokio::io::BufReader::new(reader);
-                    let pump =
-                        sse_pump_to_writer(&mut reader, &writer, max_message_bytes, true).await;
-                    if pump.is_err()
-                        && !emit_post_bridge_error_from_line(
+                    if let Err(err) =
+                        sse_pump_to_writer(&mut reader, &writer, max_message_bytes, true).await
+                    {
+                        if !emit_post_bridge_error_from_line(
                             &writer,
                             &handle,
                             line.as_ref(),
                             HTTP_TRANSPORT_ERROR,
-                            "http response stream failed".to_string(),
+                            format!("http response stream failed: {err}"),
                             None,
                         )
                         .await
-                    {
-                        return;
+                        {
+                            return;
+                        }
                     }
                     continue;
                 }
@@ -1147,14 +1148,18 @@ async fn flush_sse_event_data(
 
 fn normalize_sse_event_data_for_json_line(data: &[u8]) -> Result<Vec<u8>, io::Error> {
     if data.iter().any(|byte| matches!(byte, b'\n' | b'\r')) {
-        if let Ok(value) = serde_json::from_slice::<Value>(data) {
-            return serde_json::to_vec(&value).map_err(|err| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("serialize sse event payload failed: {err}"),
-                )
-            });
-        }
+        let value = serde_json::from_slice::<Value>(data).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("multiline sse event payload must be valid json: {err}"),
+            )
+        })?;
+        return serde_json::to_vec(&value).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("serialize sse event payload failed: {err}"),
+            )
+        });
     }
 
     Ok(data.to_vec())
@@ -1341,6 +1346,51 @@ mod tests {
             normalized,
             br#"{"id":1,"jsonrpc":"2.0","result":{"ok":true}}"#
         );
+    }
+
+    #[test]
+    fn normalize_sse_event_data_rejects_multiline_non_json() {
+        let err = normalize_sse_event_data_for_json_line(b"not json\nstill not json")
+            .expect_err("multiline non-json should be rejected before line framing");
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string()
+                .contains("multiline sse event payload must be valid json"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_pump_rejects_multiline_non_json_event_without_emitting_partial_frames()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let sse = "data: not json\ndata: still not json\n\n";
+
+        let (mut in_write, in_read) = tokio::io::duplex(1024);
+        in_write.write_all(sse.as_bytes()).await?;
+        drop(in_write);
+        let mut reader = tokio::io::BufReader::new(in_read);
+
+        let (client_side, mut capture_side) = tokio::io::duplex(1024);
+        let (read, write) = tokio::io::split(client_side);
+        drop(read);
+        let writer = Arc::new(tokio::sync::Mutex::new(write));
+
+        let err = sse_pump_to_writer(&mut reader, &writer, 1024, false)
+            .await
+            .expect_err("multiline non-json SSE event should fail closed");
+        drop(writer);
+
+        let mut out = Vec::new();
+        capture_side.read_to_end(&mut out).await?;
+
+        assert!(out.is_empty(), "bad SSE event must not emit partial frames");
+        assert!(
+            err.to_string()
+                .contains("multiline sse event payload must be valid json"),
+            "unexpected error: {err}"
+        );
+        Ok(())
     }
 
     #[tokio::test]

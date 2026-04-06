@@ -26,6 +26,10 @@ struct EnvTimeoutConfig {
     hub_timeout: Duration,
 }
 
+const DEFAULT_SINK_TIMEOUT_MS: u64 = 5_000;
+const MIN_HUB_TIMEOUT_SLACK_MS: u64 = 250;
+const MAX_HUB_TIMEOUT_SLACK_MS: u64 = 1_000;
+
 fn parse_bool_env_value(raw: &str) -> anyhow::Result<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),
@@ -79,7 +83,13 @@ where
     if let Some(timeout) = parse_timeout_ms_env_optional(fallback_key, get)? {
         return Ok(timeout);
     }
-    Ok(Duration::from_millis(5000))
+    Ok(Duration::from_millis(DEFAULT_SINK_TIMEOUT_MS))
+}
+
+fn hub_timeout_with_slack(sink_timeout: Duration) -> Duration {
+    let sink_timeout_ms = sink_timeout.as_millis() as u64;
+    let slack_ms = (sink_timeout_ms / 5).clamp(MIN_HUB_TIMEOUT_SLACK_MS, MAX_HUB_TIMEOUT_SLACK_MS);
+    sink_timeout.saturating_add(Duration::from_millis(slack_ms))
 }
 
 fn parse_timeout_config<F>(get: &F) -> anyhow::Result<EnvTimeoutConfig>
@@ -90,13 +100,22 @@ where
     const NOTIFY_SINK_TIMEOUT_MS_ENV: &str = "NOTIFY_SINK_TIMEOUT_MS";
     const NOTIFY_HUB_TIMEOUT_MS_ENV: &str = "NOTIFY_HUB_TIMEOUT_MS";
 
+    let sink_timeout =
+        resolve_timeout_ms_env(NOTIFY_SINK_TIMEOUT_MS_ENV, NOTIFY_TIMEOUT_MS_ENV, get)?;
+    let hub_timeout = match parse_timeout_ms_env_optional(NOTIFY_HUB_TIMEOUT_MS_ENV, get)? {
+        Some(timeout) => timeout,
+        None => hub_timeout_with_slack(sink_timeout),
+    };
+
+    if hub_timeout <= sink_timeout {
+        anyhow::bail!(
+            "{NOTIFY_HUB_TIMEOUT_MS_ENV} must be greater than the effective sink timeout; keep slack so Hub does not time out before the sink finishes"
+        );
+    }
+
     Ok(EnvTimeoutConfig {
-        sink_timeout: resolve_timeout_ms_env(
-            NOTIFY_SINK_TIMEOUT_MS_ENV,
-            NOTIFY_TIMEOUT_MS_ENV,
-            get,
-        )?,
-        hub_timeout: resolve_timeout_ms_env(NOTIFY_HUB_TIMEOUT_MS_ENV, NOTIFY_TIMEOUT_MS_ENV, get)?,
+        sink_timeout,
+        hub_timeout,
     })
 }
 
@@ -232,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_timeout_config_uses_legacy_timeout_as_shared_fallback() {
+    fn parse_timeout_config_uses_legacy_timeout_for_sink_and_adds_hub_slack() {
         let env = HashMap::from([(String::from("NOTIFY_TIMEOUT_MS"), String::from("1200"))]);
 
         let config = parse_timeout_config(&|key| env.get(key).cloned()).expect("parse timeout");
@@ -241,7 +260,7 @@ mod tests {
             config,
             EnvTimeoutConfig {
                 sink_timeout: Duration::from_millis(1200),
-                hub_timeout: Duration::from_millis(1200),
+                hub_timeout: Duration::from_millis(1450),
             }
         );
     }
@@ -310,5 +329,56 @@ mod tests {
 
         let msg = format!("{err:#}");
         assert!(msg.contains("invalid NOTIFY_HUB_TIMEOUT_MS"), "{msg}");
+    }
+
+    #[test]
+    fn parse_timeout_config_uses_default_hub_slack_when_only_sink_timeout_is_explicit() {
+        let env = HashMap::from([(String::from("NOTIFY_SINK_TIMEOUT_MS"), String::from("1200"))]);
+
+        let config = parse_timeout_config(&|key| env.get(key).cloned()).expect("parse timeout");
+
+        assert_eq!(
+            config,
+            EnvTimeoutConfig {
+                sink_timeout: Duration::from_millis(1200),
+                hub_timeout: Duration::from_millis(1450),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_timeout_config_clamps_default_hub_slack_for_large_timeouts() {
+        let env = HashMap::from([(
+            String::from("NOTIFY_SINK_TIMEOUT_MS"),
+            String::from("20000"),
+        )]);
+
+        let config = parse_timeout_config(&|key| env.get(key).cloned()).expect("parse timeout");
+
+        assert_eq!(
+            config,
+            EnvTimeoutConfig {
+                sink_timeout: Duration::from_millis(20_000),
+                hub_timeout: Duration::from_millis(21_000),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_timeout_config_rejects_hub_timeout_without_slack() {
+        let env = HashMap::from([
+            (String::from("NOTIFY_SINK_TIMEOUT_MS"), String::from("1200")),
+            (String::from("NOTIFY_HUB_TIMEOUT_MS"), String::from("1200")),
+        ]);
+
+        let err = parse_timeout_config(&|key| env.get(key).cloned())
+            .expect_err("hub timeout should leave some slack");
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("NOTIFY_HUB_TIMEOUT_MS"), "{msg}");
+        assert!(
+            msg.contains("greater than the effective sink timeout"),
+            "{msg}"
+        );
     }
 }

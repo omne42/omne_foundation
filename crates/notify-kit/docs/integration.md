@@ -87,6 +87,14 @@ fn build_hub_from_env() -> notify_kit::Result<Hub> {
 如果你采用库自带的 env helper，建议通过 `notify_kit::env::build_hub_from_standard_env(...)` 访问，并把它当成 bootstrap helper：能减少样板代码，但不妨碍你在自己的 integration layer 继续包装、替换或扩展。
 它使用一套中性的 `NOTIFY_*` 约定，而不是业务前缀协议。
 
+标准 helper 的 timeout 约定是：
+
+- `NOTIFY_SINK_TIMEOUT_MS`：配置 sink 自身的内部超时
+- `NOTIFY_HUB_TIMEOUT_MS`：配置 Hub 外层 `tokio::time::timeout` 的硬上界
+- `NOTIFY_TIMEOUT_MS`：legacy fallback，只喂给 sink timeout；若未显式设置 `NOTIFY_HUB_TIMEOUT_MS`，helper 会自动给 Hub 额外留出一小段 slack，避免外层先制造伪超时
+
+如果显式设置了 `NOTIFY_HUB_TIMEOUT_MS`，它必须大于最终生效的 sink timeout；否则 helper 会直接报错而不是接受一个默认会误杀 sink 的配置。
+
 ## 标准 helper 示例
 
 如果你的应用愿意直接采用这套标准约定，可以这样接线：

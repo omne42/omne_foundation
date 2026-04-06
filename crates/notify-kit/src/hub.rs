@@ -57,8 +57,9 @@ pub struct HubConfig {
     /// This is a **hard upper bound** enforced by `Hub` (via `tokio::time::timeout`) around each
     /// `Sink::send`. If a sink has its own internal timeout (e.g. an HTTP request timeout), keep
     /// `per_sink_timeout` >= that value (and ideally leave some slack for preflight work like DNS
-    /// checks), otherwise `Hub` may time out first. Calling `Hub::send` or `Hub::notify` with
-    /// sinks configured therefore requires a Tokio runtime with the time driver enabled.
+    /// checks), otherwise `Hub` may time out first. Calling `Hub::send`,
+    /// `Hub::notify_best_effort`, or `Hub::notify` with sinks configured therefore requires a
+    /// Tokio runtime with the time driver enabled.
     pub per_sink_timeout: Duration,
 }
 
@@ -170,12 +171,12 @@ impl Hub {
         }
     }
 
-    /// Fire-and-forget notification.
+    /// Explicit best-effort fire-and-forget notification.
     ///
     /// - Requires a Tokio runtime with the time driver enabled; otherwise the notification is
     ///   dropped and a warning is logged.
     /// - Concurrency is bounded; if overloaded, notifications are dropped (with a warning).
-    pub fn notify(&self, event: Event) {
+    pub fn notify_best_effort(&self, event: Event) {
         if self.inner.sinks.is_empty() {
             return;
         }
@@ -195,6 +196,13 @@ impl Hub {
         if let Err(event) = self.try_notify_spawn(handle, event) {
             warn_hub_notify_dropped(event.kind.as_str(), "overloaded");
         }
+    }
+
+    #[deprecated(
+        note = "use Hub::notify_best_effort for explicit best-effort semantics, or Hub::try_notify / Hub::send for observable delivery"
+    )]
+    pub fn notify(&self, event: Event) {
+        self.notify_best_effort(event);
     }
 
     /// Attempt to enqueue a fire-and-forget notification.

@@ -19,4 +19,4 @@ pub use crate::sinks::{
     ServerChanConfig, ServerChanSink, Sink, SlackWebhookConfig, SlackWebhookSink, SoundConfig,
     SoundSink, TelegramBotConfig, TelegramBotSink, WeComWebhookConfig, WeComWebhookSink,
 };
-pub use secret_kit::SecretString;
+pub(crate) use secret_kit::SecretString;

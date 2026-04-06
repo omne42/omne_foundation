@@ -7,7 +7,7 @@
 ## 你将获得什么
 
 - **统一出口**：用 `Hub` 把事件广播到多个 sink。
-- **不阻塞主流程**：`Hub::notify` fire-and-forget；每个 sink 都有超时上限。
+- **不阻塞主流程**：`Hub::notify_best_effort` fire-and-forget；每个 sink 都有超时上限。
 - **可扩展**：通过实现 `Sink` trait 接入任意渠道（Discord/Slack/Email/桌面通知…）。
 - **安全意识**：对 webhook URL 进行限制；Debug 输出默认脱敏。
 

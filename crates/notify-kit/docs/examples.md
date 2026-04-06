@@ -111,8 +111,8 @@ let hub = Hub::new(
     vec![Arc::new(SoundSink::new(SoundConfig { command_argv: None }))],
 );
 
-hub.notify(Event::new("turn_completed", Severity::Success, "done"));
-hub.notify(Event::new("debug_noise", Severity::Info, "ignored"));
+hub.notify_best_effort(Event::new("turn_completed", Severity::Success, "done"));
+hub.notify_best_effort(Event::new("debug_noise", Severity::Info, "ignored"));
 #
 # Ok(())
 # }

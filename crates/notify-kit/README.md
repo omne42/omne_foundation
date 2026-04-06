@@ -111,10 +111,11 @@ notify-kit = { path = "crates/notify-kit" }
 
 ## 用法
 
-`Hub::notify` 是 fire-and-forget：在 **Tokio runtime** 中 spawn 后台任务并立即返回。
+`Hub::notify_best_effort` 是显式的 best-effort fire-and-forget：在 **Tokio runtime** 中 spawn 后台任务并立即返回。
 
-- 如果当前没有 Tokio runtime：`notify` 会丢弃通知并 `tracing::warn!`；可用 `Hub::try_notify` 检测。
+- 如果当前没有 Tokio runtime：`notify_best_effort` 会丢弃通知并 `tracing::warn!`；可用 `Hub::try_notify` 检测。
 - 如果需要可观测结果：用 `Hub::send(event).await`（会等待所有 sinks 完成/超时）。
+- 旧的 `Hub::notify` 仍保留为兼容别名，但已弃用；新代码应改用 `Hub::notify_best_effort` 或 `Hub::try_notify`。
 - 注意：`HubConfig.per_sink_timeout` 是 Hub 对每个 sink 的兜底超时；如果你把某个 sink 的 `timeout` 调大，也需要把 `per_sink_timeout` 调到 >= 该值，否则 Hub 可能会先超时。
 - 运行时限制（例如 `max_inflight_events`、`max_sink_sends_in_parallel`）放在 `HubLimits`，避免把执行期背压策略混进 `HubConfig` 的语义配置里。
 
@@ -132,7 +133,7 @@ let hub = Hub::new(
     vec![Arc::new(SoundSink::new(SoundConfig { command_argv: None }))],
 );
 
-hub.notify(Event::new("turn_completed", Severity::Success, "done"));
+hub.notify_best_effort(Event::new("turn_completed", Severity::Success, "done"));
 ```
 
 ## 安全提示

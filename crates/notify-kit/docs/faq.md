@@ -4,7 +4,7 @@
 
 最常见原因：当前线程不在 Tokio runtime 中。
 
-- `Hub::notify` 在无 runtime 时会丢弃通知并 `tracing::warn!`
+- `Hub::notify_best_effort` 在无 runtime 时会丢弃通知并 `tracing::warn!`
 - 如果你想显式检测，请使用 `Hub::try_notify`
 
 ## 为什么 `try_notify()` 返回了 `NoTokioRuntime`？
@@ -42,4 +42,4 @@
 - `notify-kit` 侧：使用 `SoundSink`（默认就是 bell）。
 - 终端/系统侧：需要你在终端设置里启用 Visual Bell / Dock/任务栏提示（不同终端选项不同，见 [SoundSink](sinks/sound.md)）。
 
-本仓库不包含具体 TUI 应用；你需要在你的 TUI 项目里在“reply completed / turn completed”处调用 `hub.notify(...)`。
+本仓库不包含具体 TUI 应用；你需要在你的 TUI 项目里在“reply completed / turn completed”处调用 `hub.notify_best_effort(...)`。

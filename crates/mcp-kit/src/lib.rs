@@ -34,13 +34,10 @@
 //! when you need fine-grained lifecycle control or handler callbacks that may need to call back
 //! into connection setup/teardown paths.
 //!
-//! When you use config-driven connection helpers (`Manager::request`, `get_or_connect`, etc.),
-//! relative `cwd` values are resolved against the loaded `mcp.json` thread root when available,
-//! not against the ambient process directory.
-//!
-//! When you use config-driven connection helpers (`Manager::request`, `get_or_connect`, etc.),
-//! relative `cwd` values are resolved against the loaded `mcp.json` thread root when available,
-//! not against the ambient process directory.
+//! Relative `cwd` values are resolved against the loaded `mcp.json` thread root when available.
+//! Otherwise `Manager` and `SharedManager` fall back to the current-directory snapshot captured
+//! when the manager instance was created, so later process-wide `current_dir()` changes cannot
+//! silently change connection identity or reuse behavior.
 //!
 //! ## Non-goals
 //!

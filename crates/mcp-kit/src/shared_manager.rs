@@ -39,6 +39,7 @@ pub struct SharedManager {
     inner: Arc<Mutex<Manager>>,
     connect_gates: Arc<StdMutex<HashMap<String, Weak<RwLock<()>>>>>,
     manager_id: u64,
+    cwd_resolution_base: Option<std::path::PathBuf>,
 }
 
 impl Manager {
@@ -51,10 +52,12 @@ impl Manager {
 impl SharedManager {
     pub fn new(manager: Manager) -> Self {
         let manager_id = manager.instance_id();
+        let cwd_resolution_base = manager.cwd_resolution_base().map(Path::to_path_buf);
         Self {
             inner: Arc::new(Mutex::new(manager)),
             connect_gates: Arc::new(StdMutex::new(HashMap::new())),
             manager_id,
+            cwd_resolution_base,
         }
     }
 
@@ -65,6 +68,7 @@ impl SharedManager {
                 inner,
                 connect_gates: self.connect_gates,
                 manager_id: self.manager_id,
+                cwd_resolution_base: self.cwd_resolution_base,
             }),
         }
     }
@@ -198,7 +202,11 @@ impl SharedManager {
         server_name: &str,
         cwd: &Path,
     ) -> anyhow::Result<()> {
-        let cwd = crate::manager::resolve_connection_cwd_with_base(config.thread_root(), cwd)?;
+        let cwd = crate::manager::resolve_connection_cwd_with_base(
+            config.thread_root(),
+            cwd,
+            self.cwd_resolution_base.as_deref(),
+        )?;
 
         if self
             .try_prepare_reusable_connected_client(operation, config, server_name, Some(&cwd))
@@ -276,7 +284,11 @@ impl SharedManager {
         server_name: &str,
         cwd: &Path,
     ) -> anyhow::Result<PreparedSharedClient> {
-        let cwd = crate::manager::resolve_connection_cwd_with_base(config.thread_root(), cwd)?;
+        let cwd = crate::manager::resolve_connection_cwd_with_base(
+            config.thread_root(),
+            cwd,
+            self.cwd_resolution_base.as_deref(),
+        )?;
         let read_gate = self.lock_connect_gate_read(operation, server_name).await?;
 
         if let Some(prepared) = self

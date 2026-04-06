@@ -43,7 +43,7 @@ use streamable_http_validation::validate_streamable_http_url_untrusted_dns;
 
 pub(crate) use connect::{ConnectContext, connect_transport};
 pub(crate) use handlers::is_in_manager_handler_scope;
-pub(crate) use path_identity::{resolve_connection_cwd, resolve_connection_cwd_with_base};
+pub(crate) use path_identity::resolve_connection_cwd_with_base;
 pub(crate) use streamable_http_validation::should_disconnect_after_jsonrpc_error;
 
 static NEXT_MANAGER_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
@@ -182,6 +182,7 @@ impl ServerHandlerTimeoutCounts {
 pub struct Manager {
     instance_id: u64,
     active_handler_scopes: Arc<AtomicU64>,
+    cwd_resolution_base: Option<PathBuf>,
     conns: HashMap<ServerName, Connection>,
     connection_cwds: HashMap<ServerName, PathBuf>,
     connection_server_configs: HashMap<ServerName, ServerConfig>,
@@ -560,6 +561,7 @@ impl Manager {
         Self {
             instance_id: NEXT_MANAGER_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
             active_handler_scopes: Arc::new(AtomicU64::new(0)),
+            cwd_resolution_base: std::env::current_dir().ok(),
             conns: HashMap::new(),
             connection_cwds: HashMap::new(),
             connection_server_configs: HashMap::new(),
@@ -622,6 +624,10 @@ impl Manager {
 
     pub(crate) fn instance_id(&self) -> u64 {
         self.instance_id
+    }
+
+    pub(crate) fn cwd_resolution_base(&self) -> Option<&Path> {
+        self.cwd_resolution_base.as_deref()
     }
 
     pub fn protocol_version_mismatches(&self) -> &[ProtocolVersionMismatch] {
@@ -755,8 +761,10 @@ impl Manager {
         base: Option<&Path>,
     ) -> anyhow::Result<()> {
         let server_name = parse_server_name_anyhow(server_name)?;
-        self.connection_cwds
-            .insert(server_name, resolve_connection_cwd_with_base(base, cwd)?);
+        self.connection_cwds.insert(
+            server_name,
+            resolve_connection_cwd_with_base(base, cwd, self.cwd_resolution_base())?,
+        );
         Ok(())
     }
 
@@ -810,7 +818,8 @@ impl Manager {
         let Some(connected_cwd) = self.connection_cwds.get(server_name) else {
             return Ok(());
         };
-        let requested_cwd = resolve_connection_cwd_with_base(base, cwd)?;
+        let requested_cwd =
+            resolve_connection_cwd_with_base(base, cwd, self.cwd_resolution_base())?;
         if *connected_cwd == requested_cwd {
             return Ok(());
         }
@@ -892,7 +901,7 @@ impl Manager {
             .validate()
             .with_context(|| format!("invalid mcp server config (server={server_name_key})"))
             .map_err(|err| wrap_kind(ErrorKind::Config, err))?;
-        let cwd = resolve_connection_cwd_with_base(config_root, cwd)?;
+        let cwd = resolve_connection_cwd_with_base(config_root, cwd, self.cwd_resolution_base())?;
 
         Ok(Some(PreparedTransportConnect {
             server_name: server_name.to_string(),
@@ -963,7 +972,7 @@ impl Manager {
     where
         F: FnOnce() -> anyhow::Result<ServerName>,
     {
-        let cwd = resolve_connection_cwd_with_base(cwd_base, cwd)?;
+        let cwd = resolve_connection_cwd_with_base(cwd_base, cwd, self.cwd_resolution_base())?;
         let server_name_key = build_server_name()?;
         if self.is_connected_and_alive(server_name_key.as_str()) {
             self.ensure_connection_cwd_matches(server_name_key.as_str(), &cwd, None)?;

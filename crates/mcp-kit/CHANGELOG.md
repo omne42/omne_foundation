@@ -16,6 +16,7 @@
 - `mcp-kit`：`stable_connection_cwd_identity` 的缺失尾段回归测试现在比较稳定目录身份而不是原始路径字符串，避免 Windows 上的 verbatim 前缀与 8.3 短路径表示差异把等价路径误报成失败。
 
 ### Changed
+- `mcp-kit`：相对 `cwd` 的连接 identity 现在优先锚定到 `mcp.json` 所在 thread root；没有 config root 时则回退到 `Manager`/`SharedManager` 创建时捕获的一次性工作目录快照，而不是每次解析都重新读取进程级 `current_dir()`。
 - `mcp-kit`：`Manager` 与 `SharedManager` 现在都通过 `PreparedConnectedClient` 的共享 request/notify helper 执行借用连接上的 JSON-RPC I/O；`SharedManager` 额外把错误后的 cleanup 编排收口到内部统一 helper，减少同一套 prepared-client 边界在两类入口之间继续漂移。
 - `mcp-kit` 现在显式标记 `publish = false`，因为当前实现直接依赖 `config-kit` 等 workspace-only foundation crate；crate manifest 不再暗示可独立 crates.io 发布。
 - `mcp-kit`: `SharedManager` 现在使用 per-server read/write lifecycle gate；同 server 的 `request*` / `notify*` 可以并发复用同一连接，而 `disconnect` / `disconnect_and_wait` 仍会等待在途 RPC I/O 先释放借用连接。

@@ -1,25 +1,38 @@
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::Context;
-
-pub(crate) fn resolve_connection_cwd(cwd: &Path) -> anyhow::Result<PathBuf> {
-    resolve_connection_cwd_with_base(None, cwd)
+#[cfg(test)]
+pub(crate) fn resolve_connection_cwd(
+    cwd: &Path,
+    fallback_base: Option<&Path>,
+) -> anyhow::Result<PathBuf> {
+    resolve_connection_cwd_with_base(None, cwd, fallback_base)
 }
 
 pub(crate) fn resolve_connection_cwd_with_base(
     base: Option<&Path>,
     cwd: &Path,
+    fallback_base: Option<&Path>,
 ) -> anyhow::Result<PathBuf> {
     let resolved = if cwd.is_absolute() {
         cwd.to_path_buf()
     } else {
         let base = match base {
             Some(base) if base.is_absolute() => base.to_path_buf(),
-            Some(base) => std::env::current_dir()
-                .context("determine current working directory for relative MCP cwd base")?
+            Some(base) => fallback_base
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "relative MCP cwd base requires a manager created from a valid current directory: {}",
+                        base.display()
+                    )
+                })?
                 .join(base),
-            None => std::env::current_dir()
-                .context("determine current working directory for relative MCP cwd")?,
+            None => fallback_base
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "relative MCP cwd requires a manager created from a valid current directory"
+                    )
+                })?
+                .to_path_buf(),
         };
         base.join(cwd)
     };

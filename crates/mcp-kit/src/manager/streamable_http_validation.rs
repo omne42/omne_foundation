@@ -1,6 +1,13 @@
 use anyhow::Context;
 
+use crate::error::{ErrorKind, tagged_message, wrap_kind};
 use crate::{ServerConfig, TrustMode, UntrustedStreamableHttpPolicy};
+
+macro_rules! config_bail {
+    ($($arg:tt)*) => {
+        return Err(tagged_message(ErrorKind::Config, format!($($arg)*)))
+    };
+}
 
 pub(super) fn validate_streamable_http_config(
     trust_mode: TrustMode,
@@ -18,7 +25,7 @@ pub(super) fn validate_streamable_http_config(
 
     for header in server_cfg.http_headers().keys() {
         if is_untrusted_sensitive_http_header(header) {
-            anyhow::bail!(
+            config_bail!(
                 "refusing to send sensitive http header in untrusted mode: {server_name} header={header} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
             );
         }
@@ -36,7 +43,7 @@ pub(super) fn validate_streamable_http_url_untrusted(
     let parsed = parse_streamable_http_url(server_name, url_field, url)?;
 
     if !parsed.username().is_empty() || parsed.password().is_some() {
-        anyhow::bail!(
+        config_bail!(
             "refusing to use url credentials in untrusted mode: {server_name} field={url_field} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
         );
     }
@@ -44,11 +51,9 @@ pub(super) fn validate_streamable_http_url_untrusted(
     match parsed.scheme() {
         "https" => {}
         "http" if !policy.require_https => {}
-        _ => {
-            anyhow::bail!(
-                "refusing to connect non-https streamable http url in untrusted mode: {server_name} field={url_field} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
-            );
-        }
+        _ => config_bail!(
+            "refusing to connect non-https streamable http url in untrusted mode: {server_name} field={url_field} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
+        ),
     }
 
     http_kit::validate_untrusted_outbound_url(&policy.outbound, &parsed)
@@ -72,11 +77,13 @@ fn parse_streamable_http_url(
     url_field: &str,
     url: &str,
 ) -> anyhow::Result<reqwest::Url> {
-    reqwest::Url::parse(url).with_context(|| {
-        format!(
-            "invalid streamable http url (server={server_name} field={url_field}) (url redacted)"
-        )
-    })
+    reqwest::Url::parse(url)
+        .with_context(|| {
+            format!(
+                "invalid streamable http url (server={server_name} field={url_field}) (url redacted)"
+            )
+        })
+        .map_err(|err| wrap_kind(ErrorKind::Config, err))
 }
 
 fn is_untrusted_sensitive_http_header(header: &str) -> bool {
@@ -92,29 +99,53 @@ fn map_untrusted_outbound_url_error(
     url_field: &str,
 ) -> anyhow::Error {
     match err {
-        http_kit::UntrustedOutboundError::MissingHost => anyhow::anyhow!(
-            "streamable http url must include a host (server={server_name} field={url_field}) (url redacted)"
+        http_kit::UntrustedOutboundError::MissingHost => tagged_message(
+            ErrorKind::Config,
+            format!(
+                "streamable http url must include a host (server={server_name} field={url_field}) (url redacted)"
+            ),
         ),
-        http_kit::UntrustedOutboundError::LocalhostHostNotAllowed { host } => anyhow::anyhow!(
-            "refusing to connect localhost/local/single-label domain in untrusted mode: {server_name} host={host} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
+        http_kit::UntrustedOutboundError::LocalhostHostNotAllowed { host } => tagged_message(
+            ErrorKind::Config,
+            format!(
+                "refusing to connect localhost/local/single-label domain in untrusted mode: {server_name} host={host} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
+            ),
         ),
-        http_kit::UntrustedOutboundError::HostNotAllowed { host } => anyhow::anyhow!(
-            "refusing to connect streamable http host not in allowlist in untrusted mode: {server_name} host={host} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
+        http_kit::UntrustedOutboundError::HostNotAllowed { host } => tagged_message(
+            ErrorKind::Config,
+            format!(
+                "refusing to connect streamable http host not in allowlist in untrusted mode: {server_name} host={host} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
+            ),
         ),
-        http_kit::UntrustedOutboundError::NonGlobalIpNotAllowed { host } => anyhow::anyhow!(
-            "refusing to connect non-global ip in untrusted mode: {server_name} host={host} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
+        http_kit::UntrustedOutboundError::NonGlobalIpNotAllowed { host } => tagged_message(
+            ErrorKind::Config,
+            format!(
+                "refusing to connect non-global ip in untrusted mode: {server_name} host={host} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
+            ),
         ),
-        http_kit::UntrustedOutboundError::DnsLookupFailed { host, message } => anyhow::anyhow!(
-            "refusing to connect hostname with failed dns lookup in untrusted mode: {server_name} host={host} err={message}"
+        http_kit::UntrustedOutboundError::DnsLookupFailed { host, message } => tagged_message(
+            ErrorKind::Config,
+            format!(
+                "refusing to connect hostname with failed dns lookup in untrusted mode: {server_name} host={host} err={message}"
+            ),
         ),
-        http_kit::UntrustedOutboundError::DnsLookupTimedOut { host } => anyhow::anyhow!(
-            "refusing to connect hostname with timed out dns lookup in untrusted mode: {server_name} host={host}"
+        http_kit::UntrustedOutboundError::DnsLookupTimedOut { host } => tagged_message(
+            ErrorKind::Config,
+            format!(
+                "refusing to connect hostname with timed out dns lookup in untrusted mode: {server_name} host={host}"
+            ),
         ),
-        http_kit::UntrustedOutboundError::ResolvedToNonGlobalIp { host, ip } => anyhow::anyhow!(
-            "refusing to connect hostname that resolves to non-global ip in untrusted mode: {server_name} host={host} ip={ip} (set Manager::with_trust_mode(TrustMode::Trusted) or allow_private_ips to override)"
+        http_kit::UntrustedOutboundError::ResolvedToNonGlobalIp { host, ip } => tagged_message(
+            ErrorKind::Config,
+            format!(
+                "refusing to connect hostname that resolves to non-global ip in untrusted mode: {server_name} host={host} ip={ip} (set Manager::with_trust_mode(TrustMode::Trusted) or allow_private_ips to override)"
+            ),
         ),
-        http_kit::UntrustedOutboundError::MissingPortOrKnownDefault => anyhow::anyhow!(
-            "streamable http url must include a port or known scheme (server={server_name} field={url_field}) (url redacted)"
+        http_kit::UntrustedOutboundError::MissingPortOrKnownDefault => tagged_message(
+            ErrorKind::Config,
+            format!(
+                "streamable http url must include a port or known scheme (server={server_name} field={url_field}) (url redacted)"
+            ),
         ),
     }
 }
@@ -125,20 +156,35 @@ fn map_untrusted_outbound_dns_error(
     url_field: &str,
 ) -> anyhow::Error {
     match err {
-        http_kit::UntrustedOutboundError::MissingHost => anyhow::anyhow!(
-            "streamable http url must include a host (server={server_name} field={url_field}) (url redacted)"
+        http_kit::UntrustedOutboundError::MissingHost => tagged_message(
+            ErrorKind::Config,
+            format!(
+                "streamable http url must include a host (server={server_name} field={url_field}) (url redacted)"
+            ),
         ),
-        http_kit::UntrustedOutboundError::MissingPortOrKnownDefault => anyhow::anyhow!(
-            "streamable http url must include a port or known scheme (server={server_name} field={url_field}) (url redacted)"
+        http_kit::UntrustedOutboundError::MissingPortOrKnownDefault => tagged_message(
+            ErrorKind::Config,
+            format!(
+                "streamable http url must include a port or known scheme (server={server_name} field={url_field}) (url redacted)"
+            ),
         ),
-        http_kit::UntrustedOutboundError::DnsLookupFailed { host, message } => anyhow::anyhow!(
-            "refusing to connect hostname with failed dns lookup in untrusted mode: {server_name} host={host} err={message}"
+        http_kit::UntrustedOutboundError::DnsLookupFailed { host, message } => tagged_message(
+            ErrorKind::Config,
+            format!(
+                "refusing to connect hostname with failed dns lookup in untrusted mode: {server_name} host={host} err={message}"
+            ),
         ),
-        http_kit::UntrustedOutboundError::DnsLookupTimedOut { host } => anyhow::anyhow!(
-            "refusing to connect hostname with timed out dns lookup in untrusted mode: {server_name} host={host}"
+        http_kit::UntrustedOutboundError::DnsLookupTimedOut { host } => tagged_message(
+            ErrorKind::Config,
+            format!(
+                "refusing to connect hostname with timed out dns lookup in untrusted mode: {server_name} host={host}"
+            ),
         ),
-        http_kit::UntrustedOutboundError::ResolvedToNonGlobalIp { host, ip } => anyhow::anyhow!(
-            "refusing to connect hostname that resolves to non-global ip in untrusted mode: {server_name} host={host} ip={ip} (set Manager::with_trust_mode(TrustMode::Trusted) or allow_private_ips to override)"
+        http_kit::UntrustedOutboundError::ResolvedToNonGlobalIp { host, ip } => tagged_message(
+            ErrorKind::Config,
+            format!(
+                "refusing to connect hostname that resolves to non-global ip in untrusted mode: {server_name} host={host} ip={ip} (set Manager::with_trust_mode(TrustMode::Trusted) or allow_private_ips to override)"
+            ),
         ),
         other => map_untrusted_outbound_url_error(other, server_name, url_field),
     }

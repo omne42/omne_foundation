@@ -8,9 +8,16 @@ use serde_json::Value;
 use super::file_format::{ConfigFile, StdoutLogConfigFile};
 use super::{ClientConfig, Config, ServerConfig, StdoutLogConfig, Transport};
 use crate::ServerName;
+use crate::error::{ErrorKind, tagged_message, wrap_kind};
 
 const MCP_CONFIG_VERSION: u32 = 1;
 const DEFAULT_CONFIG_CANDIDATES: [&str; 2] = [".mcp.json", "mcp.json"];
+
+macro_rules! config_bail {
+    ($($arg:tt)*) => {
+        return Err(tagged_message(ErrorKind::Config, format!($($arg)*)))
+    };
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ConfigLoadPolicy {
@@ -80,7 +87,7 @@ fn resolve_override_path(
     if let Some(canonical_override_or_parent) = canonicalize_existing_ancestor(&path)
         && !canonical_override_or_parent.starts_with(&canonical_root)
     {
-        anyhow::bail!(
+        config_bail!(
             "override config path must be within root {} (set ConfigLoadPolicy::allow_override_outside_root(true) to override): {}",
             thread_root.display(),
             path.display()
@@ -115,8 +122,9 @@ async fn load_initial_path_and_value(
                     .last()
                     .and_then(|layer| layer.path())
                     .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "mcp config loader returned a candidate file layer without a path"
+                        tagged_message(
+                            ErrorKind::Config,
+                            "mcp config loader returned a candidate file layer without a path",
                         )
                     })?
                     .to_path_buf();
@@ -137,19 +145,21 @@ fn parse_config_file(path: Option<&Path>, json: Value) -> anyhow::Result<ConfigF
     match json {
         Value::Object(root) => {
             if root.contains_key("mcpServers") {
-                anyhow::bail!(
+                config_bail!(
                     "unsupported legacy MCP config format: `mcpServers` wrapper is no longer accepted; use canonical mcp.json v{MCP_CONFIG_VERSION}"
                 );
             }
             if !root.contains_key("version") {
-                anyhow::bail!(
+                config_bail!(
                     "unsupported mcp.json format: missing `version` (expected v{MCP_CONFIG_VERSION})"
                 );
             }
 
-            serde_json::from_value(Value::Object(root)).with_context(|| parse_context(path))
+            serde_json::from_value(Value::Object(root))
+                .with_context(|| parse_context(path))
+                .map_err(|err| wrap_kind(ErrorKind::Config, err))
         }
-        _ => anyhow::bail!("invalid mcp config: expected a JSON object"),
+        _ => config_bail!("invalid mcp config: expected a JSON object"),
     }
 }
 
@@ -162,7 +172,7 @@ fn resolve_inherit_env(
         Transport::Stdio => Ok(inherit_env.unwrap_or(false)),
         _ => {
             if inherit_env.is_some() {
-                anyhow::bail!("mcp server {name}: inherit_env is only valid for transport=stdio");
+                config_bail!("mcp server {name}: inherit_env is only valid for transport=stdio");
             }
             Ok(true)
         }
@@ -171,7 +181,7 @@ fn resolve_inherit_env(
 
 fn ensure_unix_path_only_for_unix(name: &str, unix_path_present: bool) -> anyhow::Result<()> {
     if unix_path_present {
-        anyhow::bail!("mcp server {name}: unix_path is only valid for transport=unix");
+        config_bail!("mcp server {name}: unix_path is only valid for transport=unix");
     }
     Ok(())
 }
@@ -181,7 +191,7 @@ fn ensure_url_fields_only_for_streamable_http(
     has_url_fields: bool,
 ) -> anyhow::Result<()> {
     if has_url_fields {
-        anyhow::bail!(
+        config_bail!(
             "mcp server {name}: url/sse_url/http_url are only valid for transport=streamable_http"
         );
     }
@@ -193,7 +203,7 @@ fn ensure_http_headers_auth_only_for_streamable_http(
     has_auth_fields: bool,
 ) -> anyhow::Result<()> {
     if has_auth_fields {
-        anyhow::bail!(
+        config_bail!(
             "mcp server {name}: http headers/auth are only valid for transport=streamable_http"
         );
     }
@@ -206,10 +216,10 @@ fn ensure_env_empty(name: &str, transport: Transport, env_nonempty: bool) -> any
     }
     match transport {
         Transport::Unix => {
-            anyhow::bail!("mcp server {name}: env is not supported for transport=unix")
+            config_bail!("mcp server {name}: env is not supported for transport=unix")
         }
         Transport::StreamableHttp => {
-            anyhow::bail!("mcp server {name}: env is not supported for transport=streamable_http")
+            config_bail!("mcp server {name}: env is not supported for transport=streamable_http")
         }
         Transport::Stdio => Ok(()),
     }
@@ -225,9 +235,9 @@ fn ensure_stdout_log_supported(
     }
     match transport {
         Transport::Unix => {
-            anyhow::bail!("mcp server {name}: stdout_log is not supported for transport=unix")
+            config_bail!("mcp server {name}: stdout_log is not supported for transport=unix")
         }
-        Transport::StreamableHttp => anyhow::bail!(
+        Transport::StreamableHttp => config_bail!(
             "mcp server {name}: stdout_log is not supported for transport=streamable_http"
         ),
         Transport::Stdio => Ok(()),
@@ -246,7 +256,7 @@ fn insert_server_unique(
             Ok(())
         }
         Entry::Occupied(entry) => {
-            anyhow::bail!(
+            config_bail!(
                 "duplicate mcp server name after normalization: {raw_name:?} -> {}",
                 entry.key()
             );
@@ -260,7 +270,7 @@ fn build_v1_config(
     cfg: ConfigFile,
 ) -> anyhow::Result<Config> {
     if cfg.version != MCP_CONFIG_VERSION {
-        anyhow::bail!(
+        config_bail!(
             "unsupported mcp.json version {} (expected {})",
             cfg.version,
             MCP_CONFIG_VERSION
@@ -292,9 +302,9 @@ fn build_v1_config(
         {
             match server.transport {
                 Transport::Unix => {
-                    anyhow::bail!("mcp server {name}: argv is not allowed for transport=unix")
+                    config_bail!("mcp server {name}: argv is not allowed for transport=unix")
                 }
-                Transport::StreamableHttp => anyhow::bail!(
+                Transport::StreamableHttp => config_bail!(
                     "mcp server {name}: argv is not allowed for transport=streamable_http"
                 ),
                 Transport::Stdio => unreachable!("matches! guard excludes stdio"),
@@ -366,7 +376,10 @@ fn build_v1_config(
                 ensure_http_headers_auth_only_for_streamable_http(&name, has_auth_fields)?;
 
                 let unix_path = unix_path.ok_or_else(|| {
-                    anyhow::anyhow!("mcp server {name}: unix_path is required for transport=unix")
+                    tagged_message(
+                        ErrorKind::Config,
+                        format!("mcp server {name}: unix_path is required for transport=unix"),
+                    )
                 })?;
                 ServerConfig::unix(unix_path)?
             }
@@ -380,14 +393,14 @@ fn build_v1_config(
                     (None, Some(sse_url), Some(http_url)) => {
                         ServerConfig::streamable_http_split(sse_url, http_url)?
                     }
-                    (None, None, None) => anyhow::bail!(
+                    (None, None, None) => config_bail!(
                         "mcp server {name}: url (or sse_url + http_url) is required for transport=streamable_http"
                     ),
-                    (Some(_), Some(_), _) | (Some(_), _, Some(_)) => anyhow::bail!(
+                    (Some(_), Some(_), _) | (Some(_), _, Some(_)) => config_bail!(
                         "mcp server {name}: set either url or (sse_url + http_url), not both"
                     ),
                     (None, Some(_), None) | (None, None, Some(_)) => {
-                        anyhow::bail!("mcp server {name}: sse_url and http_url must both be set")
+                        config_bail!("mcp server {name}: sse_url and http_url must both be set")
                     }
                 };
                 server_cfg.set_bearer_token_env_var(server.bearer_token_env_var)?;
@@ -463,10 +476,13 @@ impl Config {
     ) -> crate::Result<Self> {
         let cfg = Self::load_with_policy(thread_root, override_path, policy).await?;
         if cfg.path().is_none() {
-            return Err(anyhow::anyhow!(
-                "mcp config not found under root {} (tried: {})",
-                thread_root.display(),
-                DEFAULT_CONFIG_CANDIDATES.join(", ")
+            return Err(tagged_message(
+                ErrorKind::Config,
+                format!(
+                    "mcp config not found under root {} (tried: {})",
+                    thread_root.display(),
+                    DEFAULT_CONFIG_CANDIDATES.join(", ")
+                ),
             )
             .into());
         }

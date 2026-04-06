@@ -59,7 +59,9 @@ mod session;
 mod shared_manager;
 
 pub use config::{
-    ClientConfig, Config, ConfigLoadPolicy, Root, ServerConfig, StdoutLogConfig, Transport,
+    ClientConfig, Config, ConfigLoadPolicy, Root, ServerConfig, StdioServerConfigMut,
+    StdioServerConfigRef, StdoutLogConfig, StreamableHttpServerConfigMut,
+    StreamableHttpServerConfigRef, Transport, UnixServerConfigRef,
 };
 pub use error::{Error, ErrorKind, Result};
 pub use manager::{

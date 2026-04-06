@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::{Mutex, MutexGuard, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
+use crate::error::{ErrorKind, tagged_message};
 use crate::{Config, Manager, McpNotification, McpRequest, ProtocolVersionMismatch, ServerName};
 
 const REENTRANT_HANDLER_ERROR: &str = "SharedManager async operations cannot be called reentrantly from the wrapped manager's server handlers while another operation is in flight";
@@ -83,9 +84,12 @@ impl SharedManager {
             return Ok(None);
         }
 
-        try_acquire()
-            .map(Some)
-            .map_err(|_| anyhow::anyhow!("{REENTRANT_HANDLER_ERROR}: {operation}"))
+        try_acquire().map(Some).map_err(|_| {
+            tagged_message(
+                ErrorKind::ManagerState,
+                format!("{REENTRANT_HANDLER_ERROR}: {operation}"),
+            )
+        })
     }
 
     fn connect_gate_for(&self, server_name: &str) -> Arc<RwLock<()>> {
@@ -176,9 +180,12 @@ impl SharedManager {
         server_name: &str,
         cwd: Option<&Path>,
     ) -> anyhow::Result<Option<crate::manager::PreparedConnectedClient>> {
-        let server_cfg = config
-            .server(server_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
+        let server_cfg = config.server(server_name).ok_or_else(|| {
+            tagged_message(
+                ErrorKind::Config,
+                format!("unknown mcp server: {server_name}"),
+            )
+        })?;
         self.lock_for_async_op(operation)
             .await?
             .try_prepare_reusable_connected_client(server_name, server_cfg, cwd)
@@ -250,7 +257,12 @@ impl SharedManager {
         let prepared = self
             .try_prepare_connected_client(operation, server_name, None)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {}", server_name.trim()))?;
+            .ok_or_else(|| {
+                tagged_message(
+                    ErrorKind::ManagerState,
+                    format!("mcp server not connected: {}", server_name.trim()),
+                )
+            })?;
         Ok(PreparedSharedClient {
             prepared,
             same_server_gate: Some(gate),
@@ -297,9 +309,12 @@ impl SharedManager {
             .try_prepare_connected_client(operation, server_name, Some(&cwd))
             .await?
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "mcp server became unavailable before {operation}: {}",
-                    server_name.trim()
+                tagged_message(
+                    ErrorKind::ManagerState,
+                    format!(
+                        "mcp server became unavailable before {operation}: {}",
+                        server_name.trim()
+                    ),
                 )
             })?;
         Ok(PreparedSharedClient {

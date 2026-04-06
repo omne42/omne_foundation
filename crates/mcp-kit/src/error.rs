@@ -9,6 +9,34 @@ pub enum ErrorKind {
 }
 
 #[derive(Debug)]
+struct ClassifiedError {
+    kind: ErrorKind,
+    source: anyhow::Error,
+}
+
+impl ClassifiedError {
+    fn new(kind: ErrorKind, source: anyhow::Error) -> Self {
+        Self { kind, source }
+    }
+
+    fn kind(&self) -> ErrorKind {
+        self.kind
+    }
+}
+
+impl std::fmt::Display for ClassifiedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.source)
+    }
+}
+
+impl std::error::Error for ClassifiedError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+#[derive(Debug)]
 pub struct Error {
     kind: ErrorKind,
     inner: anyhow::Error,
@@ -51,6 +79,14 @@ impl Error {
     }
 
     fn classify(err: &anyhow::Error) -> ErrorKind {
+        if let Some(kind) = err.chain().find_map(|cause| {
+            cause
+                .downcast_ref::<ClassifiedError>()
+                .map(ClassifiedError::kind)
+        }) {
+            return kind;
+        }
+
         if err.chain().any(|cause| {
             cause
                 .downcast_ref::<mcp_jsonrpc::Error>()
@@ -81,40 +117,22 @@ impl Error {
             return ErrorKind::Config;
         }
 
-        let mut chain_text = String::new();
-        for cause in err.chain() {
-            if !chain_text.is_empty() {
-                chain_text.push_str(" | ");
-            }
-            chain_text.push_str(&cause.to_string());
-        }
-        let chain_text = chain_text.to_ascii_lowercase();
-
-        if chain_text.contains("not connected")
-            || chain_text.contains("cannot be reused for cwd")
-            || chain_text.contains("reentrantly")
-            || chain_text.contains("became unavailable before")
-        {
-            return ErrorKind::ManagerState;
-        }
-
-        if chain_text.contains("mcp config")
-            || chain_text.contains("invalid mcp server config")
-            || chain_text.contains("unknown mcp server")
-            || chain_text.contains("override config path")
-            || chain_text.contains("transport=")
-            || chain_text.contains("stdout_log")
-            || chain_text.contains("client.protocol_version")
-            || chain_text.contains("client.capabilities")
-            || chain_text.contains("client.roots")
-            || chain_text.contains("bearer_token_env_var")
-            || chain_text.contains("unix_path")
-            || chain_text.contains("untrusted mode")
-        {
-            return ErrorKind::Config;
-        }
-
         ErrorKind::Other
+    }
+}
+
+pub(crate) fn tagged_message(kind: ErrorKind, message: impl std::fmt::Display) -> anyhow::Error {
+    anyhow::Error::new(ClassifiedError::new(kind, anyhow::anyhow!("{message}")))
+}
+
+pub(crate) fn wrap_kind(kind: ErrorKind, err: anyhow::Error) -> anyhow::Error {
+    if err
+        .chain()
+        .any(|cause| cause.downcast_ref::<ClassifiedError>().is_some())
+    {
+        err
+    } else {
+        anyhow::Error::new(ClassifiedError::new(kind, err))
     }
 }
 
@@ -179,13 +197,14 @@ impl From<crate::ServerNameError> for Error {
 
 #[cfg(test)]
 mod tests {
-    use anyhow::anyhow;
-
     use super::{Error, ErrorKind};
 
     #[test]
     fn classifies_config_errors() {
-        let err = Error::from(anyhow!("mcp config not found under root /tmp"));
+        let err = Error::from(super::tagged_message(
+            ErrorKind::Config,
+            "mcp config not found under root /tmp",
+        ));
         assert_eq!(err.kind(), ErrorKind::Config);
     }
 
@@ -218,7 +237,19 @@ mod tests {
 
     #[test]
     fn classifies_manager_state_errors() {
-        let err = Error::from(anyhow!("mcp server not connected: demo"));
+        let err = Error::from(super::tagged_message(
+            ErrorKind::ManagerState,
+            "mcp server not connected: demo",
+        ));
         assert_eq!(err.kind(), ErrorKind::ManagerState);
+    }
+
+    #[test]
+    fn wrapped_errors_keep_explicit_kind() {
+        let err = Error::from(super::wrap_kind(
+            ErrorKind::Config,
+            anyhow::anyhow!("invalid mcp server config"),
+        ));
+        assert_eq!(err.kind(), ErrorKind::Config);
     }
 }

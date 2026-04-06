@@ -25,7 +25,6 @@ fn seed_manager_side_state(manager: &mut Manager, server_name: &str) {
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
-#[cfg(not(windows))]
 fn absolute_test_cwd() -> &'static Path {
     static CWD: OnceLock<PathBuf> = OnceLock::new();
     CWD.get_or_init(|| {

@@ -119,11 +119,11 @@ where
     })
 }
 
-pub fn build_hub_from_standard_env(options: StandardEnvHubOptions) -> anyhow::Result<Option<Hub>> {
+pub fn build_hub_from_standard_env(options: StandardEnvHubOptions) -> crate::Result<Option<Hub>> {
     build_hub_from_env(options, &|key| std::env::var(key).ok())
 }
 
-fn build_hub_from_env<F>(options: StandardEnvHubOptions, get: &F) -> anyhow::Result<Option<Hub>>
+fn build_hub_from_env<F>(options: StandardEnvHubOptions, get: &F) -> crate::Result<Option<Hub>>
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -134,8 +134,10 @@ where
     const NOTIFY_SLACK_WEBHOOK_URL_ENV: &str = "NOTIFY_SLACK_WEBHOOK_URL";
     const NOTIFY_EVENTS_ENV: &str = "NOTIFY_EVENTS";
 
-    let sound_enabled = env_bool(NOTIFY_SOUND_ENV, get)?.unwrap_or(options.default_sound_enabled);
-    let timeouts = parse_timeout_config(get)?;
+    let sound_enabled = env_bool(NOTIFY_SOUND_ENV, get)
+        .map_err(crate::Error::from)?
+        .unwrap_or(options.default_sound_enabled);
+    let timeouts = parse_timeout_config(get).map_err(crate::Error::from)?;
 
     let mut sinks: Vec<Arc<dyn Sink>> = Vec::new();
     if sound_enabled {
@@ -148,29 +150,36 @@ where
             cfg = cfg.with_payload_field(field);
         }
         sinks.push(Arc::new(
-            GenericWebhookSink::new(cfg).context("build generic webhook sink")?,
+            GenericWebhookSink::new(cfg)
+                .context("build generic webhook sink")
+                .map_err(crate::Error::from)?,
         ));
     }
 
     if let Some(url) = env_nonempty(NOTIFY_FEISHU_WEBHOOK_URL_ENV, get) {
         let cfg = FeishuWebhookConfig::new(url).with_timeout(timeouts.sink_timeout);
         sinks.push(Arc::new(
-            FeishuWebhookSink::new(cfg).context("build feishu sink")?,
+            FeishuWebhookSink::new(cfg)
+                .context("build feishu sink")
+                .map_err(crate::Error::from)?,
         ));
     }
 
     if let Some(url) = env_nonempty(NOTIFY_SLACK_WEBHOOK_URL_ENV, get) {
         let cfg = SlackWebhookConfig::new(url).with_timeout(timeouts.sink_timeout);
         sinks.push(Arc::new(
-            SlackWebhookSink::new(cfg).context("build slack sink")?,
+            SlackWebhookSink::new(cfg)
+                .context("build slack sink")
+                .map_err(crate::Error::from)?,
         ));
     }
 
     if sinks.is_empty() {
         if options.require_sink {
-            anyhow::bail!(
+            return Err(anyhow::anyhow!(
                 "no notification sinks configured (enable {NOTIFY_SOUND_ENV}=1 or provide webhook envs)"
-            );
+            )
+            .into());
         }
         return Ok(None);
     }
@@ -248,6 +257,7 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("invalid NOTIFY_SOUND"), "{msg}");
         assert!(msg.contains("expected one of"), "{msg}");
+        assert_eq!(err.kind(), crate::ErrorKind::Other);
     }
 
     #[test]

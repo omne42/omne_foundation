@@ -554,18 +554,19 @@ impl Manager {
 
     /// Build a `Manager` using client defaults from `config`.
     ///
-    /// Note: this assumes `config.client()` is valid. Use `Manager::try_from_config` if you
-    /// manually constructed a config and want fail-fast validation for the full config.
+    /// Note: this constructor still fail-fast validates the full config and will panic if
+    /// `config` is invalid. Use `Manager::try_from_config` if you want a typed validation error.
     pub fn from_config(
         config: &Config,
         client_name: impl Into<String>,
         client_version: impl Into<String>,
         timeout: Duration,
     ) -> Self {
-        debug_assert!(
-            config.client().validate().is_ok(),
-            "Manager::from_config requires a validated Config::client() (use try_from_config)"
-        );
+        if let Err(err) = config.validate() {
+            panic!(
+                "Manager::from_config requires a validated Config (use try_from_config): {err:#}"
+            );
+        }
         let mut manager = Self::new(client_name, client_version, timeout);
         if let Some(protocol_version) = config.client().protocol_version.clone() {
             manager = manager.with_protocol_version(protocol_version);

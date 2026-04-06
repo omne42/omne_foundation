@@ -37,6 +37,16 @@ fn test_workspace_path(name: &str) -> PathBuf {
     absolute_test_cwd().join("workspace").join(name)
 }
 
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        return (*message).to_string();
+    }
+    "<non-string panic payload>".to_string()
+}
+
 #[cfg(not(windows))]
 fn cwd_test_guard() -> std::sync::MutexGuard<'static, ()> {
     static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
@@ -413,6 +423,27 @@ fn try_from_config_rejects_invalid_client_config() {
 }
 
 #[test]
+fn from_config_panics_on_invalid_client_config() {
+    let config = Config::new(
+        crate::ClientConfig {
+            capabilities: Some(serde_json::json!(1)),
+            ..Default::default()
+        },
+        std::collections::BTreeMap::new(),
+    );
+    let panic = std::panic::catch_unwind(|| {
+        let _ = Manager::from_config(&config, "test-client", "0.0.0", Duration::from_secs(1));
+    })
+    .expect_err("invalid client config should panic");
+    let message = panic_message(&panic);
+    assert!(
+        message.contains("validated Config"),
+        "panic should explain the contract: {message}"
+    );
+    assert!(message.contains("capabilities"), "panic={message}");
+}
+
+#[test]
 fn try_from_config_rejects_invalid_server_config() {
     let mut server = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
     server
@@ -433,6 +464,31 @@ fn try_from_config_rejects_invalid_server_config() {
     assert!(msg.contains("server=srv"), "err={err:#}");
     assert!(msg.contains("invalid mcp server config"), "err={err:#}");
     assert!(msg.contains("reserved by transport"), "err={err:#}");
+}
+
+#[test]
+fn from_config_panics_on_invalid_server_config() {
+    let mut server = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+    server
+        .env_http_headers_mut()
+        .unwrap()
+        .insert("MCP-Protocol-Version".to_string(), "MCP_TOKEN".to_string());
+
+    let mut servers = std::collections::BTreeMap::new();
+    servers.insert(ServerName::parse("srv").unwrap(), server);
+    let config = Config::new(crate::ClientConfig::default(), servers);
+
+    let panic = std::panic::catch_unwind(|| {
+        let _ = Manager::from_config(&config, "test-client", "0.0.0", Duration::from_secs(1));
+    })
+    .expect_err("invalid server config should panic");
+    let message = panic_message(&panic);
+    assert!(
+        message.contains("validated Config"),
+        "panic should explain the contract: {message}"
+    );
+    assert!(message.contains("server=srv"), "panic={message}");
+    assert!(message.contains("reserved by transport"), "panic={message}");
 }
 
 #[cfg(all(unix, target_os = "linux"))]

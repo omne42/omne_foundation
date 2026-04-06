@@ -48,6 +48,7 @@ pub type StdoutLogRedactor = Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
 const DEFAULT_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 const REUSABLE_LINE_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 const READ_LINE_INITIAL_CAP_BYTES: usize = 4 * 1024;
+const REQUEST_DISPATCH_ERROR_TIMEOUT: Duration = Duration::from_secs(1);
 pub const STREAMABLE_HTTP_SESSION_ID_HEADER: &str = "mcp-session-id";
 const TOKIO_TIME_DRIVER_ERROR: &str =
     "tokio runtime time driver is not enabled; build the runtime with enable_time()";
@@ -603,6 +604,13 @@ impl RequestResponder {
             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
     }
+
+    fn schedule_transport_close(&self, reason: String) {
+        match &self.target {
+            RequestResponseTarget::Direct(handle) => handle.schedule_close_once(reason),
+            RequestResponseTarget::Batch(batch) => batch.state.handle.schedule_close_once(reason),
+        }
+    }
 }
 
 impl ClientHandle {
@@ -645,26 +653,41 @@ impl ClientHandle {
         self.close_with_reason(reason).await;
     }
 
-    fn schedule_close_once(&self, reason: String) {
-        if self
+    fn begin_close_with_error(&self, reason: impl Into<String>, err: &Error) -> bool {
+        let reason = reason.into();
+        let first_close = self
             .closed
             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err()
-        {
+            .is_ok();
+        let _ = self.close_reason.set(reason);
+        if first_close {
+            drain_pending(&self.pending, err);
+        }
+        first_close
+    }
+
+    async fn finish_close_write(&self) {
+        let mut write = self.write.lock().await;
+        let _ = write.shutdown().await;
+        // Many `AsyncWrite` impls (e.g. `tokio::process::ChildStdin`) only fully close on drop.
+        // Replacing the writer guarantees the underlying write end is closed.
+        let _ = std::mem::replace(&mut *write, Box::new(tokio::io::sink()));
+    }
+
+    fn schedule_close_once(&self, reason: String) {
+        let err = Error::protocol(ProtocolErrorKind::Closed, reason.clone());
+        if !self.begin_close_with_error(reason, &err) {
             return;
         }
-        let _ = self.close_reason.set(reason.clone()); // pre-commit: allow-let-underscore
         let handle = self.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             drop(runtime.spawn(async move {
-                handle.close_with_reason(reason).await;
+                handle.finish_close_write().await;
             }));
             return;
         }
 
         // No runtime available (e.g. sync context): avoid panicking and perform best-effort close.
-        let err = Error::protocol(ProtocolErrorKind::Closed, reason);
-        drain_pending(&handle.pending, &err);
         if let Ok(mut write) = handle.write.try_lock() {
             drop(std::mem::replace(&mut *write, Box::new(tokio::io::sink())));
         }
@@ -693,16 +716,8 @@ impl ClientHandle {
 
     pub(crate) async fn close_with_error(&self, reason: impl Into<String>, err: Error) {
         let reason = reason.into();
-
-        self.closed.store(true, Ordering::Relaxed);
-        let _ = self.close_reason.set(reason);
-
-        drain_pending(&self.pending, &err);
-        let mut write = self.write.lock().await;
-        let _ = write.shutdown().await;
-        // Many `AsyncWrite` impls (e.g. `tokio::process::ChildStdin`) only fully close on drop.
-        // Replacing the writer guarantees the underlying write end is closed.
-        let _ = std::mem::replace(&mut *write, Box::new(tokio::io::sink()));
+        self.begin_close_with_error(reason, &err);
+        self.finish_close_write().await;
     }
 
     pub async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), Error> {
@@ -1205,7 +1220,10 @@ impl Client {
         for task in self.transport_tasks.drain(..) {
             task.abort();
         }
-        if tokio::time::timeout_at(deadline, self.handle.close_with_reason("client closed"))
+        let close_err = Error::protocol(ProtocolErrorKind::Closed, "client closed");
+        self.handle
+            .begin_close_with_error("client closed", &close_err);
+        if tokio::time::timeout_at(deadline, self.handle.finish_close_write())
             .await
             .is_err()
         {
@@ -1300,8 +1318,8 @@ impl Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
-        self.handle.closed.store(true, Ordering::Relaxed);
-        let _ = self.handle.close_reason.set("client closed".to_string());
+        let err = Error::protocol(ProtocolErrorKind::Closed, "client closed");
+        self.handle.begin_close_with_error("client closed", &err);
         self.task.abort();
         for task in self.transport_tasks.drain(..) {
             task.abort();
@@ -1310,8 +1328,6 @@ impl Drop for Client {
         if let Ok(mut write) = self.handle.write.try_lock() {
             drop(std::mem::replace(&mut *write, Box::new(tokio::io::sink())));
         }
-        let err = Error::protocol(ProtocolErrorKind::Closed, "client closed");
-        drain_pending(&self.handle.pending, &err);
     }
 }
 
@@ -1541,6 +1557,41 @@ async fn close_invalid_message(responder: &ClientHandle, reason: String) {
         .await;
 }
 
+fn schedule_request_dispatch_error(
+    request: IncomingRequest,
+    code: i64,
+    message: &'static str,
+    close_reason: &'static str,
+    task_name: &'static str,
+) {
+    let responder = request.responder.clone();
+    let id = request.id.clone();
+    let close_reason = format!("{close_reason}: method={}", request.method);
+    let schedule_failure_reason = format!(
+        "failed to schedule {task_name} response: method={}",
+        request.method
+    );
+    if let Err(err) = spawn_detached(task_name, async move {
+        match tokio::time::timeout(
+            REQUEST_DISPATCH_ERROR_TIMEOUT,
+            responder.respond_error(&id, code, message, None),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => responder.schedule_transport_close(format!("{close_reason}: {err}")),
+            Err(_) => responder.schedule_transport_close(format!(
+                "{close_reason}: timed out after {:?} while writing error response",
+                REQUEST_DISPATCH_ERROR_TIMEOUT
+            )),
+        }
+    }) {
+        request
+            .responder
+            .schedule_transport_close(format!("{schedule_failure_reason}: {err}"));
+    }
+}
+
 async fn handle_incoming_value(
     value: Value,
     pending: &PendingRequests,
@@ -1717,29 +1768,21 @@ async fn handle_incoming_item(
                         match ctx.request_tx.try_send(request) {
                             Ok(()) => {}
                             Err(mpsc::error::TrySendError::Full(request)) => {
-                                drop(
-                                    request
-                                        .responder
-                                        .respond_error(
-                                            &request.id,
-                                            -32000,
-                                            "client overloaded",
-                                            None,
-                                        )
-                                        .await,
+                                schedule_request_dispatch_error(
+                                    request,
+                                    -32000,
+                                    "client overloaded",
+                                    "client request handler overloaded",
+                                    "request handler overload",
                                 );
                             }
                             Err(mpsc::error::TrySendError::Closed(request)) => {
-                                drop(
-                                    request
-                                        .responder
-                                        .respond_error(
-                                            &request.id,
-                                            -32601,
-                                            "no request handler installed",
-                                            None,
-                                        )
-                                        .await,
+                                schedule_request_dispatch_error(
+                                    request,
+                                    -32601,
+                                    "no request handler installed",
+                                    "client request handler unavailable",
+                                    "request handler unavailable",
                                 );
                             }
                         }

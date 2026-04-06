@@ -7,6 +7,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：`ClientHandle` 关闭路径现在在同一临界区内记录首个 `close_reason` 并发布 `closed`，并且无 runtime 的最后兜底 close 收尾会等待 busy writer 释放后再替换写端；`is_closed()`/`check_closed()` 不再暴露“已关闭但原因已被其他竞态路径抢写”或“写端正忙时直接放弃收尾”的窗口。
+- `mcp-jsonrpc`：batch response flush 的完成判定改为单原子状态机，消除了 `finish()` 与最后一个异步响应并发时双方都早退、整批响应永远不 flush 的竞态。
 - `mcp-jsonrpc`：对超时关闭诊断的内部格式化写法做了风格收敛，保持与 workspace 的 Clippy 门禁一致而不改变运行时行为。
 - `mcp-jsonrpc`：无 Tokio runtime 的 detached cleanup 调度现在在 shared worker 不可用时退化到“每任务独立 fallback thread + runtime”，不再 inline `block_on` 调用方；shared worker 与 fallback runtime 都不可用时仍会把失败显式回传给上层 fail-closed，而不是 panic 或静默丢任务。
 - `mcp-jsonrpc`：共享 detached runtime worker 现在会把收到的 cleanup 任务并发 `spawn` 到同一个 Tokio runtime 上执行，而不是按队列串行 `block_on`；单个卡住的 dropped-request / batch-flush cleanup 不会再把后续 cleanup 全部拖死。

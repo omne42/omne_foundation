@@ -1105,6 +1105,77 @@ mod tests {
     }
 
     #[test]
+    fn failed_token_refresh_resets_state_and_allows_retry() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let mut buf = [0_u8; 1024];
+
+            let (mut first_stream, _) = listener.accept().expect("accept first connection");
+            let _ = first_stream.read(&mut buf).expect("read first request");
+            let first_body = r#"{"code":999,"msg":"boom"}"#;
+            let first_response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                first_body.len(),
+                first_body
+            );
+            first_stream
+                .write_all(first_response.as_bytes())
+                .expect("write first response");
+
+            let (mut second_stream, _) = listener.accept().expect("accept second connection");
+            let _ = second_stream.read(&mut buf).expect("read second request");
+            let second_body =
+                r#"{"code":0,"tenant_access_token":"token-after-error","expires_in":7200}"#;
+            let second_response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                second_body.len(),
+                second_body
+            );
+            second_stream
+                .write_all(second_response.as_bytes())
+                .expect("write second response");
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            let mut sink = FeishuWebhookSink::new(
+                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+                    .with_app_credentials("app_id", "app_secret"),
+            )
+            .expect("build sink");
+            sink.webhook_url =
+                reqwest::Url::parse(&format!("http://{addr}/open-apis/bot/v2/hook/x"))
+                    .expect("parse local webhook url");
+            sink.enforce_public_ip = false;
+
+            let err = sink
+                .ensure_tenant_access_token()
+                .await
+                .expect_err("first refresh should fail");
+            assert!(err.to_string().contains("code=999"), "{err:#}");
+
+            let state = sink.tenant_access_token.lock().await;
+            assert!(
+                matches!(&*state, TenantAccessTokenState::Empty),
+                "failed refresh should reset token state"
+            );
+            drop(state);
+
+            let token = sink
+                .ensure_tenant_access_token()
+                .await
+                .expect("retry should fetch a fresh token");
+            assert_eq!(token.expose_secret(), "token-after-error");
+        });
+
+        server.join().expect("join server");
+    }
+
+    #[test]
     fn cancelled_token_refresh_resets_state_and_allows_retry() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let addr = listener.local_addr().expect("listener addr");

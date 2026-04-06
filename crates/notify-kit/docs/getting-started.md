@@ -15,7 +15,7 @@ notify-kit = { path = "/path/to/omne_foundation/crates/notify-kit" }
 
 ## 一个可运行的 `main.rs` 示例
 
-`Hub::notify` 需要在 **Tokio runtime** 中调用（否则会丢弃并 `tracing::warn!`）。
+`Hub::notify_best_effort` 需要在 **Tokio runtime** 中调用（否则会丢弃并 `tracing::warn!`）。
 
 ```rust,no_run,edition2024
 # extern crate notify_kit;
@@ -53,7 +53,7 @@ fn main() -> notify_kit::Result<()> {
 
     rt.block_on(async {
         // fire-and-forget（不关心结果）
-        hub.notify(Event::new("turn_completed", Severity::Success, "done"));
+        hub.notify_best_effort(Event::new("turn_completed", Severity::Success, "done"));
 
         // 可观测结果（等待所有 sinks）
         hub.send(Event::new("turn_completed", Severity::Success, "done (awaited)"))

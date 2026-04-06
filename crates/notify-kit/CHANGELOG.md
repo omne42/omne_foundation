@@ -8,6 +8,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ### Fixed
 - `GitHubCommentSink` 现在适配 `github-kit` 收紧后的 header helper 边界，由 helper 直接校验真实 request target 再附带 bearer token；即使调用链参数漂移，也不会因为“校验 URL”和“发送 URL”不一致而绕过共享 GitHub 凭证边界。
+- `notify-kit` crate root 不再直接 re-export `secret_kit::SecretString`；secret 领域类型回到各 sink/config 的显式依赖边界，避免通知 crate 的公开 API 再把 secret 语义直接污染到 root namespace。
+- `Hub::notify_best_effort` 现在成为显式命名的 best-effort fire-and-forget 入口；原 `Hub::notify` 仅保留为兼容别名并标记弃用，避免默认 API 名称继续伪装成可观测投递语义。
 - `notify-kit::env` 的标准 helper 现在默认把 Hub 外层 hard timeout 设为 `sink timeout + slack`，不再把两层超时默认绑成同一个值；显式 `NOTIFY_HUB_TIMEOUT_MS` 若不大于生效的 sink timeout 也会 fail closed，避免 helper 自己制造伪超时。
 - docs: `docs/integration.md` 与聚合 `llms.txt` 现在同步写明标准 env helper 的 timeout 约定，避免继续暗示 legacy `NOTIFY_TIMEOUT_MS` 会同时直接驱动 sink 与 Hub 两层硬超时。
 - docs: `docs/sinks/custom.md` 的自定义 sink 示例改为使用 `Event::title()`，并同步刷新 `llms.txt`，避免文档继续示范对已封装私有字段的直接访问。

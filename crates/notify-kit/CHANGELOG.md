@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Fixed
+- `notify_kit::env::build_hub_from_standard_env(...)` 不再公开泄露 `anyhow::Result`；现在和 crate 其他 fallible API 一样统一返回 `notify_kit::Result` / `notify_kit::Error`，并在非法 env 值路径上保留稳定的 `ErrorKind::Other`。
 - `notify-kit::Event` 的 plain-fallback 契约现在真正落到实现：structured-only `CatalogText` 不会再通过 `title()` / `body()` / `tags()` 泄漏成 `code {args}` 诊断串；如果调用方先提供了 plain title/body/tag，再写入 catalog text，也会继续保留这层纯文本 fallback 给现有 sinks 使用。
 - `GitHubCommentSink` 现在补上针对自定义 GitHub API base 的回归锁定：即使调用方显式 trust 了自定义 host，bearer token 目标仍必须保持 HTTPS、不能携带 URL 凭证；对应文档也同步改成当前真实的 fail-closed 契约。
 - `notify-kit::Event` 不再同时维护 plain string 镜像与 `StructuredText` 两套可失同步状态；`title` / `body` / `tags` 现在统一从 canonical `StructuredText` 即时渲染，`Bark`、`PushPlus`、`ServerChan`、`Feishu post` 与 `sinks/text` 也都改为消费同一条渲染边界。

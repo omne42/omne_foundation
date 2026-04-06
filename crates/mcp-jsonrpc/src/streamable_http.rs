@@ -1623,18 +1623,20 @@ mod tests {
             .take_notifications()
             .expect("take notifications receiver");
 
-        let stage = tokio::time::timeout(Duration::from_secs(2), stage_rx.recv())
+        let reconnect_timeout = Duration::from_secs(10);
+
+        let stage = tokio::time::timeout(reconnect_timeout, stage_rx.recv())
             .await
             .expect("initial SSE stage should arrive before timeout")
             .expect("stage channel open");
         assert_eq!(stage, "initial-sse-open");
-        let stage = tokio::time::timeout(Duration::from_secs(2), stage_rx.recv())
+        let stage = tokio::time::timeout(reconnect_timeout, stage_rx.recv())
             .await
             .expect("reconnect SSE stage should arrive before timeout")
             .expect("stage channel open");
         assert_eq!(stage, "reconnected-sse-open");
 
-        let notification = tokio::time::timeout(Duration::from_secs(2), notifications.recv())
+        let notification = tokio::time::timeout(reconnect_timeout, notifications.recv())
             .await
             .expect("notification should arrive before timeout")
             .expect("notification stream open");

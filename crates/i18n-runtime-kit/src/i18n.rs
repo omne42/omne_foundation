@@ -902,6 +902,41 @@ mod tests {
     }
 
     #[test]
+    fn directory_catalog_reload_with_base_uses_explicit_base_across_cwd_changes() {
+        let cwd = CurrentDirGuard::new();
+        let temp = TempDir::new().expect("temp dir");
+        let workspace_a = temp.path().join("workspace_a");
+        let workspace_b = temp.path().join("workspace_b");
+        let catalog_dir = workspace_a.join("catalog");
+        fs::create_dir_all(&catalog_dir).expect("mkdir catalog");
+        fs::create_dir_all(&workspace_b).expect("mkdir workspace_b");
+        let locale_path = catalog_dir.join("en_US.json");
+        fs::write(&locale_path, r#"{"greeting":"hello"}"#).expect("write initial locale");
+        cwd.set(&workspace_b);
+
+        let catalog = load_i18n_catalog_from_directory_with_base(
+            &workspace_a,
+            Path::new("catalog"),
+            Locale::EN_US,
+            FallbackStrategy::Both,
+        )
+        .expect("load catalog with base");
+        assert_eq!(
+            catalog.get_text(Locale::EN_US, "greeting"),
+            Some("hello".to_string())
+        );
+
+        fs::write(&locale_path, r#"{"greeting":"hi"}"#).expect("rewrite locale");
+        reload_i18n_catalog_from_directory_with_base(&catalog, &workspace_a, Path::new("catalog"))
+            .expect("reload catalog with base");
+
+        assert_eq!(
+            catalog.get_text(Locale::EN_US, "greeting"),
+            Some("hi".to_string())
+        );
+    }
+
+    #[test]
     fn directory_catalog_rejects_excessive_directory_depth() {
         let temp = TempDir::new().expect("temp dir");
         let mut deepest = temp.path().to_path_buf();

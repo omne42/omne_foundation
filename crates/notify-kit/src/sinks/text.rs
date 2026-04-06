@@ -419,13 +419,16 @@ mod tests {
             .with_tag_text("thread_id", tag.clone());
 
         let out = format_event_text_limited(&event, TextLimits::default());
-        assert!(out.contains(&title.to_string()), "{out}");
-        assert!(out.contains(&body.to_string()), "{out}");
-        assert!(out.contains(&format!("thread_id={tag}")), "{out}");
+        assert!(out.contains("plain title"), "{out}");
+        assert!(out.contains("plain body"), "{out}");
+        assert!(out.contains("thread_id=plain-tag"), "{out}");
+        assert!(!out.contains(&title.to_string()), "{out}");
+        assert!(!out.contains(&body.to_string()), "{out}");
+        assert!(!out.contains(&format!("thread_id={tag}")), "{out}");
     }
 
     #[test]
-    fn format_event_text_limited_renders_structured_only_catalog_text() {
+    fn format_event_text_limited_omits_structured_only_catalog_text_without_plain_fallback() {
         let title = structured_text!("notify.title", "repo" => "omne");
         let body = structured_text!("notify.body", "step" => "review");
         let tag = structured_text!("notify.tag", "value" => "t1");
@@ -434,8 +437,6 @@ mod tests {
             .with_tag_text("thread_id", tag.clone());
 
         let out = format_event_text_limited(&event, TextLimits::default());
-        assert!(out.contains(&title.to_string()), "{out}");
-        assert!(out.contains(&body.to_string()), "{out}");
-        assert!(out.contains(&format!("thread_id={tag}")), "{out}");
+        assert!(out.is_empty(), "{out}");
     }
 }

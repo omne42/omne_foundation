@@ -68,14 +68,18 @@ impl Event {
 
     #[must_use]
     pub fn with_title_text(mut self, title_text: StructuredText) -> Self {
-        self.title = plain_text_projection(&title_text).unwrap_or_default();
+        if let Some(title) = plain_text_projection(&title_text) {
+            self.title = title;
+        }
         self.title_text = title_text;
         self
     }
 
     #[must_use]
     pub fn with_body_text(mut self, body_text: StructuredText) -> Self {
-        self.body = plain_text_projection(&body_text);
+        if let Some(body) = plain_text_projection(&body_text) {
+            self.body = Some(body);
+        }
         self.body_text = Some(body_text);
         self
     }
@@ -95,8 +99,6 @@ impl Event {
         let key = key.into();
         if let Some(value_text) = plain_text_projection(&value) {
             self.tags.insert(key.clone(), value_text);
-        } else {
-            self.tags.remove(&key);
         }
         self.tag_texts.insert(key, value);
         self
@@ -162,5 +164,25 @@ mod tests {
         assert_eq!(event.title, "title");
         assert_eq!(event.body.as_deref(), Some("body"));
         assert_eq!(event.tags.get("thread_id").map(String::as_str), Some("t1"));
+    }
+
+    #[test]
+    fn catalog_text_preserves_existing_plain_fallback() {
+        let event = Event::new("kind", Severity::Info, "plain title")
+            .with_body("plain body")
+            .with_tag("thread_id", "plain-tag")
+            .with_title_text(structured_text!("notify.title", "repo" => "omne"))
+            .with_body_text(structured_text!("notify.body", "step" => "review"))
+            .with_tag_text(
+                "thread_id",
+                structured_text!("notify.tag", "value" => "fresh"),
+            );
+
+        assert_eq!(event.title, "plain title");
+        assert_eq!(event.body.as_deref(), Some("plain body"));
+        assert_eq!(
+            event.tags.get("thread_id").map(String::as_str),
+            Some("plain-tag")
+        );
     }
 }

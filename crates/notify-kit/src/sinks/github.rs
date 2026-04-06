@@ -356,4 +356,24 @@ mod tests {
         let err = GitHubCommentSink::new(cfg).expect_err("custom host should require opt-in");
         assert!(err.to_string().contains("explicit trusted host allowlist"));
     }
+
+    #[test]
+    fn rejects_credentialed_custom_api_base_even_if_host_is_trusted() {
+        let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok")
+            .with_api_base("https://user:pass@github.example.com/api/v3/")
+            .with_trusted_bearer_token_host("github.example.com");
+        let err = GitHubCommentSink::new(cfg)
+            .expect_err("credentialed custom api base should fail closed");
+        assert!(err.to_string().contains("without credentials"), "{err:#}");
+    }
+
+    #[test]
+    fn rejects_non_https_custom_api_base_even_if_host_is_trusted() {
+        let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok")
+            .with_api_base("http://github.example.com/api/v3/")
+            .with_trusted_bearer_token_host("github.example.com");
+        let err =
+            GitHubCommentSink::new(cfg).expect_err("non-https custom api base should fail closed");
+        assert!(err.to_string().contains("requires an https"), "{err:#}");
+    }
 }

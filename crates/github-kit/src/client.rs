@@ -277,6 +277,41 @@ mod tests {
     }
 
     #[test]
+    fn rejects_trusted_custom_host_with_url_credentials() {
+        let url =
+            reqwest::Url::parse("https://user:pass@github.example.com/api/v3/repos/omne42/repo")
+                .expect("url");
+
+        let err = validate_github_api_request_url(
+            &url,
+            GitHubApiRequestOptions::new()
+                .with_bearer_token(Some("secret-token"))
+                .with_trusted_bearer_token_hosts(&["github.example.com"]),
+        )
+        .expect_err("credentialed bearer target should fail closed");
+
+        let message = err.to_string();
+        assert!(message.contains("without credentials"), "{message}");
+    }
+
+    #[test]
+    fn rejects_trusted_custom_host_over_http() {
+        let url =
+            reqwest::Url::parse("http://github.example.com/api/v3/repos/omne42/repo").expect("url");
+
+        let err = validate_github_api_request_url(
+            &url,
+            GitHubApiRequestOptions::new()
+                .with_bearer_token(Some("secret-token"))
+                .with_trusted_bearer_token_hosts(&["github.example.com"]),
+        )
+        .expect_err("non-https bearer target should fail closed");
+
+        let message = err.to_string();
+        assert!(message.contains("requires an https"), "{message}");
+    }
+
+    #[test]
     fn apply_headers_rejects_untrusted_bearer_target() {
         let client = reqwest::Client::new();
 

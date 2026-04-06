@@ -645,6 +645,26 @@ impl ClientHandle {
         self.close_with_reason(reason).await;
     }
 
+    fn mark_closed(&self, reason: String, err: &Error) {
+        self.closed.store(true, Ordering::Relaxed);
+        let _ = self.close_reason.set(reason);
+        drain_pending(&self.pending, err);
+    }
+
+    async fn shutdown_write_end(&self) {
+        let mut write = self.write.lock().await;
+        let _ = write.shutdown().await;
+        // Many `AsyncWrite` impls (e.g. `tokio::process::ChildStdin`) only fully close on drop.
+        // Replacing the writer guarantees the underlying write end is closed.
+        let _ = std::mem::replace(&mut *write, Box::new(tokio::io::sink()));
+    }
+
+    fn replace_write_end_if_idle(&self) {
+        if let Ok(mut write) = self.write.try_lock() {
+            drop(std::mem::replace(&mut *write, Box::new(tokio::io::sink())));
+        }
+    }
+
     fn schedule_close_once(&self, reason: String) {
         if self
             .closed
@@ -653,21 +673,19 @@ impl ClientHandle {
         {
             return;
         }
-        let _ = self.close_reason.set(reason.clone()); // pre-commit: allow-let-underscore
+        let err = Error::protocol(ProtocolErrorKind::Closed, reason.clone());
+        self.mark_closed(reason.clone(), &err);
         let handle = self.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             drop(runtime.spawn(async move {
-                handle.close_with_reason(reason).await;
+                handle.shutdown_write_end().await;
             }));
             return;
         }
 
         // No runtime available (e.g. sync context): avoid panicking and perform best-effort close.
-        let err = Error::protocol(ProtocolErrorKind::Closed, reason);
-        drain_pending(&handle.pending, &err);
-        if let Ok(mut write) = handle.write.try_lock() {
-            drop(std::mem::replace(&mut *write, Box::new(tokio::io::sink())));
-        }
+        let _ = reason;
+        handle.replace_write_end_if_idle();
     }
 
     fn check_closed(&self) -> Result<(), Error> {
@@ -693,16 +711,8 @@ impl ClientHandle {
 
     pub(crate) async fn close_with_error(&self, reason: impl Into<String>, err: Error) {
         let reason = reason.into();
-
-        self.closed.store(true, Ordering::Relaxed);
-        let _ = self.close_reason.set(reason);
-
-        drain_pending(&self.pending, &err);
-        let mut write = self.write.lock().await;
-        let _ = write.shutdown().await;
-        // Many `AsyncWrite` impls (e.g. `tokio::process::ChildStdin`) only fully close on drop.
-        // Replacing the writer guarantees the underlying write end is closed.
-        let _ = std::mem::replace(&mut *write, Box::new(tokio::io::sink()));
+        self.mark_closed(reason, &err);
+        self.shutdown_write_end().await;
     }
 
     pub async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), Error> {
@@ -1205,7 +1215,10 @@ impl Client {
         for task in self.transport_tasks.drain(..) {
             task.abort();
         }
-        if tokio::time::timeout_at(deadline, self.handle.close_with_reason("client closed"))
+        let close_reason = "client closed".to_string();
+        let close_err = Error::protocol(ProtocolErrorKind::Closed, close_reason.clone());
+        self.handle.mark_closed(close_reason, &close_err);
+        if tokio::time::timeout_at(deadline, self.handle.shutdown_write_end())
             .await
             .is_err()
         {
@@ -1300,18 +1313,14 @@ impl Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
-        self.handle.closed.store(true, Ordering::Relaxed);
-        let _ = self.handle.close_reason.set("client closed".to_string());
+        let err = Error::protocol(ProtocolErrorKind::Closed, "client closed");
+        self.handle.mark_closed("client closed".to_string(), &err);
         self.task.abort();
         for task in self.transport_tasks.drain(..) {
             task.abort();
         }
         // Best-effort: eagerly drop the underlying writer even if cloned handles remain.
-        if let Ok(mut write) = self.handle.write.try_lock() {
-            drop(std::mem::replace(&mut *write, Box::new(tokio::io::sink())));
-        }
-        let err = Error::protocol(ProtocolErrorKind::Closed, "client closed");
-        drain_pending(&self.handle.pending, &err);
+        self.handle.replace_write_end_if_idle();
     }
 }
 

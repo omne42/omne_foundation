@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：关闭路径现在先同步标记 closed 并清空 pending request，再等待写端真正 shutdown；`wait_with_timeout` 即使被卡在写锁竞争上，也不会再把旧 request 留在半关闭悬挂状态。
 - `mcp-jsonrpc`：多行 SSE `data:` event 现在要求整个 event payload 本身必须是合法 JSON；非 JSON 的多行 event 会 fail closed，不再被桥接成多条伪 JSON-RPC line 污染下游状态机。
 - `mcp-jsonrpc`：无 Tokio runtime 的 detached task 调度现在把 shared worker 初始化失败和 inline runtime 失败都显式回传给调用点；补偿任务无法调度时会关闭 transport，而不是继续静默丢掉 dropped-request / batch-flush 后续动作。
 - `mcp-jsonrpc`：detached runtime 相关单测现在复用同一把测试互斥并在 no-runtime drop 用例前后显式 reset worker 状态，避免并行单测彼此污染共享 worker/failure-injection 全局态。

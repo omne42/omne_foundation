@@ -108,6 +108,128 @@ async fn wait_with_timeout_includes_close_stage_lock_wait() {
 }
 
 #[tokio::test]
+async fn wait_with_timeout_drains_pending_requests_before_write_lock_released() {
+    struct BlocksAfterFirstFlush<W> {
+        inner: W,
+        first_flush_completed: bool,
+        entered_blocked_write: Arc<AtomicBool>,
+    }
+
+    impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for BlocksAfterFirstFlush<W> {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.first_flush_completed {
+                self.entered_blocked_write.store(true, Ordering::Relaxed);
+                return Poll::Pending;
+            }
+            Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            if self.first_flush_completed {
+                self.entered_blocked_write.store(true, Ordering::Relaxed);
+                return Poll::Pending;
+            }
+            match Pin::new(&mut self.inner).poll_flush(cx) {
+                Poll::Ready(Ok(())) => {
+                    self.first_flush_completed = true;
+                    Poll::Ready(Ok(()))
+                }
+                other => other,
+            }
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            if self.first_flush_completed {
+                self.entered_blocked_write.store(true, Ordering::Relaxed);
+                return Poll::Pending;
+            }
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    let entered = Arc::new(AtomicBool::new(false));
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, _server_write) = tokio::io::split(server_stream);
+    let blocking_write = BlocksAfterFirstFlush {
+        inner: client_write,
+        first_flush_completed: false,
+        entered_blocked_write: entered.clone(),
+    };
+
+    let mut client = mcp_jsonrpc::Client::connect_io(client_read, blocking_write)
+        .await
+        .expect("client connect");
+    let handle = client.handle();
+    let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+    let request_task = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            handle
+                .request("demo/request", serde_json::json!({ "x": 1 }))
+                .await
+        }
+    });
+
+    let request_line = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+        .await
+        .expect("request should be written")
+        .expect("request line read")
+        .expect("request line");
+    assert_eq!(parse_line(&request_line)["method"], "demo/request");
+
+    let blocked_write_task = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            let _ = handle
+                .notify("demo/stuck", Some(serde_json::json!({ "x": 2 })))
+                .await;
+        }
+    });
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !entered.load(Ordering::Relaxed) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("second write should block");
+
+    let err = client
+        .wait_with_timeout(
+            Duration::from_millis(20),
+            mcp_jsonrpc::WaitOnTimeout::ReturnError,
+        )
+        .await
+        .expect_err("close stage should time out when write lock is held");
+    assert!(err.is_wait_timeout());
+    assert!(handle.is_closed(), "client should already be marked closed");
+
+    let request_err = tokio::time::timeout(Duration::from_secs(1), request_task)
+        .await
+        .expect("pending request should resolve after close")
+        .expect("request task join")
+        .expect_err("request should fail after close");
+    assert!(
+        matches!(
+            request_err,
+            mcp_jsonrpc::Error::Protocol(mcp_jsonrpc::ProtocolError {
+                kind: mcp_jsonrpc::ProtocolErrorKind::Closed,
+                ..
+            })
+        ),
+        "err={request_err:?}"
+    );
+
+    blocked_write_task.abort();
+}
+
+#[tokio::test]
 async fn request_timeout_includes_write_stage_and_closes_client() {
     struct BlockingWrite {
         entered: Arc<AtomicBool>,

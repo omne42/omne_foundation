@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit`：`SharedManager` 现在会把 handler 重入上下文传播到在 handler 内部 `clone()` 后再 `tokio::spawn(...)` 的子任务；这类跨 task 回调不再退化成普通等锁，而会像同 task 重入一样 fail-fast 返回 `ManagerState`，同时保留“其他外部调用正常等待”的语义。
 - `mcp-kit`：`Session::notify()` 超时后的 best-effort close 现在会跟随 `mcp-jsonrpc` 一起中止底层 reader/transport 后台任务，不再只把会话标成 closed 却留下半开的连接循环。
 - `mcp-kit::ErrorKind` 现在会把 `mcp_jsonrpc::Error::Io` 稳定归到 `Connection`，不再先被泛化成 `Protocol`；并补上 JSON-RPC IO / timeout / protocol 的分类回归测试。
 - `Manager::from_config` 现在在 release 路径也会对完整 `Config` 做 fail-fast 校验；无效的 client/server 配置不会再拖到第一次 initialize 或 connect 时才暴露。

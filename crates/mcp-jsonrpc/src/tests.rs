@@ -736,7 +736,7 @@ mod stats_tests {
         .expect_err("double detached-runtime failure should be reported");
 
         assert!(
-            err.to_string().contains("inline runtime unavailable"),
+            err.to_string().contains("fallback runtime unavailable"),
             "{err}"
         );
         assert!(
@@ -778,6 +778,98 @@ mod stats_tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("detached runtime should recover after worker panic");
         assert_eq!(counter.load(AtomicOrdering::Relaxed), 1);
+        crate::background_runtime::reset_detached_runtime_for_test();
+    }
+
+    #[test]
+    fn spawn_detached_fallback_runtime_is_still_detached() {
+        let _guard = detached_runtime_test_guard()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::background_runtime::reset_detached_runtime_for_test();
+        crate::background_runtime::force_detached_runtime_spawn_failures(2, 0);
+
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let (returned_tx, returned_rx) = std::sync::mpsc::channel();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let join_handle = std::thread::spawn(move || {
+            let result = spawn_detached("test detached fallback runtime", async move {
+                started_tx
+                    .send(())
+                    .expect("signal detached fallback task start");
+                let _ = release_rx.await;
+                done_tx
+                    .send(())
+                    .expect("signal detached fallback task completion");
+            });
+            returned_tx
+                .send(result)
+                .expect("signal detached fallback scheduling result");
+        });
+
+        let schedule_result = returned_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("fallback scheduling should return without waiting for task completion");
+        schedule_result.expect("fallback detached runtime should accept queued task");
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("fallback detached runtime should start task");
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "task should remain blocked until release signal arrives"
+        );
+
+        release_tx
+            .send(())
+            .expect("release detached fallback runtime task");
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("fallback detached runtime should finish after release");
+        join_handle
+            .join()
+            .expect("fallback detached runtime scheduling thread should exit cleanly");
+        crate::background_runtime::reset_detached_runtime_for_test();
+    }
+
+    #[test]
+    fn spawn_detached_shared_worker_does_not_serialize_blocked_tasks() {
+        let _guard = detached_runtime_test_guard()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::background_runtime::reset_detached_runtime_for_test();
+
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let (first_started_tx, first_started_rx) = std::sync::mpsc::channel();
+        let (second_done_tx, second_done_rx) = std::sync::mpsc::channel();
+
+        spawn_detached("test detached shared worker blocked task", async move {
+            first_started_tx
+                .send(())
+                .expect("signal shared worker blocked task start");
+            let _ = release_rx.await;
+        })
+        .expect("shared worker should accept first task");
+
+        first_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first shared worker task should start");
+
+        spawn_detached("test detached shared worker second task", async move {
+            second_done_tx
+                .send(())
+                .expect("signal second shared worker task completion");
+        })
+        .expect("shared worker should accept second task");
+
+        second_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("second task should not be blocked behind first task");
+        release_tx
+            .send(())
+            .expect("release blocked shared worker task");
         crate::background_runtime::reset_detached_runtime_for_test();
     }
 

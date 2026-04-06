@@ -2764,9 +2764,10 @@ mod tests {
         let _cwd_restore = CurrentDirRestoreGuard::capture();
         let tempdir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        std::env::set_current_dir(outside.path()).expect("enter outside dir");
+        let config_dir = tempdir.path().join("configs");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::env::set_current_dir(tempdir.path()).expect("enter config dir parent");
 
-        let config_path = tempdir.path().join("mcp.json");
         let (client_stream, server_stream) = tokio::io::duplex(1024);
         let (client_read, client_write) = tokio::io::split(client_stream);
         let (server_read, mut server_write) = tokio::io::split(server_stream);
@@ -2819,7 +2820,9 @@ mod tests {
             ServerName::parse("srv").unwrap(),
             ServerConfig::unix(PathBuf::from("/tmp/mock.sock")).unwrap(),
         );
-        let config = Config::new(ClientConfig::default(), servers).with_path(config_path);
+        let config = Config::new(ClientConfig::default(), servers)
+            .with_path(PathBuf::from("configs/mcp.json"));
+        std::env::set_current_dir(outside.path()).expect("enter outside dir");
 
         let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
             .with_trust_mode(TrustMode::Trusted);

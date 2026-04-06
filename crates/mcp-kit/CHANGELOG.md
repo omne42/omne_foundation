@@ -10,6 +10,9 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit`：`Config::with_path(...)` 现在会在设置时把相对配置路径绑定到当时的绝对工作目录；`thread_root()`、连接 `cwd` 解析和 config 复用边界不再随着后续进程 `current_dir()` 漂移。
+- `mcp-kit`：当 `ConfigLoadPolicy::allow_override_outside_root(true)` 允许加载 root 外部的 `mcp.json` 时，相对 `unix_path` 与 `stdout_log.path` 现在会按 override 文件所在目录解析，而不是继续错误绑定原始 `thread_root`。
+- `mcp-kit`：crate 级错误分类补齐了 `config-kit::Error` 的稳定类型映射；配置错误不再需要依赖脆弱的错误文案路径才能落到 `ErrorKind::Config`。
 - `mcp-kit`：connection cwd identity 与 `stdout_log.path` root 边界检查现在只把 `NotFound` 视为“缺失后缀”；`ENOTDIR`、`EACCES` 等真实文件系统错误会直接上抛，不再被误吞成合法路径前缀或普通越界。
 - `mcp-kit`：`stdio.env` 现在允许合法的空字符串值和纯空白值，恢复与进程环境变量语义一致的配置边界；仍然继续拒绝空 key。
 - `mcp-kit`：config 驱动 `stdio.stdout_log.path` 的 root 边界检查改为绑定 `mcp.json` thread root，而不是连接请求的 `cwd`；子目录请求不再把合法的 thread-root 日志路径误判为越界。

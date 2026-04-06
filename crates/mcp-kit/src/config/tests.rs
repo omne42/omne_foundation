@@ -1096,3 +1096,51 @@ async fn load_with_policy_allows_override_path_outside_root() {
     assert_eq!(cfg.path(), Some(outside_config.as_path()));
     assert!(cfg.servers().contains_key("a"));
 }
+
+#[tokio::test]
+async fn load_with_policy_resolves_relative_paths_from_override_file_parent() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let outside_config = outside.path().join("nested").join("outside.json");
+    tokio::fs::create_dir_all(outside_config.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(
+        &outside_config,
+        r#"{
+          "version": 1,
+          "servers": {
+            "stdio": {
+              "transport": "stdio",
+              "argv": ["mcp-a"],
+              "stdout_log": { "path": "./logs/a.stdout.log" }
+            },
+            "sock": {
+              "transport": "unix",
+              "unix_path": "./sock/mcp.sock"
+            }
+          }
+        }"#,
+    )
+    .await
+    .unwrap();
+
+    let cfg = Config::load_with_policy(
+        root.path(),
+        Some(outside_config.clone()),
+        ConfigLoadPolicy::default().allow_override_outside_root(true),
+    )
+    .await
+    .unwrap();
+
+    let config_dir = outside_config.parent().unwrap();
+    assert_eq!(cfg.path(), Some(outside_config.as_path()));
+    assert_eq!(
+        cfg.server("sock").unwrap().unix_path().as_ref().unwrap(),
+        &config_dir.join("./sock/mcp.sock")
+    );
+    assert_eq!(
+        cfg.server("stdio").unwrap().stdout_log().unwrap().path,
+        config_dir.join("./logs/a.stdout.log")
+    );
+}

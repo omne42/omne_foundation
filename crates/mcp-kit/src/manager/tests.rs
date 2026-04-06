@@ -783,20 +783,23 @@ async fn prepare_transport_connect_rejects_different_effective_config() {
 #[test]
 fn prepare_transport_connect_resolves_relative_cwd_from_config_thread_root() {
     let tempdir = tempfile::tempdir().unwrap();
-    let config_path = tempdir.path().join("mcp.json");
-    let expected_cwd = tempdir.path().join("workspace").join("demo");
+    let config_dir = tempdir.path().join("configs");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let expected_cwd = config_dir.join("workspace").join("demo");
     let outside = tempfile::tempdir().unwrap();
 
     let _guard = cwd_test_guard();
     let _cwd_restore = CurrentDirRestoreGuard::capture();
-    std::env::set_current_dir(outside.path()).expect("enter outside dir");
+    std::env::set_current_dir(tempdir.path()).expect("enter config dir parent");
 
     let mut servers = std::collections::BTreeMap::new();
     servers.insert(
         ServerName::parse("srv").unwrap(),
         ServerConfig::unix(PathBuf::from("/tmp/mock.sock")).unwrap(),
     );
-    let config = Config::new(crate::ClientConfig::default(), servers).with_path(config_path);
+    let config = Config::new(crate::ClientConfig::default(), servers)
+        .with_path(PathBuf::from("configs/mcp.json"));
+    std::env::set_current_dir(outside.path()).expect("enter outside dir");
 
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
         .with_trust_mode(TrustMode::Trusted);

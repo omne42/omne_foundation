@@ -103,18 +103,18 @@ impl Error {
         }
 
         if err.chain().any(|cause| {
+            cause.downcast_ref::<crate::ServerNameError>().is_some()
+                || cause.downcast_ref::<config_kit::Error>().is_some()
+        }) {
+            return ErrorKind::Config;
+        }
+
+        if err.chain().any(|cause| {
             cause.downcast_ref::<std::io::Error>().is_some()
                 || cause.downcast_ref::<reqwest::Error>().is_some()
                 || cause.downcast_ref::<http_kit::Error>().is_some()
         }) {
             return ErrorKind::Connection;
-        }
-
-        if err
-            .chain()
-            .any(|cause| cause.downcast_ref::<crate::ServerNameError>().is_some())
-        {
-            return ErrorKind::Config;
         }
 
         ErrorKind::Other
@@ -250,6 +250,15 @@ mod tests {
             ErrorKind::Config,
             anyhow::anyhow!("invalid mcp server config"),
         ));
+        assert_eq!(err.kind(), ErrorKind::Config);
+    }
+
+    #[test]
+    fn classifies_config_kit_errors_without_message_matching() {
+        let missing = std::env::temp_dir().join("mcp-kit-missing-config.json");
+        let err = config_kit::load_config_document(&missing, config_kit::ConfigLoadOptions::new())
+            .expect_err("missing document should fail");
+        let err = Error::from(anyhow::Error::new(err));
         assert_eq!(err.kind(), ErrorKind::Config);
     }
 }

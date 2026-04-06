@@ -9,148 +9,112 @@ pub enum ErrorKind {
 }
 
 #[derive(Debug)]
-pub(crate) struct TaggedError {
-    kind: ErrorKind,
-    source: anyhow::Error,
-}
-
-impl TaggedError {
-    fn new(kind: ErrorKind, source: anyhow::Error) -> Self {
-        Self { kind, source }
-    }
-}
-
-impl std::fmt::Display for TaggedError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.source)
-    }
-}
-
-impl std::error::Error for TaggedError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.source.as_ref())
-    }
-}
-
-pub(crate) fn tag_anyhow(kind: ErrorKind, err: anyhow::Error) -> anyhow::Error {
-    anyhow::Error::new(TaggedError::new(kind, err))
-}
-
-pub(crate) fn tagged_message(kind: ErrorKind, message: impl Into<String>) -> Error {
-    Error::from(tag_anyhow(kind, anyhow::anyhow!(message.into())))
-}
-
-#[derive(Debug)]
 pub struct Error {
     kind: ErrorKind,
-    inner: anyhow::Error,
+    message: String,
+    source: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
 
 impl Error {
+    #[must_use]
+    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_source<E>(kind: ErrorKind, message: impl Into<String>, source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            kind,
+            message: message.into(),
+            source: Some(Box::new(source)),
+        }
+    }
+
     #[must_use]
     pub fn kind(&self) -> ErrorKind {
         self.kind
     }
 
     #[must_use]
-    pub fn as_anyhow(&self) -> &anyhow::Error {
-        &self.inner
-    }
-
-    #[must_use]
-    pub fn into_anyhow(self) -> anyhow::Error {
-        self.inner
-    }
-
-    fn classify(err: &anyhow::Error) -> ErrorKind {
-        if let Some(tag) = err
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<TaggedError>())
-        {
-            return tag.kind;
-        }
-
-        if let Some(reqwest) = err
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
-        {
-            return if reqwest.is_decode() {
-                ErrorKind::ResponseDecode
-            } else {
-                ErrorKind::Transport
-            };
-        }
-
-        if err
-            .chain()
-            .any(|cause| cause.downcast_ref::<serde_json::Error>().is_some())
-        {
-            return ErrorKind::ResponseDecode;
-        }
-
-        if err
-            .chain()
-            .any(|cause| cause.downcast_ref::<std::io::Error>().is_some())
-        {
-            return ErrorKind::ResponseBody;
-        }
-
-        ErrorKind::Other
+    pub fn message(&self) -> &str {
+        &self.message
     }
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if f.alternate() {
-            write!(f, "{:#}", self.inner)
-        } else {
-            write!(f, "{}", self.inner)
-        }
+        write!(f, "{}", self.message)
     }
 }
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.inner.source()
+        self.source
+            .as_deref()
+            .map(|source| source as &(dyn std::error::Error + 'static))
     }
 }
 
-impl From<anyhow::Error> for Error {
-    fn from(err: anyhow::Error) -> Self {
-        let kind = Self::classify(&err);
-        Self { kind, inner: err }
-    }
+pub(crate) fn tagged_message(kind: ErrorKind, message: impl Into<String>) -> Error {
+    Error::new(kind, message)
+}
+
+pub(crate) fn tagged_source<E>(kind: ErrorKind, message: impl Into<String>, source: E) -> Error
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    Error::with_source(kind, message, source)
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]
 mod tests {
-    use super::{Error, ErrorKind, tag_anyhow};
+    use std::error::Error as _;
+
+    use super::{Error, ErrorKind, tagged_message, tagged_source};
 
     #[test]
     fn tagged_invalid_input_errors_preserve_kind() {
-        let err = Error::from(tag_anyhow(
-            ErrorKind::InvalidInput,
-            anyhow::anyhow!("url must use https"),
-        ));
+        let err = tagged_message(ErrorKind::InvalidInput, "url must use https");
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert_eq!(err.message(), "url must use https");
     }
 
     #[test]
     fn tagged_http_status_errors_preserve_kind() {
-        let err = Error::from(tag_anyhow(
-            ErrorKind::HttpStatus,
-            anyhow::anyhow!("http error: 403"),
-        ));
+        let err = tagged_message(ErrorKind::HttpStatus, "http error: 403");
         assert_eq!(err.kind(), ErrorKind::HttpStatus);
+        assert_eq!(err.message(), "http error: 403");
     }
 
     #[test]
-    fn io_errors_map_to_response_body() {
-        let err = Error::from(anyhow::Error::new(std::io::Error::other(
+    fn source_errors_remain_available_without_anyhow() {
+        let err = tagged_source(
+            ErrorKind::ResponseBody,
             "body read failed",
-        )));
+            std::io::Error::other("permission denied"),
+        );
         assert_eq!(err.kind(), ErrorKind::ResponseBody);
+        assert_eq!(err.message(), "body read failed");
+        let source = err.source().expect("source");
+        assert_eq!(source.to_string(), "permission denied");
+    }
+
+    #[test]
+    fn display_stays_at_message_boundary() {
+        let err = Error::with_source(
+            ErrorKind::Transport,
+            "request failed",
+            std::io::Error::other("connection reset"),
+        );
+        assert_eq!(err.to_string(), "request failed");
     }
 }

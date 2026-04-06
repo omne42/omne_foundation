@@ -12,13 +12,8 @@ pub async fn read_json_body_limited(
     max_bytes: usize,
 ) -> crate::Result<serde_json::Value> {
     let buf = read_body_bytes_limited(resp, max_bytes).await?;
-    serde_json::from_slice(&buf).map_err(|err| {
-        error::tag_anyhow(
-            ErrorKind::ResponseDecode,
-            anyhow::anyhow!("decode json failed: {err}"),
-        )
-        .into()
-    })
+    serde_json::from_slice(&buf)
+        .map_err(|err| error::tagged_source(ErrorKind::ResponseDecode, "decode json failed", err))
 }
 
 pub async fn read_text_body_limited(
@@ -44,12 +39,13 @@ where
 
     let mut downloaded_bytes = 0_u64;
     while let Some(chunk) = resp.chunk().await.map_err(|err| {
-        error::tag_anyhow(
+        error::tagged_source(
             ErrorKind::ResponseBody,
-            anyhow::anyhow!(
+            format!(
                 "read response body failed ({})",
                 sanitize_reqwest_error(&err)
             ),
+            err,
         )
     })? {
         downloaded_bytes = downloaded_bytes
@@ -61,10 +57,7 @@ where
             ensure_response_body_size_within_limit(downloaded_bytes, limit, &url)?;
         }
         writer.write_all(&chunk).map_err(|err| {
-            error::tag_anyhow(
-                ErrorKind::ResponseBody,
-                anyhow::anyhow!("write response body failed: {err}"),
-            )
+            error::tagged_source(ErrorKind::ResponseBody, "write response body failed", err)
         })?;
     }
 
@@ -229,12 +222,13 @@ async fn read_body_bytes_limited(
 
     let mut buf = Vec::with_capacity(cap_hint);
     while let Some(chunk) = resp.chunk().await.map_err(|err| {
-        error::tag_anyhow(
+        error::tagged_source(
             ErrorKind::ResponseBody,
-            anyhow::anyhow!(
+            format!(
                 "read response body failed ({})",
                 sanitize_reqwest_error(&err)
             ),
+            err,
         )
     })? {
         if chunk.len() > max_bytes.saturating_sub(buf.len()) {
@@ -270,12 +264,13 @@ async fn read_body_bytes_truncated(
 
     let mut buf = Vec::with_capacity(cap_hint);
     while let Some(chunk) = resp.chunk().await.map_err(|err| {
-        error::tag_anyhow(
+        error::tagged_source(
             ErrorKind::ResponseBody,
-            anyhow::anyhow!(
+            format!(
                 "read response body failed ({})",
                 sanitize_reqwest_error(&err)
             ),
+            err,
         )
     })? {
         if buf.len() >= max_bytes {

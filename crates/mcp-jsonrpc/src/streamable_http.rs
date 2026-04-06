@@ -1147,14 +1147,18 @@ async fn flush_sse_event_data(
 
 fn normalize_sse_event_data_for_json_line(data: &[u8]) -> Result<Vec<u8>, io::Error> {
     if data.iter().any(|byte| matches!(byte, b'\n' | b'\r')) {
-        if let Ok(value) = serde_json::from_slice::<Value>(data) {
-            return serde_json::to_vec(&value).map_err(|err| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("serialize sse event payload failed: {err}"),
-                )
-            });
-        }
+        let value = serde_json::from_slice::<Value>(data).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("multiline sse event payload is not valid json: {err}"),
+            )
+        })?;
+        return serde_json::to_vec(&value).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("serialize sse event payload failed: {err}"),
+            )
+        });
     }
 
     Ok(data.to_vec())

@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：多行 SSE `data:` event 现在要求整个 event payload 本身必须是合法 JSON；非 JSON 的多行 event 会 fail closed，不再被桥接成多条伪 JSON-RPC line 污染下游状态机。
 - `mcp-jsonrpc`：`StreamableHttpOptions.headers` 现在会 fail-fast 拒绝 transport-owned 的 `mcp-session-id`，直接调用 transport 也不能预先伪造或固定会话头。
 - `mcp-jsonrpc`：将 `Error` / `ProtocolError*` 与 error-record 映射、detached runtime 后台 worker，以及 crate-local `#[cfg(test)]` 模块分别拆到独立源码文件，显著收窄 `src/lib.rs` 的职责边界而不改变公开 API。
 - `mcp-jsonrpc`：detached runtime 的共享后台 worker 现在在任务 panic 或 worker 初始化失败后会显式重建；如果共享 worker 仍不可用，会退化到单任务 fallback runtime，而不是继续把后续 dropped-request / batch-flush 补偿任务静默丢弃。

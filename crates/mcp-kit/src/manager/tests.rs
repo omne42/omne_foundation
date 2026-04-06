@@ -33,6 +33,10 @@ fn absolute_test_cwd() -> &'static Path {
     .as_path()
 }
 
+fn test_workspace_path(name: &str) -> PathBuf {
+    absolute_test_cwd().join("workspace").join(name)
+}
+
 #[cfg(not(windows))]
 fn cwd_test_guard() -> std::sync::MutexGuard<'static, ()> {
     static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
@@ -625,8 +629,10 @@ async fn prepare_transport_connect_rejects_different_cwd_context() {
             handler_tasks: Vec::new(),
         },
     );
+    let connected_cwd = test_workspace_path("a");
+    let requested_cwd = test_workspace_path("b");
     manager
-        .record_connection_cwd("srv", Path::new("/workspace/a"))
+        .record_connection_cwd("srv", &connected_cwd)
         .unwrap();
 
     let mut servers = std::collections::BTreeMap::new();
@@ -636,7 +642,7 @@ async fn prepare_transport_connect_rejects_different_cwd_context() {
     );
     let config = Config::new(crate::ClientConfig::default(), servers);
 
-    let err = match manager.prepare_transport_connect(&config, "srv", Path::new("/workspace/b")) {
+    let err = match manager.prepare_transport_connect(&config, "srv", &requested_cwd) {
         Ok(_) => panic!("different cwd should be rejected"),
         Err(err) => err,
     };
@@ -667,8 +673,9 @@ async fn prepare_transport_connect_rejects_reuse_without_config_metadata() {
             handler_tasks: Vec::new(),
         },
     );
+    let connected_cwd = test_workspace_path("a");
     manager
-        .record_connection_cwd("srv", Path::new("/workspace/a"))
+        .record_connection_cwd("srv", &connected_cwd)
         .unwrap();
 
     let mut servers = std::collections::BTreeMap::new();
@@ -678,7 +685,7 @@ async fn prepare_transport_connect_rejects_reuse_without_config_metadata() {
     );
     let config = Config::new(crate::ClientConfig::default(), servers);
 
-    let err = match manager.prepare_transport_connect(&config, "srv", Path::new("/workspace/a")) {
+    let err = match manager.prepare_transport_connect(&config, "srv", &connected_cwd) {
         Ok(_) => panic!("config-driven reuse without metadata should fail closed"),
         Err(err) => err,
     };
@@ -709,8 +716,9 @@ async fn prepare_transport_connect_rejects_different_effective_config() {
             handler_tasks: Vec::new(),
         },
     );
+    let connected_cwd = test_workspace_path("a");
     manager
-        .record_connection_cwd("srv", Path::new("/workspace/a"))
+        .record_connection_cwd("srv", &connected_cwd)
         .unwrap();
     manager
         .record_connection_server_config(
@@ -726,7 +734,7 @@ async fn prepare_transport_connect_rejects_different_effective_config() {
     );
     let config = Config::new(crate::ClientConfig::default(), servers);
 
-    let err = match manager.prepare_transport_connect(&config, "srv", Path::new("/workspace/a")) {
+    let err = match manager.prepare_transport_connect(&config, "srv", &connected_cwd) {
         Ok(_) => panic!("different effective config should not be silently reused"),
         Err(err) => err,
     };

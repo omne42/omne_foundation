@@ -10,7 +10,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `notify_kit::env::build_hub_from_standard_env(...)` 不再公开泄露 `anyhow::Result`；现在和 crate 其他 fallible API 一样统一返回 `notify_kit::Result` / `notify_kit::Error`，并在非法 env 值路径上保留稳定的 `ErrorKind::Other`。
 - `notify-kit::Event` 的 plain-fallback 契约现在真正落到实现：structured-only `CatalogText` 不会再通过 `title()` / `body()` / `tags()` 泄漏成 `code {args}` 诊断串；如果调用方先提供了 plain title/body/tag，再写入 catalog text，也会继续保留这层纯文本 fallback 给现有 sinks 使用。
 - `GitHubCommentSink` 现在补上针对自定义 GitHub API base 的回归锁定：即使调用方显式 trust 了自定义 host，bearer token 目标仍必须保持 HTTPS、不能携带 URL 凭证；对应文档也同步改成当前真实的 fail-closed 契约。
-- `notify-kit::Event` 不再同时维护 plain string 镜像与 `StructuredText` 两套可失同步状态；`title` / `body` / `tags` 现在统一从 canonical `StructuredText` 即时渲染，`Bark`、`PushPlus`、`ServerChan`、`Feishu post` 与 `sinks/text` 也都改为消费同一条渲染边界。
+- `notify-kit::Event` 的私有 plain fallback 状态现在按真实语义命名，不再继续伪装成另一套 canonical string fields；实现和文档都明确这层状态只是给纯文本 sink 保留的 fallback。
 - `FeishuWebhookSink` 补上回归测试，锁住显式 `local_image_base_dir` 下的相对图片路径解析不会再随着进程 `current_dir()` 漂移。
 - `GitHubCommentConfig` 的 `Debug` 输出现在会像 sink 侧一样对 `api_base` 做 URL 脱敏，不再把自定义 GitHub API base 里的凭证、query token 或路径细节直接打到日志里。
 - `FeishuWebhookSink` 的 tenant access token 刷新 guard 现在在无 Tokio runtime 和非 Tokio 取消路径上也会可靠清空 `Refreshing` 状态并唤醒等待者，避免一次失败的刷新把后续图片上传永久卡死；并补上失败后重试的回归覆盖。
@@ -18,7 +18,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `notify-kit` crate root 不再直接 re-export `secret_kit::SecretString`；secret 领域类型回到各 sink/config 的显式依赖边界，避免通知 crate 的公开 API 再把 secret 语义直接污染到 root namespace。
 - `Hub::notify_best_effort` 现在成为显式命名的 best-effort fire-and-forget 入口；原 `Hub::notify` 仅保留为兼容别名并标记弃用，避免默认 API 名称继续伪装成可观测投递语义。
 - `notify-kit::env` 的标准 helper 现在默认把 Hub 外层 hard timeout 设为 `sink timeout + slack`，不再把两层超时默认绑成同一个值；显式 `NOTIFY_HUB_TIMEOUT_MS` 若不大于生效的 sink timeout 也会 fail closed，避免 helper 自己制造伪超时。
-- `Event::new_structured` / `with_*_text` 产出的 structured-only 文本现在直接通过 `Event::title()` / `body()` / `tags()` 的统一渲染边界暴露给纯文本 sink，不再依赖额外 plain fallback 镜像字段。
+- docs: `docs/api/event.md` 与聚合 `llms.txt` 现在同步改成当前真实的 accessor/fallback 契约，不再继续描述已经私有化的旧字符串字段模型。
 - docs: `docs/integration.md` 与聚合 `llms.txt` 现在同步写明标准 env helper 的 timeout 约定，避免继续暗示 legacy `NOTIFY_TIMEOUT_MS` 会同时直接驱动 sink 与 Hub 两层硬超时。
 - docs: `docs/sinks/custom.md` 的自定义 sink 示例改为使用 `Event::title()`，并同步刷新 `llms.txt`，避免文档继续示范对已封装私有字段的直接访问。
 - `FeishuWebhookSink`：Markdown 图片 key 解析/上传现在会对去重后的图片 URL 做并发解析，不再把多图消息线性串行到单个 sink 超时窗口里。

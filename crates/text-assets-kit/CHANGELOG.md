@@ -31,6 +31,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Renamed the old mixed `runtime-assets-kit` boundary to `text-assets-kit` and narrowed it to generic text-resource path validation, secure filesystem access, data-root helpers, and bootstrap/rollback primitives.
 - Kept the shared text-manifest bootstrap path public so downstream domain adapters can reuse it without reaching into private modules.
 - Clarified that bootstrap/rollback only serializes same-root attempts and performs best-effort cleanup for the current attempt; it does not promise crash-safe or power-loss-recovery transactions.
+- Demoted the ambient `materialize_resource_root(...)`, `resolve_data_root(...)`, and `ensure_data_root(...)` helpers to compatibility-only entry points, and routed crate-internal callers through private compat helpers so explicit-base APIs remain the canonical workspace-boundary surface.
 - Demoted `BootstrapTransactionGuard` / `lock_bootstrap_transaction(...)` from crate-root first-class exports to deprecated compatibility re-exports, and documented `bootstrap_lock` as a hidden low-level module instead of a canonical boundary entry.
 - Demoted the root `LazyValue` / `LazyInitError` exports to deprecated compatibility re-exports and documented the underlying lazy module as a blocking shim instead of an async runtime-facing foundation API.
 - `text-assets-kit::lazy_value` 不再作为可直接下钻的 public module 暴露；blocking compat shim 现在只保留 crate-root 的 deprecated re-export，进一步收窄 runtime-facing 公共面。

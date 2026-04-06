@@ -12,6 +12,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Added explicit-base variants for higher-level text asset entry points: `TextDirectory::load_with_base(...)`, `TextDirectory::load_resource_files_with_base(...)`, `bootstrap_text_resources_then_load_with_base(...)`, `bootstrap_text_resources_with_base(...)`, `bootstrap_text_resources_with_report_with_base(...)`, and `scan_text_directory_with_base(...)`.
 
 ### Fixed
+- `LazyValue` no longer tears down its cross-thread wait edge on every `Condvar` wake-up; spurious or unrelated `notify_all()` calls now keep the tracked wait relationship alive until the in-flight attempt actually settles, so cycle detection does not silently lose visibility mid-wait.
 - `text-assets-kit` no longer vendors `omne-fs-primitives` inside `omne_foundation`; it now resolves filesystem primitives from the canonical `omne-runtime` crate instead of maintaining a second workspace-local copy.
 - `text-assets-kit` 现在显式标记 `publish = false`，因为它当前直接依赖 workspace-only 的 `omne-fs-primitives`，不再让 manifest 暗示可单独 crates.io 发布。
 - `LazyValue` 现在把“同线程但并非当前递归调用”的 in-flight 初始化冲突单独建模出来，不再把这类 blocking compatibility shim 的死锁前兆误报成 `ReentrantInitialization`。

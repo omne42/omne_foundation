@@ -1,15 +1,409 @@
-mod config;
-mod constructor;
 mod media;
 mod payload;
-mod send;
 
-pub use config::FeishuWebhookConfig;
-pub use constructor::FeishuWebhookSink;
-use constructor::TenantAccessTokenState;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use self::media::{
+    AccessTokenCache, FeishuAppCredentials, normalize_app_credentials,
+    normalize_local_image_base_dir, normalize_local_image_roots, normalize_secret,
+};
+use crate::Event;
+use crate::SecretString;
+use crate::sinks::crypto::hmac_sha256_base64;
+use crate::sinks::{BoxFuture, Sink};
+use http_kit::{
+    HttpClientOptions, HttpClientProfile, build_http_client_profile, parse_and_validate_https_url,
+    read_json_body_after_http_success, redact_url, redact_url_str, send_reqwest,
+    validate_url_path_prefix,
+};
 
 const FEISHU_MAX_CHARS: usize = 4000;
 const FEISHU_DEFAULT_IMAGE_UPLOAD_MAX_BYTES: usize = 10 * 1024 * 1024;
+
+#[non_exhaustive]
+#[derive(Clone)]
+pub struct FeishuWebhookConfig {
+    pub webhook_url: String,
+    pub timeout: Duration,
+    pub max_chars: usize,
+    pub enforce_public_ip: bool,
+    pub enable_markdown_rich_text: bool,
+    pub allow_remote_image_urls: bool,
+    pub allow_local_image_files: bool,
+    pub local_image_base_dir: Option<PathBuf>,
+    pub local_image_roots: Vec<PathBuf>,
+    pub image_upload_max_bytes: usize,
+    pub app_id: Option<String>,
+    pub app_secret: Option<SecretString>,
+}
+
+impl std::fmt::Debug for FeishuWebhookConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FeishuWebhookConfig")
+            .field("webhook_url", &redact_url_str(&self.webhook_url))
+            .field("timeout", &self.timeout)
+            .field("max_chars", &self.max_chars)
+            .field("enforce_public_ip", &self.enforce_public_ip)
+            .field("enable_markdown_rich_text", &self.enable_markdown_rich_text)
+            .field("allow_remote_image_urls", &self.allow_remote_image_urls)
+            .field("allow_local_image_files", &self.allow_local_image_files)
+            .field("local_image_base_dir", &self.local_image_base_dir)
+            .field("local_image_roots", &self.local_image_roots)
+            .field("image_upload_max_bytes", &self.image_upload_max_bytes)
+            .field("app_id", &self.app_id.as_ref().map(|_| "<redacted>"))
+            .field(
+                "app_secret",
+                &self.app_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+impl FeishuWebhookConfig {
+    pub fn new(webhook_url: impl Into<String>) -> Self {
+        Self {
+            webhook_url: webhook_url.into(),
+            timeout: Duration::from_secs(2),
+            max_chars: FEISHU_MAX_CHARS,
+            enforce_public_ip: true,
+            enable_markdown_rich_text: true,
+            allow_remote_image_urls: false,
+            allow_local_image_files: false,
+            local_image_base_dir: None,
+            local_image_roots: Vec::new(),
+            image_upload_max_bytes: FEISHU_DEFAULT_IMAGE_UPLOAD_MAX_BYTES,
+            app_id: None,
+            app_secret: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn with_max_chars(mut self, max_chars: usize) -> Self {
+        self.max_chars = max_chars;
+        self
+    }
+
+    #[must_use]
+    pub fn with_public_ip_check(mut self, enforce_public_ip: bool) -> Self {
+        self.enforce_public_ip = enforce_public_ip;
+        self
+    }
+
+    #[must_use]
+    pub fn with_markdown_rich_text(mut self, enable: bool) -> Self {
+        self.enable_markdown_rich_text = enable;
+        self
+    }
+
+    #[must_use]
+    pub fn with_remote_image_urls(mut self, allow: bool) -> Self {
+        self.allow_remote_image_urls = allow;
+        self
+    }
+
+    #[must_use]
+    pub fn with_local_image_files(mut self, allow: bool) -> Self {
+        self.allow_local_image_files = allow;
+        self
+    }
+
+    #[must_use]
+    pub fn with_local_image_base_dir(mut self, base_dir: impl Into<PathBuf>) -> Self {
+        self.local_image_base_dir = Some(base_dir.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_local_image_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.local_image_roots.push(root.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_local_image_roots<I, P>(mut self, roots: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        self.local_image_roots = roots.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_image_upload_max_bytes(mut self, max_bytes: usize) -> Self {
+        self.image_upload_max_bytes = max_bytes;
+        self
+    }
+
+    #[must_use]
+    pub fn with_app_credentials(
+        mut self,
+        app_id: impl Into<String>,
+        app_secret: impl Into<SecretString>,
+    ) -> Self {
+        self.app_id = Some(app_id.into());
+        self.app_secret = Some(app_secret.into());
+        self
+    }
+}
+
+pub struct FeishuWebhookSink {
+    webhook_url: reqwest::Url,
+    http: HttpClientProfile,
+    secret: Option<SecretString>,
+    max_chars: usize,
+    enforce_public_ip: bool,
+    enable_markdown_rich_text: bool,
+    allow_remote_image_urls: bool,
+    allow_local_image_files: bool,
+    local_image_base_dir: Option<PathBuf>,
+    local_image_roots: Vec<PathBuf>,
+    image_upload_max_bytes: usize,
+    app_credentials: Option<FeishuAppCredentials>,
+    tenant_access_token: Arc<tokio::sync::Mutex<TenantAccessTokenState>>,
+}
+
+#[derive(Debug)]
+enum TenantAccessTokenState {
+    Empty,
+    Ready(AccessTokenCache),
+    Refreshing(Arc<tokio::sync::Notify>),
+}
+
+impl std::fmt::Debug for FeishuWebhookSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FeishuWebhookSink")
+            .field("webhook_url", &redact_url(&self.webhook_url))
+            .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
+            .field("max_chars", &self.max_chars)
+            .field("enforce_public_ip", &self.enforce_public_ip)
+            .field("enable_markdown_rich_text", &self.enable_markdown_rich_text)
+            .field("allow_remote_image_urls", &self.allow_remote_image_urls)
+            .field("allow_local_image_files", &self.allow_local_image_files)
+            .field("local_image_base_dir", &self.local_image_base_dir)
+            .field("local_image_roots", &self.local_image_roots)
+            .field("image_upload_max_bytes", &self.image_upload_max_bytes)
+            .field(
+                "app_credentials",
+                &self.app_credentials.as_ref().map(|_| "<redacted>"),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl FeishuWebhookSink {
+    pub fn new(config: FeishuWebhookConfig) -> crate::Result<Self> {
+        Self::new_internal(config, None, false)
+    }
+
+    pub fn new_strict(config: FeishuWebhookConfig) -> crate::Result<Self> {
+        Self::new_internal(config, None, true)
+    }
+
+    pub async fn new_strict_async(config: FeishuWebhookConfig) -> crate::Result<Self> {
+        Self::new_internal_async(config, None, true).await
+    }
+
+    pub fn new_with_secret(
+        config: FeishuWebhookConfig,
+        secret: impl Into<SecretString>,
+    ) -> crate::Result<Self> {
+        let secret = normalize_secret(secret)?;
+        Self::new_internal(config, Some(secret), false)
+    }
+
+    pub fn new_with_secret_strict(
+        config: FeishuWebhookConfig,
+        secret: impl Into<SecretString>,
+    ) -> crate::Result<Self> {
+        let secret = normalize_secret(secret)?;
+        Self::new_internal(config, Some(secret), true)
+    }
+
+    pub async fn new_with_secret_strict_async(
+        config: FeishuWebhookConfig,
+        secret: impl Into<SecretString>,
+    ) -> crate::Result<Self> {
+        let secret = normalize_secret(secret)?;
+        Self::new_internal_async(config, Some(secret), true).await
+    }
+
+    fn new_internal(
+        config: FeishuWebhookConfig,
+        secret: Option<SecretString>,
+        validate_public_ip_at_construction: bool,
+    ) -> crate::Result<Self> {
+        let enforce_public_ip = config.enforce_public_ip;
+        if validate_public_ip_at_construction && !enforce_public_ip {
+            return Err(anyhow::anyhow!("feishu strict mode requires public ip check").into());
+        }
+
+        let app_credentials = normalize_app_credentials(config.app_id, config.app_secret)?;
+        let local_image_base_dir = normalize_local_image_base_dir(config.local_image_base_dir)?;
+        let local_image_roots =
+            normalize_local_image_roots(config.allow_local_image_files, config.local_image_roots)?;
+        let webhook_url = parse_and_validate_https_url(
+            &config.webhook_url,
+            &["open.feishu.cn", "open.larksuite.com"],
+        )?;
+        validate_url_path_prefix(&webhook_url, "/open-apis/bot/v2/hook/")?;
+        let http = build_http_client_profile(&HttpClientOptions {
+            timeout: Some(config.timeout),
+            ..Default::default()
+        })?;
+        if validate_public_ip_at_construction {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                return Err(anyhow::anyhow!(
+                    "feishu strict constructor cannot run inside tokio runtime; use new_strict_async/new_with_secret_strict_async"
+                )
+                .into());
+            }
+            Self::validate_public_ip_at_construction_sync(&http, &webhook_url)?;
+        }
+
+        Ok(Self {
+            webhook_url,
+            http,
+            secret,
+            max_chars: config.max_chars,
+            enforce_public_ip,
+            enable_markdown_rich_text: config.enable_markdown_rich_text,
+            allow_remote_image_urls: config.allow_remote_image_urls,
+            allow_local_image_files: config.allow_local_image_files,
+            local_image_base_dir,
+            local_image_roots,
+            image_upload_max_bytes: config.image_upload_max_bytes,
+            app_credentials,
+            tenant_access_token: Arc::new(tokio::sync::Mutex::new(TenantAccessTokenState::Empty)),
+        })
+    }
+
+    async fn new_internal_async(
+        config: FeishuWebhookConfig,
+        secret: Option<SecretString>,
+        validate_public_ip_at_construction: bool,
+    ) -> crate::Result<Self> {
+        let enforce_public_ip = config.enforce_public_ip;
+        if validate_public_ip_at_construction && !enforce_public_ip {
+            return Err(anyhow::anyhow!("feishu strict mode requires public ip check").into());
+        }
+
+        let app_credentials = normalize_app_credentials(config.app_id, config.app_secret)?;
+        let local_image_base_dir = normalize_local_image_base_dir(config.local_image_base_dir)?;
+        let local_image_roots =
+            normalize_local_image_roots(config.allow_local_image_files, config.local_image_roots)?;
+        let webhook_url = parse_and_validate_https_url(
+            &config.webhook_url,
+            &["open.feishu.cn", "open.larksuite.com"],
+        )?;
+        validate_url_path_prefix(&webhook_url, "/open-apis/bot/v2/hook/")?;
+        let http = build_http_client_profile(&HttpClientOptions {
+            timeout: Some(config.timeout),
+            ..Default::default()
+        })?;
+        if validate_public_ip_at_construction {
+            http.select_for_url(&webhook_url, true).await.map(|_| ())?;
+        }
+
+        Ok(Self {
+            webhook_url,
+            http,
+            secret,
+            max_chars: config.max_chars,
+            enforce_public_ip,
+            enable_markdown_rich_text: config.enable_markdown_rich_text,
+            allow_remote_image_urls: config.allow_remote_image_urls,
+            allow_local_image_files: config.allow_local_image_files,
+            local_image_base_dir,
+            local_image_roots,
+            image_upload_max_bytes: config.image_upload_max_bytes,
+            app_credentials,
+            tenant_access_token: Arc::new(tokio::sync::Mutex::new(TenantAccessTokenState::Empty)),
+        })
+    }
+
+    fn ensure_success_response(body: &serde_json::Value) -> crate::Result<()> {
+        let Some(code) = body["StatusCode"]
+            .as_i64()
+            .or_else(|| body["code"].as_i64())
+        else {
+            return Err(anyhow::anyhow!(
+                "feishu api error: missing status code (response body omitted)"
+            )
+            .into());
+        };
+
+        if code == 0 {
+            return Ok(());
+        }
+
+        Err(anyhow::anyhow!("feishu api error: code={code} (response body omitted)").into())
+    }
+
+    fn validate_public_ip_at_construction_sync(
+        http: &HttpClientProfile,
+        webhook_url: &reqwest::Url,
+    ) -> crate::Result<()> {
+        let http = http.clone();
+        let webhook_url = webhook_url.clone();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| anyhow::anyhow!("build tokio runtime: {err}"))?;
+        Ok(rt.block_on(async move { http.select_for_url(&webhook_url, true).await.map(|_| ()) })?)
+    }
+}
+
+impl Sink for FeishuWebhookSink {
+    fn name(&self) -> &'static str {
+        "feishu"
+    }
+
+    fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
+        Box::pin(async move {
+            let client = self
+                .http
+                .select_for_url(&self.webhook_url, self.enforce_public_ip)
+                .await?;
+            let (timestamp, sign) = if let Some(secret) = self.secret.as_ref() {
+                let timestamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|err| anyhow::anyhow!("get unix timestamp: {err}"))?
+                    .as_secs()
+                    .to_string();
+
+                let secret = secret.expose_secret();
+                let string_to_sign = format!("{timestamp}\n{secret}");
+                let sign = hmac_sha256_base64(secret, &string_to_sign)?;
+
+                (Some(timestamp), Some(sign))
+            } else {
+                (None, None)
+            };
+
+            let payload = self
+                .build_payload(event, timestamp.as_deref(), sign.as_deref())
+                .await?;
+
+            let resp = send_reqwest(
+                client.post(self.webhook_url.as_str()).json(&payload),
+                "feishu webhook",
+            )
+            .await?;
+
+            let body = read_json_body_after_http_success(resp, "feishu webhook").await?;
+            Self::ensure_success_response(&body)
+        })
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -20,13 +414,11 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::thread;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     #[cfg(unix)]
     use std::{os::unix::fs::symlink, os::unix::net::UnixListener};
 
     use super::*;
     use crate::sinks::feishu::media::LoadedImage;
-    use crate::{Event, SecretString};
 
     fn local_image_test_root() -> PathBuf {
         let base = std::env::temp_dir()
@@ -73,6 +465,7 @@ mod tests {
         FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
             .with_app_credentials("app_id", "app_secret")
             .with_local_image_files(true)
+            .with_local_image_base_dir(&root)
             .with_local_image_root(root)
     }
 
@@ -148,24 +541,6 @@ mod tests {
             .with_public_ip_check(false);
         let err = FeishuWebhookSink::new_strict(cfg).expect_err("expected strict validation");
         assert!(err.to_string().contains("public ip"), "{err:#}");
-        assert_eq!(err.kind(), crate::ErrorKind::Config);
-    }
-
-    #[test]
-    fn explicit_public_ip_validation_requires_public_ip_check() {
-        let sink = FeishuWebhookSink::new(
-            FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
-                .with_public_ip_check(false),
-        )
-        .expect("build sink");
-        let err = sink
-            .validate_public_ip_sync()
-            .expect_err("expected explicit validation failure");
-        assert!(
-            err.to_string().contains("with_public_ip_check(true)"),
-            "{err:#}"
-        );
-        assert_eq!(err.kind(), crate::ErrorKind::Config);
     }
 
     #[test]
@@ -178,8 +553,7 @@ mod tests {
             let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x");
             let err =
                 FeishuWebhookSink::new_strict(cfg).expect_err("expected runtime constructor error");
-            assert!(err.to_string().contains("validate_public_ip"), "{err:#}");
-            assert_eq!(err.kind(), crate::ErrorKind::Config);
+            assert!(err.to_string().contains("new_strict_async"), "{err:#}");
         });
     }
 
@@ -305,7 +679,23 @@ mod tests {
     }
 
     #[test]
-    fn remote_images_follow_public_ip_check_setting() {
+    fn local_image_base_dir_rejects_relative_paths() {
+        let err = FeishuWebhookSink::new(
+            FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+                .with_app_credentials("app_id", "app_secret")
+                .with_local_image_files(true)
+                .with_local_image_base_dir("relative-base")
+                .with_local_image_root(local_image_test_root()),
+        )
+        .expect_err("relative local image base dir should fail closed");
+        assert!(
+            err.to_string().contains("base dir must be absolute"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn remote_images_always_enforce_public_ip_checks() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -322,8 +712,12 @@ mod tests {
             let err = sink
                 .load_image("https://localhost/image.png")
                 .await
-                .expect_err("remote image host validation should still reject localhost");
-            assert!(err.to_string().contains("host is not allowed"), "{err:#}");
+                .expect_err("remote image fetch should still fail closed");
+            assert!(
+                err.to_string().contains("host is not allowed")
+                    || err.to_string().contains("resolved ip is not allowed"),
+                "{err:#}"
+            );
         });
     }
 
@@ -391,6 +785,73 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(allowed_root);
             let _ = std::fs::remove_file(outside_path);
+        });
+    }
+
+    #[test]
+    fn local_image_files_reject_relative_paths_without_explicit_base_dir() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            let root = local_image_test_root().join(unique_local_image_test_name("no-base"));
+            std::fs::create_dir_all(&root).expect("create root");
+            let path = root.join("image.png");
+            std::fs::write(&path, b"png").expect("write image");
+
+            let sink = FeishuWebhookSink::new(
+                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+                    .with_app_credentials("app_id", "app_secret")
+                    .with_local_image_files(true)
+                    .with_local_image_root(root.clone()),
+            )
+            .expect("build sink");
+
+            let err = sink
+                .load_image("image.png")
+                .await
+                .expect_err("relative local image path should require explicit base dir");
+            assert!(
+                err.to_string()
+                    .contains("relative local image paths require explicit local image base dir"),
+                "{err:#}"
+            );
+
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_dir_all(root);
+        });
+    }
+
+    #[test]
+    fn local_image_files_accept_relative_paths_with_explicit_base_dir() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            let root = local_image_test_root().join(unique_local_image_test_name("with-base"));
+            std::fs::create_dir_all(&root).expect("create root");
+            let path = root.join("image.png");
+            std::fs::write(&path, b"png").expect("write image");
+
+            let sink = FeishuWebhookSink::new(
+                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+                    .with_app_credentials("app_id", "app_secret")
+                    .with_local_image_files(true)
+                    .with_local_image_base_dir(&root)
+                    .with_local_image_root(root.clone()),
+            )
+            .expect("build sink");
+
+            let loaded = sink
+                .load_image("image.png")
+                .await
+                .expect("relative local image path should resolve from explicit base dir");
+            assert_eq!(loaded.bytes, b"png");
+
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_dir_all(root);
         });
     }
 

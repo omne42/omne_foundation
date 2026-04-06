@@ -48,18 +48,12 @@
 - `src/event.rs`
   - 统一事件模型
 - `src/hub.rs`
-  - `Hub` 公开入口与稳定类型
-- `src/hub/`
-  - runtime / backpressure / fanout 子模块
+  - hub 配置、限制、并发发送与错误聚合
 - `src/sinks/mod.rs`
   - sink trait 与各实现导出
-- `src/sinks/feishu/mod.rs`
-  - 飞书 sink 入口与导出
-- `src/sinks/feishu/`
-  - config / constructor / send / media / payload 子模块
 - `src/sinks/http/`
   - webhook 类 sink 的共享 HTTP 逻辑
-- `src/integration/standard_env.rs`
+- `src/env.rs`
   - convenience helper，不是核心协议边界
 - `bots/`
   - 上层集成示例，不是核心 Rust API
@@ -93,63 +87,14 @@
 
 ## 安装
 
-当前 `notify-kit` 的 manifest 明确声明了 `publish = false`，因此它现在的稳定复用契约是 workspace / Git 引用，而不是 registry 发布包。
-
-如果你通过 monorepo / workspace 引用（本仓库内）：
+当前 `notify-kit` 仅按 workspace / Git 源方式使用：
 
 ```toml
 [dependencies]
 notify-kit = { path = "crates/notify-kit" }
 ```
 
-如果你通过 Git 引用某个仓库快照：
-
-```toml
-[dependencies]
-notify-kit = { git = "https://github.com/omne42/omne_foundation.git", rev = "<commit>", package = "notify-kit" }
-```
-
-> 以上路径、仓库地址与 commit 仅为示例；请按你的项目实际情况调整。
-
-如果你只需要核心 `Hub` / `Event` / `Sink` 抽象，而不想连带编译内置 vendor sinks，可以关闭默认 features：
-
-```toml
-[dependencies]
-notify-kit = { path = "crates/notify-kit", default-features = false }
-```
-
-当前默认 features 只保留 `standard-env` 这条更窄的 foundation 默认面：
-
-- `sink-sound`
-- `sink-generic-webhook`
-- `sink-feishu`
-- `sink-slack`
-- `notify_kit::integration::standard_env`
-
-若只想按需打开某几个 sink，可在关闭默认 features 后显式启用：
-
-```toml
-[dependencies]
-notify-kit = { path = "crates/notify-kit", default-features = false, features = ["sink-sound", "sink-slack"] }
-```
-
-如果你确实想恢复“把所有内置 vendor sinks 一次性打开”的旧行为，可以显式启用：
-
-```toml
-[dependencies]
-notify-kit = { path = "crates/notify-kit", features = ["all-sinks"] }
-```
-
-当前主要 feature 边界：
-
-- `sink-*`
-  - 分别启用对应 vendor sink，例如 `sink-github`、`sink-feishu`、`sink-telegram`
-- `standard-env`
-  - 启用 `notify_kit::integration::standard_env` 以及它依赖的标准 sinks（`sink-sound`、`sink-generic-webhook`、`sink-feishu`、`sink-slack`）
-- `all-sinks`
-  - 在 `standard-env` 之外额外启用其余内置 vendor sinks，适合明确需要“全家桶”编译面的调用方
-- `sound-command`
-  - 允许 `SoundSink` 执行外部命令，并自动依赖 `sink-sound`
+如果你在其他仓库中引用，请改成对应的 Git 源或本地路径。
 
 ## 文档
 
@@ -192,10 +137,9 @@ hub.notify(Event::new("turn_completed", Severity::Success, "done"));
 
 ## 安全提示
 
-- 公开配置里的长期凭证现在统一使用 `notify_kit::SecretString`；它是 `notify-kit` 自己的边界类型，内部再复用 `secret-kit` 的安全容器。
 - `SoundConfig.command_argv` 会执行外部命令（需要启用 `notify-kit/sound-command`）；应视为 **受信任/本机配置**。
 - `FeishuWebhookSink` 会校验 webhook URL：仅允许 `https` + `open.feishu.cn` / `open.larksuite.com`，且不会在 `Debug`/错误信息中输出完整 URL。
-- `FeishuWebhookSink` 默认不会因为 Markdown 正文里出现远程图片 URL 就主动发起下载；远程图片上传必须显式 `with_remote_image_urls(true)`，并沿用同一个 `with_public_ip_check(...)` 决定是否启用 DNS 公网 IP 校验。本地图片也必须显式 `with_local_image_files(true)`，且在无法安全 no-follow 打开的平台上会直接拒绝。
+- `FeishuWebhookSink` 默认不会因为 Markdown 正文里出现远程图片 URL 就主动发起下载；远程图片上传必须显式 `with_remote_image_urls(true)`，本地图片也必须显式 `with_local_image_files(true)`。绝对路径可以直接读取；相对路径必须额外显式配置 `with_local_image_base_dir(...)`，库不会再偷偷把进程 `cwd` 当作图片解析输入。在无法安全 no-follow 打开的平台上会直接拒绝。
 
 ## 配置（环境变量）
 
@@ -203,15 +147,12 @@ hub.notify(Event::new("turn_completed", Severity::Success, "done"));
 
 如果你需要库自带的快捷接线方式，推荐使用：
 
-- `notify_kit::integration::standard_env::build_hub_from_standard_env(...)`
-- `notify_kit::integration::standard_env::StandardEnvHubOptions`
+- `notify_kit::env::build_hub_from_standard_env(...)`
+- `notify_kit::env::StandardEnvHubOptions`
 
 它们只是 convenience helper，适合快速接线或共享一套简单约定；不是强制协议，也不是核心架构边界。
-同时，这组 helper 现在也显式属于 `standard-env` feature；如果你关闭了默认 features，需要手动启用它。
-这套 helper 自带的中性约定是 `NOTIFY_*`，例如 `NOTIFY_SOUND`、`NOTIFY_WEBHOOK_URL`、`NOTIFY_TIMEOUT_MS`、`NOTIFY_SINK_TIMEOUT_MS`、`NOTIFY_HUB_TIMEOUT_MS`、`NOTIFY_EVENTS`。
-如果显式提供 `NOTIFY_SOUND`，它现在必须是合法布尔值（`1/0/true/false/yes/no/on/off`）；非法值会直接报错，而不是静默降级。
-如果只提供 `NOTIFY_TIMEOUT_MS`，helper 会把它当作各 HTTP sink 的基础 timeout，并自动给外层 `Hub` timeout 留一段 slack；如果你需要恢复旧的拆分控制，可以分别设置 `NOTIFY_SINK_TIMEOUT_MS` 和 `NOTIFY_HUB_TIMEOUT_MS`。
-公开入口就是 `notify_kit::integration::standard_env::...`；不要在 crate root 上再叠一层快捷别名。
+这套 helper 自带的中性约定是 `NOTIFY_*`，例如 `NOTIFY_SOUND`、`NOTIFY_WEBHOOK_URL`、`NOTIFY_TIMEOUT_MS`、`NOTIFY_EVENTS`。
+公开入口就是 `notify_kit::env::...`；不要在 crate root 上再叠一层快捷别名。
 
 ## 标准 helper 示例
 

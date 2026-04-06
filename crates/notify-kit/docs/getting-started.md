@@ -4,21 +4,14 @@
 
 ## 安装
 
-如果你通过 crates.io 使用：
-
-```toml
-[dependencies]
-notify-kit = "0.1"
-```
-
-如果你通过 Git / monorepo 引用：
+当前 `notify-kit` 通过 Git / monorepo 引用：
 
 ```toml
 [dependencies]
 notify-kit = { path = "/path/to/omne_foundation/crates/notify-kit" }
 ```
 
-> 以上版本与路径仅为示例；请按你的项目实际情况调整。
+> 路径仅为示例；请按你的项目实际情况调整。
 
 ## 一个可运行的 `main.rs` 示例
 

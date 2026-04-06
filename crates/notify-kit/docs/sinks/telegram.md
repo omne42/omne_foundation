@@ -7,8 +7,6 @@
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
-# #[cfg(feature = "sink-telegram")]
-# {
 use std::time::Duration;
 
 use notify_kit::{TelegramBotConfig, TelegramBotSink};
@@ -18,7 +16,6 @@ let cfg = TelegramBotConfig::new("bot_token", "chat_id")
     .with_max_chars(4096);
 
 let sink = TelegramBotSink::new(cfg)?;
-# }
 # Ok(())
 # }
 ```

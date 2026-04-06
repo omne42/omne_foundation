@@ -6,11 +6,11 @@ use crate::sinks::text::{TextLimits, format_event_text_limited};
 use crate::sinks::{BoxFuture, Sink};
 use github_kit::{
     DEFAULT_GITHUB_API_BASE, GitHubApiRequestOptions, apply_github_api_headers,
-    build_github_api_url, validate_github_api_request_url,
+    build_github_api_url,
 };
 use http_kit::{
     HttpClientOptions, HttpClientProfile, build_http_client_profile, ensure_http_success,
-    redact_url, redact_url_str, send_reqwest,
+    redact_url, send_reqwest,
 };
 
 #[non_exhaustive]
@@ -29,7 +29,7 @@ pub struct GitHubCommentConfig {
 impl std::fmt::Debug for GitHubCommentConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GitHubCommentConfig")
-            .field("api_base", &redact_url_str(&self.api_base))
+            .field("api_base", &self.api_base)
             .field("owner", &self.owner)
             .field("repo", &self.repo)
             .field("issue_number", &self.issue_number)
@@ -120,8 +120,6 @@ impl GitHubCommentSink {
         let token = normalize_secret(config.token, "token")?;
 
         let api_url = build_issue_comment_url(&config.api_base, owner, repo, config.issue_number)?;
-        validate_github_api_request_url(&api_url, github_request_options(token.expose_secret()))
-            .map_err(anyhow::Error::new)?;
         let http = build_http_client_profile(&HttpClientOptions {
             timeout: Some(config.timeout),
             ..Default::default()
@@ -197,20 +195,15 @@ impl Sink for GitHubCommentSink {
             let payload = Self::build_payload(event, self.max_chars);
             let request = apply_github_api_headers(
                 client.post(self.api_url.as_str()).json(&payload),
-                github_request_options(self.token.expose_secret()),
+                GitHubApiRequestOptions::new()
+                    .with_user_agent("notify-kit")
+                    .with_bearer_token(Some(self.token.expose_secret())),
             );
 
             let resp = send_reqwest(request, "github comment").await?;
             Ok(ensure_http_success(resp, "github comment").await?)
         })
     }
-}
-
-fn github_request_options(token: &str) -> GitHubApiRequestOptions<'_> {
-    GitHubApiRequestOptions::new()
-        .with_user_agent("notify-kit")
-        .with_bearer_token(Some(token))
-        .with_allow_custom_bearer_api_base(true)
 }
 
 fn normalize_secret(secret: SecretString, field: &str) -> crate::Result<SecretString> {
@@ -262,38 +255,15 @@ mod tests {
 
     #[test]
     fn debug_redacts_token() {
-        let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok_secret")
-            .with_api_base("https://user:pass@github.example.com/api/v3");
+        let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok_secret");
         let cfg_dbg = format!("{cfg:?}");
         assert!(!cfg_dbg.contains("tok_secret"), "{cfg_dbg}");
-        assert!(!cfg_dbg.contains("user:pass"), "{cfg_dbg}");
         assert!(cfg_dbg.contains("<redacted>"), "{cfg_dbg}");
-    }
 
-    #[test]
-    fn rejects_non_https_api_base_when_bearer_token_present() {
-        let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok")
-            .with_api_base("http://github.example.com/api/v3");
-        let err = GitHubCommentSink::new(cfg).expect_err("expected invalid config");
-        assert!(err.to_string().contains("https github api base"), "{err:#}");
-    }
-
-    #[test]
-    fn rejects_api_base_with_credentials_when_bearer_token_present() {
-        let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok")
-            .with_api_base("https://user:pass@github.example.com/api/v3");
-        let err = GitHubCommentSink::new(cfg).expect_err("expected invalid config");
-        assert!(err.to_string().contains("without credentials"), "{err:#}");
-    }
-
-    #[test]
-    fn sink_debug_redacts_api_url_and_token() {
-        let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok_secret")
-            .with_api_base("https://github.example.com/api/v3/");
         let sink = GitHubCommentSink::new(cfg).expect("build sink");
         let sink_dbg = format!("{sink:?}");
         assert!(!sink_dbg.contains("tok_secret"), "{sink_dbg}");
-        assert!(sink_dbg.contains("github.example.com"), "{sink_dbg}");
+        assert!(sink_dbg.contains("api.github.com"), "{sink_dbg}");
         assert!(sink_dbg.contains("<redacted>"), "{sink_dbg}");
     }
 

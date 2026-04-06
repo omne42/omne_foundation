@@ -308,7 +308,7 @@ pub struct ClientHandle {
     stats: Arc<ClientStatsInner>,
     diagnostics: Option<Arc<DiagnosticsState>>,
     closed: Arc<AtomicBool>,
-    close_reason: Arc<OnceLock<String>>,
+    close_reason: Arc<Mutex<Option<String>>>,
     stdout_log_write_error: Arc<OnceLock<String>>,
 }
 
@@ -415,8 +415,7 @@ where
 struct BatchResponseState {
     handle: ClientHandle,
     responses: tokio::sync::Mutex<Vec<Value>>,
-    pending_async_responses: AtomicU64,
-    finished: AtomicBool,
+    completion_state: AtomicU64,
     flushed: AtomicBool,
 }
 
@@ -433,22 +432,22 @@ impl std::fmt::Debug for BatchResponseWriter {
 }
 
 impl BatchResponseWriter {
+    const FINISHED_BIT: u64 = 1 << 63;
+    const PENDING_MASK: u64 = !Self::FINISHED_BIT;
+
     fn new(handle: ClientHandle) -> Self {
         Self {
             state: Arc::new(BatchResponseState {
                 handle,
                 responses: tokio::sync::Mutex::new(Vec::new()),
-                pending_async_responses: AtomicU64::new(0),
-                finished: AtomicBool::new(false),
+                completion_state: AtomicU64::new(0),
                 flushed: AtomicBool::new(false),
             }),
         }
     }
 
     fn reserve_request_slot(&self) -> Self {
-        self.state
-            .pending_async_responses
-            .fetch_add(1, Ordering::Relaxed);
+        self.state.completion_state.fetch_add(1, Ordering::AcqRel);
         self.clone()
     }
 
@@ -461,31 +460,30 @@ impl BatchResponseWriter {
     async fn push_reserved_response(&self, response: Value) -> Result<(), Error> {
         self.state.handle.check_closed()?;
         self.state.responses.lock().await.push(response);
-        self.state
-            .pending_async_responses
-            .fetch_sub(1, Ordering::Relaxed);
-        self.flush_if_ready().await
+        let previous = self.state.completion_state.fetch_sub(1, Ordering::AcqRel);
+        if previous & Self::PENDING_MASK == 1 && previous & Self::FINISHED_BIT != 0 {
+            self.flush_once().await?;
+        }
+        Ok(())
     }
 
     fn push_reserved_response_without_runtime(&self, response: Value) {
         if self.state.handle.check_closed().is_err() {
-            self.state
-                .pending_async_responses
-                .fetch_sub(1, Ordering::Relaxed);
+            self.state.completion_state.fetch_sub(1, Ordering::AcqRel);
             return;
         }
 
         self.state.responses.blocking_lock().push(response);
-        self.state
-            .pending_async_responses
-            .fetch_sub(1, Ordering::Relaxed);
-        self.flush_if_ready_without_runtime();
+        let previous = self.state.completion_state.fetch_sub(1, Ordering::AcqRel);
+        if previous & Self::PENDING_MASK == 1 && previous & Self::FINISHED_BIT != 0 {
+            self.flush_if_ready_without_runtime();
+        }
     }
 
     fn flush_if_ready_without_runtime(&self) {
         let batch = self.clone();
         if let Err(err) = spawn_detached("batch flush without runtime", async move {
-            let _ = batch.flush_if_ready().await;
+            let _ = batch.flush_once().await;
         }) {
             self.state.handle.schedule_close_once(format!(
                 "failed to schedule batch flush without runtime: {err}"
@@ -494,21 +492,21 @@ impl BatchResponseWriter {
     }
 
     async fn finish(&self) -> Result<(), Error> {
-        self.state.finished.store(true, Ordering::Relaxed);
-        self.flush_if_ready().await
+        let previous = self
+            .state
+            .completion_state
+            .fetch_or(Self::FINISHED_BIT, Ordering::AcqRel);
+        if previous & Self::PENDING_MASK == 0 {
+            self.flush_once().await?;
+        }
+        Ok(())
     }
 
-    async fn flush_if_ready(&self) -> Result<(), Error> {
-        if !self.state.finished.load(Ordering::Relaxed)
-            || self.state.pending_async_responses.load(Ordering::Relaxed) != 0
-        {
-            return Ok(());
-        }
-
+    async fn flush_once(&self) -> Result<(), Error> {
         if self
             .state
             .flushed
-            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
             return Ok(());
@@ -626,7 +624,7 @@ impl ClientHandle {
     }
 
     pub fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Relaxed)
+        self.closed.load(Ordering::Acquire)
     }
 
     /// Returns the first recorded close diagnostic, if any.
@@ -634,7 +632,10 @@ impl ClientHandle {
     /// This is best-effort transport diagnostics, not a stable concurrency contract. When
     /// multiple close paths race, whichever path records first wins; later reasons are ignored.
     pub fn close_reason(&self) -> Option<String> {
-        self.close_reason.get().cloned()
+        self.close_reason
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Returns the last stdout log write error, if any.
@@ -655,11 +656,19 @@ impl ClientHandle {
 
     fn begin_close_with_error(&self, reason: impl Into<String>, err: &Error) -> bool {
         let reason = reason.into();
-        let first_close = self
-            .closed
-            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok();
-        let _ = self.close_reason.set(reason);
+        let first_close = {
+            let mut close_reason = self
+                .close_reason
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.closed.load(Ordering::Acquire) {
+                false
+            } else {
+                *close_reason = Some(reason);
+                self.closed.store(true, Ordering::Release);
+                true
+            }
+        };
         if first_close {
             drain_pending(&self.pending, err);
         }
@@ -680,27 +689,23 @@ impl ClientHandle {
             return;
         }
         let handle = self.clone();
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            drop(runtime.spawn(async move {
-                handle.finish_close_write().await;
-            }));
-            return;
-        }
-
-        // No runtime available (e.g. sync context): avoid panicking and perform best-effort close.
-        if let Ok(mut write) = handle.write.try_lock() {
+        if spawn_detached("client close", async move {
+            handle.finish_close_write().await;
+        })
+        .is_err()
+        {
+            // Last-ditch fallback when even detached worker/thread startup is unavailable.
+            let mut write = self.write.blocking_lock();
             drop(std::mem::replace(&mut *write, Box::new(tokio::io::sink())));
         }
     }
 
     fn check_closed(&self) -> Result<(), Error> {
-        if !self.closed.load(Ordering::Relaxed) {
+        if !self.closed.load(Ordering::Acquire) {
             return Ok(());
         }
         let reason = self
-            .close_reason
-            .get()
-            .cloned()
+            .close_reason()
             .unwrap_or_else(|| "client closed".to_string());
         Err(Error::protocol(ProtocolErrorKind::Closed, reason))
     }
@@ -1076,7 +1081,7 @@ impl Client {
             stats: stats.clone(),
             diagnostics: diagnostics_state.clone(),
             closed: Arc::new(AtomicBool::new(false)),
-            close_reason: Arc::new(OnceLock::new()),
+            close_reason: Arc::new(Mutex::new(None)),
             stdout_log_write_error: Arc::new(OnceLock::new()),
         };
 

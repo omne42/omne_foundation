@@ -1070,6 +1070,33 @@ mod wait_timeout_tests {
 #[cfg(test)]
 mod background_close_tests {
     use super::*;
+    use std::pin::Pin;
+    use std::sync::atomic::AtomicBool;
+    use std::task::{Context, Poll};
+    use tokio::io::AsyncBufReadExt;
+
+    struct ObserveShutdownWrite {
+        shutdown_called: Arc<AtomicBool>,
+    }
+
+    impl tokio::io::AsyncWrite for ObserveShutdownWrite {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            self.shutdown_called.store(true, Ordering::SeqCst);
+            Poll::Ready(Ok(()))
+        }
+    }
 
     #[test]
     fn schedule_close_once_without_runtime_drains_pending_without_panic() {
@@ -1089,7 +1116,7 @@ mod background_close_tests {
             stats: Arc::new(ClientStatsInner::default()),
             diagnostics: None,
             closed: Arc::new(AtomicBool::new(false)),
-            close_reason: Arc::new(OnceLock::new()),
+            close_reason: Arc::new(Mutex::new(None)),
             stdout_log_write_error: Arc::new(OnceLock::new()),
         };
 
@@ -1115,6 +1142,122 @@ mod background_close_tests {
         ));
     }
 
+    #[test]
+    fn schedule_close_once_without_runtime_waits_for_busy_writer_lock() {
+        let _guard = detached_runtime_test_guard()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::background_runtime::reset_detached_runtime_for_test();
+
+        let shutdown_called = Arc::new(AtomicBool::new(false));
+        let handle = ClientHandle {
+            write: Arc::new(tokio::sync::Mutex::new(Box::new(ObserveShutdownWrite {
+                shutdown_called: Arc::clone(&shutdown_called),
+            })
+                as Box<dyn AsyncWrite + Send + Unpin>)),
+            next_id: Arc::new(AtomicI64::new(1)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            max_message_bytes: Limits::default().max_message_bytes,
+            max_pending_requests: 1,
+            cancelled_request_ids: Arc::new(Mutex::new(CancelledRequestIdsState::default())),
+            stats: Arc::new(ClientStatsInner::default()),
+            diagnostics: None,
+            closed: Arc::new(AtomicBool::new(false)),
+            close_reason: Arc::new(Mutex::new(None)),
+            stdout_log_write_error: Arc::new(OnceLock::new()),
+        };
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        let write_guard = runtime.block_on(handle.write.lock());
+        drop(runtime);
+
+        handle.schedule_close_once("close without runtime".to_string());
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            !shutdown_called.load(Ordering::SeqCst),
+            "close should wait for the in-flight writer instead of silently giving up"
+        );
+
+        drop(write_guard);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !shutdown_called.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "close should finish after lock release"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        crate::background_runtime::reset_detached_runtime_for_test();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn batch_finish_and_last_reserved_response_flush_once_when_started_together() {
+        for _ in 0..256 {
+            let (write, read) = tokio::io::duplex(1024);
+            let handle = ClientHandle {
+                write: Arc::new(tokio::sync::Mutex::new(
+                    Box::new(write) as Box<dyn AsyncWrite + Send + Unpin>
+                )),
+                next_id: Arc::new(AtomicI64::new(1)),
+                pending: Arc::new(Mutex::new(HashMap::new())),
+                max_message_bytes: Limits::default().max_message_bytes,
+                max_pending_requests: 1,
+                cancelled_request_ids: Arc::new(Mutex::new(CancelledRequestIdsState::default())),
+                stats: Arc::new(ClientStatsInner::default()),
+                diagnostics: None,
+                closed: Arc::new(AtomicBool::new(false)),
+                close_reason: Arc::new(Mutex::new(None)),
+                stdout_log_write_error: Arc::new(OnceLock::new()),
+            };
+            let batch = BatchResponseWriter::new(handle);
+            let reserved = batch.reserve_request_slot();
+            let start = Arc::new(tokio::sync::Barrier::new(3));
+
+            let finish_task = {
+                let batch = batch.clone();
+                let start = Arc::clone(&start);
+                tokio::spawn(async move {
+                    start.wait().await;
+                    batch.finish().await.expect("finish batch");
+                })
+            };
+            let respond_task = {
+                let start = Arc::clone(&start);
+                tokio::spawn(async move {
+                    start.wait().await;
+                    reserved
+                        .push_reserved_response(serde_json::json!({"id": 1, "result": "ok"}))
+                        .await
+                        .expect("push reserved response");
+                })
+            };
+
+            start.wait().await;
+            finish_task.await.expect("finish join");
+            respond_task.await.expect("respond join");
+
+            let mut lines = tokio::io::BufReader::new(read).lines();
+            let response_line = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+                .await
+                .expect("response timeout")
+                .expect("read response")
+                .expect("response line");
+            let response: Value = serde_json::from_str(&response_line).expect("parse response");
+            assert_eq!(response, serde_json::json!([{"id": 1, "result": "ok"}]));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), lines.next_line())
+                    .await
+                    .is_err(),
+                "batch should flush exactly once"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn outbound_notify_request_and_response_respect_max_message_bytes() {
         let handle = ClientHandle {
@@ -1129,7 +1272,7 @@ mod background_close_tests {
             stats: Arc::new(ClientStatsInner::default()),
             diagnostics: None,
             closed: Arc::new(AtomicBool::new(false)),
-            close_reason: Arc::new(OnceLock::new()),
+            close_reason: Arc::new(Mutex::new(None)),
             stdout_log_write_error: Arc::new(OnceLock::new()),
         };
 

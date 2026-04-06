@@ -61,6 +61,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `FeishuWebhookSink::new_strict` / `new_with_secret_strict`：在构造阶段额外做一次 DNS 公网 IP 校验。
 
 ### Changed
+- `Event::new_structured` / `with_*_text` 现在把 plain 字段重新收口为显式 fallback：structured-only catalog text 不会再自动写入 `title`/`body`/`tags` 诊断串，纯文本 sinks 只会消费 freeform 文本或调用方主动提供的 plain fallback。
 - `notify-kit::Event` 的 plain/structured 文本对现在收口为私有状态加 accessor/mutator；调用方不能再直接把 `title`/`title_text`、`body`/`body_text`、`tags`/`tag_texts` 改乱，纯文本 fallback 与 structured text 会继续通过成对 API 同步维护。
 - `GitHubCommentSink` 现在对携带 bearer token 的 `api_base` 默认执行 fail-closed 校验：只有 canonical GitHub API host 或显式 allowlist 的 host 才允许发 token，发送前还会重新做 DNS 公网校验；默认不再把凭证交给任意自定义 API base。
 - `notify-kit::env` 现在对非法布尔值 fail closed，并恢复对旧的 `NOTIFY_SINK_TIMEOUT_MS` / `NOTIFY_HUB_TIMEOUT_MS` 拆分超时变量的兼容读取。

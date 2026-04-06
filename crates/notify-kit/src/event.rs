@@ -6,10 +6,6 @@ fn plain_text_projection(text: &StructuredText) -> Option<String> {
     text.freeform_text().map(ToString::to_string)
 }
 
-fn fallback_text_projection(text: &StructuredText) -> String {
-    plain_text_projection(text).unwrap_or_else(|| text.to_string())
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
     Info,
@@ -53,7 +49,7 @@ impl Event {
         Self {
             kind: kind.into(),
             severity,
-            title: fallback_text_projection(&title_text),
+            title: plain_text_projection(&title_text).unwrap_or_default(),
             title_text,
             body: None,
             body_text: None,
@@ -101,8 +97,6 @@ impl Event {
     pub fn set_title_text(&mut self, title_text: StructuredText) {
         if let Some(title) = plain_text_projection(&title_text) {
             self.title = title;
-        } else if self.title.is_empty() {
-            self.title = title_text.to_string();
         }
         self.title_text = title_text;
     }
@@ -121,8 +115,6 @@ impl Event {
     pub fn set_body_text(&mut self, body_text: StructuredText) {
         if let Some(body) = plain_text_projection(&body_text) {
             self.body = Some(body);
-        } else if self.body.is_none() {
-            self.body = Some(body_text.to_string());
         }
         self.body_text = Some(body_text);
     }
@@ -139,10 +131,6 @@ impl Event {
         let key = key.into();
         if let Some(value_text) = plain_text_projection(&value) {
             self.tags.insert(key.clone(), value_text);
-        } else {
-            self.tags
-                .entry(key.clone())
-                .or_insert_with(|| value.to_string());
         }
         self.tag_texts.insert(key, value);
     }
@@ -209,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_builders_keep_catalog_text_visible_to_string_sinks() {
+    fn structured_builders_keep_catalog_text_without_synthesizing_plain_fallbacks() {
         let title = structured_text!("notify.title", "repo" => "omne");
         let body = structured_text!("notify.body", "step" => "review");
         let tag = structured_text!("notify.tag", "value" => "t1");
@@ -221,12 +209,9 @@ mod tests {
         assert_eq!(event.title_text(), &title);
         assert_eq!(event.body_text(), Some(&body));
         assert_eq!(event.tag_texts().get("thread_id"), Some(&tag));
-        assert_eq!(event.title(), r#"notify.title {repo="omne"}"#);
-        assert_eq!(event.body(), Some(r#"notify.body {step="review"}"#));
-        assert_eq!(
-            event.tags().get("thread_id").map(String::as_str),
-            Some(r#"notify.tag {value="t1"}"#)
-        );
+        assert!(event.title().is_empty());
+        assert_eq!(event.body(), None);
+        assert_eq!(event.tags().get("thread_id"), None);
     }
 
     #[test]

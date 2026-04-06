@@ -450,6 +450,68 @@ struct EnvironmentScopedResolver {
     calls: AtomicUsize,
 }
 
+#[derive(Default)]
+struct MixedHintResolver {
+    calls: AtomicUsize,
+}
+
+impl SecretResolver for MixedHintResolver {
+    fn resolve_secret<'a>(
+        &'a self,
+        spec: &'a str,
+        _context: SecretResolutionContext<'a>,
+    ) -> SecretResolveFuture<'a> {
+        Box::pin(async move {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(SecretString::from(format!("{spec}-{call}")))
+        })
+    }
+}
+
+impl CacheAwareSecretResolver for MixedHintResolver {
+    type Prepared = String;
+
+    fn lookup_secret_cache_scope(
+        &self,
+        _spec: &str,
+        _context: SecretResolutionContext<'_>,
+    ) -> Result<Option<String>> {
+        Ok(Some("shared-hint".to_string()))
+    }
+
+    fn lookup_secret_cache_partitioning(
+        &self,
+        _spec: &str,
+        _context: SecretResolutionContext<'_>,
+    ) -> Option<SecretCachePartitioning> {
+        Some(SecretCachePartitioning::Environment)
+    }
+
+    async fn prepare_secret_resolution(
+        &self,
+        spec: &str,
+        _context: SecretResolutionContext<'_>,
+    ) -> Result<PreparedSecretResolution<Self::Prepared>> {
+        let cache_scope = if spec == "spec-a" {
+            "shared-hint".to_string()
+        } else {
+            format!("prepared:{spec}")
+        };
+        Ok(PreparedSecretResolution::cached(
+            spec.to_string(),
+            cache_scope,
+        ))
+    }
+
+    async fn resolve_prepared_secret(
+        &self,
+        prepared: Self::Prepared,
+        context: SecretResolutionContext<'_>,
+    ) -> Result<SecretString> {
+        self.resolve_secret(prepared.as_str(), context).await
+    }
+}
+
 impl SecretResolver for EnvironmentScopedResolver {
     fn resolve_secret<'a>(
         &'a self,
@@ -2597,6 +2659,23 @@ async fn caching_resolver_ignores_mismatched_hint_scopes() -> Result<()> {
     assert_eq!(first, "spec-a-1");
     assert_eq!(second, "spec-a-1");
     assert_eq!(third, "spec-b-2");
+    assert_eq!(resolver.inner().calls.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn caching_resolver_validates_hint_hits_against_prepared_cache_key() -> Result<()> {
+    let resolver =
+        CachingSecretResolver::new(MixedHintResolver::default(), Duration::from_secs(60));
+    let env = TestEnv::default();
+
+    let first = resolver.resolve_secret_text("spec-a", &env).await?;
+    let second = resolver.resolve_secret_text("spec-b", &env).await?;
+    let third = resolver.resolve_secret_text("spec-a", &env).await?;
+
+    assert_eq!(first, "spec-a-1");
+    assert_eq!(second, "spec-b-2");
+    assert_eq!(third, "spec-a-1");
     assert_eq!(resolver.inner().calls.load(Ordering::SeqCst), 2);
     Ok(())
 }

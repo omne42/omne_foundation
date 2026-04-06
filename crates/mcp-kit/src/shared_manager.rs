@@ -34,11 +34,11 @@ const REENTRANT_HANDLER_ERROR: &str = "SharedManager async operations cannot be 
 /// - connect/disconnect lifecycle changes for the same server share a single gate, and
 ///   `disconnect_and_wait` keeps that gate until its wait finishes so a slow teardown cannot race
 ///   with a replacement cold start
-#[derive(Clone)]
 pub struct SharedManager {
     inner: Arc<Mutex<Manager>>,
     connect_gates: Arc<StdMutex<HashMap<String, Weak<RwLock<()>>>>>,
     manager_id: u64,
+    captured_handler_scope: Option<Weak<()>>,
 }
 
 impl Manager {
@@ -55,6 +55,7 @@ impl SharedManager {
             inner: Arc::new(Mutex::new(manager)),
             connect_gates: Arc::new(StdMutex::new(HashMap::new())),
             manager_id,
+            captured_handler_scope: None,
         }
     }
 
@@ -65,12 +66,18 @@ impl SharedManager {
                 inner,
                 connect_gates: self.connect_gates,
                 manager_id: self.manager_id,
+                captured_handler_scope: self.captured_handler_scope,
             }),
         }
     }
 
     fn is_reentrant_handler_call(&self) -> bool {
         crate::manager::is_in_manager_handler_scope(self.manager_id)
+            || self
+                .captured_handler_scope
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .is_some()
     }
 
     fn fail_fast_if_reentrant<T>(
@@ -599,6 +606,20 @@ impl SharedManager {
     }
 }
 
+impl Clone for SharedManager {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            connect_gates: Arc::clone(&self.connect_gates),
+            manager_id: self.manager_id,
+            captured_handler_scope: self
+                .captured_handler_scope
+                .clone()
+                .or_else(|| crate::manager::current_manager_handler_scope_token(self.manager_id)),
+        }
+    }
+}
+
 struct PreparedSharedClient {
     prepared: crate::manager::PreparedConnectedClient,
     same_server_gate: Option<OwnedRwLockReadGuard<()>>,
@@ -1053,7 +1074,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_manager_spawned_handler_task_waits_like_external_call() {
+    async fn shared_manager_spawned_handler_task_fails_fast_like_direct_reentrancy() {
         let (client_stream, server_stream) = tokio::io::duplex(1024);
         let (client_read, client_write) = tokio::io::split(client_stream);
         let (server_read, mut server_write) = tokio::io::split(server_stream);
@@ -1148,21 +1169,20 @@ mod tests {
         let held_lock = shared.lock_for_async_op("held_lock").await.unwrap();
         send_notification_tx.send(()).unwrap();
 
-        let mut handler_result_rx = handler_result_rx;
+        let result = tokio::time::timeout(Duration::from_secs(1), handler_result_rx)
+            .await
+            .expect("spawned handler task should fail fast instead of waiting")
+            .unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut handler_result_rx)
-                .await
-                .is_err(),
-            "spawned task should still be waiting on the shared lock"
+            result.contains(super::REENTRANT_HANDLER_ERROR),
+            "unexpected result: {result}"
+        );
+        assert!(
+            result.contains("inspect"),
+            "spawned task error should identify the blocked operation: {result}"
         );
 
         drop(held_lock);
-
-        let result = tokio::time::timeout(Duration::from_secs(1), handler_result_rx)
-            .await
-            .expect("spawned handler task should finish after lock release")
-            .unwrap();
-        assert!(result.contains("succeeded"), "unexpected result: {result}");
         shared_slot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

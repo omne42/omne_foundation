@@ -42,7 +42,7 @@ use streamable_http_validation::validate_streamable_http_url_untrusted;
 use streamable_http_validation::validate_streamable_http_url_untrusted_dns;
 
 pub(crate) use connect::{ConnectContext, connect_transport};
-pub(crate) use handlers::is_in_manager_handler_scope;
+pub(crate) use handlers::{current_manager_handler_scope_token, is_in_manager_handler_scope};
 pub(crate) use path_identity::{resolve_connection_cwd, resolve_connection_cwd_with_base};
 pub(crate) use streamable_http_validation::should_disconnect_after_jsonrpc_error;
 

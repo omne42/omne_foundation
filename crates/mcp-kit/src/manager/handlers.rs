@@ -2,6 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::Weak;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
@@ -15,13 +16,23 @@ const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
 tokio::task_local! {
-    static CURRENT_MANAGER_HANDLER_INSTANCE_ID: u64;
+    static CURRENT_MANAGER_HANDLER_CONTEXT: HandlerScopeContext;
 }
 
 pub(crate) fn is_in_manager_handler_scope(manager_instance_id: u64) -> bool {
-    CURRENT_MANAGER_HANDLER_INSTANCE_ID
-        .try_with(|current| *current == manager_instance_id)
+    CURRENT_MANAGER_HANDLER_CONTEXT
+        .try_with(|current| current.manager_instance_id == manager_instance_id)
         .unwrap_or(false)
+}
+
+pub(crate) fn current_manager_handler_scope_token(manager_instance_id: u64) -> Option<Weak<()>> {
+    CURRENT_MANAGER_HANDLER_CONTEXT
+        .try_with(|current| {
+            (current.manager_instance_id == manager_instance_id)
+                .then(|| Arc::downgrade(&current.scope_token))
+        })
+        .ok()
+        .flatten()
 }
 
 async fn scope_manager_handler_call<T>(
@@ -30,9 +41,20 @@ async fn scope_manager_handler_call<T>(
     fut: impl Future<Output = T>,
 ) -> T {
     let _scope = ActiveHandlerScope::enter(active_handler_scopes);
-    CURRENT_MANAGER_HANDLER_INSTANCE_ID
-        .scope(manager_instance_id, fut)
+    CURRENT_MANAGER_HANDLER_CONTEXT
+        .scope(
+            HandlerScopeContext {
+                manager_instance_id,
+                scope_token: Arc::new(()),
+            },
+            fut,
+        )
         .await
+}
+
+struct HandlerScopeContext {
+    manager_instance_id: u64,
+    scope_token: Arc<()>,
 }
 
 struct ActiveHandlerScope {

@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Fixed
+- `GitHubCommentConfig` 的 `Debug` 输出现在会像 sink 侧一样对 `api_base` 做 URL 脱敏，不再把自定义 GitHub API base 里的凭证、query token 或路径细节直接打到日志里。
 - `FeishuWebhookSink` 的 tenant access token 刷新 guard 现在在无 Tokio runtime 和非 Tokio 取消路径上也会可靠清空 `Refreshing` 状态并唤醒等待者，避免一次失败的刷新把后续图片上传永久卡死；并补上失败后重试的回归覆盖。
 - `GitHubCommentSink` 现在适配 `github-kit` 收紧后的 header helper 边界，由 helper 直接校验真实 request target 再附带 bearer token；即使调用链参数漂移，也不会因为“校验 URL”和“发送 URL”不一致而绕过共享 GitHub 凭证边界。
 - `notify-kit` crate root 不再直接 re-export `secret_kit::SecretString`；secret 领域类型回到各 sink/config 的显式依赖边界，避免通知 crate 的公开 API 再把 secret 语义直接污染到 root namespace。

@@ -1,12 +1,12 @@
 use http_kit::{
-    UntrustedOutboundPolicy, read_json_body_after_http_success_limited, redact_url_for_error,
-    redact_url_str, send_reqwest, validate_untrusted_outbound_url_dns,
+    HttpClientProfile, read_json_body_after_http_success_limited, redact_url_for_error,
+    redact_url_str, send_reqwest,
 };
 use serde::Deserialize;
 
 use crate::client::{
     GitHubApiRequestOptions, apply_github_api_headers, build_github_api_url,
-    validate_github_api_request_url,
+    validate_github_api_request_url_dns,
 };
 use crate::error::{GitHubApiError, Result};
 
@@ -27,6 +27,83 @@ pub struct GitHubReleaseAsset {
 
 pub async fn fetch_latest_release<S: AsRef<str>>(
     client: &reqwest::Client,
+    api_bases: &[S],
+    repo: &str,
+    options: GitHubApiRequestOptions<'_>,
+) -> Result<GitHubRelease> {
+    if options.requires_public_ip_pinning() {
+        return Err(GitHubApiError::InvalidApiBase {
+            details: "bearer token release requests require fetch_latest_release_with_profile(...) so the request can bind to http-kit public-ip pinning".to_string(),
+        });
+    }
+    let (owner, name) = normalize_repository(repo)?;
+    let repo = format!("{owner}/{name}");
+    let mut errors = Vec::new();
+    let mut attempted = false;
+
+    for base in api_bases {
+        let trimmed = base.as_ref().trim().trim_end_matches('/');
+        if trimmed.is_empty() {
+            continue;
+        }
+        attempted = true;
+
+        let url = match build_github_api_url(trimmed, ["repos", owner, name, "releases", "latest"])
+        {
+            Ok(url) => url,
+            Err(err) => {
+                errors.push(format!("{} -> {err}", redact_url_str(trimmed)));
+                continue;
+            }
+        };
+        let redacted_url = redact_url_for_error(&url);
+        let request = match apply_github_api_headers(client.get(url), options) {
+            Ok(request) => request,
+            Err(err) => {
+                errors.push(format!("{redacted_url} -> {err}"));
+                continue;
+            }
+        };
+        let response = match send_reqwest(request, "github latest release").await {
+            Ok(response) => response,
+            Err(err) => {
+                errors.push(format!("{redacted_url} -> {err}"));
+                continue;
+            }
+        };
+
+        let json = match read_json_body_after_http_success_limited(
+            response,
+            "github latest release",
+            GITHUB_LATEST_RELEASE_MAX_JSON_BYTES,
+        )
+        .await
+        {
+            Ok(json) => json,
+            Err(err) => {
+                errors.push(format!("{redacted_url} -> {err}"));
+                continue;
+            }
+        };
+
+        match serde_json::from_value::<GitHubRelease>(json) {
+            Ok(release) => return Ok(release),
+            Err(err) => errors.push(format!("{redacted_url} -> invalid json: {err}")),
+        }
+    }
+
+    if !attempted {
+        return Err(GitHubApiError::NoApiBaseConfigured);
+    }
+
+    Err(GitHubApiError::LatestReleaseFetchFailed {
+        repo,
+        details: errors.join(" | "),
+    })
+}
+
+pub async fn fetch_latest_release_with_profile<S: AsRef<str>>(
+    http: &HttpClientProfile,
     api_bases: &[S],
     repo: &str,
     options: GitHubApiRequestOptions<'_>,
@@ -52,19 +129,29 @@ pub async fn fetch_latest_release<S: AsRef<str>>(
             }
         };
         let redacted_url = redact_url_for_error(&url);
-        if let Err(err) = validate_api_url_for_bearer_token(&url, options).await {
+        if let Err(err) = validate_github_api_request_url_dns(&url, options).await {
             errors.push(format!("{redacted_url} -> {err}"));
             continue;
         }
-
-        let request = match apply_github_api_headers(client.get(url.clone()), options) {
+        let client = match http
+            .select_for_url(&url, options.requires_public_ip_pinning())
+            .await
+        {
+            Ok(client) => client,
+            Err(err) => {
+                errors.push(format!(
+                    "{redacted_url} -> bearer token target could not bind to a validated github transport: {err}"
+                ));
+                continue;
+            }
+        };
+        let request = match apply_github_api_headers(client.get(url), options) {
             Ok(request) => request,
             Err(err) => {
                 errors.push(format!("{redacted_url} -> {err}"));
                 continue;
             }
         };
-
         let response = match send_reqwest(request, "github latest release").await {
             Ok(response) => response,
             Err(err) => {
@@ -123,22 +210,6 @@ fn normalize_repository(repo: &str) -> Result<(&str, &str)> {
     Ok((owner, name))
 }
 
-async fn validate_api_url_for_bearer_token(
-    url: &reqwest::Url,
-    options: GitHubApiRequestOptions<'_>,
-) -> Result<()> {
-    validate_github_api_request_url(url, options)?;
-    if !options.has_bearer_token() {
-        return Ok(());
-    }
-
-    validate_untrusted_outbound_url_dns(&UntrustedOutboundPolicy::default(), url)
-        .await
-        .map_err(|err| GitHubApiError::InvalidApiBase {
-            details: format!("bearer token target is not allowed: {err}"),
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
@@ -146,6 +217,7 @@ mod tests {
     use std::thread;
 
     use super::*;
+    use http_kit::{HttpClientOptions, build_http_client_profile};
 
     #[test]
     fn reject_invalid_repository_identifier() {
@@ -286,10 +358,10 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_latest_release_rejects_insecure_api_base_when_bearer_token_present() {
-        let client = reqwest::Client::new();
+        let http = build_http_client_profile(&HttpClientOptions::default()).expect("http profile");
 
-        let err = fetch_latest_release(
-            &client,
+        let err = fetch_latest_release_with_profile(
+            &http,
             &["http://api.github.example.invalid/v3"],
             "cli/cli",
             GitHubApiRequestOptions::new().with_bearer_token(Some("secret-token")),
@@ -303,10 +375,10 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_latest_release_rejects_local_api_base_when_bearer_token_present() {
-        let client = reqwest::Client::new();
+        let http = build_http_client_profile(&HttpClientOptions::default()).expect("http profile");
 
-        let err = fetch_latest_release(
-            &client,
+        let err = fetch_latest_release_with_profile(
+            &http,
             &["https://127.0.0.1/api"],
             "cli/cli",
             GitHubApiRequestOptions::new().with_bearer_token(Some("secret-token")),
@@ -321,10 +393,10 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_latest_release_rejects_noncanonical_public_api_base_when_bearer_token_present() {
-        let client = reqwest::Client::new();
+        let http = build_http_client_profile(&HttpClientOptions::default()).expect("http profile");
 
-        let err = fetch_latest_release(
-            &client,
+        let err = fetch_latest_release_with_profile(
+            &http,
             &["https://github.example.com/api/v3"],
             "cli/cli",
             GitHubApiRequestOptions::new().with_bearer_token(Some("secret-token")),
@@ -338,10 +410,10 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_latest_release_rejects_custom_bearer_api_base_with_failed_dns() {
-        let client = reqwest::Client::new();
+        let http = build_http_client_profile(&HttpClientOptions::default()).expect("http profile");
 
-        let err = fetch_latest_release(
-            &client,
+        let err = fetch_latest_release_with_profile(
+            &http,
             &["https://github.example.invalid/api/v3"],
             "cli/cli",
             GitHubApiRequestOptions::new()
@@ -353,6 +425,26 @@ mod tests {
 
         let message = err.to_string();
         assert!(message.contains("dns lookup"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_release_rejects_bearer_token_when_called_without_http_profile() {
+        let client = reqwest::Client::new();
+
+        let err = fetch_latest_release(
+            &client,
+            &["https://api.github.com"],
+            "cli/cli",
+            GitHubApiRequestOptions::new().with_bearer_token(Some("secret-token")),
+        )
+        .await
+        .expect_err("bearer token requests should require http profile");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("fetch_latest_release_with_profile"),
+            "{message}"
+        );
     }
 
     #[tokio::test]

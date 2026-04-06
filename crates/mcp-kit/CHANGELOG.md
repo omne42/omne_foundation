@@ -9,6 +9,9 @@
 
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
+### Fixed
+- `Manager` 的 manager-state 校验路径去掉不必要的 `return`，保持 `cargo clippy -D warnings` 在跨平台 CI 上稳定通过；不改变错误边界语义。
+
 ### Changed
 - `mcp-kit` 现在显式标记 `publish = false`，因为当前实现直接依赖 `config-kit` 等 workspace-only foundation crate；crate manifest 不再暗示可独立 crates.io 发布。
 - `mcp-kit`: `SharedManager` 现在使用 per-server read/write lifecycle gate；同 server 的 `request*` / `notify*` 可以并发复用同一连接，而 `disconnect` / `disconnect_and_wait` 仍会等待在途 RPC I/O 先释放借用连接。

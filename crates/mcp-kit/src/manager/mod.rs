@@ -848,14 +848,14 @@ impl Manager {
             return Ok(());
         }
 
-        return Err(tagged_message(
+        Err(tagged_message(
             ErrorKind::ManagerState,
             format!(
                 "mcp server {server_name} is already connected under cwd={} and cannot be reused for cwd={} (disconnect first)",
                 connected_cwd.display(),
                 requested_cwd.display()
             ),
-        ));
+        ))
     }
 
     pub(crate) fn try_prepare_connected_client(

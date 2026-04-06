@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit`：Windows 构建下的 manager 测试现在补齐 `absolute_test_cwd()` 所需的 `OnceLock` 条件导入，避免 cross-platform CI 因测试辅助代码缺失导入而编译失败。
 - `mcp-kit`：`streamable_http` 现在在 config 边界同时拒绝 `mcp-session-id` 这类 transport-owned header；用户配置不能再伪造会话所有权或覆盖 transport 自留头。
 - `Manager` 的 manager-state 校验路径去掉不必要的 `return`，保持 `cargo clippy -D warnings` 在跨平台 CI 上稳定通过；不改变错误边界语义。
 - `mcp-kit`：connection cwd identity 不再先对整条路径做词法 `..` 折叠再 canonicalize；中间目录是 symlink 时，现在会按真实文件系统语义解析已有前缀，再对缺失后缀做词法收尾，避免把 `link/../x` 误算成宿主目录下的 sibling。

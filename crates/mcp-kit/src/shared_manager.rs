@@ -608,9 +608,7 @@ struct PreparedSharedClient {
 mod tests {
     use std::collections::BTreeMap;
     use std::path::Path;
-    #[cfg(not(windows))]
     use std::path::PathBuf;
-    #[cfg(not(windows))]
     use std::sync::OnceLock;
     #[cfg(unix)]
     use std::sync::atomic::AtomicBool;
@@ -644,6 +642,19 @@ mod tests {
         const METHOD: &'static str = "nested";
         type Params = NestedParams;
         type Result = NestedResult;
+    }
+
+    fn absolute_test_cwd() -> &'static Path {
+        static CWD: OnceLock<PathBuf> = OnceLock::new();
+        CWD.get_or_init(|| {
+            std::env::current_dir()
+                .expect("shared manager tests require an absolute current directory")
+        })
+        .as_path()
+    }
+
+    fn test_workspace_path(name: &str) -> PathBuf {
+        absolute_test_cwd().join("workspace").join(name)
     }
 
     #[cfg(not(windows))]
@@ -1277,8 +1288,10 @@ mod tests {
             .connect_io("srv", client_read, client_write)
             .await
             .unwrap();
+        let connected_cwd = test_workspace_path("a");
+        let requested_cwd = test_workspace_path("b");
         manager
-            .record_connection_cwd("srv", Path::new("/workspace/a"))
+            .record_connection_cwd("srv", &connected_cwd)
             .unwrap();
 
         let mut servers = BTreeMap::new();
@@ -1289,7 +1302,7 @@ mod tests {
         let shared = manager.into_shared();
         let config = Config::new(ClientConfig::default(), servers);
         let err = shared
-            .request(&config, "srv", "ping", None, Path::new("/workspace/b"))
+            .request(&config, "srv", "ping", None, &requested_cwd)
             .await
             .expect_err("different cwd should be rejected");
         assert!(
@@ -2881,8 +2894,9 @@ mod tests {
             .connect_io("srv", client_read, client_write)
             .await
             .unwrap();
+        let connected_cwd = test_workspace_path("a");
         manager
-            .record_connection_cwd("srv", Path::new("/workspace/a"))
+            .record_connection_cwd("srv", &connected_cwd)
             .unwrap();
         manager
             .record_connection_server_config(
@@ -2900,13 +2914,7 @@ mod tests {
 
         let shared = manager.into_shared();
         let err = shared
-            .request(
-                &config,
-                "srv",
-                "ping",
-                None::<Value>,
-                Path::new("/workspace/a"),
-            )
+            .request(&config, "srv", "ping", None::<Value>, &connected_cwd)
             .await
             .expect_err("different effective config should not be silently reused");
         assert!(
@@ -2992,31 +3000,21 @@ mod tests {
             ServerConfig::unix(socket_path.clone()).unwrap(),
         );
         let config = Config::new(ClientConfig::default(), servers);
+        let first_cwd = test_workspace_path("a");
+        let second_cwd = test_workspace_path("b");
 
         let shared = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
             .with_trust_mode(TrustMode::Trusted)
             .into_shared();
 
         let first = shared
-            .request(
-                &config,
-                "srv",
-                "ping",
-                None::<Value>,
-                Path::new("/workspace/a"),
-            )
+            .request(&config, "srv", "ping", None::<Value>, &first_cwd)
             .await
             .unwrap();
         assert_eq!(first, serde_json::json!({ "ok": true }));
 
         let err = shared
-            .request(
-                &config,
-                "srv",
-                "ping",
-                None::<Value>,
-                Path::new("/workspace/b"),
-            )
+            .request(&config, "srv", "ping", None::<Value>, &second_cwd)
             .await
             .expect_err("different cwd should be rejected");
         assert!(
@@ -3186,12 +3184,13 @@ mod tests {
         let first_shared = shared.clone();
         let first_config = Arc::clone(&config);
         let prepared_client = tokio::spawn(async move {
+            let connected_cwd = test_workspace_path("a");
             let prepared = first_shared
                 .prepare_connected_client_with_gate(
                     "test_prepare",
                     first_config.as_ref(),
                     "srv",
-                    Path::new("/workspace/a"),
+                    &connected_cwd,
                 )
                 .await
                 .unwrap();
@@ -3336,13 +3335,14 @@ mod tests {
         let first_shared = shared.clone();
         let first_config = Arc::clone(&config);
         let first_request = tokio::spawn(async move {
+            let connected_cwd = test_workspace_path("a");
             let result = first_shared
                 .request(
                     first_config.as_ref(),
                     "srv",
                     "ping",
                     None::<Value>,
-                    Path::new("/workspace/a"),
+                    &connected_cwd,
                 )
                 .await;
             request_finished_task.store(true, Ordering::SeqCst);

@@ -66,7 +66,6 @@ impl Event {
         self.body_text.as_ref()
     }
 
-    #[must_use]
     pub fn tags(&self) -> impl Iterator<Item = (&str, Cow<'_, str>)> + '_ {
         self.tag_texts
             .iter()

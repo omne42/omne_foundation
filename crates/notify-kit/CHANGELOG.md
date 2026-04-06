@@ -7,6 +7,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Fixed
+- `notify-kit::Event` 不再同时维护 plain string 镜像与 `StructuredText` 两套可失同步状态；`title` / `body` / `tags` 现在统一从 canonical `StructuredText` 即时渲染，`Bark`、`PushPlus`、`ServerChan`、`Feishu post` 与 `sinks/text` 也都改为消费同一条渲染边界。
+- `FeishuWebhookSink` 补上回归测试，锁住显式 `local_image_base_dir` 下的相对图片路径解析不会再随着进程 `current_dir()` 漂移。
 - `GitHubCommentConfig` 的 `Debug` 输出现在会像 sink 侧一样对 `api_base` 做 URL 脱敏，不再把自定义 GitHub API base 里的凭证、query token 或路径细节直接打到日志里。
 - `FeishuWebhookSink` 的 tenant access token 刷新 guard 现在在无 Tokio runtime 和非 Tokio 取消路径上也会可靠清空 `Refreshing` 状态并唤醒等待者，避免一次失败的刷新把后续图片上传永久卡死；并补上失败后重试的回归覆盖。
 - `GitHubCommentSink` 现在适配 `github-kit` 收紧后的 header helper 边界，由 helper 直接校验真实 request target 再附带 bearer token；即使调用链参数漂移，也不会因为“校验 URL”和“发送 URL”不一致而绕过共享 GitHub 凭证边界。
@@ -61,6 +63,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `FeishuWebhookSink::new_strict` / `new_with_secret_strict`：在构造阶段额外做一次 DNS 公网 IP 校验。
 
 ### Changed
+- `notify-kit::Event` 现在只把 `StructuredText` 作为文本 canonical source；`title()` / `body()` / `tags()` accessor 改为返回按需渲染结果，而 `title_text()` / `body_text()` / `tag_texts()` 保留结构化语义访问面。
 - `Event::new_structured` / `with_*_text` 现在把 plain 字段重新收口为显式 fallback：structured-only catalog text 不会再自动写入 `title`/`body`/`tags` 诊断串，纯文本 sinks 只会消费 freeform 文本或调用方主动提供的 plain fallback。
 - `notify-kit::Event` 的 plain/structured 文本对现在收口为私有状态加 accessor/mutator；调用方不能再直接把 `title`/`title_text`、`body`/`body_text`、`tags`/`tag_texts` 改乱，纯文本 fallback 与 structured text 会继续通过成对 API 同步维护。
 - `GitHubCommentSink` 现在对携带 bearer token 的 `api_base` 默认执行 fail-closed 校验：只有 canonical GitHub API host 或显式 allowlist 的 host 才允许发 token，发送前还会重新做 DNS 公网校验；默认不再把凭证交给任意自定义 API base。

@@ -1,8 +1,6 @@
 use std::borrow::Cow;
-use std::collections::BTreeSet;
 
 use crate::Event;
-use structured_text_kit::StructuredText;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TextLimits {
@@ -209,51 +207,17 @@ fn format_event_text_parts_limited(
     out.finish()
 }
 
-fn render_structured_text<'a>(
-    text: &'a StructuredText,
-    fallback: Option<&'a str>,
-) -> Option<Cow<'a, str>> {
-    if let Some(text) = text.freeform_text() {
-        return Some(Cow::Borrowed(text));
-    }
-    fallback
-        .filter(|fallback| !fallback.is_empty())
-        .map(Cow::Borrowed)
-}
-
 fn event_title_text(event: &Event) -> Option<Cow<'_, str>> {
-    render_structured_text(event.title_text(), Some(event.title()))
-        .or_else(|| (!event.title().is_empty()).then_some(Cow::Borrowed(event.title())))
+    let title = event.title();
+    (!title.is_empty()).then_some(title)
 }
 
 fn event_body_text(event: &Event) -> Option<Cow<'_, str>> {
-    event
-        .body_text()
-        .and_then(|text| render_structured_text(text, event.body()))
-        .or_else(|| event.body().map(Cow::Borrowed))
+    event.body().filter(|body| !body.is_empty())
 }
 
 fn event_tag_texts<'a>(event: &'a Event) -> impl Iterator<Item = (&'a str, Cow<'a, str>)> + 'a {
-    let mut keys = BTreeSet::new();
-    keys.extend(event.tags().keys().map(String::as_str));
-    keys.extend(event.tag_texts().keys().map(String::as_str));
-
-    keys.into_iter().filter_map(|key| {
-        let value = event
-            .tag_texts()
-            .get(key)
-            .and_then(|text| {
-                render_structured_text(text, event.tags().get(key).map(String::as_str))
-            })
-            .or_else(|| {
-                event
-                    .tags()
-                    .get(key)
-                    .filter(|value| !value.is_empty())
-                    .map(|value| Cow::Borrowed(value.as_str()))
-            })?;
-        Some((key, value))
-    })
+    event.tags().filter(|(_, value)| !value.is_empty())
 }
 
 pub(crate) fn format_event_text_limited(event: &Event, limits: TextLimits) -> String {
@@ -443,33 +407,35 @@ mod tests {
     }
 
     #[test]
-    fn format_event_text_limited_uses_existing_plain_fallback_for_catalog_text() {
+    fn format_event_text_limited_renders_canonical_structured_text() {
+        let title = structured_text!("notify.title", "repo" => "omne");
+        let body = structured_text!("notify.body", "step" => "review");
+        let tag = structured_text!("notify.tag", "value" => "t1");
         let event = Event::new("k", Severity::Info, "plain title")
             .with_body("plain body")
             .with_tag("thread_id", "plain-tag")
-            .with_title_text(structured_text!("notify.title", "repo" => "omne"))
-            .with_body_text(structured_text!("notify.body", "step" => "review"))
-            .with_tag_text("thread_id", structured_text!("notify.tag", "value" => "t1"));
+            .with_title_text(title.clone())
+            .with_body_text(body.clone())
+            .with_tag_text("thread_id", tag.clone());
 
         let out = format_event_text_limited(&event, TextLimits::default());
-        assert!(out.contains("plain title"), "{out}");
-        assert!(out.contains("plain body"), "{out}");
-        assert!(out.contains("thread_id=plain-tag"), "{out}");
-        assert!(!out.contains("notify.title"), "{out}");
-        assert!(!out.contains("step=\"review\""), "{out}");
+        assert!(out.contains(&title.to_string()), "{out}");
+        assert!(out.contains(&body.to_string()), "{out}");
+        assert!(out.contains(&format!("thread_id={tag}")), "{out}");
     }
 
     #[test]
-    fn format_event_text_limited_omits_structured_only_catalog_text_without_plain_fallback() {
-        let event = Event::new_structured(
-            "k",
-            Severity::Info,
-            structured_text!("notify.title", "repo" => "omne"),
-        )
-        .with_body_text(structured_text!("notify.body", "step" => "review"))
-        .with_tag_text("thread_id", structured_text!("notify.tag", "value" => "t1"));
+    fn format_event_text_limited_renders_structured_only_catalog_text() {
+        let title = structured_text!("notify.title", "repo" => "omne");
+        let body = structured_text!("notify.body", "step" => "review");
+        let tag = structured_text!("notify.tag", "value" => "t1");
+        let event = Event::new_structured("k", Severity::Info, title.clone())
+            .with_body_text(body.clone())
+            .with_tag_text("thread_id", tag.clone());
 
         let out = format_event_text_limited(&event, TextLimits::default());
-        assert!(out.is_empty(), "{out}");
+        assert!(out.contains(&title.to_string()), "{out}");
+        assert!(out.contains(&body.to_string()), "{out}");
+        assert!(out.contains(&format!("thread_id={tag}")), "{out}");
     }
 }

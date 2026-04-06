@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Fixed
+- `notify-kit::Event` 的 plain-fallback 契约现在真正落到实现：structured-only `CatalogText` 不会再通过 `title()` / `body()` / `tags()` 泄漏成 `code {args}` 诊断串；如果调用方先提供了 plain title/body/tag，再写入 catalog text，也会继续保留这层纯文本 fallback 给现有 sinks 使用。
 - `GitHubCommentSink` 现在补上针对自定义 GitHub API base 的回归锁定：即使调用方显式 trust 了自定义 host，bearer token 目标仍必须保持 HTTPS、不能携带 URL 凭证；对应文档也同步改成当前真实的 fail-closed 契约。
 - `notify-kit::Event` 不再同时维护 plain string 镜像与 `StructuredText` 两套可失同步状态；`title` / `body` / `tags` 现在统一从 canonical `StructuredText` 即时渲染，`Bark`、`PushPlus`、`ServerChan`、`Feishu post` 与 `sinks/text` 也都改为消费同一条渲染边界。
 - `FeishuWebhookSink` 补上回归测试，锁住显式 `local_image_base_dir` 下的相对图片路径解析不会再随着进程 `current_dir()` 漂移。

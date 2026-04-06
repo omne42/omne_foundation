@@ -3,11 +3,15 @@ use std::collections::BTreeMap;
 
 use structured_text_kit::StructuredText;
 
-fn render_text(text: &StructuredText) -> Cow<'_, str> {
-    match text.freeform_text() {
-        Some(text) => Cow::Borrowed(text),
-        None => Cow::Owned(text.to_string()),
-    }
+fn plain_fallback(text: &StructuredText) -> Option<String> {
+    text.freeform_text().map(ToOwned::to_owned)
+}
+
+fn render_text<'a>(plain: Option<&'a str>, text: &'a StructuredText) -> Cow<'a, str> {
+    plain
+        .map(Cow::Borrowed)
+        .or_else(|| text.freeform_text().map(Cow::Borrowed))
+        .unwrap_or(Cow::Borrowed(""))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -22,8 +26,11 @@ pub enum Severity {
 pub struct Event {
     pub kind: String,
     pub severity: Severity,
+    title: Option<String>,
     title_text: StructuredText,
+    body: Option<String>,
     body_text: Option<StructuredText>,
+    tags: BTreeMap<String, String>,
     tag_texts: BTreeMap<String, StructuredText>,
 }
 
@@ -40,8 +47,11 @@ impl Event {
         Self {
             kind: kind.into(),
             severity,
+            title: plain_fallback(&title_text),
             title_text,
+            body: None,
             body_text: None,
+            tags: BTreeMap::new(),
             tag_texts: BTreeMap::new(),
         }
     }
@@ -49,7 +59,7 @@ impl Event {
     /// Renders the canonical title text into the plain-text view sinks consume.
     #[must_use]
     pub fn title(&self) -> Cow<'_, str> {
-        render_text(&self.title_text)
+        render_text(self.title.as_deref(), &self.title_text)
     }
 
     #[must_use]
@@ -60,7 +70,9 @@ impl Event {
     /// Renders the canonical body text into the plain-text view sinks consume.
     #[must_use]
     pub fn body(&self) -> Option<Cow<'_, str>> {
-        self.body_text.as_ref().map(render_text)
+        self.body_text
+            .as_ref()
+            .map(|body_text| render_text(self.body.as_deref(), body_text))
     }
 
     #[must_use]
@@ -70,9 +82,12 @@ impl Event {
 
     /// Iterates rendered plain-text tags derived from the canonical structured tags.
     pub fn tags(&self) -> impl Iterator<Item = (&str, Cow<'_, str>)> + '_ {
-        self.tag_texts
-            .iter()
-            .map(|(key, value)| (key.as_str(), render_text(value)))
+        self.tag_texts.iter().map(|(key, value)| {
+            (
+                key.as_str(),
+                render_text(self.tags.get(key).map(String::as_str), value),
+            )
+        })
     }
 
     #[must_use]
@@ -81,22 +96,33 @@ impl Event {
     }
 
     pub fn set_title(&mut self, title: impl Into<String>) {
-        self.title_text = StructuredText::freeform(title.into());
+        let title = title.into();
+        self.title = Some(title.clone());
+        self.title_text = StructuredText::freeform(title);
     }
 
     pub fn set_title_text(&mut self, title_text: StructuredText) {
+        if let Some(title) = plain_fallback(&title_text) {
+            self.title = Some(title);
+        }
         self.title_text = title_text;
     }
 
     pub fn set_body(&mut self, body: impl Into<String>) {
-        self.body_text = Some(StructuredText::freeform(body.into()));
+        let body = body.into();
+        self.body = Some(body.clone());
+        self.body_text = Some(StructuredText::freeform(body));
     }
 
     pub fn clear_body(&mut self) {
+        self.body = None;
         self.body_text = None;
     }
 
     pub fn set_body_text(&mut self, body_text: StructuredText) {
+        if let Some(body) = plain_fallback(&body_text) {
+            self.body = Some(body);
+        }
         self.body_text = Some(body_text);
     }
 
@@ -105,10 +131,15 @@ impl Event {
     }
 
     pub fn insert_tag_text(&mut self, key: impl Into<String>, value: StructuredText) {
-        self.tag_texts.insert(key.into(), value);
+        let key = key.into();
+        if let Some(value_text) = plain_fallback(&value) {
+            self.tags.insert(key.clone(), value_text);
+        }
+        self.tag_texts.insert(key, value);
     }
 
     pub fn remove_tag(&mut self, key: &str) {
+        self.tags.remove(key);
         self.tag_texts.remove(key);
     }
 
@@ -176,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_builders_render_catalog_text_through_plain_accessors() {
+    fn structured_builders_do_not_render_catalog_text_through_plain_accessors() {
         let title = structured_text!("notify.title", "repo" => "omne");
         let body = structured_text!("notify.body", "step" => "review");
         let tag = structured_text!("notify.tag", "value" => "t1");
@@ -185,40 +216,40 @@ mod tests {
             .with_body_text(body.clone())
             .with_tag_text("thread_id", tag.clone());
 
-        let rendered_title = title.to_string();
-        let rendered_body = body.to_string();
-        let rendered_tag = tag.to_string();
         assert_eq!(event.title_text(), &title);
         assert_eq!(event.body_text(), Some(&body));
         assert_eq!(event.tag_texts().get("thread_id"), Some(&tag));
-        assert_eq!(event.title().as_ref(), rendered_title.as_str());
-        assert_eq!(event.body().as_deref(), Some(rendered_body.as_str()));
-        assert_eq!(
-            rendered_tags(&event).get("thread_id").map(String::as_str),
-            Some(rendered_tag.as_str())
+        assert!(event.title().is_empty());
+        assert_eq!(event.body(), Some(Cow::Borrowed("")));
+        assert!(
+            rendered_tags(&event)
+                .get("thread_id")
+                .is_some_and(String::is_empty)
         );
     }
 
     #[test]
-    fn mutators_replace_rendered_projection_with_latest_structured_value() {
+    fn mutators_preserve_existing_plain_projection_for_catalog_text() {
         let title_text = structured_text!("notify.title", "repo" => "omne");
         let body_text = structured_text!("notify.body", "step" => "review");
         let tag_text = structured_text!("notify.tag", "value" => "thread");
 
-        let mut event = Event::new("kind", Severity::Info, "plain title");
+        let mut event = Event::new("kind", Severity::Info, "plain title")
+            .with_body("plain body")
+            .with_tag("thread_id", "plain thread");
         event.set_title_text(title_text.clone());
         event.set_body_text(body_text.clone());
         event.insert_tag_text("thread_id", tag_text.clone());
 
-        let rendered_title = title_text.to_string();
-        let rendered_body = body_text.to_string();
-        let rendered_tag = tag_text.to_string();
-        assert_eq!(event.title().as_ref(), rendered_title.as_str());
-        assert_eq!(event.body().as_deref(), Some(rendered_body.as_str()));
+        assert_eq!(event.title().as_ref(), "plain title");
+        assert_eq!(event.body().as_deref(), Some("plain body"));
         assert_eq!(
             rendered_tags(&event).get("thread_id").map(String::as_str),
-            Some(rendered_tag.as_str())
+            Some("plain thread")
         );
+        assert_eq!(event.title_text(), &title_text);
+        assert_eq!(event.body_text(), Some(&body_text));
+        assert_eq!(event.tag_texts().get("thread_id"), Some(&tag_text));
     }
 
     #[test]

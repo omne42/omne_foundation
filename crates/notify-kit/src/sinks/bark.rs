@@ -265,13 +265,8 @@ mod tests {
             .with_tag_text("thread_id", tag.clone());
 
         let payload = BarkSink::build_payload(&event, "k", None, 8 * 1024);
-        assert_eq!(payload["title"].as_str().unwrap_or(""), title.to_string());
-        let rendered_body = payload["body"].as_str().unwrap_or("");
-        assert!(rendered_body.contains(&body.to_string()), "{rendered_body}");
-        assert!(
-            rendered_body.contains(&format!("thread_id={tag}")),
-            "{rendered_body}"
-        );
+        assert_eq!(payload["title"].as_str().unwrap_or(""), "");
+        assert_eq!(payload["body"].as_str().unwrap_or(""), "");
     }
 
     #[test]

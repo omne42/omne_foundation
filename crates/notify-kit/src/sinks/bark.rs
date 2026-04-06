@@ -238,6 +238,7 @@ impl Sink for BarkSink {
 mod tests {
     use super::*;
     use crate::Severity;
+    use structured_text_kit::structured_text;
 
     #[test]
     fn builds_expected_payload() {
@@ -252,6 +253,29 @@ mod tests {
         assert!(body.contains("ok"));
         assert!(body.contains("thread_id=t1"));
         assert_eq!(payload["group"].as_str().unwrap_or(""), "g");
+    }
+
+    #[test]
+    fn builds_payload_from_structured_only_event() {
+        let event = Event::new_structured(
+            "turn_completed",
+            Severity::Success,
+            structured_text!("notify.title", "repo" => "omne"),
+        )
+        .with_body_text(structured_text!("notify.body", "step" => "review"))
+        .with_tag_text("thread_id", structured_text!("notify.tag", "value" => "t1"));
+
+        let payload = BarkSink::build_payload(&event, "k", None, 8 * 1024);
+        assert_eq!(
+            payload["title"].as_str().unwrap_or(""),
+            r#"notify.title {repo="omne"}"#
+        );
+        let body = payload["body"].as_str().unwrap_or("");
+        assert!(body.contains(r#"notify.body {step="review"}"#), "{body}");
+        assert!(
+            body.contains(r#"thread_id=notify.tag {value="t1"}"#),
+            "{body}"
+        );
     }
 
     #[test]

@@ -10,6 +10,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Added a `core` integration regression test that verifies structured `Event` payloads reach sinks through `title()` / `body()` / `tags()` string projections instead of re-exposing writable dual string fields.
 
 ### Changed
+- `GitHubCommentSink`：携带 bearer token 时现在会在构造阶段复用 `github-kit` 的 API URL 校验，拒绝非 HTTPS、带 URL credentials 或非公网的自定义 `api_base`；`GitHubCommentConfig` 的 `Debug` 也改为脱敏 `api_base`。
 - `notify-kit`：`standard-env` convenience helper 的公开入口现在从 `notify_kit::env::...` 收口到 `notify_kit::integration::standard_env::...`，把这组 `NOTIFY_*` bootstrap 约定明确标成 integration wiring，而不是核心通知抽象边界。
 - `notify-kit`：将 `Hub` 按 `runtime` / `backpressure` / `fanout` 子模块收口，并把 `FeishuWebhookSink` 的 config / constructor / send 逻辑拆到更窄文件，降低热点文件复杂度而不改变公开 API。
 - `FeishuWebhookSink`：严格模式 helper 现在复用显式 `validate_public_ip_sync()` / `validate_public_ip().await` 校验入口；对象构造本身不再被“必须同步/异步校验一次”的运行时约束绑死，调用方可以先构造再按宿主环境选择何时做公网 IP 校验。

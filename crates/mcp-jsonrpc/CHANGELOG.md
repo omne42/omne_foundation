@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：`Client::close_in_background_once(...)` 现在和显式 close 一样会同时 abort reader task 与 transport tasks；best-effort 后台关闭不再只关写端留下悬挂读循环或 SSE/POST transport 任务。
 - `mcp-jsonrpc`：`ClientHandle` 关闭路径现在在同一临界区内记录首个 `close_reason` 并发布 `closed`，并且无 runtime 的最后兜底 close 收尾会等待 busy writer 释放后再替换写端；`is_closed()`/`check_closed()` 不再暴露“已关闭但原因已被其他竞态路径抢写”或“写端正忙时直接放弃收尾”的窗口。
 - `mcp-jsonrpc`：batch response flush 的完成判定改为单原子状态机，消除了 `finish()` 与最后一个异步响应并发时双方都早退、整批响应永远不 flush 的竞态。
 - `mcp-jsonrpc`：对超时关闭诊断的内部格式化写法做了风格收敛，保持与 workspace 的 Clippy 门禁一致而不改变运行时行为。

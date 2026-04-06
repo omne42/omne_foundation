@@ -959,6 +959,13 @@ pub enum WaitOnTimeout {
 }
 
 impl Client {
+    fn abort_background_tasks(&self) {
+        self.task.abort();
+        for task in &self.transport_tasks {
+            task.abort();
+        }
+    }
+
     pub fn stats(&self) -> ClientStats {
         self.handle.stats()
     }
@@ -1132,10 +1139,7 @@ impl Client {
     }
 
     pub async fn close(&self, reason: impl Into<String>) {
-        self.task.abort();
-        for task in &self.transport_tasks {
-            task.abort();
-        }
+        self.abort_background_tasks();
         self.handle.close(reason).await;
     }
 
@@ -1144,6 +1148,7 @@ impl Client {
     /// This marks the client closed immediately and starts a best-effort background close path.
     /// Repeated calls after the first one are no-ops.
     pub fn close_in_background_once(&self, reason: impl Into<String>) {
+        self.abort_background_tasks();
         self.handle.schedule_close_once(reason.into());
     }
 
@@ -1202,7 +1207,7 @@ impl Client {
     /// Note: this method can hang indefinitely if the child process does not exit.
     /// Prefer `Client::wait_with_timeout` if you need an upper bound.
     pub async fn wait(&mut self) -> Result<Option<std::process::ExitStatus>, Error> {
-        self.task.abort();
+        self.abort_background_tasks();
         for task in self.transport_tasks.drain(..) {
             task.abort();
         }
@@ -1233,7 +1238,7 @@ impl Client {
     ) -> Result<Option<std::process::ExitStatus>, Error> {
         ensure_tokio_time_driver("Client::wait_with_timeout")?;
         let deadline = tokio::time::Instant::now() + timeout;
-        self.task.abort();
+        self.abort_background_tasks();
         for task in self.transport_tasks.drain(..) {
             task.abort();
         }
@@ -1337,7 +1342,7 @@ impl Drop for Client {
     fn drop(&mut self) {
         let err = Error::protocol(ProtocolErrorKind::Closed, "client closed");
         self.handle.begin_close_with_error("client closed", &err);
-        self.task.abort();
+        self.abort_background_tasks();
         for task in self.transport_tasks.drain(..) {
             task.abort();
         }

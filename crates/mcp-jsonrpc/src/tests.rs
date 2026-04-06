@@ -8,6 +8,75 @@ fn detached_runtime_test_guard() -> &'static std::sync::Mutex<()> {
     DETACHED_RUNTIME_TEST_GUARD.get_or_init(|| std::sync::Mutex::new(()))
 }
 
+#[tokio::test]
+async fn close_in_background_once_aborts_reader_and_transport_tasks() {
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
+
+    struct BlockingRead {
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl tokio::io::AsyncRead for BlockingRead {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    impl Drop for BlockingRead {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Relaxed);
+        }
+    }
+
+    struct OnDrop(Arc<AtomicBool>);
+
+    impl Drop for OnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let reader_dropped = Arc::new(AtomicBool::new(false));
+    let transport_dropped = Arc::new(AtomicBool::new(false));
+    let mut client = Client::connect_io(
+        BlockingRead {
+            dropped: Arc::clone(&reader_dropped),
+        },
+        tokio::io::sink(),
+    )
+    .await
+    .expect("connect client");
+
+    let transport_drop_guard = OnDrop(Arc::clone(&transport_dropped));
+    client.transport_tasks.push(tokio::spawn(async move {
+        let _transport_drop_guard = transport_drop_guard;
+        std::future::pending::<()>().await;
+    }));
+
+    client.close_in_background_once("test background close");
+    assert!(
+        client.is_closed(),
+        "background close should mark client closed"
+    );
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !(reader_dropped.load(Ordering::Relaxed) && transport_dropped.load(Ordering::Relaxed))
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("background close should abort reader and transport tasks");
+}
+
 mod line_limit_tests {
     use super::*;
 

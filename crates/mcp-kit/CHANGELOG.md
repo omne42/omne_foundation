@@ -10,6 +10,8 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit::ErrorKind` 现在会把 `mcp_jsonrpc::Error::Io` 稳定归到 `Connection`，不再先被泛化成 `Protocol`；并补上 JSON-RPC IO / timeout / protocol 的分类回归测试。
+- `Manager::from_config` 现在在 release 路径也会对完整 `Config` 做 fail-fast 校验；无效的 client/server 配置不会再拖到第一次 initialize 或 connect 时才暴露。
 - `mcp-kit`：`Config::with_path(...)` 现在会在设置时把相对配置路径绑定到当时的绝对工作目录；`thread_root()`、连接 `cwd` 解析和 config 复用边界不再随着后续进程 `current_dir()` 漂移。
 - `mcp-kit`：当 `ConfigLoadPolicy::allow_override_outside_root(true)` 允许加载 root 外部的 `mcp.json` 时，相对 `unix_path` 与 `stdout_log.path` 现在会按 override 文件所在目录解析，而不是继续错误绑定原始 `thread_root`。
 - `mcp-kit`：crate 级错误分类补齐了 `config-kit::Error` 的稳定类型映射；配置错误不再需要依赖脆弱的错误文案路径才能落到 `ErrorKind::Config`。
@@ -26,6 +28,7 @@
 - `mcp-kit`：`stable_connection_cwd_identity` 的缺失尾段回归测试现在比较稳定目录身份而不是原始路径字符串，避免 Windows 上的 verbatim 前缀与 8.3 短路径表示差异把等价路径误报成失败。
 
 ### Changed
+- `Manager::from_config` 的契约现在显式收紧为“只接受已校验 `Config`”：仍保留原返回类型，但会在构造期 panic 并提示改用 `try_from_config` 获取 typed 错误。
 - `mcp-kit`：新补的“非 `NotFound` 文件系统错误上抛”回归测试改为 Unix 专属，避免把 Windows 路径解析差异误报成实现回归；产品行为不变。
 - `mcp-kit`：连接阶段解析相对 `cwd` 时现在必须拿到显式绝对 base（例如已加载 `mcp.json` 的 thread root）；`Manager` / `SharedManager` 不再在运行时偷偷回退到进程级 `current_dir()`，避免连接身份与复用语义继续依赖 ambient process state。
 - `mcp-kit`：底层 `resolve_connection_cwd*` helper 也改为对“relative cwd + missing base”直接 fail-closed，并把相对 thread root/base 视为稳定配置错误，避免后续入口重新引入 ambient `current_dir()` fallback。

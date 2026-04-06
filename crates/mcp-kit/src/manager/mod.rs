@@ -324,16 +324,8 @@ impl Connection {
         &self.client
     }
 
-    pub fn client_mut(&mut self) -> &mut mcp_jsonrpc::Client {
-        &mut self.client
-    }
-
     pub fn child_id(&self) -> Option<u32> {
         self.child.as_ref().and_then(tokio::process::Child::id)
-    }
-
-    pub fn take_child(&mut self) -> Option<Child> {
-        self.child.take()
     }
 
     /// Closes the JSON-RPC client and (if present) waits for the underlying child process to exit.
@@ -383,6 +375,10 @@ impl Connection {
         ensure_tokio_time_driver("Connection::wait_with_timeout")?;
         let deadline = tokio::time::Instant::now() + timeout;
         let remaining_budget = || deadline.saturating_duration_since(tokio::time::Instant::now());
+        let cleanup_deadline = match on_timeout {
+            mcp_jsonrpc::WaitOnTimeout::ReturnError => deadline,
+            mcp_jsonrpc::WaitOnTimeout::Kill { kill_timeout } => deadline + kill_timeout,
+        };
         let status = match self
             .client
             .wait_with_timeout(remaining_budget(), on_timeout)
@@ -475,7 +471,9 @@ impl Connection {
                 task.abort();
                 let cleanup_timeout = match on_timeout {
                     mcp_jsonrpc::WaitOnTimeout::ReturnError => remaining_budget(),
-                    mcp_jsonrpc::WaitOnTimeout::Kill { kill_timeout } => kill_timeout,
+                    mcp_jsonrpc::WaitOnTimeout::Kill { .. } => {
+                        cleanup_deadline.saturating_duration_since(tokio::time::Instant::now())
+                    }
                 };
                 if !cleanup_timeout.is_zero() {
                     let _ = tokio::time::timeout(cleanup_timeout, task).await; // pre-commit: allow-let-underscore
@@ -502,7 +500,7 @@ impl Connection {
                     }
                     mcp_jsonrpc::WaitOnTimeout::Kill { kill_timeout } => {
                         task.abort();
-                        match tokio::time::timeout(kill_timeout, task).await {
+                        match tokio::time::timeout_at(cleanup_deadline, task).await {
                             Ok(Ok(())) => {}
                             Ok(Err(err)) if err.is_cancelled() => {}
                             Ok(Err(err)) => {

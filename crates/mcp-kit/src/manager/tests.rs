@@ -5175,6 +5175,47 @@ async fn connection_wait_with_timeout_uses_single_deadline_budget() {
     );
 }
 
+#[tokio::test]
+async fn connection_wait_with_timeout_kill_uses_single_cleanup_budget_for_handler_tasks() {
+    let (client_stream, _server_stream) = tokio::io::duplex(256);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .unwrap();
+
+    let mut handler_tasks = Vec::new();
+    for _ in 0..3 {
+        handler_tasks.push(tokio::task::spawn_blocking(|| {
+            std::thread::sleep(Duration::from_millis(200));
+        }));
+    }
+
+    let conn = Connection {
+        id: next_connection_id(),
+        child: None,
+        client,
+        handler_tasks,
+    };
+
+    let timeout = Duration::from_millis(50);
+    let kill_timeout = Duration::from_millis(80);
+    let started = tokio::time::Instant::now();
+    let err = conn
+        .wait_with_timeout(timeout, mcp_jsonrpc::WaitOnTimeout::Kill { kill_timeout })
+        .await
+        .unwrap_err();
+    let err_chain = format!("{err:#}");
+    assert!(
+        err_chain.contains("wait timed out after"),
+        "unexpected error: {err_chain}"
+    );
+    assert!(
+        started.elapsed() < timeout + kill_timeout + Duration::from_millis(60),
+        "wait exceeded the shared cleanup budget: {:?}",
+        started.elapsed()
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn connection_wait_with_timeout_kill_still_kills_detached_child_when_close_stage_times_out() {

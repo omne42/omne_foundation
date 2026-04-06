@@ -121,7 +121,7 @@ impl BarkSink {
         group: Option<&str>,
         max_chars: usize,
     ) -> serde_json::Value {
-        let title = truncate_chars(event.title(), 256);
+        let title = truncate_chars(event.title().as_ref(), 256);
         let body = format_event_body_and_tags_limited(event, TextLimits::new(max_chars));
 
         let mut obj = serde_json::Map::with_capacity(4);
@@ -257,17 +257,21 @@ mod tests {
 
     #[test]
     fn builds_payload_from_structured_only_event() {
-        let event = Event::new_structured(
-            "turn_completed",
-            Severity::Success,
-            structured_text!("notify.title", "repo" => "omne"),
-        )
-        .with_body_text(structured_text!("notify.body", "step" => "review"))
-        .with_tag_text("thread_id", structured_text!("notify.tag", "value" => "t1"));
+        let title = structured_text!("notify.title", "repo" => "omne");
+        let body = structured_text!("notify.body", "step" => "review");
+        let tag = structured_text!("notify.tag", "value" => "t1");
+        let event = Event::new_structured("turn_completed", Severity::Success, title.clone())
+            .with_body_text(body.clone())
+            .with_tag_text("thread_id", tag.clone());
 
         let payload = BarkSink::build_payload(&event, "k", None, 8 * 1024);
-        assert_eq!(payload["title"].as_str().unwrap_or(""), "");
-        assert_eq!(payload["body"].as_str().unwrap_or(""), "");
+        assert_eq!(payload["title"].as_str().unwrap_or(""), title.to_string());
+        let rendered_body = payload["body"].as_str().unwrap_or("");
+        assert!(rendered_body.contains(&body.to_string()), "{rendered_body}");
+        assert!(
+            rendered_body.contains(&format!("thread_id={}", tag)),
+            "{rendered_body}"
+        );
     }
 
     #[test]

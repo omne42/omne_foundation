@@ -413,12 +413,38 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
+    use std::sync::{Mutex, MutexGuard};
     use std::thread;
     #[cfg(unix)]
     use std::{os::unix::fs::symlink, os::unix::net::UnixListener};
 
     use super::*;
     use crate::sinks::feishu::media::LoadedImage;
+
+    static CURRENT_DIR_LOCK: Mutex<()> = Mutex::new(());
+
+    struct CurrentDirGuard {
+        _lock: MutexGuard<'static, ()>,
+        original: PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn change_to(path: &std::path::Path) -> Self {
+            let lock = CURRENT_DIR_LOCK.lock().expect("lock current dir");
+            let original = std::env::current_dir().expect("current dir");
+            std::env::set_current_dir(path).expect("set current dir");
+            Self {
+                _lock: lock,
+                original,
+            }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
 
     fn local_image_test_root() -> PathBuf {
         let base = std::env::temp_dir()
@@ -852,6 +878,42 @@ mod tests {
 
             let _ = std::fs::remove_file(path);
             let _ = std::fs::remove_dir_all(root);
+        });
+    }
+
+    #[test]
+    fn local_image_base_dir_keeps_relative_paths_stable_across_cwd_changes() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            let root = local_image_test_root().join(unique_local_image_test_name("cwd-stable"));
+            let outside = local_image_test_root().join(unique_local_image_test_name("cwd-other"));
+            std::fs::create_dir_all(&root).expect("create root");
+            std::fs::create_dir_all(&outside).expect("create outside dir");
+            let path = root.join("image.png");
+            std::fs::write(&path, b"png").expect("write image");
+
+            let sink = FeishuWebhookSink::new(
+                FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
+                    .with_app_credentials("app_id", "app_secret")
+                    .with_local_image_files(true)
+                    .with_local_image_base_dir(&root)
+                    .with_local_image_root(root.clone()),
+            )
+            .expect("build sink");
+
+            let _cwd_guard = CurrentDirGuard::change_to(&outside);
+            let loaded = sink
+                .load_image("image.png")
+                .await
+                .expect("relative local image path should ignore process cwd");
+            assert_eq!(loaded.bytes, b"png");
+
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_dir_all(root);
+            let _ = std::fs::remove_dir_all(outside);
         });
     }
 

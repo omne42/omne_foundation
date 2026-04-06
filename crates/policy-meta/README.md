@@ -1,6 +1,7 @@
 # policy-meta
 
 源码入口：[`src/lib.rs`](./src/lib.rs)  
+变更记录：[`CHANGELOG.md`](./CHANGELOG.md)  
 补充规范：[`SPEC.md`](./SPEC.md)
 
 ## 领域
@@ -75,6 +76,7 @@
 
 ## Core Artifacts
 
+- Changelog: `CHANGELOG.md`
 - Spec: `SPEC.md`
 - Rust types: `src/lib.rs`
 - Export binaries:

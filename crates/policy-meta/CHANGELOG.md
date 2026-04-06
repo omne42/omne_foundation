@@ -1,5 +1,9 @@
 # Changelog
 
+All notable changes to this project will be documented in this file.
+
+The format is based on *Keep a Changelog*, and this project adheres to *Semantic Versioning*.
+
 ## [Unreleased]
 
 ### Fixed
@@ -9,3 +13,7 @@
 - Make `export-artifacts --check` fail closed for stale files under `schema/`, `bindings/`, and `profiles/`, and let regeneration prune stale artifacts back to the canonical checked-in set.
 - Align the checked-in JSON Schema dialect with the actual `schemars` 2019-09 generator output instead of advertising 2020-12.
 - Keep typed artifact/CLI errors on the binary side instead of exposing them from the public contract crate API, so argument mistakes and artifact failures stop flattening into erased boundaries without leaking filesystem workflow into library consumers.
+
+### Changed
+
+- `README.md` 现在把 `CHANGELOG.md` 列为正式入口，避免调用方或维护者只看到 schema / bindings / profiles，却漏掉 crate 自己的变更记录位置。

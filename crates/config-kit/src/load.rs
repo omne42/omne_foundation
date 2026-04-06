@@ -418,7 +418,7 @@ fn resolve_candidate_path(
 }
 
 fn map_root_open_error(root: &Path, error: io::Error) -> Error {
-    if root_open_error_is_symlink(&error) {
+    if root_open_error_is_symlink(root, &error) {
         return Error::SymlinkPath {
             path: root.to_path_buf(),
         };
@@ -431,9 +431,31 @@ fn map_root_open_error(root: &Path, error: io::Error) -> Error {
     }
 }
 
-fn root_open_error_is_symlink(error: &io::Error) -> bool {
-    error.kind() == io::ErrorKind::InvalidInput
-        && error.to_string().contains("must not traverse symlinks")
+fn root_open_error_is_symlink(root: &Path, error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::InvalidInput && root_path_contains_symlink(root)
+}
+
+fn root_path_contains_symlink(root: &Path) -> bool {
+    let mut current = PathBuf::new();
+    let mut saw_component = false;
+
+    for component in root.components() {
+        current.push(component.as_os_str());
+
+        if matches!(component, Component::Prefix(_) | Component::RootDir) {
+            continue;
+        }
+
+        saw_component = true;
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return true,
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return false,
+            Err(_) => return false,
+        }
+    }
+
+    saw_component
 }
 
 fn map_candidate_component_open_error(
@@ -681,5 +703,20 @@ mod tests {
         )
         .expect_err("symlinked candidate path must fail");
         assert!(err.to_string().contains("symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_rejects_symlink_root_without_matching_runtime_error_text() {
+        let container = tempfile::tempdir().expect("container");
+        let target_root = tempfile::tempdir().expect("target_root");
+        std::fs::write(target_root.path().join("config.toml"), "enabled = true\n").expect("write");
+
+        let root_link = container.path().join("root-link");
+        std::os::unix::fs::symlink(target_root.path(), &root_link).expect("symlink");
+
+        let err = find_config_document(&root_link, ["config.toml"], ConfigLoadOptions::new())
+            .expect_err("symlink root must fail");
+        assert!(matches!(err, Error::SymlinkPath { .. }), "{err:?}");
     }
 }

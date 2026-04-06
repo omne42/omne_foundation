@@ -107,9 +107,16 @@ async fn connect_stdio_transport(
     let stdout_log = server_cfg.stdout_log().map(|log| {
         let resolved_log_path = absolutize_with_base(&log.path, &cwd);
         let stdout_log_root = ctx.stdout_log_root.as_deref().unwrap_or(cwd.as_path());
-        if !ctx.allow_stdout_log_outside_root
-            && !stdout_log_path_within_root(&resolved_log_path, stdout_log_root)
-        {
+        let within_root = stdout_log_path_within_root(&resolved_log_path, stdout_log_root)
+            .map_err(|err| {
+                wrap_kind(
+                    ErrorKind::Config,
+                    anyhow::Error::new(err).context(format!(
+                        "resolve stdout_log.path root boundary (server={server_name})"
+                    )),
+                )
+            })?;
+        if !ctx.allow_stdout_log_outside_root && !within_root {
             config_bail!(
                 "mcp server {server_name}: stdout_log.path must be within root (set Manager::with_allow_stdout_log_outside_root(true) to override): {}",
                 log.path.display()
@@ -389,38 +396,52 @@ fn normalize_path_for_prefix_check(path: &Path) -> PathBuf {
     normalized
 }
 
-fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
+fn canonicalize_existing_prefix(path: &Path) -> std::io::Result<Option<PathBuf>> {
     let normalized = normalize_path_for_prefix_check(path);
     let mut existing = normalized.as_path();
     let mut missing_components = Vec::new();
 
-    while std::fs::symlink_metadata(existing).is_err() {
-        let component = existing.file_name()?;
-        missing_components.push(component.to_os_string());
-        existing = existing.parent()?;
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let Some(component) = existing.file_name() else {
+                    return Ok(None);
+                };
+                missing_components.push(component.to_os_string());
+                let Some(parent) = existing.parent() else {
+                    return Ok(None);
+                };
+                existing = parent;
+            }
+            Err(err) => return Err(err),
+        }
     }
 
-    let mut resolved = std::fs::canonicalize(existing).ok()?;
+    let mut resolved = std::fs::canonicalize(existing)?;
     for component in missing_components.iter().rev() {
         resolved.push(component);
     }
-    Some(resolved)
+    Ok(Some(resolved))
 }
 
-pub(super) fn stdout_log_path_within_root(stdout_log_path: &Path, root: &Path) -> bool {
+pub(super) fn stdout_log_path_within_root(
+    stdout_log_path: &Path,
+    root: &Path,
+) -> std::io::Result<bool> {
     if !root.is_absolute() {
-        return false;
+        return Ok(false);
     }
 
     let resolved_stdout_log_path = absolutize_with_base(stdout_log_path, root);
-    let Some(resolved_root) = canonicalize_existing_prefix(root) else {
-        return false;
+    let Some(resolved_root) = canonicalize_existing_prefix(root)? else {
+        return Ok(false);
     };
-    let Some(resolved_stdout_log_path) = canonicalize_existing_prefix(&resolved_stdout_log_path)
+    let Some(resolved_stdout_log_path) = canonicalize_existing_prefix(&resolved_stdout_log_path)?
     else {
-        return false;
+        return Ok(false);
     };
-    resolved_stdout_log_path.starts_with(&resolved_root)
+    Ok(resolved_stdout_log_path.starts_with(&resolved_root))
 }
 
 #[cfg(test)]

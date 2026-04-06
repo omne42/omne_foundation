@@ -11,8 +11,8 @@ use omne_fs_primitives::{
 };
 
 use crate::resource_path::{
-    materialize_resource_root, materialize_resource_root_with_base, relative_resource_components,
-    validate_relative_resource_component,
+    materialize_resource_root_from_current_dir, materialize_resource_root_with_base,
+    relative_resource_components, validate_relative_resource_component,
 };
 use crate::text_tree_scan::{TextTreeEntryKind, scan_text_tree};
 
@@ -50,7 +50,7 @@ where
     MapFileTooLarge: FnMut(&Path, usize, usize) -> E,
     MapDirectoryTooLarge: FnMut(usize, usize) -> E,
 {
-    let root = materialize_resource_root(root).map_err(E::from)?;
+    let root = materialize_resource_root_from_current_dir(root).map_err(E::from)?;
     scan_text_directory_materialized(
         &root,
         visit_directory,
@@ -207,7 +207,7 @@ impl SecureRoot {
         root: &Path,
         missing_root_policy: MissingRootPolicy,
     ) -> io::Result<Option<(Self, Vec<PathBuf>)>> {
-        let root = materialize_resource_root(root)?;
+        let root = materialize_resource_root_from_current_dir(root)?;
         let (existing_root, managed_components) = split_existing_resource_root(&root)?;
         let existing = omne_fs_primitives::open_root(
             &existing_root,

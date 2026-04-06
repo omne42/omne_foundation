@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use omne_fs_primitives::MissingRootPolicy;
 
-use crate::resource_path::materialize_resource_root;
+use crate::resource_path::materialize_resource_root_from_current_dir;
 use crate::secure_fs::SecureRoot;
 
 #[cfg(windows)]
@@ -102,7 +102,16 @@ enum WorkspaceRootState {
 /// when the directory does not exist yet.
 /// An existing invalid workspace root is reported as an error instead of
 /// silently switching scopes.
+///
+/// This remains a compatibility entry point for callers that still want
+/// workspace-local defaults to follow the process `current_dir()`. When the
+/// caller already owns a stable workspace root, prefer
+/// [`resolve_data_root_with_base`] instead.
 pub fn resolve_data_root(options: &DataRootOptions) -> io::Result<PathBuf> {
+    resolve_data_root_from_current_dir(options)
+}
+
+pub(crate) fn resolve_data_root_from_current_dir(options: &DataRootOptions) -> io::Result<PathBuf> {
     resolve_data_root_with(
         options,
         &|key| std::env::var_os(key),
@@ -176,8 +185,17 @@ where
     }
 }
 
+/// Creates the resolved data root when missing.
+///
+/// This compatibility entry point keeps the same ambient `current_dir()`
+/// behavior as [`resolve_data_root`]. Prefer [`ensure_data_root_with_base`]
+/// when the caller already owns a stable workspace root.
 pub fn ensure_data_root(options: &DataRootOptions) -> io::Result<PathBuf> {
-    let root = resolve_data_root(options)?;
+    ensure_data_root_from_current_dir(options)
+}
+
+pub(crate) fn ensure_data_root_from_current_dir(options: &DataRootOptions) -> io::Result<PathBuf> {
+    let root = resolve_data_root_from_current_dir(options)?;
     let _root = SecureRoot::open(&root, MissingRootPolicy::Create)?
         .ok_or_else(|| io::Error::other("resource data root could not be created"))?;
     Ok(root)
@@ -194,7 +212,7 @@ pub fn ensure_data_root_with_base(
 }
 
 fn materialize_data_root(path: &Path) -> io::Result<PathBuf> {
-    materialize_resource_root(path)
+    materialize_resource_root_from_current_dir(path)
 }
 
 fn workspace_root_state(path: &Path) -> io::Result<WorkspaceRootState> {
@@ -844,5 +862,15 @@ mod tests {
             .expect_err("symlinked workspace root should fail");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn ambient_resolve_data_root_remains_a_compatibility_entry_point_for_absolute_overrides() {
+        let root = resolve_data_root(
+            &DataRootOptions::default().with_data_dir("/workspace/project/.text_assets"),
+        )
+        .expect("absolute override should keep working through the compatibility entry point");
+
+        assert_eq!(root, PathBuf::from("/workspace/project/.text_assets"));
     }
 }

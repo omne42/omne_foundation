@@ -8,6 +8,10 @@ use std::path::{Component, Path, PathBuf};
 /// should prefer [`materialize_resource_root_with_base`] so the base remains an
 /// explicit input instead of ambient process state.
 pub fn materialize_resource_root(root: &Path) -> io::Result<PathBuf> {
+    materialize_resource_root_from_current_dir(root)
+}
+
+pub(crate) fn materialize_resource_root_from_current_dir(root: &Path) -> io::Result<PathBuf> {
     let root = normalize_resource_root(root, None)?;
     validate_existing_resource_ancestors(&root)
 }
@@ -413,5 +417,13 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("base must be an absolute path"));
+    }
+
+    #[test]
+    fn ambient_materialize_resource_root_remains_a_compatibility_entry_point() {
+        let root = materialize_resource_root(Path::new("/workspace/project/assets/prompts"))
+            .expect("absolute compatibility root should still work");
+
+        assert_eq!(root, PathBuf::from("/workspace/project/assets/prompts"));
     }
 }

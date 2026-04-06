@@ -2,10 +2,13 @@ use std::fmt::{self, Display, Formatter};
 use std::io;
 use std::path::Path;
 
+use crate::resource_path::{
+    materialize_resource_root_from_current_dir, materialize_resource_root_with_base,
+};
 use crate::{
     BootstrapReport, ResourceManifest, bootstrap_text_resources_with_report,
     bootstrap_text_resources_with_report_with_base, lock_bootstrap_transaction,
-    materialize_resource_root, materialize_resource_root_with_base, rollback_created_resources,
+    rollback_created_resources,
 };
 
 #[derive(Debug)]
@@ -71,7 +74,8 @@ pub fn bootstrap_text_resources_then_load<T, E, L>(
 where
     L: FnOnce(&Path, &[String]) -> Result<T, E>,
 {
-    let root = materialize_resource_root(root).map_err(BootstrapLoadError::Bootstrap)?;
+    let root =
+        materialize_resource_root_from_current_dir(root).map_err(BootstrapLoadError::Bootstrap)?;
     bootstrap_text_resources_then_load_impl(root, manifest, load, |root, manifest| {
         bootstrap_text_resources_with_report(root, manifest)
     })

@@ -6,8 +6,8 @@ use std::collections::BTreeSet;
 use std::path::Component;
 
 use crate::resource_path::{
-    materialize_resource_root, materialize_resource_root_with_base, normalize_resource_path,
-    resource_identity_key,
+    materialize_resource_root_from_current_dir, materialize_resource_root_with_base,
+    normalize_resource_path, resource_identity_key,
 };
 use crate::secure_fs::{SecureRoot, WriteResult, validate_total_text_bytes};
 use crate::text_resource::{ResourceManifest, validate_text_resource_contents};
@@ -112,7 +112,7 @@ pub fn bootstrap_text_resources_with_report(
     root: &Path,
     manifest: &ResourceManifest,
 ) -> io::Result<BootstrapReport> {
-    let root = materialize_resource_root(root)?;
+    let root = materialize_resource_root_from_current_dir(root)?;
     bootstrap_text_resources_with_report_impl(root, manifest)
 }
 

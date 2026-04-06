@@ -12,7 +12,8 @@ use omne_fs_primitives::MissingRootPolicy;
 
 use crate::resource_path::normalize_resource_path;
 use crate::resource_path::{
-    materialize_resource_root, materialize_resource_root_with_base, resource_identity_key,
+    materialize_resource_root_from_current_dir, materialize_resource_root_with_base,
+    resource_identity_key,
 };
 use crate::secure_fs::SecureRoot;
 use crate::secure_fs::validate_total_text_bytes;
@@ -25,7 +26,7 @@ pub struct TextDirectory {
 impl TextDirectory {
     /// Loads a text directory and treats a missing root as an error.
     pub fn load(root: &Path) -> io::Result<Self> {
-        let root = materialize_resource_root(root)?;
+        let root = materialize_resource_root_from_current_dir(root)?;
         Self::load_materialized(&root)
     }
 
@@ -36,7 +37,7 @@ impl TextDirectory {
     }
 
     pub fn load_resource_files(root: &Path, relative_paths: &[String]) -> io::Result<Self> {
-        let root = materialize_resource_root(root)?;
+        let root = materialize_resource_root_from_current_dir(root)?;
         Self::load_resource_files_materialized(&root, relative_paths)
     }
 

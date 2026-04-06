@@ -458,4 +458,18 @@ mod tests {
         assert!(!out.contains("notify.title"), "{out}");
         assert!(!out.contains("step=\"review\""), "{out}");
     }
+
+    #[test]
+    fn format_event_text_limited_omits_structured_only_catalog_text_without_plain_fallback() {
+        let event = Event::new_structured(
+            "k",
+            Severity::Info,
+            structured_text!("notify.title", "repo" => "omne"),
+        )
+        .with_body_text(structured_text!("notify.body", "step" => "review"))
+        .with_tag_text("thread_id", structured_text!("notify.tag", "value" => "t1"));
+
+        let out = format_event_text_limited(&event, TextLimits::default());
+        assert!(out.is_empty(), "{out}");
+    }
 }

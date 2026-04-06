@@ -368,8 +368,9 @@ impl CacheAwareSecretResolver for DefaultSecretResolver {
 /// Optional resolver decorator that caches successful secret resolutions for a bounded TTL.
 ///
 /// The wrapped resolver decides which specs are cacheable by providing a cache scope. When that
-/// scope can be derived from the raw spec, cache hits avoid running the expensive resolution path
-/// entirely. Cache entries are always partitioned by
+/// scope can be derived from the raw spec, the hint can cheaply identify candidate cache hits, but
+/// the prepared cache key remains authoritative so mismatched hints fail closed instead of
+/// reusing another secret's entry. Cache entries are always partitioned by
 /// [`SecretEnvironment::secret_cache_partition`], and runtime-sensitive secrets can additionally
 /// opt into [`SecretCommandRuntime::secret_cache_partition`]. Missing required partitions disable
 /// cache reuse so secrets from disjoint environments or command runtimes cannot bleed into one
@@ -441,6 +442,26 @@ impl<R> CachingSecretResolver<R> {
         self.inner
     }
 
+    fn hinted_cache_key(
+        &self,
+        spec: &str,
+        context: SecretResolutionContext<'_>,
+    ) -> Result<Option<SecretCacheKey>>
+    where
+        R: CacheAwareSecretResolver + Send + Sync,
+    {
+        Ok(self
+            .inner
+            .lookup_secret_cache_scope(spec, context)?
+            .and_then(|scope| {
+                self.inner
+                    .lookup_secret_cache_partitioning(spec, context)
+                    .and_then(|partitioning| {
+                        SecretCacheKey::for_context(scope, partitioning, context)
+                    })
+            }))
+    }
+
     fn lookup_cache(&self, key: &SecretCacheKey) -> SecretCacheLookup {
         let mut state = lock_cache_state(&self.state);
         state.prune_expired(self.ttl);
@@ -494,20 +515,8 @@ where
     ) -> SecretResolveFuture<'a> {
         Box::pin(async move {
             loop {
-                if let Some(key) = self
-                    .inner
-                    .lookup_secret_cache_scope(spec, context)?
-                    .and_then(|scope| {
-                        self.inner
-                            .lookup_secret_cache_partitioning(spec, context)
-                            .and_then(|partitioning| {
-                                SecretCacheKey::for_context(scope, partitioning, context)
-                            })
-                    })
-                    && let Some(value) = self.cached_value(&key)
-                {
-                    return Ok(value);
-                }
+                let hinted_key = self.hinted_cache_key(spec, context)?;
+                let hinted_value = hinted_key.as_ref().and_then(|key| self.cached_value(key));
 
                 let prepared = self.inner.prepare_secret_resolution(spec, context).await?;
                 let prepared_key = prepared.cache_key(context);
@@ -518,6 +527,14 @@ where
                         .resolve_prepared_secret(prepared.into_prepared(), context)
                         .await;
                 };
+
+                if hinted_key
+                    .as_ref()
+                    .is_some_and(|hinted_key| hinted_key == &key)
+                    && let Some(value) = hinted_value
+                {
+                    return Ok(value);
+                }
 
                 match self.lookup_cache(&key) {
                     SecretCacheLookup::Hit(value) => return Ok(value),

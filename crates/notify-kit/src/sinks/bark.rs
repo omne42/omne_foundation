@@ -266,16 +266,8 @@ mod tests {
         .with_tag_text("thread_id", structured_text!("notify.tag", "value" => "t1"));
 
         let payload = BarkSink::build_payload(&event, "k", None, 8 * 1024);
-        assert_eq!(
-            payload["title"].as_str().unwrap_or(""),
-            r#"notify.title {repo="omne"}"#
-        );
-        let body = payload["body"].as_str().unwrap_or("");
-        assert!(body.contains(r#"notify.body {step="review"}"#), "{body}");
-        assert!(
-            body.contains(r#"thread_id=notify.tag {value="t1"}"#),
-            "{body}"
-        );
+        assert_eq!(payload["title"].as_str().unwrap_or(""), "");
+        assert_eq!(payload["body"].as_str().unwrap_or(""), "");
     }
 
     #[test]

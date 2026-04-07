@@ -140,7 +140,7 @@ fn open_bootstrap_lock_file(
     root: &Path,
     root_key: &BootstrapRootKey,
 ) -> io::Result<AdvisoryLockGuard> {
-    open_bootstrap_lock_file_at(root_key, &bootstrap_lock_dir(root)?)
+    open_bootstrap_lock_file_at(root_key, &bootstrap_lock_dir(root, root_key)?)
 }
 
 fn open_bootstrap_lock_file_at(
@@ -156,11 +156,28 @@ fn open_bootstrap_lock_file_at(
     )
 }
 
-fn bootstrap_lock_dir(root: &Path) -> io::Result<PathBuf> {
-    Ok(bootstrap_lock_anchor(root)?.join(BOOTSTRAP_LOCK_DIR_NAME))
+fn bootstrap_lock_dir(root: &Path, root_key: &BootstrapRootKey) -> io::Result<PathBuf> {
+    Ok(bootstrap_lock_anchor(root, root_key)?.join(BOOTSTRAP_LOCK_DIR_NAME))
 }
 
-fn bootstrap_lock_anchor(root: &Path) -> io::Result<PathBuf> {
+fn bootstrap_lock_anchor(root: &Path, root_key: &BootstrapRootKey) -> io::Result<PathBuf> {
+    let (closest_existing_anchor, root_exists) = closest_existing_bootstrap_lock_anchor(root)?;
+    #[cfg(unix)]
+    {
+        if let Some(existing_anchor) =
+            existing_bootstrap_lock_anchor_for_root(&closest_existing_anchor, root_key)?
+        {
+            return Ok(existing_anchor);
+        }
+
+        if root_exists {
+            return default_existing_root_bootstrap_lock_anchor(root, &closest_existing_anchor);
+        }
+    }
+    Ok(closest_existing_anchor)
+}
+
+fn closest_existing_bootstrap_lock_anchor(root: &Path) -> io::Result<(PathBuf, bool)> {
     let mut existing = root;
 
     loop {
@@ -186,7 +203,7 @@ fn bootstrap_lock_anchor(root: &Path) -> io::Result<PathBuf> {
                         ),
                     ));
                 };
-                let canonical = canonicalize_path(anchor).map_err(|error| {
+                let canonical_anchor = canonicalize_path(anchor).map_err(|error| {
                     io::Error::new(
                         error.kind(),
                         format!(
@@ -195,14 +212,7 @@ fn bootstrap_lock_anchor(root: &Path) -> io::Result<PathBuf> {
                         ),
                     )
                 })?;
-                #[cfg(unix)]
-                {
-                    return stabilize_bootstrap_lock_anchor_unix(&canonical);
-                }
-                #[cfg(not(unix))]
-                {
-                    return Ok(canonical);
-                }
+                return Ok((canonical_anchor, existing == root));
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 existing = existing.parent().unwrap_or(root);
@@ -221,50 +231,70 @@ fn bootstrap_lock_anchor(root: &Path) -> io::Result<PathBuf> {
 }
 
 #[cfg(unix)]
-fn stabilize_bootstrap_lock_anchor_unix(anchor: &Path) -> io::Result<PathBuf> {
-    let device = symlink_metadata_path(anchor)
+fn existing_bootstrap_lock_anchor_for_root(
+    closest_existing_anchor: &Path,
+    root_key: &BootstrapRootKey,
+) -> io::Result<Option<PathBuf>> {
+    let lock_name = format!("{:016x}.lock", stable_bootstrap_lock_hash(root_key));
+    let mut current = Some(closest_existing_anchor);
+
+    while let Some(anchor) = current {
+        let lock_dir = anchor.join(BOOTSTRAP_LOCK_DIR_NAME);
+        match symlink_metadata_path(&lock_dir) {
+            Ok(metadata) if metadata.is_dir() && lock_dir.join(&lock_name).is_file() => {
+                return Ok(Some(anchor.to_path_buf()));
+            }
+            Ok(_) | Err(_) => {}
+        }
+        current = anchor.parent();
+    }
+
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn default_existing_root_bootstrap_lock_anchor(
+    root: &Path,
+    root_anchor: &Path,
+) -> io::Result<PathBuf> {
+    let Some(parent) = root.parent() else {
+        return Ok(root_anchor.to_path_buf());
+    };
+    let parent_anchor = canonicalize_path(parent).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "canonicalize bootstrap lock anchor parent {}: {error}",
+                parent.display()
+            ),
+        )
+    })?;
+    if same_filesystem_path(&parent_anchor, root_anchor)? {
+        Ok(parent_anchor)
+    } else {
+        Ok(root_anchor.to_path_buf())
+    }
+}
+
+#[cfg(unix)]
+fn same_filesystem_path(left: &Path, right: &Path) -> io::Result<bool> {
+    let left_device = symlink_metadata_path(left)
         .map_err(|error| {
             io::Error::new(
                 error.kind(),
-                format!(
-                    "inspect bootstrap lock anchor {}: {error}",
-                    anchor.display()
-                ),
+                format!("inspect bootstrap lock anchor {}: {error}", left.display()),
             )
         })?
         .dev();
-
-    let mut ancestors = vec![anchor.to_path_buf()];
-    let mut current = anchor;
-    while let Some(parent) = current.parent() {
-        let metadata = symlink_metadata_path(parent).map_err(|error| {
+    let right_device = symlink_metadata_path(right)
+        .map_err(|error| {
             io::Error::new(
                 error.kind(),
-                format!(
-                    "inspect bootstrap lock anchor ancestor {}: {error}",
-                    parent.display()
-                ),
+                format!("inspect bootstrap lock anchor {}: {error}", right.display()),
             )
-        })?;
-        if metadata.dev() != device {
-            break;
-        }
-        ancestors.push(parent.to_path_buf());
-        current = parent;
-    }
-
-    ancestors.reverse();
-    if ancestors.len() > 1
-        && ancestors
-            .first()
-            .is_some_and(|path| path.parent().is_none())
-    {
-        ancestors.remove(0);
-    }
-    Ok(ancestors
-        .into_iter()
-        .next()
-        .expect("canonical anchor chain must contain at least one path"))
+        })?
+        .dev();
+    Ok(left_device == right_device)
 }
 
 fn stable_bootstrap_lock_hash(root: &BootstrapRootKey) -> u64 {
@@ -823,7 +853,8 @@ mod tests {
         fs::create_dir_all(&existing_prefix).expect("mkdir existing prefix");
         let root_key = bootstrap_root_key(&root).expect("root key");
 
-        let lock_dir_before = bootstrap_lock_dir(&root).expect("lock dir before root exists");
+        let lock_dir_before =
+            bootstrap_lock_dir(&root, &root_key).expect("lock dir before root exists");
         let _lock_file_before =
             open_bootstrap_lock_file(&root, &root_key).expect("open lock file before root exists");
         let lock_path_before = lock_dir_before.join(format!(
@@ -832,17 +863,17 @@ mod tests {
         ));
         assert!(lock_path_before.is_file());
         assert!(
-            root.starts_with(
-                lock_dir_before
-                    .parent()
-                    .expect("lock dir should have an anchor parent")
-            )
+            lock_dir_before
+                .parent()
+                .is_some_and(|anchor| anchor == existing_prefix),
+            "lock namespace should stay anchored to the nearest writable existing ancestor",
         );
         drop(_lock_file_before);
 
         fs::create_dir_all(&root).expect("mkdir root");
 
-        let lock_dir_after = bootstrap_lock_dir(&root).expect("lock dir after root exists");
+        let lock_dir_after =
+            bootstrap_lock_dir(&root, &root_key).expect("lock dir after root exists");
         let _lock_file_after =
             open_bootstrap_lock_file(&root, &root_key).expect("open lock file after root exists");
 

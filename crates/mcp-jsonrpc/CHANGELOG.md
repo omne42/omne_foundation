@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：batch 收尾现在会把 `finish()` 写失败显式回传给入站主状态机，避免批量 invalid-request/error response 的 flush 失败继续被静默吞掉；同时 reserved response 在已关闭 transport 上也会归还 pending slot，不再留下脏 completion 计数。
 - `mcp-jsonrpc`：detached runtime 的 shared worker 现在只有在任务真正被 runtime 接手后才把调度视为成功；worker 若在启动任务前退出，调用点会回退到单任务 fallback runtime，而不是把已接收但未执行的 cleanup silently drop。
 - `mcp-jsonrpc`：`Client::close_in_background_once(...)` 现在和显式 close 一样会同时 abort reader task 与 transport tasks；best-effort 后台关闭不再只关写端留下悬挂读循环或 SSE/POST transport 任务。
 - `mcp-jsonrpc`：`ClientHandle` 关闭路径现在在同一临界区内记录首个 `close_reason` 并发布 `closed`，并且无 runtime 的最后兜底 close 收尾会等待 busy writer 释放后再替换写端；`is_closed()`/`check_closed()` 不再暴露“已关闭但原因已被其他竞态路径抢写”或“写端正忙时直接放弃收尾”的窗口。

@@ -1,11 +1,66 @@
 use super::*;
 use error_kit::{ErrorCategory, ErrorRetryAdvice};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 use structured_text_kit::StructuredText;
 
 fn detached_runtime_test_guard() -> &'static std::sync::Mutex<()> {
     static DETACHED_RUNTIME_TEST_GUARD: std::sync::OnceLock<std::sync::Mutex<()>> =
         std::sync::OnceLock::new();
     DETACHED_RUNTIME_TEST_GUARD.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+fn test_client_handle(write: impl tokio::io::AsyncWrite + Send + Unpin + 'static) -> ClientHandle {
+    use std::collections::HashMap;
+
+    ClientHandle {
+        write: Arc::new(tokio::sync::Mutex::new(Box::new(write))),
+        next_id: Arc::new(AtomicI64::new(1)),
+        pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        max_message_bytes: normalize_max_message_bytes(0),
+        max_pending_requests: 8,
+        cancelled_request_ids: Arc::new(std::sync::Mutex::new(CancelledRequestIdsState::default())),
+        stats: Arc::new(ClientStatsInner::default()),
+        diagnostics: None,
+        closed: Arc::new(AtomicBool::new(false)),
+        close_reason: Arc::new(std::sync::Mutex::new(None)),
+        stdout_log_write_error: Arc::new(std::sync::OnceLock::new()),
+    }
+}
+
+struct AlwaysFailWrite;
+
+impl tokio::io::AsyncWrite for AlwaysFailWrite {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        _buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let _ = self;
+        std::task::Poll::Ready(Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "forced batch write failure",
+        )))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let _ = self;
+        std::task::Poll::Ready(Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "forced batch flush failure",
+        )))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let _ = self;
+        std::task::Poll::Ready(Ok(()))
+    }
 }
 
 #[tokio::test]
@@ -170,6 +225,69 @@ mod line_limit_tests {
 mod incoming_value_tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn reserved_batch_slot_is_released_when_transport_is_already_closed() {
+        let handle = test_client_handle(tokio::io::sink());
+        handle.close_with_reason("closed for test").await;
+
+        let batch = BatchResponseWriter::new(handle.clone()).reserve_request_slot();
+        let err = batch
+            .push_reserved_response(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": { "ok": true },
+            }))
+            .await
+            .expect_err("closed transport should reject reserved response");
+
+        assert!(
+            matches!(err, Error::Protocol(ref protocol) if protocol.kind == ProtocolErrorKind::Closed),
+            "{err:?}"
+        );
+        let completion_state = batch.state.completion_state.load(Ordering::Acquire);
+        assert_eq!(completion_state & BatchResponseWriter::PENDING_MASK, 0);
+        assert_eq!(
+            completion_state & BatchResponseWriter::FINISHED_BIT,
+            0,
+            "failed response should only release the reserved slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_finish_errors_are_not_swallowed() {
+        use std::collections::HashMap;
+
+        let pending: PendingRequests = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cancelled_request_ids: CancelledRequestIds =
+            Arc::new(std::sync::Mutex::new(CancelledRequestIdsState::default()));
+        let stats = Arc::new(ClientStatsInner::default());
+        let (notify_tx, _notify_rx) = tokio::sync::mpsc::channel(1);
+        let (request_tx, _request_rx) = tokio::sync::mpsc::channel(1);
+        let handle = test_client_handle(AlwaysFailWrite);
+
+        let err = handle_incoming_value(
+            Value::Array(vec![Value::Array(vec![serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "demo",
+            })])]),
+            &pending,
+            &cancelled_request_ids,
+            &stats,
+            &notify_tx,
+            &request_tx,
+            &handle,
+        )
+        .await
+        .expect_err("batch flush failure should propagate");
+
+        assert!(err.contains("batch response flush failed"), "{err}");
+        let close_reason = handle.close_reason().expect("close reason");
+        assert!(
+            close_reason.contains("client transport write failed"),
+            "{close_reason}"
+        );
+    }
 
     #[tokio::test]
     async fn nested_batch_item_returns_invalid_request_error_in_batch_array() {

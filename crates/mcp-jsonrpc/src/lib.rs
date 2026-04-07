@@ -451,6 +451,10 @@ impl BatchResponseWriter {
         self.clone()
     }
 
+    fn complete_reserved_slot(&self) -> u64 {
+        self.state.completion_state.fetch_sub(1, Ordering::AcqRel)
+    }
+
     async fn push_immediate_response(&self, response: Value) -> Result<(), Error> {
         self.state.handle.check_closed()?;
         self.state.responses.lock().await.push(response);
@@ -458,9 +462,10 @@ impl BatchResponseWriter {
     }
 
     async fn push_reserved_response(&self, response: Value) -> Result<(), Error> {
+        let reserved_slot = ReservedBatchResponseSlot::new(self);
         self.state.handle.check_closed()?;
         self.state.responses.lock().await.push(response);
-        let previous = self.state.completion_state.fetch_sub(1, Ordering::AcqRel);
+        let previous = reserved_slot.complete();
         if previous & Self::PENDING_MASK == 1 && previous & Self::FINISHED_BIT != 0 {
             self.flush_once().await?;
         }
@@ -469,12 +474,12 @@ impl BatchResponseWriter {
 
     fn push_reserved_response_without_runtime(&self, response: Value) {
         if self.state.handle.check_closed().is_err() {
-            self.state.completion_state.fetch_sub(1, Ordering::AcqRel);
+            self.complete_reserved_slot();
             return;
         }
 
         self.state.responses.blocking_lock().push(response);
-        let previous = self.state.completion_state.fetch_sub(1, Ordering::AcqRel);
+        let previous = self.complete_reserved_slot();
         if previous & Self::PENDING_MASK == 1 && previous & Self::FINISHED_BIT != 0 {
             self.flush_if_ready_without_runtime();
         }
@@ -519,6 +524,33 @@ impl BatchResponseWriter {
         let batch = std::mem::take(&mut *responses);
         drop(responses);
         self.state.handle.write_json_line(&batch).await
+    }
+}
+
+struct ReservedBatchResponseSlot<'a> {
+    batch: &'a BatchResponseWriter,
+    completed: bool,
+}
+
+impl<'a> ReservedBatchResponseSlot<'a> {
+    fn new(batch: &'a BatchResponseWriter) -> Self {
+        Self {
+            batch,
+            completed: false,
+        }
+    }
+
+    fn complete(mut self) -> u64 {
+        self.completed = true;
+        self.batch.complete_reserved_slot()
+    }
+}
+
+impl Drop for ReservedBatchResponseSlot<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.batch.complete_reserved_slot();
+        }
     }
 }
 
@@ -1679,14 +1711,18 @@ async fn handle_incoming_value(
                 )
                 .await
                 {
-                    let _ = batch.finish().await;
+                    if let Err(err) = batch.finish().await {
+                        return Err(format!("{reason}; batch response flush failed: {err}"));
+                    }
                     return Err(reason);
                 }
                 if ctx.responder.is_closed() {
                     return Ok(());
                 }
             }
-            let _ = batch.finish().await;
+            if let Err(err) = batch.finish().await {
+                return Err(format!("batch response flush failed: {err}"));
+            }
             Ok(())
         }
         other => {

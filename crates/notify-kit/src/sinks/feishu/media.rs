@@ -1,8 +1,14 @@
-use std::io::Read as _;
+#[cfg(unix)]
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
+#[cfg(unix)]
+use omne_fs_primitives::{
+    MissingRootPolicy, open_directory_component, open_regular_file_at, open_root,
+    read_to_end_limited,
+};
 
 use crate::SecretString;
 use crate::log::{warn_feishu_image_load_failed, warn_feishu_image_upload_failed};
@@ -31,6 +37,13 @@ pub(super) struct LoadedImage {
     pub(super) bytes: Vec<u8>,
     pub(super) file_name: String,
     pub(super) content_type: String,
+}
+
+#[derive(Debug, Clone)]
+struct AllowedLocalImagePath {
+    absolute: PathBuf,
+    root: PathBuf,
+    relative: PathBuf,
 }
 
 struct TenantAccessTokenRefreshGuard {
@@ -177,8 +190,7 @@ impl FeishuWebhookSink {
             self.local_image_base_dir.as_deref(),
             &self.local_image_roots,
         )?;
-        let bytes =
-            read_local_image_file(resolved_path.clone(), self.image_upload_max_bytes).await?;
+        let bytes = read_local_image_file(&resolved_path, self.image_upload_max_bytes).await?;
         if bytes.is_empty() {
             return Err(anyhow::anyhow!("image file is empty").into());
         }
@@ -187,13 +199,15 @@ impl FeishuWebhookSink {
         }
 
         let file_name = resolved_path
+            .absolute
             .file_name()
             .and_then(|v| v.to_str())
             .filter(|v| !v.is_empty())
             .unwrap_or("image")
             .to_string();
 
-        let content_type = guess_image_mime(resolved_path.extension().and_then(|v| v.to_str()));
+        let content_type =
+            guess_image_mime(resolved_path.absolute.extension().and_then(|v| v.to_str()));
 
         Ok(LoadedImage {
             bytes,
@@ -498,7 +512,15 @@ fn normalize_local_image_root(root: PathBuf) -> crate::Result<PathBuf> {
     let root = normalize_path(&root);
 
     #[cfg(unix)]
-    ensure_local_image_path_has_no_symlink_components(&root)?;
+    {
+        let _ = open_root(
+            &root,
+            "local image root",
+            MissingRootPolicy::Error,
+            |_, component, root, error| map_local_image_root_open_error(root, component, error),
+        )
+        .map_err(|err| crate::Error::from(anyhow::anyhow!("{err}")))?;
+    }
 
     let metadata = std::fs::symlink_metadata(&root).map_err(|err| {
         crate::Error::from(anyhow::anyhow!("read local image root metadata: {err}"))
@@ -518,7 +540,7 @@ fn resolve_allowed_local_image_path(
     src: &str,
     base_dir: Option<&Path>,
     roots: &[PathBuf],
-) -> crate::Result<PathBuf> {
+) -> crate::Result<AllowedLocalImagePath> {
     if roots.is_empty() {
         return Err(anyhow::anyhow!(
             "local image files require at least one configured local image root"
@@ -527,8 +549,23 @@ fn resolve_allowed_local_image_path(
     }
 
     let resolved = resolve_local_image_path(Path::new(src), base_dir)?;
-    if roots.iter().any(|root| resolved.starts_with(root)) {
-        return Ok(resolved);
+    for root in roots {
+        let Ok(relative) = resolved.strip_prefix(root) else {
+            continue;
+        };
+        let relative = relative.to_path_buf();
+        if relative.as_os_str().is_empty() {
+            return Err(anyhow::anyhow!(
+                "image path must reference a file within configured local image roots: {}",
+                resolved.display()
+            )
+            .into());
+        }
+        return Ok(AllowedLocalImagePath {
+            absolute: resolved.clone(),
+            root: root.clone(),
+            relative,
+        });
     }
 
     Err(anyhow::anyhow!(
@@ -588,7 +625,10 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
-async fn read_local_image_file(path: PathBuf, max_bytes: usize) -> crate::Result<Vec<u8>> {
+async fn read_local_image_file(
+    path: &AllowedLocalImagePath,
+    max_bytes: usize,
+) -> crate::Result<Vec<u8>> {
     #[cfg(not(unix))]
     {
         let _ = path;
@@ -597,34 +637,20 @@ async fn read_local_image_file(path: PathBuf, max_bytes: usize) -> crate::Result
     }
 
     #[cfg(unix)]
-    tokio::task::spawn_blocking(move || {
-        ensure_local_image_path_has_no_symlink_components(&path)?;
-        let metadata = std::fs::symlink_metadata(&path).map_err(|err| {
-            crate::Error::from(anyhow::anyhow!("read image file metadata: {err}"))
-        })?;
-        let file_type = metadata.file_type();
-        if file_type.is_symlink() {
-            return Err(anyhow::anyhow!("image path must not be a symlink").into());
-        }
-        if !file_type.is_file() {
-            return Err(anyhow::anyhow!("image path must be a regular file").into());
-        }
-        if metadata.len() > max_bytes as u64 {
-            return Err(anyhow::anyhow!("image file too large for upload").into());
-        }
-        let file = open_local_image_file(&path)?;
-
-        let mut bytes = Vec::with_capacity((metadata.len() as usize).min(max_bytes));
-        file.take((max_bytes as u64).saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|err| crate::Error::from(anyhow::anyhow!("read image file: {err}")))?;
-        if bytes.len() > max_bytes {
-            return Err(anyhow::anyhow!("image file too large for upload").into());
-        }
-        Ok(bytes)
-    })
-    .await
-    .map_err(|err| crate::Error::from(anyhow::anyhow!("join image file read task: {err}")))?
+    {
+        let path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut file = open_allowed_local_image_file(&path)?;
+            let (bytes, truncated) = read_to_end_limited(&mut file, max_bytes)
+                .map_err(|err| crate::Error::from(anyhow::anyhow!("read image file: {err}")))?;
+            if truncated {
+                return Err(anyhow::anyhow!("image file too large for upload").into());
+            }
+            Ok(bytes)
+        })
+        .await
+        .map_err(|err| crate::Error::from(anyhow::anyhow!("join image file read task: {err}")))?
+    }
 }
 
 fn tenant_access_token_cache_ttl(expires_in: i64) -> Duration {
@@ -633,54 +659,122 @@ fn tenant_access_token_cache_ttl(expires_in: i64) -> Duration {
 }
 
 #[cfg(unix)]
-fn open_local_image_file(path: &Path) -> crate::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt as _;
+fn open_allowed_local_image_file(
+    path: &AllowedLocalImagePath,
+) -> crate::Result<omne_fs_primitives::File> {
+    let Some(root) = open_root(
+        &path.root,
+        "local image root",
+        MissingRootPolicy::Error,
+        |_, component, root, error| map_local_image_root_open_error(root, component, error),
+    )
+    .map_err(|err| crate::Error::from(anyhow::anyhow!("{err}")))?
+    else {
+        return Err(
+            anyhow::anyhow!("local image root does not exist: {}", path.root.display()).into(),
+        );
+    };
 
-    std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(|err| {
-            if err.raw_os_error() == Some(libc::ELOOP) {
-                crate::Error::from(anyhow::anyhow!("image path must not be a symlink"))
-            } else {
-                crate::Error::from(anyhow::anyhow!("read image file: {err}"))
+    let mut directory = root.into_dir();
+    let mut traversed = PathBuf::new();
+    let mut components = path.relative.components().peekable();
+    let file_name = loop {
+        match components.next() {
+            Some(Component::Normal(component)) if components.peek().is_none() => {
+                break PathBuf::from(component);
             }
-        })
+            Some(Component::Normal(component)) => {
+                traversed.push(component);
+                directory =
+                    open_directory_component(&directory, Path::new(component)).map_err(|err| {
+                        map_local_image_component_open_error(&path.root, &traversed, err)
+                    })?;
+            }
+            Some(other) => {
+                return Err(anyhow::anyhow!(
+                    "image path contains unsupported component {other:?}: {}",
+                    path.absolute.display()
+                )
+                .into());
+            }
+            None => {
+                return Err(anyhow::anyhow!(
+                    "image path must reference a file: {}",
+                    path.absolute.display()
+                )
+                .into());
+            }
+        }
+    };
+
+    open_regular_file_at(&directory, &file_name)
+        .map_err(|err| map_local_image_file_open_error(&path.absolute, err))
 }
 
 #[cfg(unix)]
-fn ensure_local_image_path_has_no_symlink_components(path: &Path) -> crate::Result<()> {
-    let mut current = PathBuf::new();
-
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
-            Component::RootDir => current.push(component.as_os_str()),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                current.pop();
-            }
-            Component::Normal(part) => {
-                current.push(part);
-                let metadata = std::fs::symlink_metadata(&current).map_err(|err| {
-                    crate::Error::from(anyhow::anyhow!(
-                        "read image path metadata for {}: {err}",
-                        current.display()
-                    ))
-                })?;
-                if metadata.file_type().is_symlink() {
-                    return Err(anyhow::anyhow!(
-                        "image path must not traverse symlink component: {}",
-                        current.display()
-                    )
-                    .into());
-                }
-            }
-        }
+fn map_local_image_root_open_error(root: &Path, component: &Path, error: io::Error) -> io::Error {
+    let target = root.join(component);
+    if omne_fs_primitives::is_symlink_or_reparse_open_error(&error) {
+        return io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "local image root must not traverse symlink component: {}",
+                target.display()
+            ),
+        );
     }
+    io::Error::new(
+        error.kind(),
+        format!(
+            "open local image root component {}: {error}",
+            target.display()
+        ),
+    )
+}
 
-    Ok(())
+#[cfg(unix)]
+fn map_local_image_component_open_error(
+    root: &Path,
+    traversed: &Path,
+    error: io::Error,
+) -> crate::Error {
+    let target = root.join(traversed);
+    if target_is_symlink(&target) {
+        return anyhow::anyhow!(
+            "image path must not traverse symlink component: {}",
+            target.display()
+        )
+        .into();
+    }
+    if omne_fs_primitives::is_symlink_or_reparse_open_error(&error) {
+        return anyhow::anyhow!(
+            "image path must not traverse symlink component: {}",
+            target.display()
+        )
+        .into();
+    }
+    anyhow::anyhow!("open image path component {}: {error}", target.display()).into()
+}
+
+#[cfg(unix)]
+fn map_local_image_file_open_error(path: &Path, error: io::Error) -> crate::Error {
+    if target_is_symlink(path) {
+        return anyhow::anyhow!("image path must not be a symlink: {}", path.display()).into();
+    }
+    if omne_fs_primitives::is_symlink_or_reparse_open_error(&error) {
+        return anyhow::anyhow!("image path must not be a symlink: {}", path.display()).into();
+    }
+    if error.kind() == io::ErrorKind::InvalidInput {
+        return anyhow::anyhow!("image path must be a regular file: {}", path.display()).into();
+    }
+    anyhow::anyhow!("read image file: {error}").into()
+}
+
+#[cfg(unix)]
+fn target_is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
 }
 
 pub(super) fn read_bytes_body_limited(
@@ -781,8 +875,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        TenantAccessTokenRefreshGuard, ensure_local_image_path_has_no_symlink_components,
-        normalize_local_image_base_dir, normalize_local_image_roots, resolve_local_image_path,
+        TenantAccessTokenRefreshGuard, normalize_local_image_base_dir, normalize_local_image_roots,
+        resolve_allowed_local_image_path, resolve_local_image_path,
         resolve_local_image_path_with_base, tenant_access_token_cache_ttl,
         tenant_access_token_refresh_waiter,
     };
@@ -921,26 +1015,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn symlink_component_check_catches_parent_relative_escape_to_symlink() {
-        let base = std::env::temp_dir().join(format!(
-            "notify-kit-feishu-media-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&base);
-        let cwd = base.join("cwd");
-        let target = base.join("target");
-        let link = base.join("link");
-        std::fs::create_dir_all(&cwd).expect("create cwd");
-        std::fs::create_dir_all(&target).expect("create target");
-        std::fs::write(target.join("image.png"), b"png").expect("write image");
-        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+    fn resolve_allowed_local_image_path_preserves_root_relative_boundary() {
+        let root = PathBuf::from("/workspace/images");
+        let resolved = resolve_allowed_local_image_path(
+            "../demo.png",
+            Some(Path::new("/workspace/images/nested")),
+            std::slice::from_ref(&root),
+        )
+        .expect("resolve allowed local image path");
 
-        let resolved = resolve_local_image_path_with_base(&cwd, Path::new("../link/image.png"));
-        let err = ensure_local_image_path_has_no_symlink_components(&resolved)
-            .expect_err("parent-relative symlink path should be rejected");
-        assert!(err.to_string().contains("symlink component"), "{err:#}");
-
-        let _ = std::fs::remove_file(&link);
-        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(resolved.root, root);
+        assert_eq!(resolved.relative, PathBuf::from("demo.png"));
+        assert_eq!(
+            resolved.absolute,
+            PathBuf::from("/workspace/images/demo.png")
+        );
     }
 }

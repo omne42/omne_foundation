@@ -19,7 +19,9 @@ let sink = FeishuWebhookSink::new(cfg)?;
 # }
 ```
 
-默认发送前会做 DNS 公网 IP 校验；如果你希望在 **构造阶段** 也校验一次（可能导致无网络时构造失败），可以用：
+默认发送前会做 DNS 公网 IP 校验。同步 `new_strict(...)` / `new_with_secret_strict(...)` 只会收紧配置契约
+（例如禁止关闭公网 IP 校验），不会偷偷发起网络请求或私起 Tokio runtime。
+如果你希望在 **构造阶段** 就主动做一次 DNS 公网 IP 校验，可以用 async 版本：
 
 ```rust,no_run,edition2024
 # extern crate notify_kit;
@@ -27,7 +29,7 @@ let sink = FeishuWebhookSink::new(cfg)?;
 use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
 
 let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx");
-let sink = FeishuWebhookSink::new_strict(cfg)?;
+let _future = FeishuWebhookSink::new_strict_async(cfg);
 # Ok(())
 # }
 ```
@@ -57,7 +59,7 @@ let sink = FeishuWebhookSink::new_with_secret(cfg, "your_secret")?;
 use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
 
 let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx");
-let sink = FeishuWebhookSink::new_with_secret_strict(cfg, "your_secret")?;
+let _future = FeishuWebhookSink::new_with_secret_strict_async(cfg, "your_secret");
 # Ok(())
 # }
 ```
@@ -174,7 +176,7 @@ let sink = FeishuWebhookSink::new(cfg)?;
 
 - 只会读取显式 `local_image_root(s)` 之下的文件；超出 root、`..` 逃逸、symlink 组件和其他特殊路径都会 fail closed
 - 绝对路径可以直接读取；如果消息正文里使用相对本地路径，必须显式配置 `with_local_image_base_dir(...)`，库不会使用 ambient `cwd` 解析
-- 非 Unix 平台如果无法提供安全的 no-follow 打开语义，会直接拒绝本地图片读取，而不是退化成跟随 symlink/reparse point
+- 本地图片读取会复用 workspace 的 no-follow 文件系统原语；如果宿主平台无法提供这条安全边界，会直接 fail closed，而不是退化成跟随 symlink/reparse point
 - 上传失败时不会中断整条消息，自动回退为文本链接表示
 
 ## 错误信息（刻意保持“低敏感”）

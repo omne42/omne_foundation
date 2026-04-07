@@ -11,6 +11,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `notify-kit` 的 feature-gated 日志 helper 现在也跟着 `sink-sound`/`sound-command` 组合裁剪，`default-features = false` 的核心-only 构建不再因为残留 sound fallback warning helper 触发 dead-code 失败。
 
 ### Fixed
+- `FeishuWebhookSink` 的同步 strict 构造函数不再在库内部偷偷做 DNS 校验并私起 Tokio runtime；同步入口现在只收紧 strict 配置契约，需要 eager 网络校验的调用方必须显式使用 async strict 构造。
+- `FeishuWebhookSink` 的本地图片读取现在复用 workspace 的 no-follow 文件系统原语，而不是在 sink 私有模块里继续手写一套 symlink/path 打开边界；相同 allowlist/path 语义下会继续 fail closed。
 - `notify-kit::ErrorKind` 不再把标准 env helper 和 `GitHubCommentSink` 的显式配置失败路径都塌缩成 `Other`；这些 review 命中的配置错误现在会稳定落到 `ErrorKind::Config`，而底层 I/O/HTTP 失败也会落到 `ErrorKind::Transport`，调用方不必再靠错误文本做分类。
 - `notify_kit::env::build_hub_from_standard_env(...)` 不再公开泄露 `anyhow::Result`；现在和 crate 其他 fallible API 一样统一返回 `notify_kit::Result` / `notify_kit::Error`，并在非法 env 值路径上保留稳定的 `ErrorKind::Config`。
 - `notify-kit::Event` 的 plain-fallback 契约现在真正落到实现：structured-only `CatalogText` 不会再通过 `title()` / `body()` / `tags()` 泄漏成 `code {args}` 诊断串；如果调用方先提供了 plain title/body/tag，再写入 catalog text，也会继续保留这层纯文本 fallback 给现有 sinks 使用。

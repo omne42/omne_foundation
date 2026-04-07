@@ -374,6 +374,7 @@ impl HubInner {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::error::Error as _;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -725,6 +726,55 @@ mod tests {
             let first = msg.find("- first:").expect("contains first");
             let second = msg.find("- second:").expect("contains second");
             assert!(first < second, "{msg}");
+        });
+    }
+
+    #[test]
+    fn send_keeps_aggregate_failure_sources_inspectable() {
+        #[derive(Debug)]
+        struct IoFailSink;
+
+        impl Sink for IoFailSink {
+            fn name(&self) -> &'static str {
+                "io-fail"
+            }
+
+            fn send<'a>(&'a self, _event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
+                Box::pin(async move { Err(std::io::Error::other("dial failed").into()) })
+            }
+        }
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(IoFailSink)];
+            let hub = Hub::new(
+                HubConfig {
+                    enabled_kinds: None,
+                    per_sink_timeout: Duration::from_secs(1),
+                },
+                sinks,
+            );
+
+            let err = hub
+                .send(Event::new("kind", Severity::Info, "title"))
+                .await
+                .expect_err("expected sink failure");
+
+            let aggregate_source = err.source().expect("aggregate source");
+            assert_eq!(aggregate_source.to_string(), "- io-fail: dial failed");
+
+            let failure = err.sink_failures().expect("structured failures")[0]
+                .source()
+                .expect("sink failure source");
+            assert_eq!(failure.to_string(), "dial failed");
+            assert!(
+                failure.source().is_none(),
+                "root error should stay unchanged"
+            );
         });
     }
 

@@ -78,6 +78,12 @@ impl std::fmt::Display for SinkFailure {
     }
 }
 
+impl std::error::Error for SinkFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
+
 #[derive(Debug)]
 enum ErrorRepr {
     Other(anyhow::Error),
@@ -174,7 +180,9 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match &self.repr {
             ErrorRepr::Other(err) => err.source(),
-            ErrorRepr::SinkFailures(_) => None,
+            ErrorRepr::SinkFailures(failures) => failures
+                .first()
+                .map(|failure| failure as &(dyn std::error::Error + 'static)),
         }
     }
 }
@@ -224,7 +232,9 @@ pub(crate) fn wrap_kind(kind: ErrorKind, err: anyhow::Error) -> anyhow::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{Error, ErrorKind, tagged_message, wrap_kind};
+    use std::error::Error as _;
+
+    use super::{Error, ErrorKind, SinkFailure, tagged_message, wrap_kind};
 
     #[test]
     fn tagged_errors_keep_stable_config_kind() {
@@ -245,5 +255,34 @@ mod tests {
     fn wrapped_errors_preserve_explicit_kind() {
         let err = Error::from(wrap_kind(ErrorKind::Config, anyhow::anyhow!("bad env")));
         assert_eq!(err.kind(), ErrorKind::Config);
+    }
+
+    #[test]
+    fn sink_failure_exposes_underlying_error_as_source() {
+        let failure = SinkFailure::new(
+            2,
+            "bad",
+            Error::from(anyhow::Error::new(std::io::Error::other("dial failed"))),
+        );
+
+        let source = failure.source().expect("sink failure source");
+        assert_eq!(source.to_string(), "dial failed");
+    }
+
+    #[test]
+    fn aggregate_sink_failures_expose_first_failure_via_source() {
+        let err = Error::from_sink_failures(vec![
+            SinkFailure::new(
+                1,
+                "bad",
+                Error::from(anyhow::Error::new(std::io::Error::other("dial failed"))),
+            ),
+            SinkFailure::new(3, "other", Error::from(anyhow::anyhow!("boom"))),
+        ]);
+
+        let source = err.source().expect("aggregate source");
+        assert_eq!(source.to_string(), "- bad: dial failed");
+        let nested = source.source().expect("nested error");
+        assert_eq!(nested.to_string(), "dial failed");
     }
 }

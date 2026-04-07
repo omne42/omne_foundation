@@ -104,25 +104,35 @@ impl InitializeSnapshot {
             .get("protocolVersion")
             .and_then(serde_json::Value::as_str)
         {
-            Some(server_protocol_version) if server_protocol_version != self.protocol_version => {
-                match self.protocol_version_check {
-                    ProtocolVersionCheck::Strict => protocol_bail!(
-                        "mcp initialize protocolVersion mismatch (server={}): client={}, server={}",
-                        server_name.as_str(),
-                        self.protocol_version,
-                        server_protocol_version
-                    ),
-                    ProtocolVersionCheck::Warn => {
-                        ProtocolVersionMismatchUpdate::Upsert(ProtocolVersionMismatch {
-                            server_name: server_name.clone(),
-                            client_protocol_version: self.protocol_version.clone(),
-                            server_protocol_version: server_protocol_version.to_string(),
-                        })
-                    }
-                    ProtocolVersionCheck::Ignore => ProtocolVersionMismatchUpdate::None,
-                }
+            Some(server_protocol_version) if server_protocol_version == self.protocol_version => {
+                ProtocolVersionMismatchUpdate::Clear
             }
-            Some(_) | None => ProtocolVersionMismatchUpdate::Clear,
+            Some(server_protocol_version) => match self.protocol_version_check {
+                ProtocolVersionCheck::Strict => protocol_bail!(
+                    "mcp initialize protocolVersion mismatch (server={}): client={}, server={}",
+                    server_name.as_str(),
+                    self.protocol_version,
+                    server_protocol_version
+                ),
+                ProtocolVersionCheck::Warn => {
+                    ProtocolVersionMismatchUpdate::Upsert(ProtocolVersionMismatch {
+                        server_name: server_name.clone(),
+                        client_protocol_version: self.protocol_version.clone(),
+                        server_protocol_version: server_protocol_version.to_string(),
+                    })
+                }
+                ProtocolVersionCheck::Ignore => ProtocolVersionMismatchUpdate::None,
+            },
+            None => match self.protocol_version_check {
+                ProtocolVersionCheck::Strict => protocol_bail!(
+                    "mcp initialize result missing string protocolVersion (server={}): client={}",
+                    server_name.as_str(),
+                    self.protocol_version
+                ),
+                ProtocolVersionCheck::Warn | ProtocolVersionCheck::Ignore => {
+                    ProtocolVersionMismatchUpdate::Clear
+                }
+            },
         };
 
         Manager::notify_raw(
@@ -140,7 +150,12 @@ impl InitializeSnapshot {
             )
         })?;
 
-        Ok((result, mismatch_update))
+        let mut exposed_result = result.clone();
+        if let Some(object) = exposed_result.as_object_mut() {
+            object.remove("protocolVersion");
+        }
+
+        Ok((exposed_result, mismatch_update))
     }
 }
 

@@ -134,8 +134,8 @@ pub(crate) fn resolve_config_connection_cwd(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProtocolVersionCheck {
-    /// Fail closed (default): reject servers whose `initialize` result includes a different
-    /// `protocolVersion`.
+    /// Fail closed (default): require a string `initialize.result.protocolVersion` and reject
+    /// mismatches.
     #[default]
     Strict,
     /// Allow mismatches but record them in `Manager::protocol_version_mismatches`.

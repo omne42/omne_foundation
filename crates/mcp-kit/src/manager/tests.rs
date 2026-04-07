@@ -1141,7 +1141,7 @@ async fn connect_io_performs_initialize_and_exposes_result() {
         let response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": { "hello": "world" },
+            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
         });
         let mut response_line = serde_json::to_string(&response).unwrap();
         response_line.push('\n');
@@ -1196,7 +1196,7 @@ async fn server_request_handler_panic_is_bridged_to_error_response() {
         let response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": { "hello": "world" },
+            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
         });
         let mut response_line = serde_json::to_string(&response).unwrap();
         response_line.push('\n');
@@ -1343,7 +1343,7 @@ async fn request_connected_disconnects_after_protocol_error() {
         let response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": init_id,
-            "result": { "hello": "world" },
+            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
         });
         let mut response_line = serde_json::to_string(&response).unwrap();
         response_line.push('\n');
@@ -1425,7 +1425,7 @@ async fn request_connected_accepts_trimmed_server_name() {
         let response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": init_id,
-            "result": { "hello": "world" },
+            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
         });
         let mut response_line = serde_json::to_string(&response).unwrap();
         response_line.push('\n');
@@ -1515,7 +1515,7 @@ async fn request_connected_timeout_late_response_does_not_disconnect() {
         let init_response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": init_id,
-            "result": { "hello": "world" },
+            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
         });
         let mut init_response_line = serde_json::to_string(&init_response).unwrap();
         init_response_line.push('\n');
@@ -1624,7 +1624,7 @@ async fn connect_io_session_returns_session_and_supports_requests() {
         let response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": { "hello": "world" },
+            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
         });
         let mut response_line = serde_json::to_string(&response).unwrap();
         response_line.push('\n');
@@ -2099,7 +2099,7 @@ async fn session_request_timeout_late_response_keeps_session_usable() {
         let init_response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": init_id,
-            "result": { "hello": "world" },
+            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
         });
         let mut init_response_line = serde_json::to_string(&init_response).unwrap();
         init_response_line.push('\n');
@@ -2363,6 +2363,52 @@ async fn connect_io_rejects_initialize_protocol_version_mismatch() {
 }
 
 #[tokio::test]
+async fn connect_io_rejects_missing_initialize_protocol_version_in_strict_mode() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["jsonrpc"], "2.0");
+        assert_eq!(init_value["method"], "initialize");
+        let id = init_value["id"].clone();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "hello": "world" },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+    let err = match manager
+        .connect_io_session("srv", client_read, client_write)
+        .await
+    {
+        Ok(_) => panic!("missing protocolVersion should fail in strict mode"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("missing string protocolVersion"),
+        "unexpected error: {err:#}"
+    );
+
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
 async fn connect_io_allows_initialize_protocol_version_mismatch_when_configured() {
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
         .with_trust_mode(TrustMode::Trusted)
@@ -2407,7 +2453,7 @@ async fn connect_io_allows_initialize_protocol_version_mismatch_when_configured(
             .unwrap();
         assert_eq!(
             session.initialize_result(),
-            &serde_json::json!({ "protocolVersion": "1900-01-01", "hello": "world" })
+            &serde_json::json!({ "hello": "world" })
         );
         assert_eq!(manager.protocol_version_mismatches().len(), 1);
         assert_eq!(
@@ -2674,7 +2720,7 @@ async fn protocol_version_mismatch_is_cleared_when_reconnect_omits_protocol_vers
             let response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
-                "result": { "hello": "world" },
+                "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
             });
             let mut response_line = serde_json::to_string(&response).unwrap();
             response_line.push('\n');
@@ -3066,7 +3112,7 @@ async fn connect_io_reconnects_when_existing_connection_is_closed() {
         let response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": { "hello": "world" },
+            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
         });
         let mut response_line = serde_json::to_string(&response).unwrap();
         response_line.push('\n');
@@ -3125,7 +3171,7 @@ async fn connect_io_reconnects_when_existing_connection_is_closed() {
         let response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": { "hello": "world" },
+            "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "hello": "world" },
         });
         let mut response_line = serde_json::to_string(&response).unwrap();
         response_line.push('\n');

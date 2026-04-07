@@ -31,6 +31,7 @@
 - `Manager` 的 manager-state 校验路径去掉不必要的 `return`，保持 `cargo clippy -D warnings` 在跨平台 CI 上稳定通过；不改变错误边界语义。
 - `mcp-kit`：connection cwd identity 不再先对整条路径做词法 `..` 折叠再 canonicalize；中间目录是 symlink 时，现在会按真实文件系统语义解析已有前缀，再对缺失后缀做词法收尾，避免把 `link/../x` 误算成宿主目录下的 sibling。
 - `mcp-kit`：`stable_connection_cwd_identity` 的缺失尾段回归测试现在比较稳定目录身份而不是原始路径字符串，避免 Windows 上的 verbatim 前缀与 8.3 短路径表示差异把等价路径误报成失败。
+- `mcp-kit`：strict 协议协商现在要求 `initialize.result.protocolVersion` 必须存在且是字符串；缺失该字段的服务端不再被误接入成功。
 
 ### Changed
 - `mcp-kit`：`Manager` 的高层 convenience wrapper 现在拆到独立的 `manager/convenience.rs`，并与 `Session` 一起统一复用 `mcp.rs` 中已有的 typed MCP method metadata/params 序列化 helper，减少 `manager/mod.rs` 神对象继续膨胀，也避免同一批 method string 与 JSON payload 在两条入口上漂移。

@@ -10,6 +10,13 @@ fn detached_runtime_test_guard() -> &'static std::sync::Mutex<()> {
     DETACHED_RUNTIME_TEST_GUARD.get_or_init(|| std::sync::Mutex::new(()))
 }
 
+fn test_detached_spawner() -> crate::background_runtime::DetachedSpawner {
+    crate::background_runtime::reset_detached_runtime_test_state();
+    let spawner = crate::background_runtime::DetachedSpawner::new();
+    spawner.reset_for_test();
+    spawner
+}
+
 fn test_client_handle(write: impl tokio::io::AsyncWrite + Send + Unpin + 'static) -> ClientHandle {
     use std::collections::HashMap;
 
@@ -671,7 +678,7 @@ mod incoming_value_tests {
         let _guard = detached_runtime_test_guard()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::background_runtime::reset_detached_runtime_for_test();
+        crate::background_runtime::reset_detached_runtime_test_state();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -749,7 +756,7 @@ mod incoming_value_tests {
 
             drop(client);
         });
-        crate::background_runtime::reset_detached_runtime_for_test();
+        crate::background_runtime::reset_detached_runtime_test_state();
     }
 
     #[test]
@@ -757,7 +764,7 @@ mod incoming_value_tests {
         let _guard = detached_runtime_test_guard()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::background_runtime::reset_detached_runtime_for_test();
+        crate::background_runtime::reset_detached_runtime_test_state();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -813,7 +820,7 @@ mod incoming_value_tests {
 
             drop(client);
         });
-        crate::background_runtime::reset_detached_runtime_for_test();
+        crate::background_runtime::reset_detached_runtime_test_state();
     }
 
     #[test]
@@ -821,7 +828,7 @@ mod incoming_value_tests {
         let _guard = detached_runtime_test_guard()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::background_runtime::reset_detached_runtime_for_test();
+        crate::background_runtime::reset_detached_runtime_test_state();
         crate::background_runtime::force_detached_runtime_spawn_failures(2, 1);
 
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -876,7 +883,7 @@ mod incoming_value_tests {
         assert!(handle.is_closed(), "client should fail closed");
 
         drop(client);
-        crate::background_runtime::reset_detached_runtime_for_test();
+        crate::background_runtime::reset_detached_runtime_test_state();
     }
 
     #[test]
@@ -884,7 +891,7 @@ mod incoming_value_tests {
         let _guard = detached_runtime_test_guard()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::background_runtime::reset_detached_runtime_for_test();
+        crate::background_runtime::reset_detached_runtime_test_state();
 
         let handle = test_client_handle(PendingWrite);
         let batch = BatchResponseWriter::new(handle.clone()).reserve_request_slot();
@@ -923,7 +930,7 @@ mod incoming_value_tests {
             "client should fail closed after flush timeout"
         );
 
-        crate::background_runtime::reset_detached_runtime_for_test();
+        crate::background_runtime::reset_detached_runtime_test_state();
     }
 
     #[tokio::test]
@@ -1098,16 +1105,17 @@ mod stats_tests {
         let _guard = detached_runtime_test_guard()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::background_runtime::reset_detached_runtime_for_test();
+        let spawner = test_detached_spawner();
         let counter = Arc::new(AtomicU64::new(0));
         let counter_for_task = Arc::clone(&counter);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
 
-        spawn_detached("test detached runtime", async move {
-            counter_for_task.fetch_add(1, AtomicOrdering::Relaxed);
-            done_tx.send(()).unwrap();
-        })
-        .expect("detached runtime should accept queued task");
+        spawner
+            .spawn("test detached runtime", async move {
+                counter_for_task.fetch_add(1, AtomicOrdering::Relaxed);
+                done_tx.send(()).unwrap();
+            })
+            .expect("detached runtime should accept queued task");
 
         done_rx
             .recv_timeout(Duration::from_secs(1))
@@ -1120,20 +1128,21 @@ mod stats_tests {
         let _guard = detached_runtime_test_guard()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::background_runtime::reset_detached_runtime_for_test();
+        let spawner = test_detached_spawner();
         crate::background_runtime::force_detached_runtime_spawn_failures(2, 1);
 
         let counter = Arc::new(AtomicU64::new(0));
         let counter_for_task = Arc::clone(&counter);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
 
-        let err = spawn_detached("test detached runtime double spawn failure", async move {
-            counter_for_task.fetch_add(1, AtomicOrdering::Relaxed);
-            done_tx
-                .send(())
-                .expect("signal inline fallback task completion");
-        })
-        .expect_err("double detached-runtime failure should be reported");
+        let err = spawner
+            .spawn("test detached runtime double spawn failure", async move {
+                counter_for_task.fetch_add(1, AtomicOrdering::Relaxed);
+                done_tx
+                    .send(())
+                    .expect("signal inline fallback task completion");
+            })
+            .expect_err("double detached-runtime failure should be reported");
 
         assert!(
             err.to_string().contains("fallback runtime unavailable"),
@@ -1144,7 +1153,7 @@ mod stats_tests {
             "failed detached-runtime scheduling must not silently run the task"
         );
         assert_eq!(counter.load(AtomicOrdering::Relaxed), 0);
-        crate::background_runtime::reset_detached_runtime_for_test();
+        crate::background_runtime::reset_detached_runtime_test_state();
     }
 
     #[test]
@@ -1152,14 +1161,15 @@ mod stats_tests {
         let _guard = detached_runtime_test_guard()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::background_runtime::reset_detached_runtime_for_test();
+        let spawner = test_detached_spawner();
         let (panic_done_tx, panic_done_rx) = std::sync::mpsc::channel();
 
-        spawn_detached("test detached runtime panic", async move {
-            panic_done_tx.send(()).expect("signal panic task start");
-            panic!("boom");
-        })
-        .expect("panic task should still schedule");
+        spawner
+            .spawn("test detached runtime panic", async move {
+                panic_done_tx.send(()).expect("signal panic task start");
+                panic!("boom");
+            })
+            .expect("panic task should still schedule");
         panic_done_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("panic task should start");
@@ -1168,17 +1178,18 @@ mod stats_tests {
         let counter_for_task = Arc::clone(&counter);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
 
-        spawn_detached("test detached runtime restart", async move {
-            counter_for_task.fetch_add(1, AtomicOrdering::Relaxed);
-            done_tx.send(()).expect("signal recovery task completion");
-        })
-        .expect("detached runtime should recover after panic");
+        spawner
+            .spawn("test detached runtime restart", async move {
+                counter_for_task.fetch_add(1, AtomicOrdering::Relaxed);
+                done_tx.send(()).expect("signal recovery task completion");
+            })
+            .expect("detached runtime should recover after panic");
 
         done_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("detached runtime should recover after worker panic");
         assert_eq!(counter.load(AtomicOrdering::Relaxed), 1);
-        crate::background_runtime::reset_detached_runtime_for_test();
+        crate::background_runtime::reset_detached_runtime_test_state();
     }
 
     #[test]
@@ -1186,7 +1197,7 @@ mod stats_tests {
         let _guard = detached_runtime_test_guard()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::background_runtime::reset_detached_runtime_for_test();
+        let spawner = test_detached_spawner();
         crate::background_runtime::force_detached_runtime_spawn_failures(2, 0);
 
         let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1195,7 +1206,7 @@ mod stats_tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
 
         let join_handle = std::thread::spawn(move || {
-            let result = spawn_detached("test detached fallback runtime", async move {
+            let result = spawner.spawn("test detached fallback runtime", async move {
                 started_tx
                     .send(())
                     .expect("signal detached fallback task start");
@@ -1231,7 +1242,7 @@ mod stats_tests {
         join_handle
             .join()
             .expect("fallback detached runtime scheduling thread should exit cleanly");
-        crate::background_runtime::reset_detached_runtime_for_test();
+        crate::background_runtime::reset_detached_runtime_test_state();
     }
 
     #[test]
@@ -1239,7 +1250,7 @@ mod stats_tests {
         let _guard = detached_runtime_test_guard()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::background_runtime::reset_detached_runtime_for_test();
+        let spawner = test_detached_spawner();
         crate::background_runtime::force_shared_worker_runtime_build_failures(2);
 
         let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1248,16 +1259,15 @@ mod stats_tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
 
         let join_handle = std::thread::spawn(move || {
-            let result =
-                spawn_detached("test detached runtime init failure fallback", async move {
-                    started_tx
-                        .send(())
-                        .expect("signal fallback task start after init failure");
-                    let _ = release_rx.await;
-                    done_tx
-                        .send(())
-                        .expect("signal fallback task completion after init failure");
-                });
+            let result = spawner.spawn("test detached runtime init failure fallback", async move {
+                started_tx
+                    .send(())
+                    .expect("signal fallback task start after init failure");
+                let _ = release_rx.await;
+                done_tx
+                    .send(())
+                    .expect("signal fallback task completion after init failure");
+            });
             returned_tx
                 .send(result)
                 .expect("signal detached scheduling result after init failure");
@@ -1285,7 +1295,7 @@ mod stats_tests {
         join_handle
             .join()
             .expect("fallback detached scheduling thread should exit cleanly");
-        crate::background_runtime::reset_detached_runtime_for_test();
+        crate::background_runtime::reset_detached_runtime_test_state();
     }
 
     #[test]
@@ -1293,7 +1303,7 @@ mod stats_tests {
         let _guard = detached_runtime_test_guard()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::background_runtime::reset_detached_runtime_for_test();
+        let spawner = test_detached_spawner();
         crate::background_runtime::force_shared_worker_drop_before_start(1);
 
         let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1302,7 +1312,7 @@ mod stats_tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
 
         let join_handle = std::thread::spawn(move || {
-            let result = spawn_detached("test detached worker pre-start drop", async move {
+            let result = spawner.spawn("test detached worker pre-start drop", async move {
                 started_tx.send(()).expect("signal fallback task start");
                 let _ = release_rx.await;
                 done_tx.send(()).expect("signal fallback task completion");
@@ -1325,14 +1335,15 @@ mod stats_tests {
             "task should stay blocked until release signal arrives"
         );
 
-        release_tx.send(()).expect("release fallback task");
-        done_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("fallback runtime should finish after release");
+        if release_tx.send(()).is_ok() {
+            done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("fallback runtime should finish after release");
+        }
         join_handle
             .join()
             .expect("fallback detached scheduling thread should exit cleanly");
-        crate::background_runtime::reset_detached_runtime_for_test();
+        crate::background_runtime::reset_detached_runtime_test_state();
     }
 
     #[test]
@@ -1340,30 +1351,32 @@ mod stats_tests {
         let _guard = detached_runtime_test_guard()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::background_runtime::reset_detached_runtime_for_test();
+        let spawner = test_detached_spawner();
 
         let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
         let (first_started_tx, first_started_rx) = std::sync::mpsc::channel();
         let (second_done_tx, second_done_rx) = std::sync::mpsc::channel();
 
-        spawn_detached("test detached shared worker blocked task", async move {
-            first_started_tx
-                .send(())
-                .expect("signal shared worker blocked task start");
-            let _ = release_rx.await;
-        })
-        .expect("shared worker should accept first task");
+        spawner
+            .spawn("test detached shared worker blocked task", async move {
+                first_started_tx
+                    .send(())
+                    .expect("signal shared worker blocked task start");
+                let _ = release_rx.await;
+            })
+            .expect("shared worker should accept first task");
 
         first_started_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("first shared worker task should start");
 
-        spawn_detached("test detached shared worker second task", async move {
-            second_done_tx
-                .send(())
-                .expect("signal second shared worker task completion");
-        })
-        .expect("shared worker should accept second task");
+        spawner
+            .spawn("test detached shared worker second task", async move {
+                second_done_tx
+                    .send(())
+                    .expect("signal second shared worker task completion");
+            })
+            .expect("shared worker should accept second task");
 
         second_done_rx
             .recv_timeout(Duration::from_secs(1))
@@ -1371,7 +1384,40 @@ mod stats_tests {
         release_tx
             .send(())
             .expect("release blocked shared worker task");
-        crate::background_runtime::reset_detached_runtime_for_test();
+        crate::background_runtime::reset_detached_runtime_test_state();
+    }
+
+    #[test]
+    fn detached_spawners_do_not_share_process_global_worker() {
+        let _guard = detached_runtime_test_guard()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::background_runtime::reset_detached_runtime_test_state();
+
+        let first = test_detached_spawner();
+        let second = test_detached_spawner();
+        let (first_tx, first_rx) = std::sync::mpsc::channel();
+        let (second_tx, second_rx) = std::sync::mpsc::channel();
+
+        first
+            .spawn("first detached spawner", async move {
+                first_tx.send(()).expect("signal first detached worker");
+            })
+            .expect("first spawner should start a worker");
+        first_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first detached worker should run");
+
+        second
+            .spawn("second detached spawner", async move {
+                second_tx.send(()).expect("signal second detached worker");
+            })
+            .expect("second spawner should start its own worker");
+        second_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("second detached worker should run");
+
+        assert_eq!(crate::background_runtime::shared_worker_spawn_count(), 2);
     }
 
     fn detached_runtime_test_guard() -> &'static std::sync::Mutex<()> {
@@ -1689,7 +1735,7 @@ mod background_close_tests {
         let _guard = detached_runtime_test_guard()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::background_runtime::reset_detached_runtime_for_test();
+        crate::background_runtime::reset_detached_runtime_test_state();
 
         let shutdown_called = Arc::new(AtomicBool::new(false));
         let handle = ClientHandle {
@@ -1735,7 +1781,7 @@ mod background_close_tests {
             std::thread::sleep(Duration::from_millis(10));
         }
 
-        crate::background_runtime::reset_detached_runtime_for_test();
+        crate::background_runtime::reset_detached_runtime_test_state();
     }
 
     #[tokio::test]

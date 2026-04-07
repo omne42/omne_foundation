@@ -39,7 +39,7 @@ mod streamable_http;
 #[cfg(test)]
 mod tests;
 
-use background_runtime::spawn_detached;
+use background_runtime::{DetachedSpawner, DetachedTask, spawn_fallback_detached};
 pub use error::{Error, ProtocolError, ProtocolErrorKind};
 use stdout_log::LogState;
 
@@ -340,6 +340,7 @@ impl std::fmt::Debug for ClientHandle {
 struct ClientLifecycle {
     reader_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     transport_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    detached_runtime: DetachedSpawner,
 }
 
 impl ClientLifecycle {
@@ -381,6 +382,10 @@ impl ClientLifecycle {
         for task in transport_tasks {
             task.abort();
         }
+    }
+
+    fn spawn_detached_task(&self, task_name: &str, task: DetachedTask) -> std::io::Result<()> {
+        self.detached_runtime.spawn_boxed(task_name, task)
     }
 }
 
@@ -554,17 +559,21 @@ impl BatchResponseWriter {
     fn flush_if_ready_without_runtime(&self) {
         let batch = self.clone();
         let handle = self.state.handle.clone();
-        if let Err(err) = spawn_detached("batch flush without runtime", async move {
-            match tokio::time::timeout(REQUEST_DISPATCH_ERROR_TIMEOUT, batch.flush_once()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    handle.schedule_close_once(format!("batch response flush failed: {err}"))
+        let close_handle = handle.clone();
+        if let Err(err) = handle.spawn_detached_task(
+            "batch flush without runtime",
+            Box::pin(async move {
+                match tokio::time::timeout(REQUEST_DISPATCH_ERROR_TIMEOUT, batch.flush_once()).await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => close_handle
+                        .schedule_close_once(format!("batch response flush failed: {err}")),
+                    Err(_) => close_handle.schedule_close_once(format!(
+                        "batch response flush timed out after {REQUEST_DISPATCH_ERROR_TIMEOUT:?}"
+                    )),
                 }
-                Err(_) => handle.schedule_close_once(format!(
-                    "batch response flush timed out after {REQUEST_DISPATCH_ERROR_TIMEOUT:?}"
-                )),
-            }
-        }) {
+            }),
+        ) {
             self.state.handle.schedule_close_once(format!(
                 "failed to schedule batch flush without runtime: {err}"
             ));
@@ -720,6 +729,15 @@ impl RequestResponder {
             RequestResponseTarget::Batch(batch) => batch.state.handle.schedule_close_once(reason),
         }
     }
+
+    fn spawn_detached_task(&self, task_name: &str, task: DetachedTask) -> std::io::Result<()> {
+        match &self.target {
+            RequestResponseTarget::Direct(handle) => handle.spawn_detached_task(task_name, task),
+            RequestResponseTarget::Batch(batch) => {
+                batch.state.handle.spawn_detached_task(task_name, task)
+            }
+        }
+    }
 }
 
 impl ClientHandle {
@@ -783,6 +801,13 @@ impl ClientHandle {
         }
     }
 
+    fn spawn_detached_task(&self, task_name: &str, task: DetachedTask) -> std::io::Result<()> {
+        if let Some(lifecycle) = &self.lifecycle {
+            return lifecycle.spawn_detached_task(task_name, task);
+        }
+        spawn_fallback_detached(task_name, task)
+    }
+
     pub async fn close(&self, reason: impl Into<String>) {
         self.close_with_reason(reason).await;
     }
@@ -822,11 +847,16 @@ impl ClientHandle {
             return;
         }
         let handle = self.clone();
-        if spawn_detached("client close", async move {
-            handle.finish_close_write().await;
-            handle.abort_background_tasks();
-        })
-        .is_err()
+        let close_handle = handle.clone();
+        if handle
+            .spawn_detached_task(
+                "client close",
+                Box::pin(async move {
+                    close_handle.finish_close_write().await;
+                    close_handle.abort_background_tasks();
+                }),
+            )
+            .is_err()
         {
             // Last-ditch fallback when even detached worker/thread startup is unavailable.
             let mut write = self.write.blocking_lock();
@@ -1712,12 +1742,14 @@ fn schedule_request_dispatch_error(
         "failed to schedule {task_name} response: method={}",
         request.method
     );
-    if let Err(err) = spawn_detached(task_name, async move {
-        match tokio::time::timeout(
-            REQUEST_DISPATCH_ERROR_TIMEOUT,
-            responder.respond_error(&id, code, message, None),
-        )
-        .await
+    if let Err(err) = request.responder.spawn_detached_task(
+        task_name,
+        Box::pin(async move {
+            match tokio::time::timeout(
+                REQUEST_DISPATCH_ERROR_TIMEOUT,
+                responder.respond_error(&id, code, message, None),
+            )
+            .await
         {
             Ok(Ok(())) => {}
             Ok(Err(err)) => responder.schedule_transport_close(format!("{close_reason}: {err}")),
@@ -1725,7 +1757,8 @@ fn schedule_request_dispatch_error(
                 "{close_reason}: timed out after {REQUEST_DISPATCH_ERROR_TIMEOUT:?} while writing error response"
             )),
         }
-    }) {
+        }),
+    ) {
         request
             .responder
             .schedule_transport_close(format!("{schedule_failure_reason}: {err}"));
@@ -1741,12 +1774,14 @@ fn schedule_background_response_write(
 ) {
     let close_reason_for_task = close_reason.clone();
     let responder_for_task = responder.clone();
-    if let Err(err) = spawn_detached(task_name, async move {
-        match tokio::time::timeout(
-            REQUEST_DISPATCH_ERROR_TIMEOUT,
-            responder_for_task.write_transport_response(response),
-        )
-        .await
+    if let Err(err) = responder.spawn_detached_task(
+        task_name,
+        Box::pin(async move {
+            match tokio::time::timeout(
+                REQUEST_DISPATCH_ERROR_TIMEOUT,
+                responder_for_task.write_transport_response(response),
+            )
+            .await
         {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
@@ -1757,7 +1792,8 @@ fn schedule_background_response_write(
                 "{close_reason_for_task}: timed out after {REQUEST_DISPATCH_ERROR_TIMEOUT:?} while writing response"
             )),
         }
-    }) {
+        }),
+    ) {
         responder.schedule_transport_close(format!("{schedule_failure_reason}: {err}"));
     }
 }

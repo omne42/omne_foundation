@@ -29,7 +29,11 @@ fn seed_manager_side_state(manager: &mut Manager, server_name: &str) {
 fn absolute_test_cwd() -> &'static Path {
     static CWD: OnceLock<PathBuf> = OnceLock::new();
     CWD.get_or_init(|| {
-        std::env::current_dir().expect("manager tests require an absolute current directory")
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("mcp-kit tests require a stable workspace root")
+            .to_path_buf()
     })
     .as_path()
 }
@@ -310,6 +314,22 @@ fn stdout_log_path_within_root_rejects_symlink_escape() {
     assert!(
         !stdout_log_path_within_root(Path::new("logs/server.stdout.log"), &root)
             .expect("symlink escape should be rejected")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn stdout_log_path_within_root_rejects_symlink_parent_escape() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let root = tempdir.path().join("workspace");
+    let outside = tempdir.path().join("outside");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+
+    assert!(
+        !stdout_log_path_within_root(Path::new("escape/../logs/server.stdout.log"), &root)
+            .expect("symlink parent escape should be rejected")
     );
 }
 

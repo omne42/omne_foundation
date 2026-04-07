@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 - `i18n-runtime-kit`：当 manifest bootstrap 之后的 catalog load 失败且 best-effort rollback 也失败时，错误现在显式归类为 `ResourceCatalogError::LoadRollback(...)`，保留原始 load/rollback 双错误，而不再把这类双失败误重分类成 bootstrap 主错误。
+- `i18n-runtime-kit`：`ResourceCatalogError::LoadRollback(...)` 现在对 cleanup payload 做 `Box` 封装，保持双错误语义不变，同时继续满足 workspace 的 `clippy::result_large_err` 质量门禁。
 
 ### Changed
 - `LazyCatalog` 的 blocking-shim 契约继续保持“并发访问等待既有初始化结果”，不再因为 `LazyValue` 把同线程 in-flight 状态误判成递归而提前 fail-fast；直接递归初始化仍然显式拒绝。

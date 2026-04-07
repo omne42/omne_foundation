@@ -487,8 +487,17 @@ impl BatchResponseWriter {
 
     fn flush_if_ready_without_runtime(&self) {
         let batch = self.clone();
+        let handle = self.state.handle.clone();
         if let Err(err) = spawn_detached("batch flush without runtime", async move {
-            let _ = batch.flush_once().await;
+            match tokio::time::timeout(REQUEST_DISPATCH_ERROR_TIMEOUT, batch.flush_once()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    handle.schedule_close_once(format!("batch response flush failed: {err}"))
+                }
+                Err(_) => handle.schedule_close_once(format!(
+                    "batch response flush timed out after {REQUEST_DISPATCH_ERROR_TIMEOUT:?}"
+                )),
+            }
         }) {
             self.state.handle.schedule_close_once(format!(
                 "failed to schedule batch flush without runtime: {err}"

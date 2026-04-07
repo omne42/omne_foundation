@@ -135,7 +135,11 @@ impl GitHubCommentSink {
         let owner = normalize_github_identifier("owner", &config.owner)?;
         let repo = normalize_github_identifier("repo", &config.repo)?;
         if config.issue_number == 0 {
-            return Err(anyhow::anyhow!("github issue_number must be > 0").into());
+            return Err(crate::error::tagged_message(
+                crate::ErrorKind::Config,
+                "github issue_number must be > 0",
+            )
+            .into());
         }
         let token = normalize_secret(config.token, "token")?;
 
@@ -152,11 +156,13 @@ impl GitHubCommentSink {
                 .with_bearer_token(Some(token.expose_secret()))
                 .with_trusted_bearer_token_hosts(trusted_hosts.as_slice()),
         )
-        .map_err(anyhow::Error::new)?;
+        .map_err(anyhow::Error::new)
+        .map_err(|err| crate::error::wrap_kind(crate::ErrorKind::Config, err))?;
         let http = build_http_client_profile(&HttpClientOptions {
             timeout: Some(config.timeout),
             ..Default::default()
-        })?;
+        })
+        .map_err(|err| crate::error::wrap_kind(crate::ErrorKind::Config, err.into()))?;
 
         Ok(Self {
             api_url,
@@ -180,16 +186,28 @@ impl GitHubCommentSink {
 fn normalize_github_identifier<'a>(kind: &'static str, value: &'a str) -> crate::Result<&'a str> {
     let value = value.trim();
     if value.is_empty() {
-        return Err(anyhow::anyhow!("github {kind} must not be empty").into());
+        return Err(crate::error::tagged_message(
+            crate::ErrorKind::Config,
+            format!("github {kind} must not be empty"),
+        )
+        .into());
     }
     if value.contains('/') {
-        return Err(anyhow::anyhow!("github {kind} must not contain '/'").into());
+        return Err(crate::error::tagged_message(
+            crate::ErrorKind::Config,
+            format!("github {kind} must not contain '/'"),
+        )
+        .into());
     }
     if !value
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
     {
-        return Err(anyhow::anyhow!("github {kind} contains invalid characters").into());
+        return Err(crate::error::tagged_message(
+            crate::ErrorKind::Config,
+            format!("github {kind} contains invalid characters"),
+        )
+        .into());
     }
     Ok(value)
 }
@@ -212,7 +230,8 @@ fn build_issue_comment_url(
             "comments",
         ],
     )
-    .map_err(|err| anyhow::Error::new(err).into())
+    .map_err(anyhow::Error::new)
+    .map_err(|err| crate::error::wrap_kind(crate::ErrorKind::Config, err).into())
 }
 
 impl Sink for GitHubCommentSink {
@@ -257,7 +276,11 @@ impl Sink for GitHubCommentSink {
 fn normalize_secret(secret: SecretString, field: &str) -> crate::Result<SecretString> {
     let secret = secret.expose_secret().trim();
     if secret.is_empty() {
-        return Err(anyhow::anyhow!("github {field} must not be empty").into());
+        return Err(crate::error::tagged_message(
+            crate::ErrorKind::Config,
+            format!("github {field} must not be empty"),
+        )
+        .into());
     }
     Ok(SecretString::new(secret))
 }
@@ -284,6 +307,7 @@ mod tests {
     fn rejects_empty_owner() {
         let cfg = GitHubCommentConfig::new("", "repo", 1, "tok");
         let err = GitHubCommentSink::new(cfg).expect_err("expected invalid config");
+        assert_eq!(err.kind(), crate::ErrorKind::Config);
         assert!(err.to_string().contains("owner"), "{err:#}");
     }
 
@@ -291,6 +315,7 @@ mod tests {
     fn rejects_slash_in_owner() {
         let cfg = GitHubCommentConfig::new("a/b", "repo", 1, "tok");
         let err = GitHubCommentSink::new(cfg).expect_err("expected invalid config");
+        assert_eq!(err.kind(), crate::ErrorKind::Config);
         assert!(err.to_string().contains("contain '/'"), "{err:#}");
     }
 
@@ -298,6 +323,7 @@ mod tests {
     fn rejects_issue_number_zero() {
         let cfg = GitHubCommentConfig::new("owner", "repo", 0, "tok");
         let err = GitHubCommentSink::new(cfg).expect_err("expected invalid config");
+        assert_eq!(err.kind(), crate::ErrorKind::Config);
         assert!(err.to_string().contains("issue_number"), "{err:#}");
     }
 
@@ -354,6 +380,7 @@ mod tests {
         let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok")
             .with_api_base("https://github.example.com/api/v3/");
         let err = GitHubCommentSink::new(cfg).expect_err("custom host should require opt-in");
+        assert_eq!(err.kind(), crate::ErrorKind::Config);
         assert!(err.to_string().contains("explicit trusted host allowlist"));
     }
 
@@ -364,6 +391,7 @@ mod tests {
             .with_trusted_bearer_token_host("github.example.com");
         let err = GitHubCommentSink::new(cfg)
             .expect_err("credentialed custom api base should fail closed");
+        assert_eq!(err.kind(), crate::ErrorKind::Config);
         assert!(err.to_string().contains("without credentials"), "{err:#}");
     }
 
@@ -374,6 +402,7 @@ mod tests {
             .with_trusted_bearer_token_host("github.example.com");
         let err =
             GitHubCommentSink::new(cfg).expect_err("non-https custom api base should fail closed");
+        assert_eq!(err.kind(), crate::ErrorKind::Config);
         assert!(err.to_string().contains("requires an https"), "{err:#}");
     }
 }

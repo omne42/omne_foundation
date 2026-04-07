@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit`：连接复用元数据现在记录 transport 的 effective config identity，而不再只比较原始 `ServerConfig`；`streamable_http` 的 placeholder 展开、env header / bearer token 注入，以及 `stdio` 的 argv/env 展开变化都不会再静默复用旧连接。
 - `mcp-kit`：`stdout_log.path` 的 root 边界检查不再先对整条路径做词法 `..` 折叠；`symlink + ..` 现在会按真实文件系统语义解析已有前缀并继续 fail-closed 拒绝越界路径，避免程序化配置绕过日志写盘边界。
 - `mcp-kit`：`SharedManager` 与 `Manager::connect*` 现在复用同一条 manager 内部 transport lifecycle 流程；wrapper 不再直接手工拼接 `prepare/connect/install/cleanup` 细节，后续连接语义调整只需收口在 manager 生命周期边界里，降低 core/wrapper 漂移风险。
 - `mcp-kit`：`Manager::with_protocol_version(...)` 与 `with_capabilities(...)` 现在会在本地构造期 fail-fast 拒绝空协议版本和非对象 capabilities，不再把无效 builder 状态拖到异步 initialize 阶段；`with_roots(...)` 依赖的 `capabilities.roots` 补偿也同步收口为对象语义。

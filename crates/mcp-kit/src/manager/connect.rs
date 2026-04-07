@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -41,6 +42,157 @@ struct ResolvedStreamableHttpUrls {
     post_url: String,
     sse_url_field: &'static str,
     post_url_field: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConnectionServerConfigIdentity {
+    Stdio {
+        argv: Vec<OsString>,
+        inherit_env: bool,
+        env: BTreeMap<String, OsString>,
+        stdout_log: Option<ResolvedStdoutLogConfig>,
+    },
+    Unix {
+        unix_path: PathBuf,
+    },
+    StreamableHttp {
+        sse_url: String,
+        post_url: String,
+        headers: BTreeMap<String, String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedStdoutLogConfig {
+    pub(crate) path: PathBuf,
+    pub(crate) max_bytes_per_part: u64,
+    pub(crate) max_parts: Option<u32>,
+}
+
+pub(crate) fn raw_server_config_identity(
+    server_cfg: &ServerConfig,
+) -> ConnectionServerConfigIdentity {
+    match server_cfg {
+        ServerConfig::Stdio(_) => ConnectionServerConfigIdentity::Stdio {
+            argv: server_cfg
+                .argv()
+                .iter()
+                .cloned()
+                .map(OsString::from)
+                .collect(),
+            inherit_env: server_cfg.inherit_env(),
+            env: server_cfg
+                .env()
+                .iter()
+                .map(|(key, value)| (key.clone(), OsString::from(value)))
+                .collect(),
+            stdout_log: server_cfg.stdout_log().map(|log| ResolvedStdoutLogConfig {
+                path: log.path.clone(),
+                max_bytes_per_part: log.max_bytes_per_part,
+                max_parts: log.max_parts,
+            }),
+        },
+        ServerConfig::Unix(_) => ConnectionServerConfigIdentity::Unix {
+            unix_path: server_cfg.unix_path_required().to_path_buf(),
+        },
+        ServerConfig::StreamableHttp(_) => {
+            let mut headers = BTreeMap::new();
+            headers.extend(
+                server_cfg
+                    .http_headers()
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone())),
+            );
+            if let Some(env_var) = server_cfg.bearer_token_env_var() {
+                headers.insert(
+                    AUTHORIZATION_HEADER.to_string(),
+                    format!("$ENVVAR:{env_var}"),
+                );
+            }
+            for (header, env_var) in server_cfg.env_http_headers() {
+                headers.insert(header.clone(), format!("$ENVVAR:{env_var}"));
+            }
+
+            let (sse_url, post_url) = match (
+                server_cfg.url(),
+                server_cfg.sse_url(),
+                server_cfg.http_url(),
+            ) {
+                (Some(url), None, None) => (url.to_string(), url.to_string()),
+                (None, Some(sse_url), Some(http_url)) => {
+                    (sse_url.to_string(), http_url.to_string())
+                }
+                _ => ("<invalid>".to_string(), "<invalid>".to_string()),
+            };
+            ConnectionServerConfigIdentity::StreamableHttp {
+                sse_url,
+                post_url,
+                headers,
+            }
+        }
+    }
+}
+
+pub(crate) fn effective_server_config_identity(
+    ctx: &ConnectContext,
+    server_name: &str,
+    server_cfg: &ServerConfig,
+    cwd: &Path,
+) -> anyhow::Result<ConnectionServerConfigIdentity> {
+    match server_cfg.transport() {
+        Transport::Stdio => {
+            let cwd = super::resolve_connection_cwd(cwd)?;
+            let argv = server_cfg
+                .argv()
+                .iter()
+                .enumerate()
+                .map(|(idx, arg)| {
+                    expand_placeholders_trusted_os(arg, &cwd).with_context(|| {
+                        format!(
+                            "expand argv placeholder (server={server_name} argv[{idx}] redacted)"
+                        )
+                    })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()
+                .map_err(|err| wrap_kind(ErrorKind::Config, err))?;
+            let env = server_cfg
+                .env()
+                .iter()
+                .map(|(key, value)| {
+                    expand_placeholders_trusted_os(value, &cwd)
+                        .with_context(|| format!("expand env placeholder: {key}"))
+                        .map(|value| (key.clone(), value))
+                        .map_err(|err| wrap_kind(ErrorKind::Config, err))
+                })
+                .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+            let stdout_log = server_cfg.stdout_log().map(|log| ResolvedStdoutLogConfig {
+                path: absolutize_with_base(&log.path, &cwd),
+                max_bytes_per_part: log.max_bytes_per_part,
+                max_parts: log.max_parts,
+            });
+            Ok(ConnectionServerConfigIdentity::Stdio {
+                argv,
+                inherit_env: server_cfg.inherit_env(),
+                env,
+                stdout_log,
+            })
+        }
+        Transport::Unix => Ok(ConnectionServerConfigIdentity::Unix {
+            unix_path: server_cfg.unix_path_required().to_path_buf(),
+        }),
+        Transport::StreamableHttp => {
+            let resolved_urls = resolve_streamable_http_urls(ctx, server_name, server_cfg, cwd)?;
+            let mut headers = build_streamable_http_headers(ctx, server_name, server_cfg, cwd)?
+                .into_iter()
+                .collect::<BTreeMap<_, _>>();
+            headers.remove(MCP_PROTOCOL_VERSION_HEADER);
+            Ok(ConnectionServerConfigIdentity::StreamableHttp {
+                sse_url: resolved_urls.sse_url,
+                post_url: resolved_urls.post_url,
+                headers,
+            })
+        }
+    }
 }
 
 pub(crate) async fn connect_transport(
@@ -494,6 +646,28 @@ mod tests {
         assert_eq!(
             headers.get(MCP_PROTOCOL_VERSION_HEADER).map(String::as_str),
             Some(MCP_PROTOCOL_VERSION)
+        );
+    }
+
+    #[test]
+    fn effective_streamable_http_identity_resolves_env_backed_headers() {
+        let ctx = trusted_connect_context();
+        let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+        server_cfg
+            .set_bearer_token_env_var(Some("PATH".to_string()))
+            .unwrap();
+        server_cfg
+            .env_http_headers_mut()
+            .unwrap()
+            .insert("x-env-header".to_string(), "PATH".to_string());
+
+        let raw = raw_server_config_identity(&server_cfg);
+        let effective = effective_server_config_identity(&ctx, "srv", &server_cfg, Path::new("."))
+            .expect("resolve effective identity");
+
+        assert_ne!(
+            raw, effective,
+            "config identity should capture resolved env-backed inputs instead of raw env var names"
         );
     }
 

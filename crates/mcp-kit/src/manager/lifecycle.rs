@@ -56,12 +56,14 @@ pub(crate) struct CompletedConnectionInstall {
 pub(crate) struct PreparedTransportInstall {
     cwd: std::path::PathBuf,
     server_config: ServerConfig,
+    connect_ctx: super::ConnectContext,
     install: PreparedConnectionInstall,
 }
 
 pub(crate) struct CompletedTransportInstall {
     cwd: std::path::PathBuf,
     server_config: ServerConfig,
+    connect_ctx: super::ConnectContext,
     completed: CompletedConnectionInstall,
 }
 
@@ -271,6 +273,7 @@ impl PreparedTransportInstall {
         Ok(CompletedTransportInstall {
             cwd: self.cwd,
             server_config: self.server_config,
+            connect_ctx: self.connect_ctx,
             completed: self.install.run(client, child).await?,
         })
     }
@@ -408,10 +411,12 @@ impl Manager {
         server_name: &ServerName,
         cwd: &Path,
         server_config: &ServerConfig,
+        connect_ctx: &super::ConnectContext,
     ) -> PreparedTransportInstall {
         PreparedTransportInstall {
             cwd: cwd.to_path_buf(),
             server_config: server_config.clone(),
+            connect_ctx: connect_ctx.clone(),
             install: self.prepare_connection_install(server_name),
         }
     }
@@ -426,6 +431,7 @@ impl Manager {
                 &connect.server_name_key,
                 &connect.cwd,
                 &connect.server_cfg,
+                &connect.ctx,
             ),
             connect,
         }
@@ -466,7 +472,14 @@ impl Manager {
     ) -> anyhow::Result<()> {
         let server_name = completed.completed.server_name.clone();
         self.commit_connection_install(completed.completed);
-        self.record_connection_server_config(server_name.as_str(), &completed.server_config)?;
+        let server_config_identity = super::effective_server_config_identity(
+            &completed.connect_ctx,
+            server_name.as_str(),
+            &completed.server_config,
+            &completed.cwd,
+        )?;
+        self.connection_server_configs
+            .insert(server_name.clone(), server_config_identity);
         self.record_connection_cwd(server_name.as_str(), &completed.cwd)?;
         Ok(())
     }

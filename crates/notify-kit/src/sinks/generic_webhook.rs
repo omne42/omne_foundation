@@ -2,11 +2,11 @@ use std::time::Duration;
 
 use crate::Event;
 use crate::sinks::text::{TextLimits, format_event_text_limited};
+use crate::sinks::webhook_transport::WebhookTransport;
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
-    HttpClientOptions, HttpClientProfile, build_http_client_profile, ensure_http_success,
-    parse_and_validate_https_url_basic, redact_url, redact_url_str, send_reqwest,
-    validate_url_path_prefix,
+    ensure_http_success, parse_and_validate_https_url_basic, redact_url, redact_url_str,
+    send_reqwest, validate_url_path_prefix,
 };
 
 #[non_exhaustive]
@@ -104,9 +104,8 @@ impl GenericWebhookConfig {
 pub struct GenericWebhookSink {
     url: reqwest::Url,
     payload_field: String,
-    http: HttpClientProfile,
+    transport: WebhookTransport,
     max_chars: usize,
-    enforce_public_ip: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,7 +128,10 @@ impl std::fmt::Debug for GenericWebhookSink {
             .field("url", &redact_url(&self.url))
             .field("payload_field", &self.payload_field)
             .field("max_chars", &self.max_chars)
-            .field("enforce_public_ip", &self.enforce_public_ip)
+            .field(
+                "enforce_public_ip",
+                &self.transport.default_enforce_public_ip(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -148,16 +150,12 @@ impl GenericWebhookSink {
         mode: GenericWebhookValidationMode,
     ) -> crate::Result<Self> {
         let normalized = normalize_config(config, mode)?;
-        let http = build_http_client_profile(&HttpClientOptions {
-            timeout: Some(normalized.timeout),
-            ..Default::default()
-        })?;
+        let transport = WebhookTransport::new(normalized.timeout, normalized.enforce_public_ip)?;
         Ok(Self {
             url: normalized.url,
             payload_field: normalized.payload_field,
-            http,
+            transport,
             max_chars: normalized.max_chars,
-            enforce_public_ip: normalized.enforce_public_ip,
         })
     }
 
@@ -353,10 +351,7 @@ impl Sink for GenericWebhookSink {
 
     fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
-            let client = self
-                .http
-                .select_for_url(&self.url, self.enforce_public_ip)
-                .await?;
+            let client = self.transport.client_for(&self.url).await?;
 
             let payload = Self::build_payload(event, &self.payload_field, self.max_chars);
 

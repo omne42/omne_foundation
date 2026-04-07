@@ -2,10 +2,10 @@ use std::time::Duration;
 
 use crate::Event;
 use crate::sinks::text::{TextLimits, format_event_text_limited, truncate_chars};
+use crate::sinks::webhook_transport::WebhookTransport;
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
-    DEFAULT_MAX_RESPONSE_BODY_BYTES, HttpClientOptions, HttpClientProfile,
-    build_http_client_profile, http_status_text_error, parse_and_validate_https_url,
+    DEFAULT_MAX_RESPONSE_BODY_BYTES, http_status_text_error, parse_and_validate_https_url,
     read_text_body_limited, redact_url, redact_url_str, response_body_read_error, send_reqwest,
     validate_url_path_prefix,
 };
@@ -63,9 +63,8 @@ impl SlackWebhookConfig {
 
 pub struct SlackWebhookSink {
     webhook_url: reqwest::Url,
-    http: HttpClientProfile,
+    transport: WebhookTransport,
     max_chars: usize,
-    enforce_public_ip: bool,
 }
 
 impl std::fmt::Debug for SlackWebhookSink {
@@ -73,6 +72,10 @@ impl std::fmt::Debug for SlackWebhookSink {
         f.debug_struct("SlackWebhookSink")
             .field("webhook_url", &redact_url(&self.webhook_url))
             .field("max_chars", &self.max_chars)
+            .field(
+                "enforce_public_ip",
+                &self.transport.default_enforce_public_ip(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -81,15 +84,11 @@ impl SlackWebhookSink {
     pub fn new(config: SlackWebhookConfig) -> crate::Result<Self> {
         let webhook_url = parse_and_validate_https_url(&config.webhook_url, &SLACK_ALLOWED_HOSTS)?;
         validate_url_path_prefix(&webhook_url, "/services/")?;
-        let http = build_http_client_profile(&HttpClientOptions {
-            timeout: Some(config.timeout),
-            ..Default::default()
-        })?;
+        let transport = WebhookTransport::new(config.timeout, config.enforce_public_ip)?;
         Ok(Self {
             webhook_url,
-            http,
+            transport,
             max_chars: config.max_chars,
-            enforce_public_ip: config.enforce_public_ip,
         })
     }
 
@@ -106,10 +105,7 @@ impl Sink for SlackWebhookSink {
 
     fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
-            let client = self
-                .http
-                .select_for_url(&self.webhook_url, self.enforce_public_ip)
-                .await?;
+            let client = self.transport.client_for(&self.webhook_url).await?;
             let payload = Self::build_payload(event, self.max_chars);
 
             let resp = send_reqwest(

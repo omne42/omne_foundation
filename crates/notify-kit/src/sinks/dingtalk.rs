@@ -4,11 +4,11 @@ use crate::Event;
 use crate::SecretString;
 use crate::sinks::crypto::hmac_sha256_base64;
 use crate::sinks::text::{TextLimits, format_event_text_limited};
+use crate::sinks::webhook_transport::WebhookTransport;
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
-    HttpClientOptions, HttpClientProfile, build_http_client_profile, parse_and_validate_https_url,
-    read_json_body_after_http_success, redact_url, redact_url_str, send_reqwest,
-    validate_url_path_prefix,
+    parse_and_validate_https_url, read_json_body_after_http_success, redact_url, redact_url_str,
+    send_reqwest, validate_url_path_prefix,
 };
 
 const DINGTALK_ALLOWED_HOSTS: [&str; 1] = ["oapi.dingtalk.com"];
@@ -74,9 +74,8 @@ impl DingTalkWebhookConfig {
 pub struct DingTalkWebhookSink {
     webhook_url: reqwest::Url,
     secret: Option<SecretString>,
-    http: HttpClientProfile,
+    transport: WebhookTransport,
     max_chars: usize,
-    enforce_public_ip: bool,
 }
 
 impl std::fmt::Debug for DingTalkWebhookSink {
@@ -85,6 +84,10 @@ impl std::fmt::Debug for DingTalkWebhookSink {
             .field("webhook_url", &redact_url(&self.webhook_url))
             .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
             .field("max_chars", &self.max_chars)
+            .field(
+                "enforce_public_ip",
+                &self.transport.default_enforce_public_ip(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -101,10 +104,7 @@ impl DingTalkWebhookSink {
 
         let mut webhook_url = parse_and_validate_https_url(&webhook_url, &DINGTALK_ALLOWED_HOSTS)?;
         validate_url_path_prefix(&webhook_url, "/robot/send")?;
-        let http = build_http_client_profile(&HttpClientOptions {
-            timeout: Some(timeout),
-            ..Default::default()
-        })?;
+        let transport = WebhookTransport::new(timeout, enforce_public_ip)?;
 
         let secret = normalize_optional_trimmed(secret)?;
 
@@ -115,9 +115,8 @@ impl DingTalkWebhookSink {
         Ok(Self {
             webhook_url,
             secret,
-            http,
+            transport,
             max_chars,
-            enforce_public_ip,
         })
     }
 
@@ -196,10 +195,7 @@ impl Sink for DingTalkWebhookSink {
     fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
             let url = self.webhook_url_with_signature()?;
-            let client = self
-                .http
-                .select_for_url(&url, self.enforce_public_ip)
-                .await?;
+            let client = self.transport.client_for(&url).await?;
             let payload = Self::build_payload(event, self.max_chars);
 
             let resp = send_reqwest(client.post(url).json(&payload), "dingtalk webhook").await?;

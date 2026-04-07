@@ -3,15 +3,13 @@ use std::time::Duration;
 use crate::Event;
 use crate::SecretString;
 use crate::sinks::text::{TextLimits, format_event_text_limited};
+use crate::sinks::webhook_transport::WebhookTransport;
 use crate::sinks::{BoxFuture, Sink};
 use github_kit::{
     DEFAULT_GITHUB_API_BASE, GitHubApiRequestOptions, apply_github_api_headers,
     build_github_api_url, validate_github_api_request_url, validate_github_api_request_url_dns,
 };
-use http_kit::{
-    HttpClientOptions, HttpClientProfile, build_http_client_profile, ensure_http_success,
-    redact_url, send_reqwest,
-};
+use http_kit::{ensure_http_success, redact_url, send_reqwest};
 
 #[non_exhaustive]
 #[derive(Clone)]
@@ -106,9 +104,8 @@ pub struct GitHubCommentSink {
     repo: String,
     issue_number: u64,
     token: SecretString,
-    http: HttpClientProfile,
+    transport: WebhookTransport,
     max_chars: usize,
-    enforce_public_ip: bool,
     trusted_bearer_token_hosts: Vec<String>,
 }
 
@@ -121,7 +118,10 @@ impl std::fmt::Debug for GitHubCommentSink {
             .field("issue_number", &self.issue_number)
             .field("token", &"<redacted>")
             .field("max_chars", &self.max_chars)
-            .field("enforce_public_ip", &self.enforce_public_ip)
+            .field(
+                "enforce_public_ip",
+                &self.transport.default_enforce_public_ip(),
+            )
             .field(
                 "trusted_bearer_token_hosts",
                 &self.trusted_bearer_token_hosts,
@@ -158,11 +158,8 @@ impl GitHubCommentSink {
         )
         .map_err(anyhow::Error::new)
         .map_err(|err| crate::error::wrap_kind(crate::ErrorKind::Config, err))?;
-        let http = build_http_client_profile(&HttpClientOptions {
-            timeout: Some(config.timeout),
-            ..Default::default()
-        })
-        .map_err(|err| crate::error::wrap_kind(crate::ErrorKind::Config, err.into()))?;
+        let transport = WebhookTransport::new(config.timeout, config.enforce_public_ip)
+            .map_err(|err| crate::error::wrap_kind(crate::ErrorKind::Config, err.into()))?;
 
         Ok(Self {
             api_url,
@@ -170,9 +167,8 @@ impl GitHubCommentSink {
             repo: repo.to_string(),
             issue_number: config.issue_number,
             token,
-            http,
+            transport,
             max_chars: config.max_chars,
-            enforce_public_ip: config.enforce_public_ip,
             trusted_bearer_token_hosts: config.trusted_bearer_token_hosts,
         })
     }
@@ -254,10 +250,10 @@ impl Sink for GitHubCommentSink {
                 .await
                 .map_err(anyhow::Error::new)?;
             let client = self
-                .http
-                .select_for_url(
+                .transport
+                .client_for_with_public_ip(
                     &self.api_url,
-                    self.enforce_public_ip || request_options.requires_public_ip_pinning(),
+                    request_options.requires_public_ip_pinning(),
                 )
                 .await?;
             let payload = Self::build_payload(event, self.max_chars);

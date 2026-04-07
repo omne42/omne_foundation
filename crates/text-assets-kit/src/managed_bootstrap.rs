@@ -160,28 +160,64 @@ mod tests {
         }
     }
 
-    fn managed_bootstrap_test_tempdir(test_name: &str) -> Option<TempDir> {
-        let tempdir = tempfile::Builder::new()
-            .prefix("of-bootstrap-")
-            .rand_bytes(3)
-            .tempdir_in(std::env::temp_dir())
-            .unwrap_or_else(|err| panic!("temp dir: {err}"));
-        let probe_root = tempdir.path().join("bootstrap-probe");
-        let probe_manifest = ResourceManifest::new()
-            .with_resource(TextResource::new("default.md", "hello").expect("valid probe resource"));
-        match crate::bootstrap_text_resources(&probe_root, &probe_manifest) {
-            Ok(()) => {
-                let _ = std::fs::remove_dir_all(&probe_root);
-                Some(tempdir)
+    fn managed_bootstrap_temp_roots() -> Vec<std::path::PathBuf> {
+        let mut roots = Vec::new();
+
+        if let Some(root) = std::env::var_os("OMNE_TEST_SHORT_TMPDIR") {
+            let root = std::path::PathBuf::from(root);
+            if !roots.iter().any(|candidate| candidate == &root) {
+                roots.push(root);
             }
-            Err(err) if err.kind() == io::ErrorKind::StorageFull => {
-                eprintln!(
-                    "skipping {test_name}: managed bootstrap temp root unavailable in this environment: {err}"
-                );
-                None
-            }
-            Err(err) => panic!("managed bootstrap probe: {err}"),
         }
+
+        #[cfg(unix)]
+        {
+            let root = std::path::PathBuf::from("/var/tmp");
+            if !roots.iter().any(|candidate| candidate == &root) {
+                roots.push(root);
+            }
+        }
+
+        let temp_dir = std::env::temp_dir();
+        if !roots.iter().any(|candidate| candidate == &temp_dir) {
+            roots.push(temp_dir);
+        }
+
+        roots
+    }
+
+    fn managed_bootstrap_test_tempdir(test_name: &str) -> Option<TempDir> {
+        for root in managed_bootstrap_temp_roots() {
+            if !root.exists() && std::fs::create_dir_all(&root).is_err() {
+                continue;
+            }
+
+            let tempdir = match tempfile::Builder::new()
+                .prefix("of-bootstrap-")
+                .rand_bytes(3)
+                .tempdir_in(&root)
+            {
+                Ok(tempdir) => tempdir,
+                Err(_) => continue,
+            };
+            let probe_root = tempdir.path().join("bootstrap-probe");
+            let probe_manifest = ResourceManifest::new().with_resource(
+                TextResource::new("default.md", "hello").expect("valid probe resource"),
+            );
+            match crate::bootstrap_text_resources(&probe_root, &probe_manifest) {
+                Ok(()) => {
+                    let _ = std::fs::remove_dir_all(&probe_root);
+                    return Some(tempdir);
+                }
+                Err(err) if err.kind() == io::ErrorKind::StorageFull => continue,
+                Err(err) => panic!("managed bootstrap probe: {err}"),
+            }
+        }
+
+        eprintln!(
+            "skipping {test_name}: unable to create a usable temp root for managed bootstrap tests"
+        );
+        None
     }
 
     fn skip_managed_bootstrap_storage_full<E>(

@@ -248,7 +248,7 @@ fn shared_prompt_error_detail(error: LazyInitError<io::Error>) -> Arc<io::Error>
             "reentrant prompt directory initialization",
         )),
         LazyInitError::SameThreadInitializationConflict => Arc::new(io::Error::other(
-            "same-thread prompt directory initialization conflict",
+            "same-thread prompt directory initialization conflict; LazyPromptDirectory is a blocking compatibility shim, so runtime-facing callers should prefer PromptDirectoryHandle plus eager load/bootstrap",
         )),
         LazyInitError::CrossThreadCycleDetected => Arc::new(io::Error::other(
             "cross-thread prompt directory initialization cycle detected",
@@ -617,7 +617,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_eq!(
             error.to_string(),
-            "same-thread prompt directory initialization conflict"
+            "same-thread prompt directory initialization conflict; LazyPromptDirectory is a blocking compatibility shim, so runtime-facing callers should prefer PromptDirectoryHandle plus eager load/bootstrap"
         );
     }
 

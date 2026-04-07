@@ -11,6 +11,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Added explicit-base variants for path/data-root resolution: `materialize_resource_root_with_base(...)`, `resolve_data_root_with_base(...)`, and `ensure_data_root_with_base(...)`. Callers that already know their workspace root no longer need to rely on ambient `current_dir()` to resolve relative text-assets paths.
 - Added explicit-base variants for higher-level text asset entry points: `TextDirectory::load_with_base(...)`, `TextDirectory::load_resource_files_with_base(...)`, `bootstrap_text_resources_then_load_with_base(...)`, `bootstrap_text_resources_with_base(...)`, `bootstrap_text_resources_with_report_with_base(...)`, and `scan_text_directory_with_base(...)`.
 - Added `SharedRuntimeHandle<T>`, a narrow hot-swappable runtime snapshot handle that higher-level domain adapters can reuse instead of each carrying their own `RwLock<Option<Arc<_>>>` implementation.
+- Added `LazyInitConflictKind` plus `LazyInitError::conflict_kind()`, so compat-shim callers can distinguish stable blocking/conflict causes without relying on display-string matching.
 
 ### Fixed
 - `LazyValue` no longer tears down its cross-thread wait edge on every `Condvar` wake-up; spurious or unrelated `notify_all()` calls now keep the tracked wait relationship alive until the in-flight attempt actually settles, so cycle detection does not silently lose visibility mid-wait.

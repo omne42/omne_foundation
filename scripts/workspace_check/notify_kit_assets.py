@@ -24,6 +24,8 @@ def _run_docs_test(ctx: CheckContext, crate_root: Path) -> None:
     docs_target_dir = ctx.repo_root / "target" / "mdbook-test" / "notify-kit"
     docs_target_dir.mkdir(parents=True, exist_ok=True)
     clear_directory_contents(docs_target_dir)
+    # Some toolchains/runners assume the final deps tempdir ancestry already exists.
+    (docs_target_dir / "debug" / "deps").mkdir(parents=True, exist_ok=True)
 
     env = {"CARGO_TARGET_DIR": str(docs_target_dir)}
     run_command(
@@ -62,6 +64,13 @@ def _run_bot_syntax_checks(ctx: CheckContext, bots_root: Path) -> None:
 def _run_shared_bot_tests(ctx: CheckContext, bots_root: Path) -> None:
     shared_root = bots_root / "_shared"
     if not shared_root.is_dir():
+        return
+
+    if not command_exists("node"):
+        print(
+            "pre-commit: skipping notify-kit shared bot tests because node is not installed",
+            file=sys.stderr,
+        )
         return
 
     test_files = sorted(shared_root.glob("*.test.mjs")) + sorted(

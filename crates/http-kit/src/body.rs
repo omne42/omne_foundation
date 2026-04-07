@@ -121,7 +121,7 @@ pub async fn read_json_body_after_http_success_limited(
 ) -> crate::Result<serde_json::Value> {
     let status = resp.status();
     if !status.is_success() {
-        let body = read_text_body_limited(resp, DEFAULT_MAX_RESPONSE_BODY_BYTES)
+        let body = read_text_body_limited(resp, max_bytes)
             .await
             .map_err(|err| {
                 response_body_read_error(&format!("{context} http error"), status, &err)
@@ -356,6 +356,8 @@ fn truncate_chars(input: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn decode_text_body_lossy_reuses_valid_utf8_buffer() {
@@ -415,6 +417,44 @@ mod tests {
     fn body_preview_json_returns_none_for_zero_limit() {
         let body = b"{\"large\":true}";
         assert!(body_preview_json(body, 0).is_none());
+    }
+
+    #[tokio::test]
+    async fn error_branch_respects_custom_body_limit() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf).await.expect("read request");
+            let body = "abcdefghijklmnopqrstuvwxyz";
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect("send request");
+        let err = read_json_body_after_http_success_limited(resp, "github api", 4)
+            .await
+            .expect_err("expected http error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("response=abcd\n[truncated]"),
+            "unexpected error: {msg}"
+        );
+        assert!(!msg.contains("efgh"), "unexpected error: {msg}");
+
+        server.await.expect("server task");
     }
 
     #[test]

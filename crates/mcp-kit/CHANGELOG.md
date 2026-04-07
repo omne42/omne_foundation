@@ -30,6 +30,7 @@
 - `mcp-kit`：`stable_connection_cwd_identity` 的缺失尾段回归测试现在比较稳定目录身份而不是原始路径字符串，避免 Windows 上的 verbatim 前缀与 8.3 短路径表示差异把等价路径误报成失败。
 
 ### Changed
+- `mcp-kit`：`Manager` 的高层 convenience wrapper 现在拆到独立的 `manager/convenience.rs`，并与 `Session` 一起统一复用 `mcp.rs` 中已有的 typed MCP method metadata/params 序列化 helper，减少 `manager/mod.rs` 神对象继续膨胀，也避免同一批 method string 与 JSON payload 在两条入口上漂移。
 - `Manager::from_config` 的契约现在显式收紧为“只接受已校验 `Config`”：仍保留原返回类型，但会在构造期 panic 并提示改用 `try_from_config` 获取 typed 错误。
 - `mcp-kit`：新补的“非 `NotFound` 文件系统错误上抛”回归测试改为 Unix 专属，避免把 Windows 路径解析差异误报成实现回归；产品行为不变。
 - `mcp-kit`：连接阶段解析相对 `cwd` 时现在必须拿到显式绝对 base（例如已加载 `mcp.json` 的 thread root）；`Manager` / `SharedManager` 不再在运行时偷偷回退到进程级 `current_dir()`，避免连接身份与复用语义继续依赖 ambient process state。

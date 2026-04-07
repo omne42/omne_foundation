@@ -3,6 +3,13 @@ use std::time::Duration;
 use anyhow::Context;
 use serde_json::Value;
 
+use crate::mcp::{
+    CallToolRequest, CallToolRequestParams, CompleteRequest, GetPromptRequest,
+    GetPromptRequestParams, ListPromptsRequest, ListResourceTemplatesRequest, ListResourcesRequest,
+    ListToolsRequest, PingRequest, ReadResourceRequest, ReadResourceRequestParams, SetLevelRequest,
+    SetLevelRequestParams, SubscribeRequest, SubscribeRequestParams, UnsubscribeRequest,
+    UnsubscribeRequestParams, serialize_request_params,
+};
 use crate::{Connection, McpNotification, McpRequest, ServerName};
 
 pub struct Session {
@@ -190,62 +197,89 @@ impl Session {
     }
 
     pub async fn ping(&self) -> crate::Result<Value> {
-        self.request("ping", None).await
+        self.request(PingRequest::METHOD, None).await
     }
 
     pub async fn list_tools(&self) -> crate::Result<Value> {
-        self.request("tools/list", None).await
+        self.request(ListToolsRequest::METHOD, None).await
     }
 
     pub async fn list_resources(&self) -> crate::Result<Value> {
-        self.request("resources/list", None).await
+        self.request(ListResourcesRequest::METHOD, None).await
     }
 
     pub async fn list_resource_templates(&self) -> crate::Result<Value> {
-        self.request("resources/templates/list", None).await
+        self.request(ListResourceTemplatesRequest::METHOD, None)
+            .await
     }
 
     pub async fn read_resource(&self, uri: &str) -> crate::Result<Value> {
-        let params = serde_json::json!({ "uri": uri });
-        self.request("resources/read", Some(params)).await
+        let params = serialize_request_params::<ReadResourceRequest>(
+            self.server_name.as_str(),
+            Some(ReadResourceRequestParams {
+                uri: uri.to_string(),
+            }),
+        )?;
+        self.request(ReadResourceRequest::METHOD, params).await
     }
 
     pub async fn subscribe_resource(&self, uri: &str) -> crate::Result<Value> {
-        let params = serde_json::json!({ "uri": uri });
-        self.request("resources/subscribe", Some(params)).await
+        let params = serialize_request_params::<SubscribeRequest>(
+            self.server_name.as_str(),
+            Some(SubscribeRequestParams {
+                uri: uri.to_string(),
+            }),
+        )?;
+        self.request(SubscribeRequest::METHOD, params).await
     }
 
     pub async fn unsubscribe_resource(&self, uri: &str) -> crate::Result<Value> {
-        let params = serde_json::json!({ "uri": uri });
-        self.request("resources/unsubscribe", Some(params)).await
+        let params = serialize_request_params::<UnsubscribeRequest>(
+            self.server_name.as_str(),
+            Some(UnsubscribeRequestParams {
+                uri: uri.to_string(),
+            }),
+        )?;
+        self.request(UnsubscribeRequest::METHOD, params).await
     }
 
     pub async fn list_prompts(&self) -> crate::Result<Value> {
-        self.request("prompts/list", None).await
+        self.request(ListPromptsRequest::METHOD, None).await
     }
 
     pub async fn get_prompt(&self, prompt: &str, arguments: Option<Value>) -> crate::Result<Value> {
-        let mut params = serde_json::json!({ "name": prompt });
-        if let Some(arguments) = arguments {
-            params["arguments"] = arguments;
-        }
-        self.request("prompts/get", Some(params)).await
+        let params = serialize_request_params::<GetPromptRequest>(
+            self.server_name.as_str(),
+            Some(GetPromptRequestParams {
+                name: prompt.to_string(),
+                arguments,
+            }),
+        )?;
+        self.request(GetPromptRequest::METHOD, params).await
     }
 
     pub async fn call_tool(&self, tool: &str, arguments: Option<Value>) -> crate::Result<Value> {
-        let mut params = serde_json::json!({ "name": tool });
-        if let Some(arguments) = arguments {
-            params["arguments"] = arguments;
-        }
-        self.request("tools/call", Some(params)).await
+        let params = serialize_request_params::<CallToolRequest>(
+            self.server_name.as_str(),
+            Some(CallToolRequestParams {
+                name: tool.to_string(),
+                arguments,
+            }),
+        )?;
+        self.request(CallToolRequest::METHOD, params).await
     }
 
     pub async fn set_logging_level(&self, level: &str) -> crate::Result<Value> {
-        let params = serde_json::json!({ "level": level });
-        self.request("logging/setLevel", Some(params)).await
+        let params = serialize_request_params::<SetLevelRequest>(
+            self.server_name.as_str(),
+            Some(SetLevelRequestParams {
+                level: level.to_string(),
+            }),
+        )?;
+        self.request(SetLevelRequest::METHOD, params).await
     }
 
     pub async fn complete(&self, params: Value) -> crate::Result<Value> {
-        self.request("completion/complete", Some(params)).await
+        self.request(CompleteRequest::METHOD, Some(params)).await
     }
 }

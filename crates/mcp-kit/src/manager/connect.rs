@@ -227,7 +227,7 @@ async fn connect_streamable_http_transport(
         &resolved_urls.post_url,
         mcp_jsonrpc::StreamableHttpOptions {
             headers,
-            enforce_public_ip: ctx.trust_mode != TrustMode::Trusted,
+            enforce_public_ip: should_enforce_public_ip(ctx),
             request_timeout: Some(ctx.request_timeout),
             ..Default::default()
         },
@@ -249,6 +249,14 @@ async fn connect_streamable_http_transport(
     })?;
 
     Ok((client, None))
+}
+
+fn should_enforce_public_ip(ctx: &ConnectContext) -> bool {
+    ctx.trust_mode != TrustMode::Trusted
+        && !ctx
+            .untrusted_streamable_http_policy
+            .outbound
+            .allow_private_ips
 }
 
 fn resolve_streamable_http_urls(
@@ -576,5 +584,19 @@ mod tests {
         let mut child = child.expect("stdio child");
         child.kill().await.expect("kill child");
         let _ = child.wait().await;
+    }
+
+    #[test]
+    fn private_ip_override_disables_public_ip_pinning_for_streamable_http() {
+        let mut ctx = trusted_connect_context();
+        assert!(!should_enforce_public_ip(&ctx));
+
+        ctx.trust_mode = TrustMode::Untrusted;
+        assert!(should_enforce_public_ip(&ctx));
+
+        ctx.untrusted_streamable_http_policy
+            .outbound
+            .allow_private_ips = true;
+        assert!(!should_enforce_public_ip(&ctx));
     }
 }

@@ -6,6 +6,7 @@ use tokio::sync::Semaphore;
 
 use crate::error::{self, ErrorKind};
 use crate::public_ip::validate_public_addrs;
+use crate::tokio_time;
 
 const DEFAULT_DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_MAX_DNS_LOOKUPS_INFLIGHT: usize = 32;
@@ -103,6 +104,10 @@ impl HttpClientProfile {
 
 fn dns_lookup_timeout_message() -> String {
     format!("dns lookup timeout (capped at {DEFAULT_DNS_LOOKUP_TIMEOUT:?})")
+}
+
+fn dns_lookup_time_driver_message() -> &'static str {
+    "dns lookup timeout requires a Tokio runtime with the time driver enabled"
 }
 
 fn remaining_dns_timeout(deadline: Instant) -> crate::Result<Duration> {
@@ -268,21 +273,23 @@ async fn resolve_url_to_public_addrs_async(
 
     let deadline = Instant::now() + dns_timeout;
     let lookup = {
-        let _permit = tokio::time::timeout(
+        let _permit = tokio_time::timeout(
             remaining_dns_timeout(deadline)?,
             shared_state.dns_lookup_semaphore().acquire(),
         )
         .await
+        .map_err(|_| error::tagged_message(ErrorKind::Transport, dns_lookup_time_driver_message()))?
         .map_err(|err| {
             error::tagged_source(ErrorKind::Transport, dns_lookup_timeout_message(), err)
         })?
         .map_err(|err| error::tagged_source(ErrorKind::Transport, "dns lookup failed", err))?;
 
-        tokio::time::timeout(
+        tokio_time::timeout(
             remaining_dns_timeout(deadline)?,
             tokio::net::lookup_host((host, port)),
         )
         .await
+        .map_err(|_| error::tagged_message(ErrorKind::Transport, dns_lookup_time_driver_message()))?
         .map_err(|err| {
             error::tagged_source(ErrorKind::Transport, dns_lookup_timeout_message(), err)
         })?
@@ -909,5 +916,30 @@ mod tests {
             !Arc::ptr_eq(&profile_a.shared_state, &profile_b.shared_state),
             "distinct profiles should not share process-global pinned-client state"
         );
+    }
+
+    #[test]
+    fn select_http_client_with_public_ip_pinning_returns_error_without_time_driver() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let url = reqwest::Url::parse("https://example.com/mcp").expect("parse url");
+            let err = select_http_client_with_options(
+                &timeout_only_options(Duration::from_secs(1)),
+                &url,
+                true,
+            )
+            .await
+            .expect_err("missing time driver should return an error");
+
+            assert_eq!(err.kind(), ErrorKind::Transport);
+            assert!(
+                err.to_string().contains("time driver enabled"),
+                "unexpected error: {err}"
+            );
+        });
     }
 }

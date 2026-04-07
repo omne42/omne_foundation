@@ -4,6 +4,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::ip::{is_always_disallowed_ip, is_non_global_ip, normalize_ip};
+use crate::tokio_time;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UntrustedOutboundPolicy {
@@ -103,14 +104,28 @@ pub async fn validate_untrusted_outbound_url_dns(
         .port_or_known_default()
         .ok_or(UntrustedOutboundError::MissingPortOrKnownDefault)?;
 
-    let addrs = match tokio::time::timeout(
+    let addrs = match tokio_time::timeout(
         policy.dns_timeout,
         tokio::net::lookup_host((host_for_ip, port)),
     )
     .await
     {
-        Ok(Ok(addrs)) => addrs,
-        Ok(Err(err)) => {
+        Err(_) => {
+            return Err(UntrustedOutboundError::DnsLookupFailed {
+                host: host.to_string(),
+                message: "dns lookup timeout requires a Tokio runtime with the time driver enabled"
+                    .to_string(),
+            });
+        }
+        Ok(Err(_)) => {
+            if policy.dns_fail_open {
+                return Ok(());
+            }
+            return Err(UntrustedOutboundError::DnsLookupTimedOut {
+                host: host.to_string(),
+            });
+        }
+        Ok(Ok(Err(err))) => {
             if policy.dns_fail_open {
                 return Ok(());
             }
@@ -119,14 +134,7 @@ pub async fn validate_untrusted_outbound_url_dns(
                 message: err.to_string(),
             });
         }
-        Err(_) => {
-            if policy.dns_fail_open {
-                return Ok(());
-            }
-            return Err(UntrustedOutboundError::DnsLookupTimedOut {
-                host: host.to_string(),
-            });
-        }
+        Ok(Ok(Ok(addrs))) => addrs,
     };
 
     validate_resolved_addrs(policy, host, addrs)
@@ -504,6 +512,49 @@ mod tests {
             UntrustedOutboundError::ResolvedToNonGlobalIp { ip, .. }
                 if ip == IpAddr::from([0, 0, 0, 0])
         ));
+    }
+
+    #[test]
+    fn resolved_multicast_ip_is_rejected_even_with_private_ip_override() {
+        let policy = UntrustedOutboundPolicy {
+            allow_private_ips: true,
+            ..Default::default()
+        };
+
+        let err = validate_resolved_addrs(
+            &policy,
+            "example.test",
+            [std::net::SocketAddr::from(([224, 0, 0, 1], 443))],
+        )
+        .expect_err("multicast ip must stay disallowed");
+
+        assert!(matches!(
+            err,
+            UntrustedOutboundError::ResolvedToNonGlobalIp { ip, .. }
+                if ip == IpAddr::from([224, 0, 0, 1])
+        ));
+    }
+
+    #[test]
+    fn dns_check_returns_error_without_time_driver() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let policy = UntrustedOutboundPolicy::default();
+            let url = reqwest::Url::parse("https://example.com/mcp").expect("parse url");
+            let err = validate_untrusted_outbound_url_dns(&policy, &url)
+                .await
+                .expect_err("missing time driver should return an error");
+
+            assert!(matches!(
+                err,
+                UntrustedOutboundError::DnsLookupFailed { message, .. }
+                    if message.contains("time driver enabled")
+            ));
+        });
     }
 
     #[test]

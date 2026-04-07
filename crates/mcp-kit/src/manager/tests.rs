@@ -142,6 +142,60 @@ fn roots_capability_overwrites_non_object() {
     assert!(capabilities.get("roots").unwrap().is_object());
 }
 
+#[test]
+fn roots_capability_normalizes_non_object_container() {
+    let mut capabilities = serde_json::json!(true);
+    ensure_roots_capability(&mut capabilities);
+    assert_eq!(capabilities, serde_json::json!({ "roots": {} }));
+}
+
+#[test]
+fn with_protocol_version_rejects_empty_input() {
+    let err = match Manager::default().with_protocol_version("   ") {
+        Ok(_) => panic!("empty protocol version should be rejected"),
+        Err(err) => err,
+    };
+    assert_eq!(err.kind(), crate::ErrorKind::Config);
+    assert!(
+        err.to_string()
+            .contains("protocol version must not be empty")
+    );
+}
+
+#[test]
+fn with_capabilities_rejects_non_object() {
+    let err = match Manager::default().with_capabilities(serde_json::json!(["not", "an", "object"]))
+    {
+        Ok(_) => panic!("non-object capabilities should be rejected"),
+        Err(err) => err,
+    };
+    assert_eq!(err.kind(), crate::ErrorKind::Config);
+    assert!(
+        err.to_string()
+            .contains("capabilities must be a JSON object")
+    );
+}
+
+#[test]
+fn with_capabilities_normalizes_non_object_roots_entry() {
+    let manager = Manager::default()
+        .with_capabilities(serde_json::json!({ "roots": true }))
+        .expect("object-shaped capabilities should be accepted")
+        .with_roots(vec![Root {
+            uri: "file:///tmp".to_string(),
+            name: Some("tmp".to_string()),
+        }]);
+
+    assert!(manager.capabilities.get("roots").is_some());
+    assert!(
+        manager
+            .capabilities
+            .get("roots")
+            .expect("roots capability")
+            .is_object()
+    );
+}
+
 #[tokio::test]
 async fn get_or_connect_unknown_server_is_config_error_kind() {
     let cfg = Config::new(

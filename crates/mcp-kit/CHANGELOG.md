@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit`：`Manager::with_protocol_version(...)` 与 `with_capabilities(...)` 现在会在本地构造期 fail-fast 拒绝空协议版本和非对象 capabilities，不再把无效 builder 状态拖到异步 initialize 阶段；`with_roots(...)` 依赖的 `capabilities.roots` 补偿也同步收口为对象语义。
 - `mcp-kit`：untrusted `streamable_http` 文档与回归测试现在明确区分 `allow_private_ips` 和 `allow_localhost` 的职责；开启 `allow_private_ips` 后，普通私网解析结果可以放开，但公网 hostname 解析到 loopback/host-local 这类本机地址仍会继续拒绝，避免把 DNS rebinding 风险误解释成“私网放行”。
 - `mcp-kit`：`Config::server(&str)` 与 config-driven `Manager`/`SharedManager` 入口现在会按 `ServerName::parse(...)` 的 `trim()` 契约做查找；带前后空白的合法 server 名不再被误判成 unknown server。
 - `mcp-kit`：untrusted `streamable_http` 连接现在会在 `allow_private_ips=true` 时关闭底层 public-IP pinning，与配置层的 outbound override 保持一致；默认策略仍继续对未放宽的连接启用 public-IP pinning。

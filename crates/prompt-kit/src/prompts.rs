@@ -335,6 +335,67 @@ mod tests {
         TextDirectory::load(temp.path()).expect("load prompt directory")
     }
 
+    fn managed_prompt_test_tempdir(test_name: &str) -> Option<TempDir> {
+        let tempdir = tempfile::Builder::new()
+            .prefix("of-prompt-")
+            .rand_bytes(3)
+            .tempdir_in(std::env::temp_dir())
+            .unwrap_or_else(|err| panic!("temp dir: {err}"));
+        let probe_root = tempdir.path().join("bootstrap-probe");
+        let probe_manifest = ResourceManifest::new().with_resource(
+            TextResource::new("probe/default.md", "hello").expect("valid probe resource"),
+        );
+        match text_assets_kit::bootstrap_text_resources(&probe_root, &probe_manifest) {
+            Ok(()) => {
+                let _ = std::fs::remove_dir_all(&probe_root);
+                Some(tempdir)
+            }
+            Err(err) if err.kind() == io::ErrorKind::StorageFull => {
+                eprintln!(
+                    "skipping {test_name}: prompt bootstrap temp root unavailable in this environment: {err}"
+                );
+                None
+            }
+            Err(err) => panic!("prompt bootstrap probe: {err}"),
+        }
+    }
+
+    fn skip_prompt_bootstrap_storage_full(test_name: &str, context: &str, err: &io::Error) -> bool {
+        if err.kind() == io::ErrorKind::StorageFull {
+            eprintln!("skipping {test_name}: {context} unavailable in this environment: {err}");
+            true
+        } else {
+            false
+        }
+    }
+
+    fn bootstrap_prompt_directory_or_skip(
+        test_name: &str,
+        context: &str,
+        root: impl AsRef<Path>,
+        manifest: &ResourceManifest,
+    ) -> Option<TextDirectory> {
+        match bootstrap_prompt_directory(root, manifest) {
+            Ok(directory) => Some(directory),
+            Err(err) if skip_prompt_bootstrap_storage_full(test_name, context, &err) => None,
+            Err(err) => panic!("{context}: {err}"),
+        }
+    }
+
+    fn bootstrap_prompt_directory_with_base_or_skip(
+        test_name: &str,
+        context: &str,
+        base: &Path,
+        root: impl AsRef<Path>,
+        manifest: &ResourceManifest,
+    ) -> Option<TextDirectory> {
+        match bootstrap_prompt_directory_with_base(base, root, manifest) {
+            Ok(directory) => Some(directory),
+            Err(err) if skip_prompt_bootstrap_storage_full(test_name, context, &err) => None,
+            Err(err) => panic!("{context}: {err}"),
+        }
+    }
+
     static REENTRANT_PROMPTS: LazyLock<LazyPromptDirectory> =
         LazyLock::new(|| LazyPromptDirectory::new(reentrant_initializer));
 
@@ -468,17 +529,32 @@ mod tests {
 
     #[test]
     fn bootstrap_prompt_directory_loads_manifest_resources() {
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) =
+            managed_prompt_test_tempdir("bootstrap_prompt_directory_loads_manifest_resources")
+        else {
+            return;
+        };
         let manifest = ResourceManifest::new()
             .with_resource(TextResource::new("default.md", "hello").expect("valid resource"));
 
-        let directory = bootstrap_prompt_directory(temp.path(), &manifest).expect("bootstrap");
+        let Some(directory) = bootstrap_prompt_directory_or_skip(
+            "bootstrap_prompt_directory_loads_manifest_resources",
+            "bootstrap prompt directory",
+            temp.path(),
+            &manifest,
+        ) else {
+            return;
+        };
         assert_eq!(directory.get("default.md"), Some("hello"));
     }
 
     #[test]
     fn bootstrap_prompt_directory_waits_for_in_flight_bootstrap_load() {
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) = managed_prompt_test_tempdir(
+            "bootstrap_prompt_directory_waits_for_in_flight_bootstrap_load",
+        ) else {
+            return;
+        };
         let manifest = ResourceManifest::new()
             .with_resource(TextResource::new("default.md", "hello").expect("valid resource"));
         let blocking_root = temp.path().to_path_buf();
@@ -493,9 +569,23 @@ mod tests {
             })
         });
 
-        entered_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("first loader should start");
+        match entered_rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(()) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => match handle
+                .join()
+                .expect("join first bootstrap thread after early exit")
+            {
+                Err(err) if err.kind() == io::ErrorKind::StorageFull => {
+                    eprintln!(
+                        "skipping bootstrap_prompt_directory_waits_for_in_flight_bootstrap_load: first bootstrap unavailable in this environment: {err}"
+                    );
+                    return;
+                }
+                Ok(_) => panic!("first bootstrap finished before entering loader"),
+                Err(err) => panic!("first bootstrap failed before entering loader: {err}"),
+            },
+            Err(err) => panic!("first loader should start: {err}"),
+        }
 
         let waiting_root = temp.path().to_path_buf();
         let waiting_manifest = manifest.clone();
@@ -532,29 +622,58 @@ mod tests {
 
     #[test]
     fn bootstrap_prompt_directory_rebuilds_snapshot_from_current_disk_state() {
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) = managed_prompt_test_tempdir(
+            "bootstrap_prompt_directory_rebuilds_snapshot_from_current_disk_state",
+        ) else {
+            return;
+        };
         let manifest = ResourceManifest::new()
             .with_resource(TextResource::new("default.md", "hello").expect("valid resource"));
 
-        let first = bootstrap_prompt_directory(temp.path(), &manifest).expect("first bootstrap");
+        let Some(first) = bootstrap_prompt_directory_or_skip(
+            "bootstrap_prompt_directory_rebuilds_snapshot_from_current_disk_state",
+            "first bootstrap",
+            temp.path(),
+            &manifest,
+        ) else {
+            return;
+        };
         assert_eq!(first.get("default.md"), Some("hello"));
 
         fs::write(temp.path().join("default.md"), "updated").expect("rewrite prompt");
 
-        let second = bootstrap_prompt_directory(temp.path(), &manifest).expect("second bootstrap");
+        let Some(second) = bootstrap_prompt_directory_or_skip(
+            "bootstrap_prompt_directory_rebuilds_snapshot_from_current_disk_state",
+            "second bootstrap",
+            temp.path(),
+            &manifest,
+        ) else {
+            return;
+        };
         assert_eq!(second.get("default.md"), Some("updated"));
         assert_eq!(first.get("default.md"), Some("hello"));
     }
 
     #[test]
     fn bootstrap_prompt_directory_ignores_unmanaged_root_files() {
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) =
+            managed_prompt_test_tempdir("bootstrap_prompt_directory_ignores_unmanaged_root_files")
+        else {
+            return;
+        };
         fs::write(temp.path().join("notes.txt"), "ignore me").expect("write unrelated file");
 
         let manifest = ResourceManifest::new()
             .with_resource(TextResource::new("default.md", "hello").expect("valid resource"));
 
-        let directory = bootstrap_prompt_directory(temp.path(), &manifest).expect("bootstrap");
+        let Some(directory) = bootstrap_prompt_directory_or_skip(
+            "bootstrap_prompt_directory_ignores_unmanaged_root_files",
+            "bootstrap prompt directory",
+            temp.path(),
+            &manifest,
+        ) else {
+            return;
+        };
         assert_eq!(directory.get("default.md"), Some("hello"));
         assert_eq!(directory.get("notes.txt"), None);
         assert_eq!(
@@ -569,7 +688,11 @@ mod tests {
     #[test]
     fn bootstrap_prompt_directory_with_base_uses_explicit_base_across_cwd_changes() {
         let cwd = CurrentDirGuard::new();
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) = managed_prompt_test_tempdir(
+            "bootstrap_prompt_directory_with_base_uses_explicit_base_across_cwd_changes",
+        ) else {
+            return;
+        };
         let workspace_a = temp.path().join("workspace_a");
         let workspace_b = temp.path().join("workspace_b");
         fs::create_dir_all(&workspace_a).expect("mkdir workspace_a");
@@ -579,9 +702,15 @@ mod tests {
         let manifest = ResourceManifest::new()
             .with_resource(TextResource::new("default.md", "hello").expect("valid resource"));
 
-        let directory =
-            bootstrap_prompt_directory_with_base(&workspace_a, Path::new("prompts"), &manifest)
-                .expect("bootstrap with base");
+        let Some(directory) = bootstrap_prompt_directory_with_base_or_skip(
+            "bootstrap_prompt_directory_with_base_uses_explicit_base_across_cwd_changes",
+            "bootstrap with base",
+            &workspace_a,
+            Path::new("prompts"),
+            &manifest,
+        ) else {
+            return;
+        };
 
         assert_eq!(directory.get("default.md"), Some("hello"));
         assert_eq!(

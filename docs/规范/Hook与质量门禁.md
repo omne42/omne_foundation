@@ -180,8 +180,9 @@ scripts/check-workspace.sh publish-contract
 - 直接执行 `build-llms-txt.py --check`
 - 先 `cargo build --manifest-path crates/notify-kit/Cargo.toml`，再 `mdbook test crates/notify-kit/docs`
 - bot entrypoint 的 `node --check`
+- `crates/notify-kit/bots/_shared/*.test.mjs` / `*.test.js` 的 `node --test`
 
-如果本机没有 `node`，bot syntax check 会被跳过并输出提示。
+如果本机没有 `node`，bot syntax check 和 `_shared` Node tests 都会被跳过并输出提示。
 
 ## `workspace_check` 的其他模式
 

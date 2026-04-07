@@ -59,6 +59,18 @@ def _run_bot_syntax_checks(ctx: CheckContext, bots_root: Path) -> None:
         run_command(ctx, ["node", "--check", entrypoint], cwd=ctx.repo_root)
 
 
+def _run_shared_bot_tests(ctx: CheckContext, bots_root: Path) -> None:
+    shared_root = bots_root / "_shared"
+    if not shared_root.is_dir():
+        return
+
+    test_files = sorted(shared_root.glob("*.test.mjs")) + sorted(
+        shared_root.glob("*.test.js")
+    )
+    for test_file in test_files:
+        run_command(ctx, ["node", "--test", test_file], cwd=ctx.repo_root)
+
+
 def run_notify_kit_asset_checks(ctx: CheckContext) -> None:
     crate_root = ctx.repo_root / "crates" / "notify-kit"
     docs_dir = crate_root / "docs"
@@ -70,3 +82,4 @@ def run_notify_kit_asset_checks(ctx: CheckContext) -> None:
     _run_llms_check(ctx, crate_root)
     _run_docs_test(ctx, crate_root)
     _run_bot_syntax_checks(ctx, crate_root / "bots")
+    _run_shared_bot_tests(ctx, crate_root / "bots")

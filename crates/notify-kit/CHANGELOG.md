@@ -11,6 +11,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `notify-kit` 的 feature-gated 日志 helper 现在也跟着 `sink-sound`/`sound-command` 组合裁剪，`default-features = false` 的核心-only 构建不再因为残留 sound fallback warning helper 触发 dead-code 失败。
 
 ### Fixed
+- `FeishuWebhookSink` 的本地与远程 Markdown 图片上传现在统一按真实字节签名识别图片类型，不再信任文件扩展名或远端 `Content-Type`；伪装成 `.png`/`.jpg` 的任意文件与 SVG 文本都会在上传前被拒绝，避免图片边界退化成“允许读取并上传任意文件”。
 - `FeishuWebhookSink` 的同步 strict 构造函数不再在库内部偷偷做 DNS 校验并私起 Tokio runtime；同步入口现在只收紧 strict 配置契约，需要 eager 网络校验的调用方必须显式使用 async strict 构造。
 - `FeishuWebhookSink` 的本地图片读取现在复用 workspace 的 no-follow 文件系统原语，而不是在 sink 私有模块里继续手写一套 symlink/path 打开边界；相同 allowlist/path 语义下会继续 fail closed。
 - `notify-kit::ErrorKind` 不再把标准 env helper 和 `GitHubCommentSink` 的显式配置失败路径都塌缩成 `Other`；这些 review 命中的配置错误现在会稳定落到 `ErrorKind::Config`，而底层 I/O/HTTP 失败也会落到 `ErrorKind::Transport`，调用方不必再靠错误文本做分类。

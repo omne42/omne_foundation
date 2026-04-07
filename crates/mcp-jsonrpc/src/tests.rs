@@ -63,6 +63,35 @@ impl tokio::io::AsyncWrite for AlwaysFailWrite {
     }
 }
 
+struct PendingWrite;
+
+impl tokio::io::AsyncWrite for PendingWrite {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        _buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let _ = self;
+        std::task::Poll::Pending
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let _ = self;
+        std::task::Poll::Pending
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let _ = self;
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
 #[tokio::test]
 async fn close_in_background_once_aborts_reader_and_transport_tasks() {
     use std::io;
@@ -710,6 +739,53 @@ mod incoming_value_tests {
         assert!(handle.is_closed(), "client should fail closed");
 
         drop(client);
+        crate::background_runtime::reset_detached_runtime_for_test();
+    }
+
+    #[test]
+    fn batch_flush_without_runtime_times_out_and_closes_transport() {
+        let _guard = detached_runtime_test_guard()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::background_runtime::reset_detached_runtime_for_test();
+
+        let handle = test_client_handle(PendingWrite);
+        let batch = BatchResponseWriter::new(handle.clone()).reserve_request_slot();
+        batch
+            .state
+            .completion_state
+            .fetch_or(BatchResponseWriter::FINISHED_BIT, Ordering::AcqRel);
+
+        batch.push_reserved_response_without_runtime(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32603,
+                "message": "request handler dropped request without responding",
+            },
+        }));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let close_reason = loop {
+            if let Some(reason) = handle.close_reason() {
+                break reason;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "batch flush should record close reason after timeout"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        assert!(
+            close_reason.contains("batch response flush timed out after"),
+            "{close_reason}"
+        );
+        assert!(
+            handle.is_closed(),
+            "client should fail closed after flush timeout"
+        );
+
         crate::background_runtime::reset_detached_runtime_for_test();
     }
 

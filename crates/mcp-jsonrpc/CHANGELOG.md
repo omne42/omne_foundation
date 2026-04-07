@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：无 Tokio runtime 的 batch flush 补偿现在和 dropped-response 补偿一样带有明确超时；坏写端不会把后台 flush 任务无限挂住，超时后会 fail closed 关闭 transport。
 - `mcp-jsonrpc`：batch 收尾现在会把 `finish()` 写失败显式回传给入站主状态机，避免批量 invalid-request/error response 的 flush 失败继续被静默吞掉；同时 reserved response 在已关闭 transport 上也会归还 pending slot，不再留下脏 completion 计数。
 - `mcp-jsonrpc`：detached runtime 的 shared worker 现在只有在任务真正被 runtime 接手后才把调度视为成功；worker 若在启动任务前退出，调用点会回退到单任务 fallback runtime，而不是把已接收但未执行的 cleanup silently drop。
 - `mcp-jsonrpc`：`Client::close_in_background_once(...)` 现在和显式 close 一样会同时 abort reader task 与 transport tasks；best-effort 后台关闭不再只关写端留下悬挂读循环或 SSE/POST transport 任务。

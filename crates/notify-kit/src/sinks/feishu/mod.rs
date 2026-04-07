@@ -400,6 +400,7 @@ mod tests {
     use crate::sinks::feishu::media::LoadedImage;
 
     static CURRENT_DIR_LOCK: Mutex<()> = Mutex::new(());
+    const TEST_PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\nnotify-kit-feishu";
 
     struct CurrentDirGuard {
         _lock: MutexGuard<'static, ()>,
@@ -738,7 +739,7 @@ mod tests {
                 "{}.png",
                 unique_local_image_test_name("notify-kit-feishu-local-image")
             ));
-            std::fs::write(&path, b"png").expect("write local image");
+            std::fs::write(&path, TEST_PNG_BYTES).expect("write local image");
 
             let sink = FeishuWebhookSink::new(config).expect("build sink");
 
@@ -746,7 +747,7 @@ mod tests {
                 .load_image(path.to_str().expect("utf8 path"))
                 .await
                 .expect("load local image");
-            assert_eq!(loaded.bytes, b"png");
+            assert_eq!(loaded.bytes, TEST_PNG_BYTES);
             assert_eq!(loaded.content_type, "image/png");
 
             let _ = std::fs::remove_file(path);
@@ -767,7 +768,7 @@ mod tests {
                 unique_local_image_test_name("outside")
             ));
             std::fs::create_dir_all(&allowed_root).expect("create allowed root");
-            std::fs::write(&outside_path, b"png").expect("write outside image");
+            std::fs::write(&outside_path, TEST_PNG_BYTES).expect("write outside image");
 
             let sink = FeishuWebhookSink::new(
                 FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
@@ -802,7 +803,7 @@ mod tests {
             let root = local_image_test_root().join(unique_local_image_test_name("no-base"));
             std::fs::create_dir_all(&root).expect("create root");
             let path = root.join("image.png");
-            std::fs::write(&path, b"png").expect("write image");
+            std::fs::write(&path, TEST_PNG_BYTES).expect("write image");
 
             let sink = FeishuWebhookSink::new(
                 FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
@@ -837,7 +838,7 @@ mod tests {
             let root = local_image_test_root().join(unique_local_image_test_name("with-base"));
             std::fs::create_dir_all(&root).expect("create root");
             let path = root.join("image.png");
-            std::fs::write(&path, b"png").expect("write image");
+            std::fs::write(&path, TEST_PNG_BYTES).expect("write image");
 
             let sink = FeishuWebhookSink::new(
                 FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
@@ -852,7 +853,7 @@ mod tests {
                 .load_image("image.png")
                 .await
                 .expect("relative local image path should resolve from explicit base dir");
-            assert_eq!(loaded.bytes, b"png");
+            assert_eq!(loaded.bytes, TEST_PNG_BYTES);
 
             let _ = std::fs::remove_file(path);
             let _ = std::fs::remove_dir_all(root);
@@ -871,7 +872,7 @@ mod tests {
             std::fs::create_dir_all(&root).expect("create root");
             std::fs::create_dir_all(&outside).expect("create outside dir");
             let path = root.join("image.png");
-            std::fs::write(&path, b"png").expect("write image");
+            std::fs::write(&path, TEST_PNG_BYTES).expect("write image");
 
             let sink = FeishuWebhookSink::new(
                 FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x")
@@ -887,7 +888,7 @@ mod tests {
                 .load_image("image.png")
                 .await
                 .expect("relative local image path should ignore process cwd");
-            assert_eq!(loaded.bytes, b"png");
+            assert_eq!(loaded.bytes, TEST_PNG_BYTES);
 
             let _ = std::fs::remove_file(path);
             let _ = std::fs::remove_dir_all(root);

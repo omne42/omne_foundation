@@ -42,7 +42,7 @@
 - 内建 provider 的系统目录级 PATH 发现、子进程 PATH 裁剪与显式绝对路径 override
 - JSON 字段提取
 - 输出大小与命令超时限制
-- `SECRET_COMMAND_TIMEOUT_MS` / `SECRET_COMMAND_TIMEOUT_SECS` 超时调优入口
+- `SECRET_COMMAND_TIMEOUT_MS` / `SECRET_COMMAND_TIMEOUT_SECS` 的显式 command-env 超时调优入口
 - 进程树清理
 
 不覆盖：

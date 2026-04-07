@@ -21,6 +21,7 @@
 - `Manager::from_config` 现在在 release 路径也会对完整 `Config` 做 fail-fast 校验；无效的 client/server 配置不会再拖到第一次 initialize 或 connect 时才暴露。
 - `mcp-kit`：`Config::with_path(...)` 现在会在设置时把相对配置路径绑定到当时的绝对工作目录；`thread_root()`、连接 `cwd` 解析和 config 复用边界不再随着后续进程 `current_dir()` 漂移。
 - `mcp-kit`：当 `ConfigLoadPolicy::allow_override_outside_root(true)` 允许加载 root 外部的 `mcp.json` 时，相对 `unix_path` 与 `stdout_log.path` 现在会按 override 文件所在目录解析，而不是继续错误绑定原始 `thread_root`。
+- `mcp-kit`：补充直接命中的回归测试，覆盖 `SharedManager` 同 server request/notify 的并发语义，以及 `Config::with_path(...)` 对相对配置路径的单次绝对绑定，防止 gate/thread-root 语义回退成依赖运行时 `cwd` 的隐式约定。
 - `mcp-kit`：crate 级错误分类补齐了 `config-kit::Error` 的稳定类型映射；配置错误不再需要依赖脆弱的错误文案路径才能落到 `ErrorKind::Config`。
 - `mcp-kit`：connection cwd identity 与 `stdout_log.path` root 边界检查现在只把 `NotFound` 视为“缺失后缀”；`ENOTDIR`、`EACCES` 等真实文件系统错误会直接上抛，不再被误吞成合法路径前缀或普通越界。
 - `mcp-kit`：`stdio.env` 现在允许合法的空字符串值和纯空白值，恢复与进程环境变量语义一致的配置边界；仍然继续拒绝空 key。

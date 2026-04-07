@@ -1,6 +1,35 @@
 use super::*;
 use crate::ServerName;
 use std::path::PathBuf;
+#[cfg(not(windows))]
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
+#[cfg(not(windows))]
+fn cwd_test_guard() -> MutexGuard<'static, ()> {
+    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    GUARD.get_or_init(|| Mutex::new(())).lock().unwrap()
+}
+
+#[cfg(not(windows))]
+struct CurrentDirRestoreGuard {
+    original_cwd: PathBuf,
+}
+
+#[cfg(not(windows))]
+impl CurrentDirRestoreGuard {
+    fn capture() -> Self {
+        Self {
+            original_cwd: std::env::current_dir().expect("original cwd"),
+        }
+    }
+}
+
+#[cfg(not(windows))]
+impl Drop for CurrentDirRestoreGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.original_cwd);
+    }
+}
 
 #[tokio::test]
 async fn load_rejects_mcpservers_wrapper() {
@@ -194,6 +223,26 @@ async fn load_discovers_mcp_json_when_dot_mcp_json_missing() {
     let cfg = Config::load(dir.path(), None).await.unwrap();
     assert_eq!(cfg.path().unwrap(), &dir.path().join("mcp.json"));
     assert!(cfg.servers().contains_key("a"));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn with_path_binds_relative_config_path_to_current_dir_once() {
+    let _guard = cwd_test_guard();
+    let _cwd_restore = CurrentDirRestoreGuard::capture();
+    let workspace = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let config_dir = workspace.path().join("configs");
+    std::fs::create_dir_all(&config_dir).unwrap();
+
+    std::env::set_current_dir(workspace.path()).expect("enter workspace");
+    let config = Config::new(ClientConfig::default(), std::collections::BTreeMap::new())
+        .with_path(PathBuf::from("configs/mcp.json"));
+
+    std::env::set_current_dir(outside.path()).expect("leave workspace");
+
+    assert_eq!(config.path(), Some(config_dir.join("mcp.json").as_path()));
+    assert_eq!(config.thread_root(), Some(config_dir.as_path()));
 }
 
 #[tokio::test]

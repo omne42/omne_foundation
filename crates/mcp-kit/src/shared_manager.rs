@@ -2603,6 +2603,118 @@ mod tests {
         let _ = std::fs::remove_file(fast_socket_path);
     }
 
+    #[tokio::test]
+    async fn shared_manager_notify_can_overlap_with_in_flight_request_on_same_server() {
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+        let (request_seen_tx, request_seen_rx) = oneshot::channel();
+        let (notify_seen_tx, notify_seen_rx) = oneshot::channel();
+
+        let server_task = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            let init_id = init_value["id"].clone();
+
+            let init_response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": init_id,
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+            });
+            let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+            init_response_line.push('\n');
+            server_write
+                .write_all(init_response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let initialized_line = lines.next_line().await.unwrap().unwrap();
+            let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+            assert_eq!(initialized_value["method"], "notifications/initialized");
+
+            let request_line = lines.next_line().await.unwrap().unwrap();
+            let request_value: Value = serde_json::from_str(&request_line).unwrap();
+            assert_eq!(request_value["method"], "ping");
+            let request_id = request_value["id"].clone();
+            request_seen_tx.send(()).unwrap();
+
+            let notification_line =
+                tokio::time::timeout(Duration::from_millis(200), lines.next_line())
+                    .await
+                    .expect("same-server notify should overlap an in-flight request")
+                    .unwrap()
+                    .unwrap();
+            let notification_value: Value = serde_json::from_str(&notification_line).unwrap();
+            assert_eq!(notification_value["method"], "demo/notify");
+            notify_seen_tx.send(()).unwrap();
+
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": { "ok": true },
+            });
+            let mut response_line = serde_json::to_string(&response).unwrap();
+            response_line.push('\n');
+            server_write
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+        });
+
+        let cwd = test_workspace_path("overlap");
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            ServerName::parse("srv").unwrap(),
+            ServerConfig::stdio(vec!["mock-server".to_string()]).unwrap(),
+        );
+        let config = Arc::new(Config::new(ClientConfig::default(), servers));
+
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted);
+        manager
+            .connect_io("srv", client_read, client_write)
+            .await
+            .unwrap();
+        manager.record_connection_cwd("srv", &cwd).unwrap();
+        manager
+            .record_connection_server_config("srv", config.server("srv").unwrap())
+            .unwrap();
+
+        let shared = manager.into_shared();
+        let request_shared = shared.clone();
+        let request_config = Arc::clone(&config);
+        let request_cwd = cwd.clone();
+        let request_task = tokio::spawn(async move {
+            request_shared
+                .request(
+                    request_config.as_ref(),
+                    "srv",
+                    "ping",
+                    None::<Value>,
+                    &request_cwd,
+                )
+                .await
+        });
+
+        request_seen_rx.await.unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            shared.notify_connected("srv", "demo/notify", None::<Value>),
+        )
+        .await
+        .expect("notify should not wait for the request response")
+        .unwrap();
+        notify_seen_rx.await.unwrap();
+
+        let result = request_task.await.unwrap().unwrap();
+        assert_eq!(result, serde_json::json!({ "ok": true }));
+        server_task.await.unwrap();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn shared_manager_reentrant_handler_cold_start_fails_fast_on_connect_gate() {

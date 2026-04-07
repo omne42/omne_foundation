@@ -1,3 +1,4 @@
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::bail;
@@ -27,6 +28,10 @@ pub(crate) fn resolve_connection_cwd_with_base(
 }
 
 pub(crate) fn stable_connection_cwd_identity(path: &Path) -> anyhow::Result<PathBuf> {
+    stable_path_identity(path).map_err(Into::into)
+}
+
+pub(crate) fn stable_path_identity(path: &Path) -> io::Result<PathBuf> {
     let mut normalized = PathBuf::new();
     let mut can_follow_existing_components = true;
 
@@ -51,7 +56,7 @@ pub(crate) fn stable_connection_cwd_identity(path: &Path) -> anyhow::Result<Path
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                         can_follow_existing_components = false;
                     }
-                    Err(err) => return Err(err.into()),
+                    Err(err) => return Err(err),
                 }
             }
         }

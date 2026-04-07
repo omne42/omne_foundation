@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -388,51 +388,6 @@ pub(super) fn absolutize_with_base(path: &Path, base: &Path) -> PathBuf {
     base.join(path)
 }
 
-fn normalize_path_for_prefix_check(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(component.as_os_str()),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            Component::Normal(part) => normalized.push(part),
-        }
-    }
-    normalized
-}
-
-fn canonicalize_existing_prefix(path: &Path) -> std::io::Result<Option<PathBuf>> {
-    let normalized = normalize_path_for_prefix_check(path);
-    let mut existing = normalized.as_path();
-    let mut missing_components = Vec::new();
-
-    loop {
-        match std::fs::symlink_metadata(existing) {
-            Ok(_) => break,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                let Some(component) = existing.file_name() else {
-                    return Ok(None);
-                };
-                missing_components.push(component.to_os_string());
-                let Some(parent) = existing.parent() else {
-                    return Ok(None);
-                };
-                existing = parent;
-            }
-            Err(err) => return Err(err),
-        }
-    }
-
-    let mut resolved = std::fs::canonicalize(existing)?;
-    for component in missing_components.iter().rev() {
-        resolved.push(component);
-    }
-    Ok(Some(resolved))
-}
-
 pub(super) fn stdout_log_path_within_root(
     stdout_log_path: &Path,
     root: &Path,
@@ -442,13 +397,9 @@ pub(super) fn stdout_log_path_within_root(
     }
 
     let resolved_stdout_log_path = absolutize_with_base(stdout_log_path, root);
-    let Some(resolved_root) = canonicalize_existing_prefix(root)? else {
-        return Ok(false);
-    };
-    let Some(resolved_stdout_log_path) = canonicalize_existing_prefix(&resolved_stdout_log_path)?
-    else {
-        return Ok(false);
-    };
+    let resolved_root = super::path_identity::stable_path_identity(root)?;
+    let resolved_stdout_log_path =
+        super::path_identity::stable_path_identity(&resolved_stdout_log_path)?;
     Ok(resolved_stdout_log_path.starts_with(&resolved_root))
 }
 

@@ -1045,24 +1045,21 @@ impl Manager {
             .validate()
             .with_context(|| format!("invalid mcp server config (server={server_name_key})"))?;
 
-        let ctx = ConnectContext {
-            trust_mode: self.trust_mode,
-            untrusted_streamable_http_policy: self.untrusted_streamable_http_policy.clone(),
-            allow_stdout_log_outside_root: self.allow_stdout_log_outside_root,
-            stdout_log_root: Some(cwd.clone()),
-            protocol_version: self.protocol_version.clone(),
-            request_timeout: self.request_timeout,
-        };
-        let (client, child) = connect_transport(&ctx, server_name, server_cfg, &cwd).await?;
-
-        let install = self.prepare_transport_install(&server_name_key, &cwd, server_cfg);
-        match install.run(client, child).await {
-            Ok(completed) => self.commit_transport_install(completed),
-            Err(err) => {
-                self.cleanup_failed_connection_install(&server_name_key);
-                Err(err)
-            }
-        }
+        let lifecycle = self.prepare_transport_lifecycle(PreparedTransportConnect {
+            server_name: server_name.to_string(),
+            server_name_key,
+            server_cfg: server_cfg.clone(),
+            cwd: cwd.clone(),
+            ctx: ConnectContext {
+                trust_mode: self.trust_mode,
+                untrusted_streamable_http_policy: self.untrusted_streamable_http_policy.clone(),
+                allow_stdout_log_outside_root: self.allow_stdout_log_outside_root,
+                stdout_log_root: Some(cwd),
+                protocol_version: self.protocol_version.clone(),
+                request_timeout: self.request_timeout,
+            },
+        });
+        self.finish_transport_lifecycle(lifecycle.run().await)
     }
 
     /// Attach an already-connected `mcp_jsonrpc::Client` and perform MCP initialize.

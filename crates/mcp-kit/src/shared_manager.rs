@@ -215,44 +215,20 @@ impl SharedManager {
             return Ok(());
         }
 
-        let prepared = {
-            self.lock_for_async_op(operation)
-                .await?
+        let lifecycle = {
+            let mut manager = self.lock_for_async_op(operation).await?;
+            manager
                 .prepare_transport_connect(config, server_name, &cwd)?
+                .map(|prepared| manager.prepare_transport_lifecycle(prepared))
         };
-        let Some(prepared) = prepared else {
+        let Some(lifecycle) = lifecycle else {
             return Ok(());
         };
 
-        let (client, child) = crate::manager::connect_transport(
-            &prepared.ctx,
-            &prepared.server_name,
-            &prepared.server_cfg,
-            &prepared.cwd,
-        )
-        .await?;
-
-        let install = self
-            .lock_for_async_op(operation)
+        let completed = lifecycle.run().await;
+        self.lock_for_async_op(operation)
             .await?
-            .prepare_transport_install(
-                &prepared.server_name_key,
-                &prepared.cwd,
-                &prepared.server_cfg,
-            );
-
-        match install.run(client, child).await {
-            Ok(completed) => self
-                .lock_for_async_op(operation)
-                .await?
-                .commit_transport_install(completed),
-            Err(err) => {
-                self.lock_for_async_op(operation)
-                    .await?
-                    .cleanup_failed_connection_install(&prepared.server_name_key);
-                Err(err)
-            }
-        }
+            .finish_transport_lifecycle(completed)
     }
 
     async fn prepare_existing_connected_client_with_gate(

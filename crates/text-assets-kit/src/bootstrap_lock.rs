@@ -161,6 +161,7 @@ fn bootstrap_lock_dir() -> PathBuf {
         bootstrap_lock_dir_unix(
             rustix::process::geteuid().as_raw(),
             std::env::var_os(BOOTSTRAP_LOCK_ENV_RUNTIME_DIR_UNIX),
+            std::env::temp_dir(),
             &|path| path.is_dir(),
         )
     }
@@ -174,6 +175,7 @@ fn bootstrap_lock_dir() -> PathBuf {
 fn bootstrap_lock_dir_unix(
     uid: u32,
     xdg_runtime_dir: Option<std::ffi::OsString>,
+    process_temp_dir: PathBuf,
     runtime_dir_exists: &impl Fn(&Path) -> bool,
 ) -> PathBuf {
     if let Some(runtime_dir) = xdg_runtime_dir
@@ -189,7 +191,13 @@ fn bootstrap_lock_dir_unix(
         return runtime_dir.join("text-assets-kit/bootstrap-locks");
     }
 
-    PathBuf::from(BOOTSTRAP_LOCK_TMP_ROOT_UNIX)
+    let temp_root = if process_temp_dir.is_absolute() {
+        process_temp_dir
+    } else {
+        PathBuf::from(BOOTSTRAP_LOCK_TMP_ROOT_UNIX)
+    };
+
+    temp_root
         .join(BOOTSTRAP_LOCK_DIR_NAME_UNIX)
         .join(format!("uid-{uid}"))
 }
@@ -661,9 +669,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bootstrap_lock_dir_prefers_xdg_runtime_dir_on_unix() {
-        let lock_dir = bootstrap_lock_dir_unix(1000, Some("/xdg/runtime".into()), &|path| {
-            path == Path::new("/xdg/runtime")
-        });
+        let lock_dir = bootstrap_lock_dir_unix(
+            1000,
+            Some("/xdg/runtime".into()),
+            PathBuf::from("/process/tmp"),
+            &|path| path == Path::new("/xdg/runtime"),
+        );
         assert_eq!(
             lock_dir,
             PathBuf::from("/xdg/runtime").join("text-assets-kit/bootstrap-locks")
@@ -674,7 +685,9 @@ mod tests {
     #[test]
     fn bootstrap_lock_dir_prefers_uid_runtime_dir_on_unix() {
         let lock_dir =
-            bootstrap_lock_dir_unix(1000, None, &|path| path == Path::new("/run/user/1000"));
+            bootstrap_lock_dir_unix(1000, None, PathBuf::from("/process/tmp"), &|path| {
+                path == Path::new("/run/user/1000")
+            });
         assert_eq!(
             lock_dir,
             PathBuf::from("/run/user/1000").join("text-assets-kit/bootstrap-locks")
@@ -683,8 +696,22 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn bootstrap_lock_dir_prefers_process_temp_dir_when_runtime_dirs_are_missing_on_unix() {
+        let lock_dir =
+            bootstrap_lock_dir_unix(1000, None, PathBuf::from("/process/tmp"), &|_| false);
+        assert_eq!(
+            lock_dir,
+            PathBuf::from("/process/tmp")
+                .join(BOOTSTRAP_LOCK_DIR_NAME_UNIX)
+                .join("uid-1000")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn bootstrap_lock_dir_falls_back_to_uid_tmp_namespace_on_unix() {
-        let lock_dir = bootstrap_lock_dir_unix(1000, None, &|_| false);
+        let lock_dir =
+            bootstrap_lock_dir_unix(1000, None, PathBuf::from("relative-tmp"), &|_| false);
         assert_eq!(
             lock_dir,
             PathBuf::from("/tmp")

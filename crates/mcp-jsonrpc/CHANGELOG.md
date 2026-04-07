@@ -11,6 +11,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `mcp-jsonrpc`：batch 收尾现在会把 `finish()` 写失败显式回传给入站主状态机，避免批量 invalid-request/error response 的 flush 失败继续被静默吞掉；同时 reserved response 在已关闭 transport 上也会归还 pending slot，不再留下脏 completion 计数。
 - `mcp-jsonrpc`：detached runtime 的 shared worker 现在只有在任务真正被 runtime 接手后才把调度视为成功；worker 若在启动任务前退出，调用点会回退到单任务 fallback runtime，而不是把已接收但未执行的 cleanup silently drop。
 - `mcp-jsonrpc`：`Client::close_in_background_once(...)` 现在和显式 close 一样会同时 abort reader task 与 transport tasks；best-effort 后台关闭不再只关写端留下悬挂读循环或 SSE/POST transport 任务。
+- `mcp-jsonrpc`：`ClientHandle::close(...)`、内部 `close_with_reason(...)` 和 timeout/写失败触发的 `schedule_close_once(...)` 现在也会复用同一套 reader/transport lifecycle 收尾；持有 handle 的调用方不再只关闭写端而把 reader 或 streamable-http transport 留在后台悬挂。
 - `mcp-jsonrpc`：`ClientHandle` 关闭路径现在在同一临界区内记录首个 `close_reason` 并发布 `closed`，并且无 runtime 的最后兜底 close 收尾会等待 busy writer 释放后再替换写端；`is_closed()`/`check_closed()` 不再暴露“已关闭但原因已被其他竞态路径抢写”或“写端正忙时直接放弃收尾”的窗口。
 - `mcp-jsonrpc`：batch response flush 的完成判定改为单原子状态机，消除了 `finish()` 与最后一个异步响应并发时双方都早退、整批响应永远不 flush 的竞态。
 - `mcp-jsonrpc`：对超时关闭诊断的内部格式化写法做了风格收敛，保持与 workspace 的 Clippy 门禁一致而不改变运行时行为。

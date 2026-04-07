@@ -25,6 +25,7 @@ fn test_client_handle(write: impl tokio::io::AsyncWrite + Send + Unpin + 'static
         closed: Arc::new(AtomicBool::new(false)),
         close_reason: Arc::new(std::sync::Mutex::new(None)),
         stdout_log_write_error: Arc::new(std::sync::OnceLock::new()),
+        lifecycle: None,
     }
 }
 
@@ -130,7 +131,7 @@ async fn close_in_background_once_aborts_reader_and_transport_tasks() {
 
     let reader_dropped = Arc::new(AtomicBool::new(false));
     let transport_dropped = Arc::new(AtomicBool::new(false));
-    let mut client = Client::connect_io(
+    let client = Client::connect_io(
         BlockingRead {
             dropped: Arc::clone(&reader_dropped),
         },
@@ -140,7 +141,7 @@ async fn close_in_background_once_aborts_reader_and_transport_tasks() {
     .expect("connect client");
 
     let transport_drop_guard = OnDrop(Arc::clone(&transport_dropped));
-    client.transport_tasks.push(tokio::spawn(async move {
+    client.register_transport_task(tokio::spawn(async move {
         let _transport_drop_guard = transport_drop_guard;
         std::future::pending::<()>().await;
     }));
@@ -159,6 +160,142 @@ async fn close_in_background_once_aborts_reader_and_transport_tasks() {
     })
     .await
     .expect("background close should abort reader and transport tasks");
+}
+
+#[tokio::test]
+async fn client_handle_close_aborts_reader_and_transport_tasks() {
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
+
+    struct BlockingRead {
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl tokio::io::AsyncRead for BlockingRead {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    impl Drop for BlockingRead {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Relaxed);
+        }
+    }
+
+    struct OnDrop(Arc<AtomicBool>);
+
+    impl Drop for OnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let reader_dropped = Arc::new(AtomicBool::new(false));
+    let transport_dropped = Arc::new(AtomicBool::new(false));
+    let client = Client::connect_io(
+        BlockingRead {
+            dropped: Arc::clone(&reader_dropped),
+        },
+        tokio::io::sink(),
+    )
+    .await
+    .expect("connect client");
+
+    let transport_drop_guard = OnDrop(Arc::clone(&transport_dropped));
+    client.register_transport_task(tokio::spawn(async move {
+        let _transport_drop_guard = transport_drop_guard;
+        std::future::pending::<()>().await;
+    }));
+
+    let handle = client.handle();
+    handle.close("test handle close").await;
+    assert!(
+        handle.is_closed(),
+        "handle close should mark the client closed"
+    );
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !(reader_dropped.load(Ordering::Relaxed) && transport_dropped.load(Ordering::Relaxed))
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("handle close should abort reader and transport tasks");
+}
+
+#[tokio::test]
+async fn schedule_close_once_aborts_reader_and_transport_tasks() {
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
+
+    struct BlockingRead {
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl tokio::io::AsyncRead for BlockingRead {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    impl Drop for BlockingRead {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Relaxed);
+        }
+    }
+
+    struct OnDrop(Arc<AtomicBool>);
+
+    impl Drop for OnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let reader_dropped = Arc::new(AtomicBool::new(false));
+    let transport_dropped = Arc::new(AtomicBool::new(false));
+    let client = Client::connect_io(
+        BlockingRead {
+            dropped: Arc::clone(&reader_dropped),
+        },
+        tokio::io::sink(),
+    )
+    .await
+    .expect("connect client");
+
+    let transport_drop_guard = OnDrop(Arc::clone(&transport_dropped));
+    client.register_transport_task(tokio::spawn(async move {
+        let _transport_drop_guard = transport_drop_guard;
+        std::future::pending::<()>().await;
+    }));
+
+    let handle = client.handle();
+    handle.schedule_close_once("test scheduled close".to_string());
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !(reader_dropped.load(Ordering::Relaxed) && transport_dropped.load(Ordering::Relaxed))
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("timeout close should abort reader and transport tasks");
 }
 
 mod line_limit_tests {
@@ -1098,6 +1235,60 @@ mod stats_tests {
     }
 
     #[test]
+    fn spawn_detached_falls_back_when_shared_worker_runtime_init_fails() {
+        let _guard = detached_runtime_test_guard()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::background_runtime::reset_detached_runtime_for_test();
+        crate::background_runtime::force_shared_worker_runtime_build_failures(2);
+
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let (returned_tx, returned_rx) = std::sync::mpsc::channel();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let join_handle = std::thread::spawn(move || {
+            let result =
+                spawn_detached("test detached runtime init failure fallback", async move {
+                    started_tx
+                        .send(())
+                        .expect("signal fallback task start after init failure");
+                    let _ = release_rx.await;
+                    done_tx
+                        .send(())
+                        .expect("signal fallback task completion after init failure");
+                });
+            returned_tx
+                .send(result)
+                .expect("signal detached scheduling result after init failure");
+        });
+
+        let schedule_result = returned_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("fallback scheduling should return after worker init failure");
+        schedule_result.expect("runtime init failure should fall back to dedicated runtime");
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("fallback runtime should start task after worker init failure");
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "task should stay blocked until release signal arrives"
+        );
+
+        release_tx
+            .send(())
+            .expect("release fallback task after init failure");
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("fallback runtime should finish after init failure");
+        join_handle
+            .join()
+            .expect("fallback detached scheduling thread should exit cleanly");
+        crate::background_runtime::reset_detached_runtime_for_test();
+    }
+
+    #[test]
     fn spawn_detached_falls_back_when_shared_worker_drops_task_before_start() {
         let _guard = detached_runtime_test_guard()
             .lock()
@@ -1444,6 +1635,7 @@ mod background_close_tests {
             closed: Arc::new(AtomicBool::new(false)),
             close_reason: Arc::new(Mutex::new(None)),
             stdout_log_write_error: Arc::new(OnceLock::new()),
+            lifecycle: None,
         }
     }
 
@@ -1467,6 +1659,7 @@ mod background_close_tests {
             closed: Arc::new(AtomicBool::new(false)),
             close_reason: Arc::new(Mutex::new(None)),
             stdout_log_write_error: Arc::new(OnceLock::new()),
+            lifecycle: None,
         };
 
         handle.schedule_close_once("closed outside runtime".to_string());
@@ -1514,6 +1707,7 @@ mod background_close_tests {
             closed: Arc::new(AtomicBool::new(false)),
             close_reason: Arc::new(Mutex::new(None)),
             stdout_log_write_error: Arc::new(OnceLock::new()),
+            lifecycle: None,
         };
 
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1607,6 +1801,7 @@ mod background_close_tests {
                 closed: Arc::new(AtomicBool::new(false)),
                 close_reason: Arc::new(Mutex::new(None)),
                 stdout_log_write_error: Arc::new(OnceLock::new()),
+                lifecycle: None,
             };
             let batch = BatchResponseWriter::new(handle);
             let reserved = batch.reserve_request_slot();
@@ -1668,6 +1863,7 @@ mod background_close_tests {
             closed: Arc::new(AtomicBool::new(false)),
             close_reason: Arc::new(Mutex::new(None)),
             stdout_log_write_error: Arc::new(OnceLock::new()),
+            lifecycle: None,
         };
 
         let oversized = serde_json::json!({

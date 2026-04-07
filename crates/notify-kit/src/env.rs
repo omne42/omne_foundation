@@ -133,11 +133,13 @@ where
     const NOTIFY_FEISHU_WEBHOOK_URL_ENV: &str = "NOTIFY_FEISHU_WEBHOOK_URL";
     const NOTIFY_SLACK_WEBHOOK_URL_ENV: &str = "NOTIFY_SLACK_WEBHOOK_URL";
     const NOTIFY_EVENTS_ENV: &str = "NOTIFY_EVENTS";
+    let config_error =
+        |err| crate::Error::from(crate::error::wrap_kind(crate::ErrorKind::Config, err));
 
     let sound_enabled = env_bool(NOTIFY_SOUND_ENV, get)
-        .map_err(crate::Error::from)?
+        .map_err(config_error)?
         .unwrap_or(options.default_sound_enabled);
-    let timeouts = parse_timeout_config(get).map_err(crate::Error::from)?;
+    let timeouts = parse_timeout_config(get).map_err(config_error)?;
 
     let mut sinks: Vec<Arc<dyn Sink>> = Vec::new();
     if sound_enabled {
@@ -152,7 +154,7 @@ where
         sinks.push(Arc::new(
             GenericWebhookSink::new(cfg)
                 .context("build generic webhook sink")
-                .map_err(crate::Error::from)?,
+                .map_err(config_error)?,
         ));
     }
 
@@ -161,7 +163,7 @@ where
         sinks.push(Arc::new(
             FeishuWebhookSink::new(cfg)
                 .context("build feishu sink")
-                .map_err(crate::Error::from)?,
+                .map_err(config_error)?,
         ));
     }
 
@@ -170,13 +172,14 @@ where
         sinks.push(Arc::new(
             SlackWebhookSink::new(cfg)
                 .context("build slack sink")
-                .map_err(crate::Error::from)?,
+                .map_err(config_error)?,
         ));
     }
 
     if sinks.is_empty() {
         if options.require_sink {
-            return Err(anyhow::anyhow!(
+            return Err(crate::error::tagged_message(
+                crate::ErrorKind::Config,
                 "no notification sinks configured (enable {NOTIFY_SOUND_ENV}=1 or provide webhook envs)"
             )
             .into());
@@ -257,7 +260,7 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("invalid NOTIFY_SOUND"), "{msg}");
         assert!(msg.contains("expected one of"), "{msg}");
-        assert_eq!(err.kind(), crate::ErrorKind::Other);
+        assert_eq!(err.kind(), crate::ErrorKind::Config);
     }
 
     #[test]

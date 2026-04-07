@@ -3,12 +3,17 @@ use std::future::Future;
 use std::pin::Pin;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock, mpsc as std_mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc as std_mpsc};
 
 type DetachedTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
+struct DetachedTaskEnvelope {
+    task: Arc<Mutex<Option<DetachedTask>>>,
+    started_tx: std_mpsc::Sender<()>,
+}
+
 struct DetachedRuntime {
-    worker_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<DetachedTask>>>,
+    worker_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<DetachedTaskEnvelope>>>,
 }
 
 impl DetachedRuntime {
@@ -45,10 +50,47 @@ impl DetachedRuntime {
             let task = pending_task
                 .take()
                 .expect("detached runtime task should still be available");
-            match tx.send(task) {
-                Ok(()) => return Ok(()),
+            let shared_task = Arc::new(Mutex::new(Some(task)));
+            let (started_tx, started_rx) = std_mpsc::channel();
+            let envelope = DetachedTaskEnvelope {
+                task: Arc::clone(&shared_task),
+                started_tx,
+            };
+
+            match tx.send(envelope) {
+                Ok(()) => match started_rx.recv() {
+                    Ok(()) => return Ok(()),
+                    Err(_) => {
+                        pending_task = shared_task
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take();
+                        last_error = Some(std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            format!("detached runtime worker stopped before starting {task_name}"),
+                        ));
+                        let mut worker_tx = self
+                            .worker_tx
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        *worker_tx = None;
+                        if pending_task.is_none() {
+                            return Err(DetachedSpawnError {
+                                task: None,
+                                source: last_error
+                                    .take()
+                                    .expect("last_error should be set for lost worker"),
+                            });
+                        }
+                    }
+                },
                 Err(err) => {
-                    pending_task = Some(err.0);
+                    pending_task = err
+                        .0
+                        .task
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take();
                     last_error = Some(std::io::Error::new(
                         std::io::ErrorKind::BrokenPipe,
                         format!("detached runtime worker stopped before accepting {task_name}"),
@@ -63,7 +105,7 @@ impl DetachedRuntime {
         }
 
         Err(DetachedSpawnError {
-            task: pending_task.expect("detached runtime task should still be available"),
+            task: pending_task,
             source: last_error.unwrap_or_else(|| {
                 std::io::Error::other(format!("detached runtime unavailable for {task_name}"))
             }),
@@ -72,7 +114,7 @@ impl DetachedRuntime {
 }
 
 struct DetachedSpawnError {
-    task: DetachedTask,
+    task: Option<DetachedTask>,
     source: std::io::Error,
 }
 
@@ -80,6 +122,8 @@ struct DetachedSpawnError {
 static FORCE_SHARED_WORKER_SPAWN_FAILURES: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static FORCE_INLINE_RUNTIME_BUILD_FAILURES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static FORCE_SHARED_WORKER_DROP_BEFORE_START: AtomicUsize = AtomicUsize::new(0);
 
 pub(super) fn spawn_detached(
     task_name: &str,
@@ -92,15 +136,26 @@ pub(super) fn spawn_detached(
 
     match detached_runtime().try_spawn(task_name, Box::pin(task)) {
         Ok(()) => Ok(()),
-        Err(err) => spawn_fallback_detached_task(task_name, err.task).map_err(|fallback_err| {
-            std::io::Error::new(
-                fallback_err.kind(),
-                format!(
-                    "schedule detached task failed for {task_name}: shared worker unavailable ({source}); fallback runtime unavailable ({fallback_err})",
-                    source = err.source
-                ),
-            )
-        }),
+        Err(err) => {
+            let Some(task) = err.task else {
+                return Err(std::io::Error::new(
+                    err.source.kind(),
+                    format!(
+                        "schedule detached task failed for {task_name}: shared worker lost the task before fallback could reclaim it ({})",
+                        err.source
+                    ),
+                ));
+            };
+            spawn_fallback_detached_task(task_name, task).map_err(|fallback_err| {
+                std::io::Error::new(
+                    fallback_err.kind(),
+                    format!(
+                        "schedule detached task failed for {task_name}: shared worker unavailable ({source}); fallback runtime unavailable ({fallback_err})",
+                        source = err.source
+                    ),
+                )
+            })
+        }
     }
 }
 
@@ -113,7 +168,7 @@ fn detached_runtime() -> &'static DetachedRuntime {
 
 fn spawn_detached_runtime_worker(
     task_name: &str,
-) -> std::io::Result<tokio::sync::mpsc::UnboundedSender<DetachedTask>> {
+) -> std::io::Result<tokio::sync::mpsc::UnboundedSender<DetachedTaskEnvelope>> {
     #[cfg(test)]
     if FORCE_SHARED_WORKER_SPAWN_FAILURES
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
@@ -126,7 +181,7 @@ fn spawn_detached_runtime_worker(
         )));
     }
 
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<DetachedTask>();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<DetachedTaskEnvelope>();
     let (ready_tx, ready_rx) = std_mpsc::channel::<std::io::Result<()>>();
     let spawn_result = std::thread::Builder::new()
         .name("mcp-jsonrpc-detached".to_string())
@@ -150,7 +205,7 @@ fn spawn_detached_runtime_worker(
 }
 
 fn run_detached_runtime_worker(
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<DetachedTask>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<DetachedTaskEnvelope>,
     ready_tx: std_mpsc::Sender<std::io::Result<()>>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -166,10 +221,31 @@ fn run_detached_runtime_worker(
     let _ = ready_tx.send(Ok(()));
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         runtime.block_on(async move {
-            while let Some(task) = rx.recv().await {
+            while let Some(envelope) = rx.recv().await {
+                #[cfg(test)]
+                if FORCE_SHARED_WORKER_DROP_BEFORE_START
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok()
+                {
+                    return;
+                }
+
+                let Some(task) = envelope
+                    .task
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                else {
+                    let _ = envelope.started_tx.send(());
+                    continue;
+                };
+
                 drop(tokio::spawn(async move {
                     let _ = std::panic::AssertUnwindSafe(task).catch_unwind().await;
                 }));
+                let _ = envelope.started_tx.send(());
             }
         });
     }));
@@ -233,10 +309,16 @@ pub(super) fn reset_detached_runtime_for_test() {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     FORCE_SHARED_WORKER_SPAWN_FAILURES.store(0, Ordering::Relaxed);
     FORCE_INLINE_RUNTIME_BUILD_FAILURES.store(0, Ordering::Relaxed);
+    FORCE_SHARED_WORKER_DROP_BEFORE_START.store(0, Ordering::Relaxed);
 }
 
 #[cfg(test)]
 pub(super) fn force_detached_runtime_spawn_failures(shared_worker: usize, inline_runtime: usize) {
     FORCE_SHARED_WORKER_SPAWN_FAILURES.store(shared_worker, Ordering::Relaxed);
     FORCE_INLINE_RUNTIME_BUILD_FAILURES.store(inline_runtime, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(super) fn force_shared_worker_drop_before_start(count: usize) {
+    FORCE_SHARED_WORKER_DROP_BEFORE_START.store(count, Ordering::Relaxed);
 }

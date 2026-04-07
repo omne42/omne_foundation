@@ -904,6 +904,53 @@ mod stats_tests {
     }
 
     #[test]
+    fn spawn_detached_falls_back_when_shared_worker_drops_task_before_start() {
+        let _guard = detached_runtime_test_guard()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::background_runtime::reset_detached_runtime_for_test();
+        crate::background_runtime::force_shared_worker_drop_before_start(1);
+
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let (returned_tx, returned_rx) = std::sync::mpsc::channel();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let join_handle = std::thread::spawn(move || {
+            let result = spawn_detached("test detached worker pre-start drop", async move {
+                started_tx.send(()).expect("signal fallback task start");
+                let _ = release_rx.await;
+                done_tx.send(()).expect("signal fallback task completion");
+            });
+            returned_tx
+                .send(result)
+                .expect("signal detached scheduling result");
+        });
+
+        let schedule_result = returned_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("fallback scheduling should return after worker loss");
+        schedule_result.expect("worker pre-start drop should fall back to dedicated runtime");
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("fallback runtime should still start the task");
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "task should stay blocked until release signal arrives"
+        );
+
+        release_tx.send(()).expect("release fallback task");
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("fallback runtime should finish after release");
+        join_handle
+            .join()
+            .expect("fallback detached scheduling thread should exit cleanly");
+        crate::background_runtime::reset_detached_runtime_for_test();
+    }
+
+    #[test]
     fn spawn_detached_shared_worker_does_not_serialize_blocked_tasks() {
         let _guard = detached_runtime_test_guard()
             .lock()

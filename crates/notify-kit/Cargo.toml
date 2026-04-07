@@ -10,24 +10,68 @@ include = ["/src/**", "/Cargo.toml", "/README.md", "/CHANGELOG.md"]
 workspace = true
 
 [features]
-default = []
+default = ["default-sinks", "env-standard"]
+default-sinks = [
+    "sink-bark",
+    "sink-dingtalk",
+    "sink-discord",
+    "sink-feishu",
+    "sink-generic-webhook",
+    "sink-github-comment",
+    "sink-pushplus",
+    "sink-serverchan",
+    "sink-slack",
+    "sink-sound",
+    "sink-telegram",
+    "sink-wecom",
+]
+env-standard = [
+    "sink-feishu",
+    "sink-generic-webhook",
+    "sink-slack",
+    "sink-sound",
+]
+sink-bark = ["__http-stack", "__secret-types"]
+sink-dingtalk = ["__http-stack", "__secret-types", "__signing"]
+sink-discord = ["__http-stack"]
+sink-feishu = [
+    "__feishu-local-files",
+    "__http-stack",
+    "__markdown",
+    "__secret-types",
+    "__signing",
+]
+sink-generic-webhook = ["__http-stack"]
+sink-github-comment = ["__github-api", "__http-stack", "__secret-types"]
+sink-pushplus = ["__http-stack", "__secret-types"]
+sink-serverchan = ["__http-stack", "__secret-types"]
+sink-slack = ["__http-stack"]
+sink-sound = []
+sink-telegram = ["__http-stack", "__secret-types"]
+sink-wecom = ["__http-stack"]
 # Allow SoundSink to execute external commands (SoundConfig.command_argv).
-sound-command = []
+sound-command = ["sink-sound"]
+__feishu-local-files = ["dep:libc"]
+__github-api = ["dep:github-kit"]
+__http-stack = ["dep:http-kit", "dep:reqwest", "dep:serde_json"]
+__markdown = ["dep:pulldown-cmark"]
+__secret-types = ["dep:secret-kit"]
+__signing = ["dep:base64", "dep:hmac", "dep:sha2"]
 
 [dependencies]
 anyhow = "1"
-base64 = "0.22"
+base64 = { version = "0.22", optional = true }
 futures-util = "0.3"
-hmac = "0.12"
-http-kit = { path = "../http-kit" }
-github-kit = { path = "../github-kit" }
-libc = "0.2"
+hmac = { version = "0.12", optional = true }
+http-kit = { path = "../http-kit", optional = true }
+github-kit = { path = "../github-kit", optional = true }
+libc = { version = "0.2", optional = true }
 log-kit = { path = "../log-kit" }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "stream"] }
-pulldown-cmark = "0.12"
-secret-kit = { path = "../secret-kit" }
-serde_json = "1"
-sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "stream"], optional = true }
+pulldown-cmark = { version = "0.12", optional = true }
+secret-kit = { path = "../secret-kit", optional = true }
+serde_json = { version = "1", optional = true }
+sha2 = { version = "0.10", optional = true }
 structured-text-kit = { path = "../structured-text-kit" }
 tokio = { version = "1", features = ["net", "process", "rt", "sync", "time"] }
 tracing = "0.1"

@@ -41,6 +41,7 @@ pub(crate) fn warn_hub_notify_failed(kind: &str, error: &str) {
     record.emit_tracing();
 }
 
+#[cfg(feature = "sink-feishu")]
 pub(crate) fn warn_feishu_image_load_failed(image_src: &str, error: &str) {
     let mut record = warn_record(
         "notify.feishu.image_load_failed",
@@ -53,6 +54,7 @@ pub(crate) fn warn_feishu_image_load_failed(image_src: &str, error: &str) {
     record.emit_tracing();
 }
 
+#[cfg(feature = "sink-feishu")]
 pub(crate) fn warn_feishu_image_upload_failed(image_src: &str, error: &str) {
     let mut record = warn_record(
         "notify.feishu.image_upload_failed",

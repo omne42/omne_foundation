@@ -25,6 +25,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `text-assets-kit`：Unix 下的 bootstrap advisory lock 目录不再固定落在全局 `/tmp/.text-assets-kit-bootstrap-locks`；现在优先使用用户级 runtime 目录（`$XDG_RUNTIME_DIR` 或 `/run/user/<uid>`），缺失时退回 `/tmp/.text-assets-kit-bootstrap-locks/uid-<uid>` 的每用户命名空间，避免跨用户共享同一全局锁目录。
 - Kept the unix socket entry regression test under a short non-symlink temp root so hook and CI runs do not fail on host `sun_path` limits before the real validation path executes.
 - `text-assets-kit`：Unix socket 目录回归测试不再硬编码 `/var/tmp`；现在使用 `tempfile` 选择的环境临时根，并在 socket setup 本身不可用时显式跳过，避免受限 runner 因非业务性临时目录或磁盘问题误报失败。
+- `text-assets-kit`：Unix socket 目录回归测试现在也支持 `OMNE_TEST_SHORT_TMPDIR`，让 harness 能在 `cargo test` 重写 `TMPDIR` 到长路径时显式提供一个更短的可写根。
 - `text-assets-kit` 的 bootstrap lock / managed bootstrap 回归测试现在会在临时根或锁目录出现 `StorageFull` 时显式跳过，避免受限 runner 因非业务性磁盘条件误报失败。
 - `text-assets-kit`：默认 `DataRootScope::Auto` 不再在 workspace-local root 缺失时静默退回 `$HOME/.text_assets`；现在会继续使用 `<cwd>/.text_assets` 并按需创建，避免把本应局部的状态悄悄放大成 user-global 边界。
 - `text-assets-kit`：收紧 `DataRootScope::Auto` 后同步清理实现中的多余 `return`，确保 crate 继续满足 workspace `clippy -D warnings` 质量门禁。

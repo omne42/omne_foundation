@@ -174,19 +174,53 @@ mod tests {
 
     #[cfg(unix)]
     fn unix_socket_test_tempdir(test_name: &str) -> Option<TempDir> {
-        match tempfile::Builder::new()
-            .prefix("of-sock-")
-            .rand_bytes(3)
-            .tempdir()
-        {
-            Ok(tempdir) => Some(tempdir),
-            Err(err) => {
-                eprintln!(
-                    "skipping {test_name}: unable to create temp dir for unix socket test: {err}"
-                );
-                None
+        use std::os::unix::net::UnixListener;
+
+        for root in unix_socket_temp_roots() {
+            let Ok(metadata) = std::fs::symlink_metadata(&root) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if let Ok(tempdir) = tempfile::Builder::new()
+                .prefix("of-sock-")
+                .rand_bytes(3)
+                .tempdir_in(&root)
+            {
+                let probe_path = tempdir.path().join("socket-probe.sock");
+                if let Ok(listener) = UnixListener::bind(&probe_path) {
+                    drop(listener);
+                    let _ = std::fs::remove_file(&probe_path);
+                    return Some(tempdir);
+                }
             }
         }
+
+        eprintln!(
+            "skipping {test_name}: unable to create a short writable temp dir for unix socket test"
+        );
+        None
+    }
+
+    #[cfg(unix)]
+    fn unix_socket_temp_roots() -> Vec<std::path::PathBuf> {
+        let mut roots = Vec::new();
+
+        if let Some(root) = std::env::var_os("OMNE_TEST_SHORT_TMPDIR") {
+            let root = std::path::PathBuf::from(root);
+            if !roots.iter().any(|candidate| candidate == &root) {
+                roots.push(root);
+            }
+        }
+
+        for root in [std::path::PathBuf::from("/var/tmp"), std::env::temp_dir()] {
+            if !roots.iter().any(|candidate| candidate == &root) {
+                roots.push(root);
+            }
+        }
+
+        roots
     }
 
     #[test]

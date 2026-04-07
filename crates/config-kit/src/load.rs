@@ -185,10 +185,8 @@ where
     Ok(None)
 }
 
-pub fn canonicalize_path_in_root(
-    root: impl AsRef<Path>,
-    path: impl AsRef<Path>,
-) -> Result<PathBuf> {
+#[cfg(test)]
+fn canonicalize_path_in_root(root: impl AsRef<Path>, path: impl AsRef<Path>) -> Result<PathBuf> {
     let root = root.as_ref();
     let path = path.as_ref();
     let rooted_path = if path.is_absolute() {

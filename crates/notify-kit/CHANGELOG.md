@@ -17,6 +17,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `FeishuWebhookSink` 的本地图片读取现在复用 workspace 的 no-follow 文件系统原语，而不是在 sink 私有模块里继续手写一套 symlink/path 打开边界；相同 allowlist/path 语义下会继续 fail closed。
 - `notify-kit::ErrorKind` 不再把标准 env helper 和 `GitHubCommentSink` 的显式配置失败路径都塌缩成 `Other`；这些 review 命中的配置错误现在会稳定落到 `ErrorKind::Config`，而底层 I/O/HTTP 失败也会落到 `ErrorKind::Transport`，调用方不必再靠错误文本做分类。
 - `notify_kit::env::build_hub_from_standard_env(...)` 不再公开泄露 `anyhow::Result`；现在和 crate 其他 fallible API 一样统一返回 `notify_kit::Result` / `notify_kit::Error`，并在非法 env 值路径上保留稳定的 `ErrorKind::Config`。
+- `notify-kit::Error` 在聚合 sink 失败时不再把标准 `source()` 链完全截断：aggregate error 现在会把首个 `SinkFailure` 暴露给通用错误检查器，而完整失败列表仍继续通过 `sink_failures()` 保留可检查的 sink 名称、索引和底层错误链。
 - `notify-kit::Event` 的 plain-fallback 契约现在真正落到实现：structured-only `CatalogText` 不会再通过 `title()` / `body()` / `tags()` 泄漏成 `code {args}` 诊断串；如果调用方先提供了 plain title/body/tag，再写入 catalog text，也会继续保留这层纯文本 fallback 给现有 sinks 使用。
 - `GitHubCommentSink` 现在补上针对自定义 GitHub API base 的回归锁定：即使调用方显式 trust 了自定义 host，bearer token 目标仍必须保持 HTTPS、不能携带 URL 凭证；对应文档也同步改成当前真实的 fail-closed 契约。
 - `notify-kit::Event` 的私有 plain fallback 状态现在按真实语义命名，不再继续伪装成另一套 canonical string fields；实现和文档都明确这层状态只是给纯文本 sink 保留的 fallback。

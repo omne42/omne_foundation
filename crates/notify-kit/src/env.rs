@@ -2,6 +2,22 @@
 //!
 //! This module is intentionally not part of the core notification abstraction. Prefer your own
 //! integration layer when you need project-specific env/CLI/file configuration semantics.
+//!
+//! Use the helper through the `notify_kit::env` namespace:
+//!
+//! ```rust
+//! use notify_kit::env::{build_hub_from_standard_env, StandardEnvHubOptions};
+//!
+//! let _ = build_hub_from_standard_env(StandardEnvHubOptions::default());
+//! ```
+//!
+//! `notify-kit` does not re-export this helper from the crate root:
+//!
+//! ```compile_fail
+//! use notify_kit::{build_hub_from_standard_env, StandardEnvHubOptions};
+//!
+//! let _ = build_hub_from_standard_env(StandardEnvHubOptions::default());
+//! ```
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -260,6 +276,22 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("invalid NOTIFY_SOUND"), "{msg}");
         assert!(msg.contains("expected one of"), "{msg}");
+        assert_eq!(err.kind(), crate::ErrorKind::Config);
+    }
+
+    #[test]
+    fn invalid_timeout_env_maps_to_config_error_kind() {
+        let env = HashMap::from([(String::from("NOTIFY_HUB_TIMEOUT_MS"), String::from("oops"))]);
+
+        let err = match build_hub_from_env(StandardEnvHubOptions::default(), &|key| {
+            env.get(key).cloned()
+        }) {
+            Ok(_) => panic!("invalid timeout should fail"),
+            Err(err) => err,
+        };
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("invalid NOTIFY_HUB_TIMEOUT_MS"), "{msg}");
         assert_eq!(err.kind(), crate::ErrorKind::Config);
     }
 

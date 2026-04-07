@@ -9,6 +9,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ### Changed
 - `notify-kit` 现在把内置 sinks 拆成显式 Cargo features：核心 `Event` / `Hub` / `Sink` 可在 `default-features = false` 下单独使用，各 sink 按 `sink-*` feature 裁剪，`env` helper 也收口到 `env-standard` feature，避免 foundation crate 默认把全部通知 transport 和依赖硬绑进单个编译面。
 - `notify-kit` 的 feature-gated 日志 helper 现在也跟着 `sink-sound`/`sound-command` 组合裁剪，`default-features = false` 的核心-only 构建不再因为残留 sound fallback warning helper 触发 dead-code 失败。
+- `notify-kit` 的 webhook/API sinks 现在共享一个内部 outbound transport helper，统一 `HttpClientProfile` 创建、公网 IP 选择和 strict eager 校验入口，后续新增 transport 级约束时不再需要在每个 sink 里散弹式重复接线。
 
 ### Fixed
 - `FeishuWebhookSink` 的同步 strict 构造函数不再在库内部偷偷做 DNS 校验并私起 Tokio runtime；同步入口现在只收紧 strict 配置契约，需要 eager 网络校验的调用方必须显式使用 async strict 构造。

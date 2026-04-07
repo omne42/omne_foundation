@@ -275,6 +275,59 @@ pub(crate) struct PreparedConnectedClient {
     pub client: mcp_jsonrpc::ClientHandle,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreparedCallCleanup {
+    None,
+    Disconnect,
+}
+
+impl PreparedCallCleanup {
+    pub(crate) const fn should_disconnect(self) -> bool {
+        matches!(self, Self::Disconnect)
+    }
+}
+
+pub(crate) struct PreparedCall<T> {
+    result: anyhow::Result<T>,
+    cleanup: PreparedCallCleanup,
+}
+
+impl<T> PreparedCall<T> {
+    pub(crate) fn cleanup(&self) -> PreparedCallCleanup {
+        self.cleanup
+    }
+
+    pub(crate) fn into_result(self) -> anyhow::Result<T> {
+        self.result
+    }
+}
+
+fn request_call_cleanup(result: &anyhow::Result<Value>) -> PreparedCallCleanup {
+    result
+        .as_ref()
+        .err()
+        .map_or(PreparedCallCleanup::None, |err| {
+            if should_disconnect_after_jsonrpc_error(err) {
+                PreparedCallCleanup::Disconnect
+            } else {
+                PreparedCallCleanup::None
+            }
+        })
+}
+
+fn notify_call_cleanup(result: &anyhow::Result<()>) -> PreparedCallCleanup {
+    result
+        .as_ref()
+        .err()
+        .map_or(PreparedCallCleanup::None, |err| {
+            if should_disconnect_after_jsonrpc_error(err) || contains_wait_timeout(err) {
+                PreparedCallCleanup::Disconnect
+            } else {
+                PreparedCallCleanup::None
+            }
+        })
+}
+
 impl PreparedConnectedClient {
     pub(crate) async fn request(
         &self,
@@ -301,6 +354,30 @@ impl PreparedConnectedClient {
         )
         .await
     }
+
+    pub(crate) async fn request_call(
+        &self,
+        method: &str,
+        params: Option<Value>,
+    ) -> PreparedCall<Value> {
+        let result = self.request(method, params).await;
+        PreparedCall {
+            cleanup: request_call_cleanup(&result),
+            result,
+        }
+    }
+
+    pub(crate) async fn notify_call(
+        &self,
+        method: &str,
+        params: Option<Value>,
+    ) -> PreparedCall<()> {
+        let result = self.notify(method, params).await;
+        PreparedCall {
+            cleanup: notify_call_cleanup(&result),
+            result,
+        }
+    }
 }
 
 pub(crate) struct PreparedTransportConnect {
@@ -316,6 +393,47 @@ fn handler_task_join_error(err: tokio::task::JoinError) -> anyhow::Error {
         anyhow::anyhow!("server handler task panicked")
     } else {
         anyhow::anyhow!("server handler task failed: {err}")
+    }
+}
+
+#[cfg(test)]
+mod prepared_call_tests {
+    use super::{PreparedCallCleanup, notify_call_cleanup, request_call_cleanup};
+
+    #[test]
+    fn request_cleanup_ignores_wait_timeout_protocol_errors() {
+        let result = Err(anyhow::Error::new(mcp_jsonrpc::Error::protocol(
+            mcp_jsonrpc::ProtocolErrorKind::WaitTimeout,
+            "timed out",
+        )));
+
+        assert_eq!(request_call_cleanup(&result), PreparedCallCleanup::None);
+    }
+
+    #[test]
+    fn request_cleanup_disconnects_on_non_timeout_protocol_errors() {
+        let result = Err(anyhow::Error::new(mcp_jsonrpc::Error::protocol(
+            mcp_jsonrpc::ProtocolErrorKind::InvalidInput,
+            "bad request",
+        )));
+
+        assert_eq!(
+            request_call_cleanup(&result),
+            PreparedCallCleanup::Disconnect
+        );
+    }
+
+    #[test]
+    fn notify_cleanup_disconnects_on_wait_timeout() {
+        let result = Err(anyhow::Error::new(mcp_jsonrpc::Error::protocol(
+            mcp_jsonrpc::ProtocolErrorKind::WaitTimeout,
+            "timed out",
+        )));
+
+        assert_eq!(
+            notify_call_cleanup(&result),
+            PreparedCallCleanup::Disconnect
+        );
     }
 }
 
@@ -1426,16 +1544,14 @@ impl Manager {
             manager_state_bail!("mcp server not connected: {server_name}");
         };
         let server_name = prepared.server_name.clone();
-        let result = prepared.request(method, params).await;
+        let call = prepared.request_call(method, params).await;
 
-        if let Err(err) = &result {
-            if should_disconnect_after_jsonrpc_error(err) {
-                self.disconnect_after_jsonrpc_error(&server_name).await;
-                self.clear_connection_cwd(&server_name);
-            }
+        if call.cleanup().should_disconnect() {
+            self.disconnect_after_jsonrpc_error(&server_name).await;
+            self.clear_connection_cwd(&server_name);
         }
 
-        Ok(result?)
+        Ok(call.into_result()?)
     }
 
     pub async fn request_connected_named(
@@ -1459,16 +1575,14 @@ impl Manager {
             manager_state_bail!("mcp server not connected: {server_name}");
         };
         let server_name = prepared.server_name.clone();
-        let result = prepared.notify(method, params).await;
+        let call = prepared.notify_call(method, params).await;
 
-        if let Err(err) = &result {
-            if should_disconnect_after_jsonrpc_error(err) || contains_wait_timeout(err) {
-                self.disconnect_after_jsonrpc_error(&server_name).await;
-                self.clear_connection_cwd(&server_name);
-            }
+        if call.cleanup().should_disconnect() {
+            self.disconnect_after_jsonrpc_error(&server_name).await;
+            self.clear_connection_cwd(&server_name);
         }
 
-        Ok(result?)
+        Ok(call.into_result()?)
     }
 
     pub async fn notify_connected_named(

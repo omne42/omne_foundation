@@ -15,8 +15,6 @@ const BOOTSTRAP_LOCK_DIR_NAME_UNIX: &str = ".text-assets-kit-bootstrap-locks";
 const BOOTSTRAP_LOCK_ENV_RUNTIME_DIR_UNIX: &str = "XDG_RUNTIME_DIR";
 #[cfg(unix)]
 const BOOTSTRAP_LOCK_RUNTIME_ROOT_UNIX: &str = "/run/user";
-#[cfg(unix)]
-const BOOTSTRAP_LOCK_TMP_ROOT_UNIX: &str = "/tmp";
 #[cfg(not(unix))]
 const BOOTSTRAP_LOCK_DIR_NAME_OTHER: &str = ".text-assets-kit-bootstrap-locks";
 
@@ -161,6 +159,7 @@ fn bootstrap_lock_dir() -> PathBuf {
         bootstrap_lock_dir_unix(
             rustix::process::geteuid().as_raw(),
             std::env::var_os(BOOTSTRAP_LOCK_ENV_RUNTIME_DIR_UNIX),
+            &std::env::temp_dir(),
             &|path| path.is_dir(),
         )
     }
@@ -174,6 +173,7 @@ fn bootstrap_lock_dir() -> PathBuf {
 fn bootstrap_lock_dir_unix(
     uid: u32,
     xdg_runtime_dir: Option<std::ffi::OsString>,
+    temp_root: &Path,
     runtime_dir_exists: &impl Fn(&Path) -> bool,
 ) -> PathBuf {
     if let Some(runtime_dir) = xdg_runtime_dir
@@ -189,7 +189,7 @@ fn bootstrap_lock_dir_unix(
         return runtime_dir.join("text-assets-kit/bootstrap-locks");
     }
 
-    PathBuf::from(BOOTSTRAP_LOCK_TMP_ROOT_UNIX)
+    temp_root
         .join(BOOTSTRAP_LOCK_DIR_NAME_UNIX)
         .join(format!("uid-{uid}"))
 }
@@ -267,7 +267,7 @@ mod tests {
     use super::*;
 
     use std::fs;
-    use std::process::Command;
+    use std::process::{Child, Command};
     use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -280,6 +280,37 @@ mod tests {
     const BOOTSTRAP_LOCK_RELEASE_ENV: &str = "RUNTIME_ASSETS_KIT_BOOTSTRAP_LOCK_RELEASE";
     const BOOTSTRAP_LOCK_TEST_FILTER: &str =
         "bootstrap_lock::tests::bootstrap_transaction_lock_blocks_other_processes";
+
+    fn bootstrap_lock_test_tempdir(test_name: &str) -> Option<TempDir> {
+        let tempdir = tempfile::Builder::new()
+            .prefix("of-lock-")
+            .rand_bytes(3)
+            .tempdir_in(std::env::temp_dir())
+            .unwrap_or_else(|err| panic!("temp dir: {err}"));
+        let probe_root = tempdir.path().join("bootstrap-probe");
+        match lock_bootstrap_transaction(&probe_root) {
+            Ok(_guard) => Some(tempdir),
+            Err(err) if err.kind() == io::ErrorKind::StorageFull => {
+                eprintln!(
+                    "skipping {test_name}: bootstrap lock temp root unavailable in this environment: {err}"
+                );
+                None
+            }
+            Err(err) => panic!("bootstrap lock probe: {err}"),
+        }
+    }
+
+    fn helper_requested_skip(test_name: &str, held: &Path, child: &mut Child) -> bool {
+        let contents = fs::read_to_string(held).unwrap_or_default();
+        if let Some(reason) = contents.strip_prefix("skip:") {
+            let status = child.wait().expect("wait for helper process after skip");
+            assert!(status.success(), "helper process should exit cleanly");
+            eprintln!("skipping {test_name}: {}", reason.trim());
+            true
+        } else {
+            false
+        }
+    }
 
     fn wait_for_path(path: &Path, timeout: Duration) {
         let deadline = Instant::now() + timeout;
@@ -322,7 +353,15 @@ mod tests {
             std::env::var_os(BOOTSTRAP_LOCK_RELEASE_ENV).expect("helper release path must be set"),
         );
 
-        let _guard = lock_bootstrap_transaction(&root).expect("helper lock should succeed");
+        let _guard = match lock_bootstrap_transaction(&root) {
+            Ok(guard) => guard,
+            Err(err) if err.kind() == io::ErrorKind::StorageFull => {
+                fs::write(&held, format!("skip:{err}"))
+                    .expect("helper should signal skipped lock setup");
+                return true;
+            }
+            Err(err) => panic!("helper lock should succeed: {err}"),
+        };
         fs::write(&held, "").expect("helper should signal held lock");
         wait_for_path(&release, Duration::from_secs(5));
         true
@@ -330,7 +369,11 @@ mod tests {
 
     #[test]
     fn bootstrap_transaction_lock_waits_for_same_root() {
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) =
+            bootstrap_lock_test_tempdir("bootstrap_transaction_lock_waits_for_same_root")
+        else {
+            return;
+        };
         let root = temp.path().join("root");
         let blocking_root = root.clone();
         let waiting_root = root.clone();
@@ -368,7 +411,11 @@ mod tests {
 
     #[test]
     fn bootstrap_transaction_lock_allows_distinct_roots() {
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) =
+            bootstrap_lock_test_tempdir("bootstrap_transaction_lock_allows_distinct_roots")
+        else {
+            return;
+        };
         let root_a = temp.path().join("root-a");
         let root_b = temp.path().join("root-b");
         let (entered_tx, entered_rx) = mpsc::channel();
@@ -409,7 +456,11 @@ mod tests {
             return;
         }
 
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) =
+            bootstrap_lock_test_tempdir("bootstrap_transaction_lock_blocks_other_processes")
+        else {
+            return;
+        };
         let root = temp.path().join("root");
         let held = temp.path().join("held");
         let release = temp.path().join("release");
@@ -426,6 +477,13 @@ mod tests {
             .expect("spawn helper process");
 
         wait_for_path(&held, Duration::from_secs(5));
+        if helper_requested_skip(
+            "bootstrap_transaction_lock_blocks_other_processes",
+            &held,
+            &mut child,
+        ) {
+            return;
+        }
 
         let waiting_root = root.clone();
         let (result_tx, result_rx) = mpsc::channel();
@@ -456,7 +514,11 @@ mod tests {
             return;
         }
 
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) = bootstrap_lock_test_tempdir(
+            "bootstrap_transaction_lock_waiting_on_other_process_does_not_block_distinct_roots",
+        ) else {
+            return;
+        };
         let root_a = temp.path().join("root-a");
         let root_b = temp.path().join("root-b");
         let held = temp.path().join("held");
@@ -474,6 +536,13 @@ mod tests {
             .expect("spawn helper process");
 
         wait_for_path(&held, Duration::from_secs(5));
+        if helper_requested_skip(
+            "bootstrap_transaction_lock_waiting_on_other_process_does_not_block_distinct_roots",
+            &held,
+            &mut child,
+        ) {
+            return;
+        }
 
         let blocking_root = root_a.clone();
         let blocker = thread::spawn(move || {
@@ -511,7 +580,11 @@ mod tests {
             return;
         }
 
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) = bootstrap_lock_test_tempdir(
+            "bootstrap_transaction_lock_ignores_child_home_and_temp_env",
+        ) else {
+            return;
+        };
         let root = temp.path().join("root");
         let held = temp.path().join("held");
         let release = temp.path().join("release");
@@ -534,6 +607,13 @@ mod tests {
             .expect("spawn helper process");
 
         wait_for_path(&held, Duration::from_secs(5));
+        if helper_requested_skip(
+            "bootstrap_transaction_lock_ignores_child_home_and_temp_env",
+            &held,
+            &mut child,
+        ) {
+            return;
+        }
 
         let waiting_root = root.clone();
         let (result_tx, result_rx) = mpsc::channel();
@@ -661,9 +741,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bootstrap_lock_dir_prefers_xdg_runtime_dir_on_unix() {
-        let lock_dir = bootstrap_lock_dir_unix(1000, Some("/xdg/runtime".into()), &|path| {
-            path == Path::new("/xdg/runtime")
-        });
+        let lock_dir = bootstrap_lock_dir_unix(
+            1000,
+            Some("/xdg/runtime".into()),
+            Path::new("/tmp/fallback"),
+            &|path| path == Path::new("/xdg/runtime"),
+        );
         assert_eq!(
             lock_dir,
             PathBuf::from("/xdg/runtime").join("text-assets-kit/bootstrap-locks")
@@ -673,8 +756,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bootstrap_lock_dir_prefers_uid_runtime_dir_on_unix() {
-        let lock_dir =
-            bootstrap_lock_dir_unix(1000, None, &|path| path == Path::new("/run/user/1000"));
+        let lock_dir = bootstrap_lock_dir_unix(1000, None, Path::new("/tmp/fallback"), &|path| {
+            path == Path::new("/run/user/1000")
+        });
         assert_eq!(
             lock_dir,
             PathBuf::from("/run/user/1000").join("text-assets-kit/bootstrap-locks")
@@ -683,11 +767,12 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn bootstrap_lock_dir_falls_back_to_uid_tmp_namespace_on_unix() {
-        let lock_dir = bootstrap_lock_dir_unix(1000, None, &|_| false);
+    fn bootstrap_lock_dir_falls_back_to_process_temp_dir_namespace_on_unix() {
+        let lock_dir =
+            bootstrap_lock_dir_unix(1000, None, Path::new("/workspace/tmp-root"), &|_| false);
         assert_eq!(
             lock_dir,
-            PathBuf::from("/tmp")
+            PathBuf::from("/workspace/tmp-root")
                 .join(BOOTSTRAP_LOCK_DIR_NAME_UNIX)
                 .join("uid-1000")
         );

@@ -7,7 +7,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use notify_kit::Event;
+use notify_kit::core::Event;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -29,7 +29,7 @@ pub trait Sink: Send + Sync {
 use std::future::Future;
 use std::pin::Pin;
 
-use notify_kit::{Event, Sink};
+use notify_kit::core::{Event, Sink};
 
 pub struct MySink;
 

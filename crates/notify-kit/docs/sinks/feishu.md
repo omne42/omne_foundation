@@ -11,7 +11,7 @@
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
-use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+use notify_kit::providers::feishu::{FeishuWebhookConfig, FeishuWebhookSink};
 
 let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx");
 let sink = FeishuWebhookSink::new(cfg)?;
@@ -26,7 +26,7 @@ let sink = FeishuWebhookSink::new(cfg)?;
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
-use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+use notify_kit::providers::feishu::{FeishuWebhookConfig, FeishuWebhookSink};
 
 let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx");
 let _future = FeishuWebhookSink::new_strict_async(cfg);
@@ -41,7 +41,7 @@ let _future = FeishuWebhookSink::new_strict_async(cfg);
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
-use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+use notify_kit::providers::feishu::{FeishuWebhookConfig, FeishuWebhookSink};
 
 let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx");
 let sink = FeishuWebhookSink::new_with_secret(cfg, "your_secret")?;
@@ -56,7 +56,7 @@ let sink = FeishuWebhookSink::new_with_secret(cfg, "your_secret")?;
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
-use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+use notify_kit::providers::feishu::{FeishuWebhookConfig, FeishuWebhookSink};
 
 let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx");
 let _future = FeishuWebhookSink::new_with_secret_strict_async(cfg, "your_secret");
@@ -78,7 +78,7 @@ let _future = FeishuWebhookSink::new_with_secret_strict_async(cfg, "your_secret"
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
-use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+use notify_kit::providers::feishu::{FeishuWebhookConfig, FeishuWebhookSink};
 
 let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx")
     .with_max_chars(1000);
@@ -94,7 +94,7 @@ let sink = FeishuWebhookSink::new(cfg)?;
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
-use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+use notify_kit::providers::feishu::{FeishuWebhookConfig, FeishuWebhookSink};
 
 let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx")
     .with_public_ip_check(false);
@@ -142,7 +142,7 @@ let sink = FeishuWebhookSink::new(cfg)?;
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
-use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+use notify_kit::providers::feishu::{FeishuWebhookConfig, FeishuWebhookSink};
 
 let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx")
     .with_app_credentials("cli_xxx", "app_secret_xxx")
@@ -162,7 +162,7 @@ let sink = FeishuWebhookSink::new(cfg)?;
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 # fn main() -> notify_kit::Result<()> {
-use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+use notify_kit::providers::feishu::{FeishuWebhookConfig, FeishuWebhookSink};
 
 let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/xxx")
     .with_app_credentials("cli_xxx", "app_secret_xxx")

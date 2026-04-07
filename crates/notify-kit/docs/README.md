@@ -11,6 +11,14 @@
 - **可扩展**：通过实现 `Sink` trait 接入任意渠道（Discord/Slack/Email/桌面通知…）。
 - **安全意识**：对 webhook URL 进行限制；Debug 输出默认脱敏。
 
+## 公开边界
+
+- `notify_kit::core`：核心 foundation 抽象（`Event` / `Hub` / `Sink` / `Error`）
+- `notify_kit::providers::*`：内置 provider-specific sinks
+- `notify_kit::env`：可选标准 env helper，属于 integration convenience，不属于核心协议边界
+
+crate root 仍保留兼容 re-export；新代码建议优先使用上面的 namespaced 入口。
+
 ## 当前内置 sinks
 
 内置 sinks：

@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `notify-kit` 公开入口现在显式拆成 `notify_kit::core`（核心 foundation 抽象）和 `notify_kit::providers::*`（内置 sink/integration），并把 README/mdBook 示例同步切到这条分层路径；crate root 仍保留兼容 re-export，但不再作为推荐边界。
 - `notify-kit` 现在把内置 sinks 拆成显式 Cargo features：核心 `Event` / `Hub` / `Sink` 可在 `default-features = false` 下单独使用，各 sink 按 `sink-*` feature 裁剪，`env` helper 也收口到 `env-standard` feature，避免 foundation crate 默认把全部通知 transport 和依赖硬绑进单个编译面。
 - `notify-kit` 的 feature-gated 日志 helper 现在也跟着 `sink-sound`/`sound-command` 组合裁剪，`default-features = false` 的核心-only 构建不再因为残留 sound fallback warning helper 触发 dead-code 失败。
 

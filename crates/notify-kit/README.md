@@ -9,6 +9,12 @@
 
 它把统一事件模型路由到多个 sink，并在不阻塞主流程的前提下处理并发发送和超时兜底。
 
+推荐分层入口：
+
+- `notify_kit::core`：`Event` / `Hub` / `Sink` / `Error` 这类 provider-agnostic foundation surface
+- `notify_kit::providers::*`：内置 provider/integration sink
+- `notify_kit::env`：可选的标准 env bootstrap helper，不属于核心通知抽象
+
 ## 边界
 
 负责：
@@ -49,6 +55,10 @@
   - 统一事件模型
 - `src/hub.rs`
   - hub 配置、限制、并发发送与错误聚合
+- `src/core.rs`
+  - provider-agnostic foundation re-export
+- `src/providers.rs`
+  - 内置 sink 的 feature-gated 命名空间
 - `src/sinks/mod.rs`
   - sink trait 与各实现导出
 - `src/sinks/http/`
@@ -107,6 +117,7 @@ notify-kit = { path = "crates/notify-kit", default-features = false, features = 
 - `default-features = false` 时，核心 `Event` / `Hub` / `Sink` 仍可用，只是不再自动带入内置 transport sinks
 - 标准 env helper `notify_kit::env` 现在需要 `env-standard` feature；它会自动带上自己依赖的 `sound` / `generic-webhook` / `slack` / `feishu` sinks
 - 额外的 `sound-command` 仍然是对 `SoundSink` 的增量 opt-in，需要与 `sink-sound` 一起使用（或沿用默认 features）
+- 新代码建议优先从 `notify_kit::core` 和 `notify_kit::providers::*` 引用类型；crate root 仍保留兼容 re-export，但不再是推荐的边界表达方式
 
 ## 文档
 
@@ -138,7 +149,8 @@ notify-kit = { path = "crates/notify-kit", default-features = false, features = 
 ```rust
 use std::sync::Arc;
 
-use notify_kit::{Event, Hub, HubConfig, Severity, SoundConfig, SoundSink};
+use notify_kit::core::{Event, Hub, HubConfig, Severity};
+use notify_kit::providers::sound::{SoundConfig, SoundSink};
 
 let hub = Hub::new(
     HubConfig::default(),
@@ -165,6 +177,7 @@ hub.notify_best_effort(Event::new("turn_completed", Severity::Success, "done"));
 
 它们只是 convenience helper，适合快速接线或共享一套简单约定；不是强制协议，也不是核心架构边界。
 核心 `Hub` / `Sink` API 继续留在 crate root；env helper 刻意只挂在 `notify_kit::env::...`，避免把 `NOTIFY_*` 约定伪装成通知 foundation 的默认接线协议。
+新代码更推荐从 `notify_kit::core::{...}` 读取核心抽象、从 `notify_kit::providers::<provider>::{...}` 读取具体 sink。
 这套 helper 自带的中性约定是 `NOTIFY_*`，例如 `NOTIFY_SOUND`、`NOTIFY_WEBHOOK_URL`、`NOTIFY_TIMEOUT_MS`、`NOTIFY_EVENTS`。
 公开入口就是 `notify_kit::env::...`；不要在 crate root 上再叠一层快捷别名。
 

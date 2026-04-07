@@ -9,7 +9,7 @@
 
 ```rust,no_run,edition2024
 # extern crate notify_kit;
-use notify_kit::{SoundConfig, SoundSink};
+use notify_kit::providers::sound::{SoundConfig, SoundSink};
 
 let sink = SoundSink::new(SoundConfig { command_argv: None });
 ```
@@ -32,7 +32,7 @@ let sink = SoundSink::new(SoundConfig { command_argv: None });
 
 ```rust,no_run,edition2024
 # extern crate notify_kit;
-use notify_kit::{SoundConfig, SoundSink};
+use notify_kit::providers::sound::{SoundConfig, SoundSink};
 
 let sink = SoundSink::new(SoundConfig {
     command_argv: Some(vec!["afplay".into(), "/System/Library/Sounds/Glass.aiff".into()]),

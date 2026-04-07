@@ -7,7 +7,8 @@
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 use std::sync::Arc;
-use notify_kit::{Hub, HubConfig, SoundConfig, SoundSink};
+use notify_kit::core::{Hub, HubConfig};
+use notify_kit::providers::sound::{SoundConfig, SoundSink};
 
 let hub = Hub::new(
     HubConfig::default(),
@@ -20,7 +21,8 @@ let hub = Hub::new(
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 use std::sync::Arc;
-use notify_kit::{Hub, HubConfig, SoundConfig, SoundSink};
+use notify_kit::core::{Hub, HubConfig};
+use notify_kit::providers::sound::{SoundConfig, SoundSink};
 
 let hub = Hub::new_with_inflight_limit(
     HubConfig::default(),
@@ -36,7 +38,8 @@ let hub = Hub::new_with_inflight_limit(
 ```rust,no_run,edition2024
 # extern crate notify_kit;
 use std::sync::Arc;
-use notify_kit::{Hub, HubConfig, HubLimits, SoundConfig, SoundSink};
+use notify_kit::core::{Hub, HubConfig, HubLimits};
+use notify_kit::providers::sound::{SoundConfig, SoundSink};
 
 let hub = Hub::new_with_limits(
     HubConfig::default(),
@@ -78,7 +81,7 @@ let hub = Hub::new_with_limits(
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use notify_kit::HubConfig;
+use notify_kit::core::HubConfig;
 
 let enabled_kinds = BTreeSet::from(["turn_completed".to_string(), "approval_requested".to_string()]);
 let cfg = HubConfig {

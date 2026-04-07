@@ -21,6 +21,7 @@ const MAX_CATALOG_DIRECTORY_DEPTH: usize = 32;
 pub enum ResourceCatalogError {
     Bootstrap(io::Error),
     Load(DynamicCatalogError),
+    LoadRollback(CatalogBootstrapCleanupError),
 }
 
 impl Display for ResourceCatalogError {
@@ -28,6 +29,7 @@ impl Display for ResourceCatalogError {
         match self {
             Self::Bootstrap(error) => write!(f, "bootstrap text resources: {error}"),
             Self::Load(error) => write!(f, "load i18n catalog: {error}"),
+            Self::LoadRollback(error) => write!(f, "load i18n catalog: {error}"),
         }
     }
 }
@@ -37,6 +39,7 @@ impl std::error::Error for ResourceCatalogError {
         match self {
             Self::Bootstrap(error) => Some(error),
             Self::Load(error) => Some(error),
+            Self::LoadRollback(error) => Some(error),
         }
     }
 }
@@ -133,7 +136,7 @@ fn map_catalog_bootstrap_result(
         Err(BootstrapLoadError::Bootstrap(error)) => Err(ResourceCatalogError::Bootstrap(error)),
         Err(BootstrapLoadError::Load(error)) => Err(ResourceCatalogError::Load(error)),
         Err(BootstrapLoadError::Rollback { load, rollback }) => Err(
-            ResourceCatalogError::Bootstrap(catalog_bootstrap_cleanup_error(load, rollback)),
+            ResourceCatalogError::LoadRollback(catalog_bootstrap_cleanup_error(load, rollback)),
         ),
     }
 }
@@ -224,11 +227,11 @@ pub fn reload_i18n_catalog_from_directory_with_base(
     catalog.reload_from_locale_sources(sources)
 }
 
-fn catalog_bootstrap_cleanup_error(load: DynamicCatalogError, rollback: io::Error) -> io::Error {
-    io::Error::new(
-        rollback.kind(),
-        CatalogBootstrapCleanupError { load, rollback },
-    )
+fn catalog_bootstrap_cleanup_error(
+    load: DynamicCatalogError,
+    rollback: io::Error,
+) -> CatalogBootstrapCleanupError {
+    CatalogBootstrapCleanupError { load, rollback }
 }
 
 fn validate_catalog_manifest(
@@ -616,6 +619,45 @@ mod tests {
         assert_eq!(
             second.get_text(Locale::EN_US, "greeting"),
             Some("hi".to_string())
+        );
+    }
+
+    #[test]
+    fn bootstrap_catalog_dual_failure_stays_classified_as_load_rollback() {
+        let Some(temp) = managed_resource_test_tempdir(
+            "bootstrap_catalog_dual_failure_stays_classified_as_load_rollback",
+        ) else {
+            return;
+        };
+        let root = temp.path().join("catalog");
+        let manifest = ResourceManifest::new().with_resource(
+            TextResource::new("en_US.json", r#"{"greeting":"hello"}"#).expect("valid resource"),
+        );
+        let backup_root = temp.path().join("catalog-backup");
+
+        let err = bootstrap_i18n_catalog_with_loader(
+            &root,
+            &manifest,
+            Locale::EN_US,
+            FallbackStrategy::Both,
+            |root, _, _, _| {
+                fs::rename(root, &backup_root).expect("move root aside");
+                fs::write(root, "blocking file").expect("replace root with file");
+                Err(DynamicCatalogError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "catalog load failed",
+                )))
+            },
+        )
+        .expect_err("load+rollback failure should error");
+
+        let ResourceCatalogError::LoadRollback(cleanup) = err else {
+            panic!("expected load+rollback classification");
+        };
+        assert_eq!(cleanup.load_error().to_string(), "catalog load failed");
+        assert!(
+            cleanup.rollback_error().kind() != io::ErrorKind::InvalidData,
+            "rollback error should remain distinct from the primary load classification"
         );
     }
 
@@ -1528,13 +1570,8 @@ mod tests {
             FallbackStrategy::Both,
         )
         .expect_err("invalid catalog json should fail");
-        let error =
+        let cleanup =
             catalog_bootstrap_cleanup_error(load_error, io::Error::other("rollback failed"));
-
-        let cleanup = error
-            .get_ref()
-            .and_then(|source| source.downcast_ref::<CatalogBootstrapCleanupError>())
-            .expect("wrapped cleanup error");
         assert!(matches!(
             cleanup.load_error(),
             DynamicCatalogError::LocaleSourceJson { .. }

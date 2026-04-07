@@ -6,6 +6,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ## [Unreleased]
 
+- `text-assets-kit`：低层 `bootstrap_lock` 实现模块不再公开暴露；crate root 对 `BootstrapTransactionGuard` / `lock_bootstrap_transaction(...)` 只保留 hidden deprecated compat 入口，文档继续收口到高层 bootstrap helpers。
+
 ### Added
 - Added shared `LazyValue` / `LazyInitError` primitives plus `bootstrap_text_resources_then_load(...)`, so domain runtime adapters can reuse the same lazy-init and bootstrap+rollback orchestration without reimplementing it per crate.
 - Added explicit-base variants for path/data-root resolution: `materialize_resource_root_with_base(...)`, `resolve_data_root_with_base(...)`, and `ensure_data_root_with_base(...)`. Callers that already know their workspace root no longer need to rely on ambient `current_dir()` to resolve relative text-assets paths.

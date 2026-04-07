@@ -6,8 +6,10 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ## [Unreleased]
 
+- `prompt-kit`：当 prompt directory load 失败且后续 best-effort rollback 也失败时，返回的 `io::Error` 现在保留原始 load `ErrorKind`，并通过 `PromptBootstrapCleanupError` 同时暴露 rollback 失败；主错误语义不再被 rollback 覆盖。
+
 ### Fixed
-- `bootstrap_prompt_directory(...)` 在 load 失败后又遇到 rollback 失败时，错误链现在优先暴露 rollback 作为主 `source()`，并把原始 load 失败挂到下一层 source，避免外层 `io::ErrorKind`、错误链和访问器各指向不同故障。
+- `bootstrap_prompt_directory(...)` 在 load 失败后又遇到 rollback 失败时，错误链和 `io::ErrorKind` 现在都继续对齐到 load failure；rollback 失败继续通过 `PromptBootstrapCleanupError` 的访问器保留，不再把主因重分类成 cleanup。
 - `prompt-kit` 的资源 bootstrap 回归测试现在会先探测环境临时根是否可用，并在 `StorageFull` 等非业务性临时目录故障下显式跳过，避免受限 runner 因磁盘/临时目录条件误报失败。
 
 ### Changed
@@ -24,6 +26,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `LazyPromptDirectory` 现在会把“同线程但并非当前递归调用”的初始化冲突单独映射成显式错误，避免 deprecated blocking shim 继续把这类冲突误报成 reentrant 初始化。
 - `LazyPromptDirectory` 的同线程冲突错误现在直接说明这是 blocking compatibility shim 边界，并指向 `PromptDirectoryHandle` 作为 runtime-facing canonical handle，避免调用方继续把这类失败误读成普通目录加载错误。
 - `PromptDirectoryHandle` 现在复用 `text-assets-kit::SharedRuntimeHandle<TextDirectory>`，不再在 crate 内部维护第二套几乎同构的 runtime handle 实现。
+- `prompt-kit::prompts` 不再作为 public implementation module 暴露；crate root 继续提供稳定的 prompt runtime adapter 入口，避免调用方继续从实现模块下钻。
 
 ### Added
 - Split prompt-directory bootstrap and lazy runtime handle logic out of the old mixed runtime-assets crate so prompt-specific behavior now lives behind its own domain crate.

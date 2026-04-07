@@ -47,7 +47,7 @@ impl std::fmt::Display for PromptBootstrapCleanupError {
 
 impl std::error::Error for PromptBootstrapCleanupError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.rollback)
+        Some(self.load_error())
     }
 }
 
@@ -121,7 +121,7 @@ pub fn bootstrap_prompt_directory_with_base(
 
 fn prompt_bootstrap_cleanup_error(load: io::Error, rollback: io::Error) -> io::Error {
     io::Error::new(
-        rollback.kind(),
+        load.kind(),
         PromptBootstrapCleanupError {
             rollback: PromptBootstrapRollbackError { rollback, load },
         },
@@ -394,6 +394,41 @@ mod tests {
             Err(err) if skip_prompt_bootstrap_storage_full(test_name, context, &err) => None,
             Err(err) => panic!("{context}: {err}"),
         }
+    }
+
+    #[test]
+    fn bootstrap_prompt_directory_dual_failure_keeps_load_error_kind() {
+        let Some(temp) = managed_prompt_test_tempdir(
+            "bootstrap_prompt_directory_dual_failure_keeps_load_error_kind",
+        ) else {
+            return;
+        };
+        let root = temp.path().join("prompts");
+        let manifest = ResourceManifest::new().with_resource(
+            TextResource::new("default.md", "hello").expect("valid prompt resource"),
+        );
+        let backup_root = temp.path().join("prompt-backup");
+
+        let err = bootstrap_prompt_directory_with_loader(&root, &manifest, |root, _| {
+            fs::rename(root, &backup_root).expect("move root aside");
+            fs::write(root, "blocking file").expect("replace root with file");
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "prompt load failed",
+            ))
+        })
+        .expect_err("load+rollback failure should error");
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let cleanup = err
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<PromptBootstrapCleanupError>())
+            .expect("cleanup error source");
+        assert_eq!(cleanup.load_error().to_string(), "prompt load failed");
+        assert!(
+            cleanup.rollback_error().kind() != io::ErrorKind::InvalidData,
+            "rollback error should remain distinct from the primary load classification"
+        );
     }
 
     static REENTRANT_PROMPTS: LazyLock<LazyPromptDirectory> =
@@ -824,6 +859,7 @@ mod tests {
             io::Error::other("rollback failed"),
         );
 
+        assert_eq!(error.kind(), io::ErrorKind::Other);
         let cleanup = error
             .get_ref()
             .and_then(|source| source.downcast_ref::<PromptBootstrapCleanupError>())
@@ -831,17 +867,10 @@ mod tests {
         assert_eq!(cleanup.load_error().to_string(), "load failed");
         assert_eq!(cleanup.rollback_error().to_string(), "rollback failed");
         assert_eq!(
-            cleanup.source().expect("rollback source").to_string(),
-            "rollback failed: rollback failed"
-        );
-        assert_eq!(
-            cleanup
-                .source()
-                .and_then(std::error::Error::source)
-                .expect("load source")
-                .to_string(),
+            cleanup.source().expect("load source").to_string(),
             "load failed"
         );
+        assert_eq!(cleanup.rollback_error().to_string(), "rollback failed");
         assert_eq!(
             cleanup.to_string(),
             "prompt directory load error: load failed; rollback failed: rollback failed"

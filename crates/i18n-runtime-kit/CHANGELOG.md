@@ -10,7 +10,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ### Changed
 - `LazyCatalog` 的 blocking-shim 契约继续保持“并发访问等待既有初始化结果”，不再因为 `LazyValue` 把同线程 in-flight 状态误判成递归而提前 fail-fast；直接递归初始化仍然显式拒绝。
-- `i18n-runtime-kit::lazy_catalog` 不再作为 public implementation module 暴露；crate root 继续提供稳定的 runtime adapter 入口，避免调用方继续从实现模块下钻。
+- `i18n-runtime-kit::lazy_catalog` 不再作为 public implementation module 暴露；crate root 继续提供稳定的 runtime adapter 入口，并移除实现模块路径这条可误用的兼容面。
 - `i18n-runtime-kit` 现在显式标记 `publish = false`，因为它当前直接依赖 workspace-only 的 `text-assets-kit`，发布契约收口为 Git / monorepo 复用而不是暗示可独立 crates.io 发布。
 - Reused `text-assets-kit` shared lazy-init and bootstrap+rollback primitives instead of maintaining a second copy inside `i18n-runtime-kit`.
 - Clarified that the shared bootstrap/rollback primitives used here provide best-effort cleanup for the current attempt, not crash-safe transactions.

@@ -132,6 +132,27 @@ pub(crate) fn resolve_config_connection_cwd(
     resolve_connection_cwd_with_base(config_root, cwd)
 }
 
+fn validate_protocol_version(protocol_version: impl Into<String>) -> crate::Result<String> {
+    let protocol_version = protocol_version.into();
+    if protocol_version.trim().is_empty() {
+        return Err(
+            tagged_message(ErrorKind::Config, "mcp protocol version must not be empty").into(),
+        );
+    }
+    Ok(protocol_version)
+}
+
+fn validate_capabilities(capabilities: Value) -> crate::Result<Value> {
+    if !capabilities.is_object() {
+        return Err(tagged_message(
+            ErrorKind::Config,
+            "mcp client capabilities must be a JSON object",
+        )
+        .into());
+    }
+    Ok(capabilities)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProtocolVersionCheck {
     /// Fail closed (default): require a string `initialize.result.protocolVersion` and reject
@@ -570,10 +591,14 @@ impl Manager {
         }
         let mut manager = Self::new(client_name, client_version, timeout);
         if let Some(protocol_version) = config.client().protocol_version.clone() {
-            manager = manager.with_protocol_version(protocol_version);
+            manager = manager
+                .with_protocol_version(protocol_version)
+                .expect("validated Config should always carry a non-empty protocol version");
         }
         if let Some(capabilities) = config.client().capabilities.clone() {
-            manager = manager.with_capabilities(capabilities);
+            manager = manager
+                .with_capabilities(capabilities)
+                .expect("validated Config should always carry object-shaped client capabilities");
         }
         if let Some(roots) = config.client().roots.clone() {
             manager = manager.with_roots(roots);
@@ -644,9 +669,15 @@ impl Manager {
         self
     }
 
-    pub fn with_protocol_version(mut self, protocol_version: impl Into<String>) -> Self {
-        self.protocol_version = protocol_version.into();
-        self
+    /// Override the protocol version advertised during `initialize`.
+    ///
+    /// Returns a config error when `protocol_version` is blank after trimming.
+    pub fn with_protocol_version(
+        mut self,
+        protocol_version: impl Into<String>,
+    ) -> crate::Result<Self> {
+        self.protocol_version = validate_protocol_version(protocol_version)?;
+        Ok(self)
     }
 
     pub fn with_protocol_version_check(mut self, check: ProtocolVersionCheck) -> Self {
@@ -695,12 +726,15 @@ impl Manager {
         self.server_handler_timeout_counts.take_and_reset()
     }
 
-    pub fn with_capabilities(mut self, capabilities: Value) -> Self {
-        self.capabilities = capabilities;
+    /// Override the client capabilities advertised during `initialize`.
+    ///
+    /// Returns a config error when `capabilities` is not a JSON object.
+    pub fn with_capabilities(mut self, capabilities: Value) -> crate::Result<Self> {
+        self.capabilities = validate_capabilities(capabilities)?;
         if self.roots.is_some() {
             ensure_roots_capability(&mut self.capabilities);
         }
-        self
+        Ok(self)
     }
 
     pub fn with_roots(mut self, roots: Vec<Root>) -> Self {
@@ -1466,8 +1500,11 @@ impl Manager {
 }
 
 fn ensure_roots_capability(capabilities: &mut Value) {
+    if !capabilities.is_object() {
+        *capabilities = Value::Object(serde_json::Map::new());
+    }
     let Value::Object(map) = capabilities else {
-        return;
+        unreachable!("non-object capabilities should be normalized before root injection");
     };
     match map.get_mut("roots") {
         Some(Value::Object(_)) => {}

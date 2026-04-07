@@ -23,6 +23,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ### Fixed
 - Kept the unix socket entry regression test under a short non-symlink temp root so pre-commit and CI still exercise directory validation instead of failing on host socket path-length limits.
+- `i18n-runtime-kit`：Unix socket 目录回归测试不再硬编码 `/var/tmp`；现在使用 `tempfile` 选择的环境临时根，并在 socket setup 本身不可用时显式跳过，避免受限 runner 因非业务性临时目录或磁盘问题误报失败。
 - Removed a redundant borrow in the explicit-base catalog directory scan path so the crate continues to pass the workspace `clippy -D warnings` gate.
 
 ### Added

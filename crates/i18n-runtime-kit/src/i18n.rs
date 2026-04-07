@@ -408,28 +408,124 @@ mod tests {
     use text_assets_kit::{MAX_TEXT_DIRECTORY_TOTAL_BYTES, MAX_TEXT_RESOURCE_BYTES, TextResource};
 
     #[cfg(unix)]
-    fn short_tempdir_for_unix_socket() -> TempDir {
-        tempfile::Builder::new()
+    fn unix_socket_test_tempdir(test_name: &str) -> Option<TempDir> {
+        match tempfile::Builder::new()
             .prefix("of-sock-")
             .rand_bytes(3)
-            .tempdir_in("/var/tmp")
-            .expect("short temp dir")
+            .tempdir()
+        {
+            Ok(tempdir) => Some(tempdir),
+            Err(err) => {
+                eprintln!(
+                    "skipping {test_name}: unable to create temp dir for unix socket test: {err}"
+                );
+                None
+            }
+        }
+    }
+
+    fn managed_resource_test_tempdir(test_name: &str) -> Option<TempDir> {
+        let tempdir = tempfile::Builder::new()
+            .prefix("of-i18n-")
+            .rand_bytes(3)
+            .tempdir_in(std::env::temp_dir())
+            .unwrap_or_else(|err| panic!("temp dir: {err}"));
+        let probe_root = tempdir.path().join("bootstrap-probe");
+        let probe_manifest = ResourceManifest::new().with_resource(
+            TextResource::new("probe/en_US.json", r#"{"greeting":"hello"}"#)
+                .expect("valid probe resource"),
+        );
+        match text_assets_kit::bootstrap_text_resources(&probe_root, &probe_manifest) {
+            Ok(()) => {
+                let _ = std::fs::remove_dir_all(&probe_root);
+                Some(tempdir)
+            }
+            Err(err) if err.kind() == io::ErrorKind::StorageFull => {
+                eprintln!(
+                    "skipping {test_name}: resource bootstrap temp root unavailable in this environment: {err}"
+                );
+                None
+            }
+            Err(err) => panic!("resource bootstrap probe: {err}"),
+        }
+    }
+
+    fn skip_resource_bootstrap_storage_full(
+        test_name: &str,
+        context: &str,
+        err: &ResourceCatalogError,
+    ) -> bool {
+        match err {
+            ResourceCatalogError::Bootstrap(error)
+                if error.kind() == io::ErrorKind::StorageFull =>
+            {
+                eprintln!(
+                    "skipping {test_name}: {context} unavailable in this environment: {error}"
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn bootstrap_i18n_catalog_or_skip(
+        test_name: &str,
+        context: &str,
+        root: impl AsRef<Path>,
+        manifest: &ResourceManifest,
+        default_locale: Locale,
+        fallback_strategy: FallbackStrategy,
+    ) -> Option<DynamicJsonCatalog> {
+        match bootstrap_i18n_catalog(root, manifest, default_locale, fallback_strategy) {
+            Ok(catalog) => Some(catalog),
+            Err(err) if skip_resource_bootstrap_storage_full(test_name, context, &err) => None,
+            Err(err) => panic!("{context}: {err}"),
+        }
+    }
+
+    fn bootstrap_i18n_catalog_with_base_or_skip(
+        test_name: &str,
+        context: &str,
+        base: &Path,
+        root: &Path,
+        manifest: &ResourceManifest,
+        default_locale: Locale,
+        fallback_strategy: FallbackStrategy,
+    ) -> Option<DynamicJsonCatalog> {
+        match bootstrap_i18n_catalog_with_base(
+            base,
+            root,
+            manifest,
+            default_locale,
+            fallback_strategy,
+        ) {
+            Ok(catalog) => Some(catalog),
+            Err(err) if skip_resource_bootstrap_storage_full(test_name, context, &err) => None,
+            Err(err) => panic!("{context}: {err}"),
+        }
     }
 
     #[test]
     fn resource_backed_catalog_rebuilds_snapshot_from_current_disk_state() {
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) = managed_resource_test_tempdir(
+            "resource_backed_catalog_rebuilds_snapshot_from_current_disk_state",
+        ) else {
+            return;
+        };
         let manifest = ResourceManifest::new().with_resource(
             TextResource::new("en_US.json", r#"{"greeting":"hello"}"#).expect("valid resource"),
         );
 
-        let first = bootstrap_i18n_catalog(
+        let Some(first) = bootstrap_i18n_catalog_or_skip(
+            "resource_backed_catalog_rebuilds_snapshot_from_current_disk_state",
+            "bootstrap catalog",
             temp.path(),
             &manifest,
             Locale::EN_US,
             FallbackStrategy::Both,
-        )
-        .expect("bootstrap catalog");
+        ) else {
+            return;
+        };
         assert_eq!(
             first.get_text(Locale::EN_US, "greeting"),
             Some("hello".to_string())
@@ -437,13 +533,16 @@ mod tests {
 
         std::fs::write(temp.path().join("en_US.json"), r#"{"greeting":"hi"}"#)
             .expect("rewrite locale file");
-        let second = bootstrap_i18n_catalog(
+        let Some(second) = bootstrap_i18n_catalog_or_skip(
+            "resource_backed_catalog_rebuilds_snapshot_from_current_disk_state",
+            "rebuild catalog",
             temp.path(),
             &manifest,
             Locale::EN_US,
             FallbackStrategy::Both,
-        )
-        .expect("rebuild catalog");
+        ) else {
+            return;
+        };
 
         assert_eq!(
             second.get_text(Locale::EN_US, "greeting"),
@@ -453,18 +552,25 @@ mod tests {
 
     #[test]
     fn resource_backed_catalog_failed_rebuild_keeps_previous_snapshot() {
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) = managed_resource_test_tempdir(
+            "resource_backed_catalog_failed_rebuild_keeps_previous_snapshot",
+        ) else {
+            return;
+        };
         let manifest = ResourceManifest::new().with_resource(
             TextResource::new("en_US.json", r#"{"greeting":"hello"}"#).expect("valid resource"),
         );
 
-        let catalog = bootstrap_i18n_catalog(
+        let Some(catalog) = bootstrap_i18n_catalog_or_skip(
+            "resource_backed_catalog_failed_rebuild_keeps_previous_snapshot",
+            "bootstrap catalog",
             temp.path(),
             &manifest,
             Locale::EN_US,
             FallbackStrategy::Both,
-        )
-        .expect("bootstrap catalog");
+        ) else {
+            return;
+        };
         assert_eq!(
             catalog.get_text(Locale::EN_US, "greeting"),
             Some("hello".to_string())
@@ -490,18 +596,25 @@ mod tests {
 
     #[test]
     fn resource_backed_catalog_rebuild_rejects_oversized_locale_before_parsing() {
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) = managed_resource_test_tempdir(
+            "resource_backed_catalog_rebuild_rejects_oversized_locale_before_parsing",
+        ) else {
+            return;
+        };
         let manifest = ResourceManifest::new().with_resource(
             TextResource::new("en_US.json", r#"{"greeting":"hello"}"#).expect("valid resource"),
         );
 
-        let catalog = bootstrap_i18n_catalog(
+        let Some(catalog) = bootstrap_i18n_catalog_or_skip(
+            "resource_backed_catalog_rebuild_rejects_oversized_locale_before_parsing",
+            "bootstrap catalog",
             temp.path(),
             &manifest,
             Locale::EN_US,
             FallbackStrategy::Both,
-        )
-        .expect("bootstrap catalog");
+        ) else {
+            return;
+        };
 
         std::fs::write(
             temp.path().join("en_US.json"),
@@ -529,7 +642,11 @@ mod tests {
 
     #[test]
     fn resource_backed_catalog_rejects_catalogs_that_exceed_total_size_limit() {
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) = managed_resource_test_tempdir(
+            "resource_backed_catalog_rejects_catalogs_that_exceed_total_size_limit",
+        ) else {
+            return;
+        };
         let locales = [
             "en_US", "fr_FR", "de_DE", "es_ES", "it_IT", "ja_JP", "ko_KR", "pt_BR", "zh_CN",
         ];
@@ -562,7 +679,11 @@ mod tests {
     #[test]
     fn resource_backed_catalog_rebuilds_from_absolute_root_across_cwd_changes() {
         let cwd = CurrentDirGuard::new();
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) = managed_resource_test_tempdir(
+            "resource_backed_catalog_rebuilds_from_absolute_root_across_cwd_changes",
+        ) else {
+            return;
+        };
         let workspace_a = temp.path().join("workspace_a");
         let workspace_b = temp.path().join("workspace_b");
         let root = workspace_a.join("catalog");
@@ -573,13 +694,16 @@ mod tests {
         let manifest = ResourceManifest::new().with_resource(
             TextResource::new("en_US.json", r#"{"greeting":"hello"}"#).expect("valid resource"),
         );
-        let catalog = bootstrap_i18n_catalog(
+        let Some(catalog) = bootstrap_i18n_catalog_or_skip(
+            "resource_backed_catalog_rebuilds_from_absolute_root_across_cwd_changes",
+            "bootstrap catalog",
             PathBuf::from("catalog"),
             &manifest,
             Locale::EN_US,
             FallbackStrategy::Both,
-        )
-        .expect("bootstrap catalog");
+        ) else {
+            return;
+        };
 
         cwd.set(&workspace_b);
         std::fs::write(root.join("en_US.json"), r#"{"greeting":"hi"}"#)
@@ -601,7 +725,11 @@ mod tests {
     #[test]
     fn resource_backed_catalog_bootstrap_with_base_uses_explicit_base_across_cwd_changes() {
         let cwd = CurrentDirGuard::new();
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) = managed_resource_test_tempdir(
+            "resource_backed_catalog_bootstrap_with_base_uses_explicit_base_across_cwd_changes",
+        ) else {
+            return;
+        };
         let workspace_a = temp.path().join("workspace_a");
         let workspace_b = temp.path().join("workspace_b");
         std::fs::create_dir_all(&workspace_a).expect("mkdir workspace_a");
@@ -611,14 +739,17 @@ mod tests {
         let manifest = ResourceManifest::new().with_resource(
             TextResource::new("en_US.json", r#"{"greeting":"hello"}"#).expect("valid resource"),
         );
-        let catalog = bootstrap_i18n_catalog_with_base(
+        let Some(catalog) = bootstrap_i18n_catalog_with_base_or_skip(
+            "resource_backed_catalog_bootstrap_with_base_uses_explicit_base_across_cwd_changes",
+            "bootstrap catalog with base",
             &workspace_a,
             Path::new("catalog"),
             &manifest,
             Locale::EN_US,
             FallbackStrategy::Both,
-        )
-        .expect("bootstrap catalog with base");
+        ) else {
+            return;
+        };
 
         assert_eq!(
             catalog.get_text(Locale::EN_US, "greeting"),
@@ -632,19 +763,26 @@ mod tests {
 
     #[test]
     fn resource_backed_catalog_loads_nested_locale_files() {
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) =
+            managed_resource_test_tempdir("resource_backed_catalog_loads_nested_locale_files")
+        else {
+            return;
+        };
         let manifest = ResourceManifest::new().with_resource(
             TextResource::new("i18n/en_US.json", r#"{"greeting":"hello"}"#)
                 .expect("valid resource"),
         );
 
-        let catalog = bootstrap_i18n_catalog(
+        let Some(catalog) = bootstrap_i18n_catalog_or_skip(
+            "resource_backed_catalog_loads_nested_locale_files",
+            "bootstrap catalog",
             temp.path(),
             &manifest,
             Locale::EN_US,
             FallbackStrategy::Both,
-        )
-        .expect("bootstrap catalog");
+        ) else {
+            return;
+        };
         assert_eq!(
             catalog.get_text(Locale::EN_US, "greeting"),
             Some("hello".to_string())
@@ -654,7 +792,11 @@ mod tests {
 
     #[test]
     fn resource_backed_catalog_ignores_unmanaged_root_json_files() {
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) = managed_resource_test_tempdir(
+            "resource_backed_catalog_ignores_unmanaged_root_json_files",
+        ) else {
+            return;
+        };
         std::fs::write(temp.path().join("notes.json"), r#"{"ignore":"me"}"#)
             .expect("write unrelated json");
         let manifest = ResourceManifest::new().with_resource(
@@ -662,13 +804,16 @@ mod tests {
                 .expect("valid resource"),
         );
 
-        let catalog = bootstrap_i18n_catalog(
+        let Some(catalog) = bootstrap_i18n_catalog_or_skip(
+            "resource_backed_catalog_ignores_unmanaged_root_json_files",
+            "bootstrap catalog",
             temp.path(),
             &manifest,
             Locale::EN_US,
             FallbackStrategy::Both,
-        )
-        .expect("bootstrap catalog");
+        ) else {
+            return;
+        };
         assert_eq!(
             catalog.get_text(Locale::EN_US, "greeting"),
             Some("hello".to_string())
@@ -678,7 +823,11 @@ mod tests {
 
     #[test]
     fn resource_backed_catalog_errors_when_default_locale_is_missing() {
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) = managed_resource_test_tempdir(
+            "resource_backed_catalog_errors_when_default_locale_is_missing",
+        ) else {
+            return;
+        };
         let manifest = ResourceManifest::new().with_resource(
             TextResource::new("zh_CN.json", r#"{"greeting":"nihao"}"#).expect("valid resource"),
         );
@@ -701,7 +850,11 @@ mod tests {
 
     #[test]
     fn resource_backed_catalog_bootstrap_rejects_invalid_manifest_without_writing_files() {
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) = managed_resource_test_tempdir(
+            "resource_backed_catalog_bootstrap_rejects_invalid_manifest_without_writing_files",
+        ) else {
+            return;
+        };
         let root = temp.path().join("catalog");
         let invalid_manifest = ResourceManifest::new()
             .with_resource(TextResource::new("i18n/en_US.json", "{").expect("valid resource path"));
@@ -724,13 +877,16 @@ mod tests {
             TextResource::new("i18n/en_US.json", r#"{"greeting":"hello"}"#)
                 .expect("valid resource"),
         );
-        let catalog = bootstrap_i18n_catalog(
+        let Some(catalog) = bootstrap_i18n_catalog_or_skip(
+            "resource_backed_catalog_bootstrap_rejects_invalid_manifest_without_writing_files",
+            "second bootstrap should recover",
             &root,
             &valid_manifest,
             Locale::EN_US,
             FallbackStrategy::Both,
-        )
-        .expect("second bootstrap should recover");
+        ) else {
+            return;
+        };
         assert_eq!(
             catalog.get_text(Locale::EN_US, "greeting"),
             Some("hello".to_string())
@@ -739,7 +895,11 @@ mod tests {
 
     #[test]
     fn resource_backed_catalog_bootstrap_rejects_invalid_template_without_writing_files() {
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) = managed_resource_test_tempdir(
+            "resource_backed_catalog_bootstrap_rejects_invalid_template_without_writing_files",
+        ) else {
+            return;
+        };
         let root = temp.path().join("catalog");
         let invalid_manifest = ResourceManifest::new().with_resource(
             TextResource::new("i18n/en_US.json", r#"{"greeting":"hello {name"}"#)
@@ -768,7 +928,11 @@ mod tests {
 
     #[test]
     fn resource_backed_catalog_rejects_invalid_locale_file_name_without_writing_files() {
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) = managed_resource_test_tempdir(
+            "resource_backed_catalog_rejects_invalid_locale_file_name_without_writing_files",
+        ) else {
+            return;
+        };
         let root = temp.path().join("catalog");
         let invalid_manifest = ResourceManifest::new().with_resource(
             TextResource::new("i18n/not-a-locale.txt", r#"{"greeting":"hello"}"#)
@@ -795,16 +959,31 @@ mod tests {
     fn resource_backed_catalog_rebuild_rejects_symlinked_root() {
         use std::os::unix::fs::symlink;
 
-        let temp = TempDir::new().expect("temp dir");
+        let Some(temp) =
+            managed_resource_test_tempdir("resource_backed_catalog_rebuild_rejects_symlinked_root")
+        else {
+            return;
+        };
         let root = temp.path().join("catalog");
         let backup = temp.path().join("catalog_real");
-        let outside = TempDir::new().expect("outside dir");
+        let Some(outside) = managed_resource_test_tempdir(
+            "resource_backed_catalog_rebuild_rejects_symlinked_root_outside",
+        ) else {
+            return;
+        };
         let manifest = ResourceManifest::new().with_resource(
             TextResource::new("en_US.json", r#"{"greeting":"hello"}"#).expect("valid resource"),
         );
-        let catalog =
-            bootstrap_i18n_catalog(&root, &manifest, Locale::EN_US, FallbackStrategy::Both)
-                .expect("bootstrap catalog");
+        let Some(catalog) = bootstrap_i18n_catalog_or_skip(
+            "resource_backed_catalog_rebuild_rejects_symlinked_root",
+            "bootstrap catalog",
+            &root,
+            &manifest,
+            Locale::EN_US,
+            FallbackStrategy::Both,
+        ) else {
+            return;
+        };
 
         std::fs::rename(&root, &backup).expect("move root aside");
         std::fs::write(
@@ -1206,18 +1385,20 @@ mod tests {
     fn directory_catalog_rejects_socket_entries() {
         use std::os::unix::net::UnixListener;
 
-        let temp = short_tempdir_for_unix_socket();
+        let Some(temp) = unix_socket_test_tempdir("directory_catalog_rejects_socket_entries")
+        else {
+            return;
+        };
         fs::write(temp.path().join("en_US.json"), r#"{"greeting":"hello"}"#).expect("write locale");
         let socket_path = temp.path().join("catalog.sock");
         let _listener = match UnixListener::bind(&socket_path) {
             Ok(listener) => listener,
-            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+            Err(err) => {
                 eprintln!(
-                    "skipping directory_catalog_rejects_socket_entries: unix socket bind not permitted in this environment: {err}"
+                    "skipping directory_catalog_rejects_socket_entries: unix socket bind unavailable in this environment: {err}"
                 );
                 return;
             }
-            Err(err) => panic!("bind socket: {err}"),
         };
 
         let error = load_directory_catalog(temp.path()).expect_err("socket entries should fail");

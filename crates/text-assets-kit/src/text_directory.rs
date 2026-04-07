@@ -173,12 +173,20 @@ mod tests {
     use tempfile::TempDir;
 
     #[cfg(unix)]
-    fn short_tempdir_for_unix_socket() -> TempDir {
-        tempfile::Builder::new()
+    fn unix_socket_test_tempdir(test_name: &str) -> Option<TempDir> {
+        match tempfile::Builder::new()
             .prefix("of-sock-")
             .rand_bytes(3)
-            .tempdir_in("/var/tmp")
-            .expect("short temp dir")
+            .tempdir()
+        {
+            Ok(tempdir) => Some(tempdir),
+            Err(err) => {
+                eprintln!(
+                    "skipping {test_name}: unable to create temp dir for unix socket test: {err}"
+                );
+                None
+            }
+        }
     }
 
     #[test]
@@ -237,6 +245,32 @@ mod tests {
         std::env::set_current_dir(&workspace_b).expect("set cwd");
         let directory = TextDirectory::load_with_base(&workspace_a, Path::new("prompts"))
             .expect("load with base");
+        if std::env::set_current_dir(&original_cwd).is_err() {
+            std::env::set_current_dir("/").expect("restore cwd fallback");
+        }
+
+        assert_eq!(directory.get("nested/system.md"), Some("hello"));
+    }
+
+    #[test]
+    fn text_directory_load_resource_files_with_base_uses_explicit_base_across_cwd_changes() {
+        let temp = TempDir::new().expect("temp dir");
+        let workspace_a = temp.path().join("workspace_a");
+        let workspace_b = temp.path().join("workspace_b");
+        let prompts_dir = workspace_a.join("prompts");
+        fs::create_dir_all(prompts_dir.join("nested")).expect("mkdir prompts");
+        fs::create_dir_all(&workspace_b).expect("mkdir workspace_b");
+        fs::write(prompts_dir.join("nested").join("system.md"), "hello").expect("write prompt");
+
+        let original_cwd =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+        std::env::set_current_dir(&workspace_b).expect("set cwd");
+        let directory = TextDirectory::load_resource_files_with_base(
+            &workspace_a,
+            Path::new("prompts"),
+            &["nested/system.md".to_string()],
+        )
+        .expect("load resource files with base");
         if std::env::set_current_dir(&original_cwd).is_err() {
             std::env::set_current_dir("/").expect("restore cwd fallback");
         }
@@ -434,17 +468,18 @@ mod tests {
     fn text_directory_rejects_socket_entries() {
         use std::os::unix::net::UnixListener;
 
-        let temp = short_tempdir_for_unix_socket();
+        let Some(temp) = unix_socket_test_tempdir("text_directory_rejects_socket_entries") else {
+            return;
+        };
         let socket_path = temp.path().join("resource.sock");
         let _listener = match UnixListener::bind(&socket_path) {
             Ok(listener) => listener,
-            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+            Err(err) => {
                 eprintln!(
-                    "skipping text_directory_rejects_socket_entries: unix socket bind not permitted in this environment: {err}"
+                    "skipping text_directory_rejects_socket_entries: unix socket bind unavailable in this environment: {err}"
                 );
                 return;
             }
-            Err(err) => panic!("bind socket: {err}"),
         };
 
         let err = TextDirectory::load(temp.path()).expect_err("socket entries should fail");

@@ -14,11 +14,12 @@ use crate::{resolve_locale_from_argv, resolve_locale_from_cli_args};
 /// Legacy blocking catalog shim.
 ///
 /// Concurrent access while the initializer is already running waits for the
-/// initializer to finish and then observes the settled result. Recursive
-/// initialization from the same thread is still rejected, and thread-level
-/// cross-thread wait cycles are rejected before they can deadlock. Because
-/// this path uses a blocking `Condvar`-based primitive, async runtime
-/// boundaries should still prefer eager load/bootstrap plus `GlobalCatalog`.
+/// initializer to finish and then observes the settled result. Direct
+/// recursive initialization from the current call stack is still rejected, and
+/// thread-level cross-thread wait cycles are rejected before they can
+/// deadlock. Because this path uses a blocking `Condvar`-based primitive,
+/// async runtime boundaries should still prefer eager load/bootstrap plus
+/// `GlobalCatalog`.
 #[deprecated(
     since = "0.1.0",
     note = "LazyCatalog is a blocking compatibility shim; prefer GlobalCatalog plus eager load/bootstrap for runtime-facing catalog access"

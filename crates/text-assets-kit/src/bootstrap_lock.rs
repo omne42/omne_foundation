@@ -7,16 +7,13 @@ use omne_fs_primitives::{
 use std::collections::BTreeSet;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::sync::{Condvar, LazyLock, Mutex, MutexGuard};
 
-#[cfg(unix)]
-const BOOTSTRAP_LOCK_DIR_NAME_UNIX: &str = ".text-assets-kit-bootstrap-locks";
-#[cfg(unix)]
-const BOOTSTRAP_LOCK_ENV_RUNTIME_DIR_UNIX: &str = "XDG_RUNTIME_DIR";
-#[cfg(unix)]
-const BOOTSTRAP_LOCK_RUNTIME_ROOT_UNIX: &str = "/run/user";
-#[cfg(not(unix))]
-const BOOTSTRAP_LOCK_DIR_NAME_OTHER: &str = ".text-assets-kit-bootstrap-locks";
+use crate::resource_path::materialize_resource_root_from_current_dir;
+
+const BOOTSTRAP_LOCK_DIR_NAME: &str = ".text-assets-kit-bootstrap-locks";
 
 struct BootstrapTransactionState {
     held_roots: Mutex<BTreeSet<BootstrapRootKey>>,
@@ -53,28 +50,31 @@ impl Drop for BootstrapTransactionGuard {
 ///
 /// This prevents rollback/load races between threads in one process, and
 /// advisory file locking extends the exclusion across other cooperating local
-/// processes that resolve the same lock directory.
+/// processes by creating a hidden lock namespace under a stable same-filesystem
+/// ancestor of the resource root instead of relying on an ambient temp
+/// directory.
 pub fn lock_bootstrap_transaction(root: &Path) -> io::Result<BootstrapTransactionGuard> {
-    let root = bootstrap_root_key(root)?;
+    let root = materialize_resource_root_from_current_dir(root)?;
+    let root_key = bootstrap_root_key(&root)?;
     let mut held_roots = lock_unpoisoned(&BOOTSTRAP_TRANSACTION_STATE.held_roots);
-    while held_roots.contains(&root) {
+    while held_roots.contains(&root_key) {
         held_roots = wait_unpoisoned(&BOOTSTRAP_TRANSACTION_STATE.ready, held_roots);
     }
-    held_roots.insert(root.clone());
+    held_roots.insert(root_key.clone());
     drop(held_roots);
 
-    let lock_file = match open_bootstrap_lock_file(&root) {
+    let lock_file = match open_bootstrap_lock_file(&root, &root_key) {
         Ok(lock_file) => lock_file,
         Err(error) => {
             let mut held_roots = lock_unpoisoned(&BOOTSTRAP_TRANSACTION_STATE.held_roots);
-            held_roots.remove(&root);
+            held_roots.remove(&root_key);
             BOOTSTRAP_TRANSACTION_STATE.ready.notify_all();
             return Err(error);
         }
     };
 
     Ok(BootstrapTransactionGuard {
-        root,
+        root: root_key,
         lock_file: Some(lock_file),
     })
 }
@@ -136,8 +136,11 @@ fn canonicalize_path(path: &Path) -> io::Result<PathBuf> {
     std::fs::canonicalize(path)
 }
 
-fn open_bootstrap_lock_file(root: &BootstrapRootKey) -> io::Result<AdvisoryLockGuard> {
-    open_bootstrap_lock_file_at(root, &bootstrap_lock_dir())
+fn open_bootstrap_lock_file(
+    root: &Path,
+    root_key: &BootstrapRootKey,
+) -> io::Result<AdvisoryLockGuard> {
+    open_bootstrap_lock_file_at(root_key, &bootstrap_lock_dir(root)?)
 }
 
 fn open_bootstrap_lock_file_at(
@@ -153,45 +156,115 @@ fn open_bootstrap_lock_file_at(
     )
 }
 
-fn bootstrap_lock_dir() -> PathBuf {
-    #[cfg(unix)]
-    {
-        bootstrap_lock_dir_unix(
-            rustix::process::geteuid().as_raw(),
-            std::env::var_os(BOOTSTRAP_LOCK_ENV_RUNTIME_DIR_UNIX),
-            &std::env::temp_dir(),
-            &|path| path.is_dir(),
-        )
-    }
+fn bootstrap_lock_dir(root: &Path) -> io::Result<PathBuf> {
+    Ok(bootstrap_lock_anchor(root)?.join(BOOTSTRAP_LOCK_DIR_NAME))
+}
 
-    #[cfg(not(unix))]
-    {
-        std::env::temp_dir().join(BOOTSTRAP_LOCK_DIR_NAME_OTHER)
+fn bootstrap_lock_anchor(root: &Path) -> io::Result<PathBuf> {
+    let mut existing = root;
+
+    loop {
+        match symlink_metadata_path(existing) {
+            Ok(metadata) => {
+                let anchor = if existing == root {
+                    if metadata.is_dir() {
+                        root
+                    } else {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("bootstrap root must be a directory: {}", root.display()),
+                        ));
+                    }
+                } else if metadata.is_dir() {
+                    existing
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "bootstrap lock anchor must be a directory: {}",
+                            existing.display()
+                        ),
+                    ));
+                };
+                let canonical = canonicalize_path(anchor).map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!(
+                            "canonicalize bootstrap lock anchor {}: {error}",
+                            anchor.display()
+                        ),
+                    )
+                })?;
+                #[cfg(unix)]
+                {
+                    return stabilize_bootstrap_lock_anchor_unix(&canonical);
+                }
+                #[cfg(not(unix))]
+                {
+                    return Ok(canonical);
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                existing = existing.parent().unwrap_or(root);
+            }
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "inspect bootstrap lock anchor {}: {error}",
+                        existing.display()
+                    ),
+                ));
+            }
+        }
     }
 }
 
-fn bootstrap_lock_dir_unix(
-    uid: u32,
-    xdg_runtime_dir: Option<std::ffi::OsString>,
-    temp_root: &Path,
-    runtime_dir_exists: &impl Fn(&Path) -> bool,
-) -> PathBuf {
-    if let Some(runtime_dir) = xdg_runtime_dir
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .filter(|path| runtime_dir_exists(path))
+#[cfg(unix)]
+fn stabilize_bootstrap_lock_anchor_unix(anchor: &Path) -> io::Result<PathBuf> {
+    let device = symlink_metadata_path(anchor)
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "inspect bootstrap lock anchor {}: {error}",
+                    anchor.display()
+                ),
+            )
+        })?
+        .dev();
+
+    let mut ancestors = vec![anchor.to_path_buf()];
+    let mut current = anchor;
+    while let Some(parent) = current.parent() {
+        let metadata = symlink_metadata_path(parent).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "inspect bootstrap lock anchor ancestor {}: {error}",
+                    parent.display()
+                ),
+            )
+        })?;
+        if metadata.dev() != device {
+            break;
+        }
+        ancestors.push(parent.to_path_buf());
+        current = parent;
+    }
+
+    ancestors.reverse();
+    if ancestors.len() > 1
+        && ancestors
+            .first()
+            .is_some_and(|path| path.parent().is_none())
     {
-        return runtime_dir.join("text-assets-kit/bootstrap-locks");
+        ancestors.remove(0);
     }
-
-    let runtime_dir = PathBuf::from(BOOTSTRAP_LOCK_RUNTIME_ROOT_UNIX).join(uid.to_string());
-    if runtime_dir_exists(&runtime_dir) {
-        return runtime_dir.join("text-assets-kit/bootstrap-locks");
-    }
-
-    temp_root
-        .join(BOOTSTRAP_LOCK_DIR_NAME_UNIX)
-        .join(format!("uid-{uid}"))
+    Ok(ancestors
+        .into_iter()
+        .next()
+        .expect("canonical anchor chain must contain at least one path"))
 }
 
 fn stable_bootstrap_lock_hash(root: &BootstrapRootKey) -> u64 {
@@ -738,52 +811,48 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn bootstrap_lock_dir_prefers_xdg_runtime_dir_on_unix() {
-        let lock_dir = bootstrap_lock_dir_unix(
-            1000,
-            Some("/xdg/runtime".into()),
-            Path::new("/tmp/fallback"),
-            &|path| path == Path::new("/xdg/runtime"),
-        );
-        assert_eq!(
-            lock_dir,
-            PathBuf::from("/xdg/runtime").join("text-assets-kit/bootstrap-locks")
-        );
-    }
+    fn open_bootstrap_lock_file_keeps_a_stable_same_disk_namespace_as_root_materializes() {
+        let Some(temp) = bootstrap_lock_test_tempdir(
+            "open_bootstrap_lock_file_keeps_a_stable_same_disk_namespace_as_root_materializes",
+        ) else {
+            return;
+        };
+        let existing_prefix = temp.path().join("workspace");
+        let root = existing_prefix.join("catalog").join("nested");
+        fs::create_dir_all(&existing_prefix).expect("mkdir existing prefix");
+        let root_key = bootstrap_root_key(&root).expect("root key");
 
-    #[cfg(unix)]
-    #[test]
-    fn bootstrap_lock_dir_prefers_uid_runtime_dir_on_unix() {
-        let lock_dir = bootstrap_lock_dir_unix(1000, None, Path::new("/tmp/fallback"), &|path| {
-            path == Path::new("/run/user/1000")
-        });
-        assert_eq!(
-            lock_dir,
-            PathBuf::from("/run/user/1000").join("text-assets-kit/bootstrap-locks")
+        let lock_dir_before = bootstrap_lock_dir(&root).expect("lock dir before root exists");
+        let _lock_file_before =
+            open_bootstrap_lock_file(&root, &root_key).expect("open lock file before root exists");
+        let lock_path_before = lock_dir_before.join(format!(
+            "{:016x}.lock",
+            stable_bootstrap_lock_hash(&root_key)
+        ));
+        assert!(lock_path_before.is_file());
+        assert!(
+            root.starts_with(
+                lock_dir_before
+                    .parent()
+                    .expect("lock dir should have an anchor parent")
+            )
         );
-    }
+        drop(_lock_file_before);
 
-    #[cfg(unix)]
-    #[test]
-    fn bootstrap_lock_dir_falls_back_to_process_temp_dir_namespace_on_unix() {
-        let lock_dir =
-            bootstrap_lock_dir_unix(1000, None, Path::new("/workspace/tmp-root"), &|_| false);
+        fs::create_dir_all(&root).expect("mkdir root");
+
+        let lock_dir_after = bootstrap_lock_dir(&root).expect("lock dir after root exists");
+        let _lock_file_after =
+            open_bootstrap_lock_file(&root, &root_key).expect("open lock file after root exists");
+
         assert_eq!(
-            lock_dir,
-            PathBuf::from("/workspace/tmp-root")
-                .join(BOOTSTRAP_LOCK_DIR_NAME_UNIX)
-                .join("uid-1000")
+            lock_dir_before, lock_dir_after,
+            "bootstrap lock namespace must stay stable after the resource root is created",
         );
-    }
-
-    #[cfg(not(unix))]
-    #[test]
-    fn bootstrap_lock_dir_uses_process_temp_dir_off_unix() {
-        assert_eq!(
-            bootstrap_lock_dir(),
-            std::env::temp_dir().join(BOOTSTRAP_LOCK_DIR_NAME_OTHER)
+        assert!(
+            !root.join(BOOTSTRAP_LOCK_DIR_NAME).exists(),
+            "lock namespace must stay outside the resource root",
         );
     }
 

@@ -1,8 +1,7 @@
 mod catalog_error;
 mod global_catalog;
 mod i18n;
-#[doc(hidden)]
-pub mod lazy_catalog;
+mod lazy_catalog;
 mod locale_selection;
 
 pub use catalog_error::{CatalogInitError, CatalogLocaleError, CliLocaleError};

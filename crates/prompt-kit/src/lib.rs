@@ -1,5 +1,4 @@
-#[doc(hidden)]
-pub mod prompts;
+mod prompts;
 
 #[deprecated(
     since = "0.1.0",

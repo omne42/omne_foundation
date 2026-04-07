@@ -143,7 +143,9 @@ struct SameThreadCatalogInitializationConflict;
 
 impl Display for SameThreadCatalogInitializationConflict {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str("same-thread catalog initialization conflict")
+        f.write_str(
+            "same-thread catalog initialization conflict; LazyCatalog is a blocking compatibility shim, so runtime-facing callers should prefer GlobalCatalog plus eager load/bootstrap",
+        )
     }
 }
 
@@ -443,7 +445,7 @@ mod tests {
         let error = shared_lazy_catalog_error(LazyInitError::SameThreadInitializationConflict);
         assert_eq!(
             error.to_string(),
-            "same-thread catalog initialization conflict"
+            "same-thread catalog initialization conflict; LazyCatalog is a blocking compatibility shim, so runtime-facing callers should prefer GlobalCatalog plus eager load/bootstrap"
         );
     }
 

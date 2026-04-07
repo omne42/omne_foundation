@@ -20,6 +20,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `prompt-kit` 现在补齐了 `bootstrap_prompt_directory_with_base(...)`，让调用方在已知 workspace/root 时不必继续让相对 prompt 目录依赖 ambient `current_dir()`。
 - `LazyPromptDirectory` 现在把检测到的线程级跨线程初始化环路收敛成显式错误，而不是把兼容层调用者永久卡死。
 - `LazyPromptDirectory` 现在会把“同线程但并非当前递归调用”的初始化冲突单独映射成显式错误，避免 deprecated blocking shim 继续把这类冲突误报成 reentrant 初始化。
+- `LazyPromptDirectory` 的同线程冲突错误现在直接说明这是 blocking compatibility shim 边界，并指向 `PromptDirectoryHandle` 作为 runtime-facing canonical handle，避免调用方继续把这类失败误读成普通目录加载错误。
 - `PromptDirectoryHandle` 现在复用 `text-assets-kit::SharedRuntimeHandle<TextDirectory>`，不再在 crate 内部维护第二套几乎同构的 runtime handle 实现。
 
 ### Added

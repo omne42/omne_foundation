@@ -28,12 +28,43 @@ enum LazyState<T: ?Sized, E> {
     since = "0.1.0",
     note = "LazyInitError is part of a blocking compatibility shim. Prefer eager snapshots or runtime-owned handles at crate boundaries."
 )]
-#[derive(Debug)]
-pub enum LazyInitError<E> {
-    Inner(Arc<E>),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LazyInitConflictKind {
     ReentrantInitialization,
     SameThreadInitializationConflict,
     CrossThreadCycleDetected,
+}
+
+#[deprecated(
+    since = "0.1.0",
+    note = "LazyInitConflictKind is part of a blocking compatibility shim. Prefer eager snapshots or runtime-owned handles at crate boundaries."
+)]
+#[derive(Debug)]
+pub enum LazyInitError<E> {
+    Inner(Arc<E>),
+    /// The current call stack tried to initialize the same `LazyValue` again.
+    ReentrantInitialization,
+    /// Another access re-entered the same OS thread while initialization was still in flight.
+    ///
+    /// Waiting here would block the thread behind its own unfinished initialization attempt, so
+    /// the compatibility shim fails fast instead.
+    SameThreadInitializationConflict,
+    /// Two tracked `LazyValue` initializers would end up waiting on each other across threads.
+    CrossThreadCycleDetected,
+}
+
+impl<E> LazyInitError<E> {
+    #[must_use]
+    pub fn conflict_kind(&self) -> Option<LazyInitConflictKind> {
+        match self {
+            Self::Inner(_) => None,
+            Self::ReentrantInitialization => Some(LazyInitConflictKind::ReentrantInitialization),
+            Self::SameThreadInitializationConflict => {
+                Some(LazyInitConflictKind::SameThreadInitializationConflict)
+            }
+            Self::CrossThreadCycleDetected => Some(LazyInitConflictKind::CrossThreadCycleDetected),
+        }
+    }
 }
 
 #[deprecated(
@@ -748,8 +779,18 @@ mod tests {
             err,
             LazyInitError::SameThreadInitializationConflict
         ));
+        assert_eq!(
+            err.conflict_kind(),
+            Some(LazyInitConflictKind::SameThreadInitializationConflict)
+        );
 
         *lock_unpoisoned(&lazy.state) = LazyState::Uninitialized;
+    }
+
+    #[test]
+    fn inner_errors_do_not_report_conflict_kinds() {
+        let error = LazyInitError::Inner(Arc::new("boom"));
+        assert_eq!(error.conflict_kind(), None);
     }
 
     #[test]

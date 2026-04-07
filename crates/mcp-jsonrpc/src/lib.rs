@@ -310,11 +310,60 @@ pub struct ClientHandle {
     closed: Arc<AtomicBool>,
     close_reason: Arc<Mutex<Option<String>>>,
     stdout_log_write_error: Arc<OnceLock<String>>,
+    lifecycle: Option<Arc<ClientLifecycle>>,
 }
 
 impl std::fmt::Debug for ClientHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClientHandle").finish_non_exhaustive()
+    }
+}
+
+#[derive(Default)]
+struct ClientLifecycle {
+    reader_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    transport_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl ClientLifecycle {
+    fn install_reader_task(&self, task: tokio::task::JoinHandle<()>) {
+        let mut reader_task = self
+            .reader_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(previous) = reader_task.replace(task) {
+            previous.abort();
+        }
+    }
+
+    fn push_transport_task(&self, task: tokio::task::JoinHandle<()>) {
+        self.transport_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(task);
+    }
+
+    fn abort_all(&self) {
+        let reader_task = {
+            self.reader_task
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        };
+        if let Some(task) = reader_task {
+            task.abort();
+        }
+
+        let transport_tasks = {
+            let mut transport_tasks = self
+                .transport_tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *transport_tasks)
+        };
+        for task in transport_tasks {
+            task.abort();
+        }
     }
 }
 
@@ -695,6 +744,28 @@ impl ClientHandle {
         let _ = self.stdout_log_write_error.set(err.to_string());
     }
 
+    fn install_reader_task(&self, task: tokio::task::JoinHandle<()>) {
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.install_reader_task(task);
+        } else {
+            task.abort();
+        }
+    }
+
+    fn register_transport_task(&self, task: tokio::task::JoinHandle<()>) {
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.push_transport_task(task);
+        } else {
+            task.abort();
+        }
+    }
+
+    fn abort_background_tasks(&self) {
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.abort_all();
+        }
+    }
+
     pub async fn close(&self, reason: impl Into<String>) {
         self.close_with_reason(reason).await;
     }
@@ -736,12 +807,14 @@ impl ClientHandle {
         let handle = self.clone();
         if spawn_detached("client close", async move {
             handle.finish_close_write().await;
+            handle.abort_background_tasks();
         })
         .is_err()
         {
             // Last-ditch fallback when even detached worker/thread startup is unavailable.
             let mut write = self.write.blocking_lock();
             drop(std::mem::replace(&mut *write, Box::new(tokio::io::sink())));
+            self.abort_background_tasks();
         }
     }
 
@@ -766,8 +839,11 @@ impl ClientHandle {
 
     pub(crate) async fn close_with_error(&self, reason: impl Into<String>, err: Error) {
         let reason = reason.into();
-        self.begin_close_with_error(reason, &err);
+        let first_close = self.begin_close_with_error(reason, &err);
         self.finish_close_write().await;
+        if first_close {
+            self.abort_background_tasks();
+        }
     }
 
     pub async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), Error> {
@@ -982,8 +1058,6 @@ pub struct Client {
     child: Option<Child>,
     notifications_rx: Option<mpsc::Receiver<Notification>>,
     requests_rx: Option<mpsc::Receiver<IncomingRequest>>,
-    task: tokio::task::JoinHandle<()>,
-    transport_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1001,10 +1075,11 @@ pub enum WaitOnTimeout {
 
 impl Client {
     fn abort_background_tasks(&self) {
-        self.task.abort();
-        for task in &self.transport_tasks {
-            task.abort();
-        }
+        self.handle.abort_background_tasks();
+    }
+
+    fn register_transport_task(&self, task: tokio::task::JoinHandle<()>) {
+        self.handle.register_transport_task(task);
     }
 
     pub fn stats(&self) -> ClientStats {
@@ -1131,6 +1206,7 @@ impl Client {
         let stats = Arc::new(ClientStatsInner::default());
         let write = Arc::new(tokio::sync::Mutex::new(Box::new(write) as _));
         let diagnostics_state = DiagnosticsState::new(&diagnostics);
+        let lifecycle = Arc::new(ClientLifecycle::default());
         let handle = ClientHandle {
             write,
             next_id: Arc::new(AtomicI64::new(1)),
@@ -1143,6 +1219,7 @@ impl Client {
             closed: Arc::new(AtomicBool::new(false)),
             close_reason: Arc::new(Mutex::new(None)),
             stdout_log_write_error: Arc::new(OnceLock::new()),
+            lifecycle: Some(Arc::clone(&lifecycle)),
         };
 
         let stdout_log = match stdout_log {
@@ -1164,14 +1241,13 @@ impl Client {
                 limits,
             },
         );
+        handle.install_reader_task(task);
 
         Ok(Self {
             handle,
             child,
             notifications_rx: Some(notify_rx),
             requests_rx: Some(request_rx),
-            task,
-            transport_tasks: Vec::new(),
         })
     }
 
@@ -1249,9 +1325,6 @@ impl Client {
     /// Prefer `Client::wait_with_timeout` if you need an upper bound.
     pub async fn wait(&mut self) -> Result<Option<std::process::ExitStatus>, Error> {
         self.abort_background_tasks();
-        for task in self.transport_tasks.drain(..) {
-            task.abort();
-        }
         self.handle.close_with_reason("client closed").await;
 
         match &mut self.child {
@@ -1280,9 +1353,6 @@ impl Client {
         ensure_tokio_time_driver("Client::wait_with_timeout")?;
         let deadline = tokio::time::Instant::now() + timeout;
         self.abort_background_tasks();
-        for task in self.transport_tasks.drain(..) {
-            task.abort();
-        }
         let close_err = Error::protocol(ProtocolErrorKind::Closed, "client closed");
         self.handle
             .begin_close_with_error("client closed", &close_err);
@@ -1384,9 +1454,6 @@ impl Drop for Client {
         let err = Error::protocol(ProtocolErrorKind::Closed, "client closed");
         self.handle.begin_close_with_error("client closed", &err);
         self.abort_background_tasks();
-        for task in self.transport_tasks.drain(..) {
-            task.abort();
-        }
         // Best-effort: eagerly drop the underlying writer even if cloned handles remain.
         if let Ok(mut write) = self.handle.write.try_lock() {
             drop(std::mem::replace(&mut *write, Box::new(tokio::io::sink())));

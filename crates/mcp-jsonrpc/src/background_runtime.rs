@@ -121,6 +121,8 @@ struct DetachedSpawnError {
 #[cfg(test)]
 static FORCE_SHARED_WORKER_SPAWN_FAILURES: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
+static FORCE_SHARED_WORKER_RUNTIME_BUILD_FAILURES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
 static FORCE_INLINE_RUNTIME_BUILD_FAILURES: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static FORCE_SHARED_WORKER_DROP_BEFORE_START: AtomicUsize = AtomicUsize::new(0);
@@ -208,6 +210,19 @@ fn run_detached_runtime_worker(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<DetachedTaskEnvelope>,
     ready_tx: std_mpsc::Sender<std::io::Result<()>>,
 ) {
+    #[cfg(test)]
+    if FORCE_SHARED_WORKER_RUNTIME_BUILD_FAILURES
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+            remaining.checked_sub(1)
+        })
+        .is_ok()
+    {
+        let _ = ready_tx.send(Err(std::io::Error::other(
+            "injected detached mcp-jsonrpc shared worker runtime build failure",
+        )));
+        return;
+    }
+
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -308,6 +323,7 @@ pub(super) fn reset_detached_runtime_for_test() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     FORCE_SHARED_WORKER_SPAWN_FAILURES.store(0, Ordering::Relaxed);
+    FORCE_SHARED_WORKER_RUNTIME_BUILD_FAILURES.store(0, Ordering::Relaxed);
     FORCE_INLINE_RUNTIME_BUILD_FAILURES.store(0, Ordering::Relaxed);
     FORCE_SHARED_WORKER_DROP_BEFORE_START.store(0, Ordering::Relaxed);
 }
@@ -316,6 +332,11 @@ pub(super) fn reset_detached_runtime_for_test() {
 pub(super) fn force_detached_runtime_spawn_failures(shared_worker: usize, inline_runtime: usize) {
     FORCE_SHARED_WORKER_SPAWN_FAILURES.store(shared_worker, Ordering::Relaxed);
     FORCE_INLINE_RUNTIME_BUILD_FAILURES.store(inline_runtime, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(super) fn force_shared_worker_runtime_build_failures(count: usize) {
+    FORCE_SHARED_WORKER_RUNTIME_BUILD_FAILURES.store(count, Ordering::Relaxed);
 }
 
 #[cfg(test)]

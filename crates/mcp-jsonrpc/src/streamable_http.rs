@@ -307,7 +307,7 @@ impl Client {
         let (client_read, client_write) = tokio::io::split(client_stream);
         let (bridge_read, bridge_write) = tokio::io::split(bridge_stream);
 
-        let mut client = Self::connect_io_with_options(client_read, client_write, options).await?;
+        let client = Self::connect_io_with_options(client_read, client_write, options).await?;
         let transport_handle = client.handle.clone();
 
         let writer: Arc<tokio::sync::Mutex<_>> = Arc::new(tokio::sync::Mutex::new(bridge_write));
@@ -507,8 +507,8 @@ impl Client {
             }
         });
 
-        client.transport_tasks.push(post_task);
-        client.transport_tasks.push(sse_task);
+        client.register_transport_task(post_task);
+        client.register_transport_task(sse_task);
         Ok(client)
     }
 }

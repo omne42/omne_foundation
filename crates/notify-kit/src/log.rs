@@ -80,7 +80,7 @@ pub(crate) fn warn_sound_command_exited_non_zero(program: &str, status: &str) {
     record.emit_tracing();
 }
 
-#[cfg(not(feature = "sound-command"))]
+#[cfg(all(feature = "sink-sound", not(feature = "sound-command")))]
 pub(crate) fn warn_sound_command_disabled_fallback() {
     let mut record = warn_record(
         "notify.sound.command_disabled_fallback",

@@ -25,6 +25,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `notify-kit` crate root 不再直接 re-export `secret_kit::SecretString`；secret 领域类型回到各 sink/config 的显式依赖边界，避免通知 crate 的公开 API 再把 secret 语义直接污染到 root namespace。
 - `Hub::notify_best_effort` 现在成为显式命名的 best-effort fire-and-forget 入口；原 `Hub::notify` 仅保留为兼容别名并标记弃用，避免默认 API 名称继续伪装成可观测投递语义。
 - `notify-kit::env` 的标准 helper 现在默认把 Hub 外层 hard timeout 设为 `sink timeout + slack`，不再把两层超时默认绑成同一个值；显式 `NOTIFY_HUB_TIMEOUT_MS` 若不大于生效的 sink timeout 也会 fail closed，避免 helper 自己制造伪超时。
+- `FeishuWebhookSink` 的图片上传链路现在会按真实文件字节识别支持的图片格式，并把相同校验同时应用到本地文件和远程下载；仅靠扩展名、响应头或根目录边界伪装的任意文件不再会被当成图片上传。
 - docs: `docs/api/event.md` 与聚合 `llms.txt` 现在同步改成当前真实的 accessor/fallback 契约，不再继续描述已经私有化的旧字符串字段模型。
 - docs: `docs/integration.md` 与聚合 `llms.txt` 现在同步写明标准 env helper 的 timeout 约定，避免继续暗示 legacy `NOTIFY_TIMEOUT_MS` 会同时直接驱动 sink 与 Hub 两层硬超时。
 - docs: `docs/sinks/custom.md` 的自定义 sink 示例改为使用 `Event::title()`，并同步刷新 `llms.txt`，避免文档继续示范对已封装私有字段的直接访问。

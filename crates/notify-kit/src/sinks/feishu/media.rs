@@ -206,14 +206,7 @@ impl FeishuWebhookSink {
             .unwrap_or("image")
             .to_string();
 
-        let content_type =
-            guess_image_mime(resolved_path.absolute.extension().and_then(|v| v.to_str()));
-
-        Ok(LoadedImage {
-            bytes,
-            file_name,
-            content_type,
-        })
+        finalize_loaded_image(bytes, file_name, "image file")
     }
 
     pub(super) async fn load_remote_image(&self, src: &str) -> crate::Result<LoadedImage> {
@@ -231,23 +224,7 @@ impl FeishuWebhookSink {
             return Err(http_status_text_error("feishu image download", status, &body).into());
         }
 
-        let content_type = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split(';').next())
-            .map(str::trim)
-            .filter(|v| v.starts_with("image/"))
-            .map(ToString::to_string)
-            .unwrap_or_else(|| {
-                guess_image_mime(Path::new(url.path()).extension().and_then(|v| v.to_str()))
-            });
-
         let bytes = read_bytes_body_limited(resp, self.image_upload_max_bytes).await?;
-        if bytes.is_empty() {
-            return Err(anyhow::anyhow!("downloaded image is empty").into());
-        }
-
         let file_name = Path::new(url.path())
             .file_name()
             .and_then(|v| v.to_str())
@@ -255,11 +232,7 @@ impl FeishuWebhookSink {
             .unwrap_or("image")
             .to_string();
 
-        Ok(LoadedImage {
-            bytes,
-            file_name,
-            content_type,
-        })
+        finalize_loaded_image(bytes, file_name, "downloaded image")
     }
 
     pub(super) async fn upload_image(&self, image: LoadedImage) -> crate::Result<String> {
@@ -795,22 +768,57 @@ pub(super) fn read_bytes_body_limited(
     })
 }
 
-pub(super) fn guess_image_mime(ext: Option<&str>) -> String {
-    match ext
-        .map(|v| v.trim().to_ascii_lowercase())
-        .as_deref()
-        .unwrap_or("")
-    {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "bmp" => "image/bmp",
-        "svg" => "image/svg+xml",
-        "heic" => "image/heic",
-        _ => "application/octet-stream",
+fn finalize_loaded_image(
+    bytes: Vec<u8>,
+    file_name: String,
+    source: &'static str,
+) -> crate::Result<LoadedImage> {
+    if bytes.is_empty() {
+        return Err(anyhow::anyhow!("{source} is empty").into());
     }
-    .to_string()
+
+    let Some(content_type) = detect_image_content_type(&bytes) else {
+        return Err(anyhow::anyhow!("{source} is not a supported image format").into());
+    };
+
+    Ok(LoadedImage {
+        bytes,
+        file_name,
+        content_type: content_type.to_string(),
+    })
+}
+
+fn detect_image_content_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if bytes.len() >= 3 && bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if bytes.starts_with(b"BM") {
+        return Some("image/bmp");
+    }
+    if is_heic_image(bytes) {
+        return Some("image/heic");
+    }
+    None
+}
+
+fn is_heic_image(bytes: &[u8]) -> bool {
+    if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
+        return false;
+    }
+
+    matches!(
+        &bytes[8..12],
+        b"heic" | b"heix" | b"hevc" | b"hevx" | b"heim" | b"heis" | b"hevm" | b"hevs"
+    )
 }
 
 pub(super) fn normalize_secret(secret: impl Into<SecretString>) -> crate::Result<SecretString> {
@@ -875,7 +883,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        TenantAccessTokenRefreshGuard, normalize_local_image_base_dir, normalize_local_image_roots,
+        TenantAccessTokenRefreshGuard, detect_image_content_type, finalize_loaded_image,
+        normalize_local_image_base_dir, normalize_local_image_roots,
         resolve_allowed_local_image_path, resolve_local_image_path,
         resolve_local_image_path_with_base, tenant_access_token_cache_ttl,
         tenant_access_token_refresh_waiter,
@@ -1030,5 +1039,56 @@ mod tests {
             resolved.absolute,
             PathBuf::from("/workspace/images/demo.png")
         );
+    }
+
+    #[test]
+    fn detect_image_content_type_recognizes_supported_formats() {
+        assert_eq!(
+            detect_image_content_type(b"\x89PNG\r\n\x1a\nrest"),
+            Some("image/png")
+        );
+        assert_eq!(
+            detect_image_content_type(b"\xff\xd8\xff\xe0rest"),
+            Some("image/jpeg")
+        );
+        assert_eq!(detect_image_content_type(b"GIF89arest"), Some("image/gif"));
+        assert_eq!(
+            detect_image_content_type(b"RIFF\x00\x00\x00\x00WEBPrest"),
+            Some("image/webp")
+        );
+        assert_eq!(detect_image_content_type(b"BMrest"), Some("image/bmp"));
+        assert_eq!(
+            detect_image_content_type(b"\x00\x00\x00\x18ftypheicrest"),
+            Some("image/heic")
+        );
+    }
+
+    #[test]
+    fn finalize_loaded_image_rejects_non_image_bytes_even_with_image_name() {
+        let err = finalize_loaded_image(
+            b"not actually an image".to_vec(),
+            "masquerade.png".to_string(),
+            "image file",
+        )
+        .expect_err("non-image bytes should fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("image file is not a supported image format"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn finalize_loaded_image_uses_detected_content_type_over_file_name() {
+        let loaded = finalize_loaded_image(
+            b"\xff\xd8\xff\xe0rest".to_vec(),
+            "photo.png".to_string(),
+            "image file",
+        )
+        .expect("jpeg bytes should be accepted");
+
+        assert_eq!(loaded.file_name, "photo.png");
+        assert_eq!(loaded.content_type, "image/jpeg");
     }
 }

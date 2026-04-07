@@ -12,11 +12,11 @@ use self::media::{
 use crate::Event;
 use crate::SecretString;
 use crate::sinks::crypto::hmac_sha256_base64;
+use crate::sinks::webhook_transport::WebhookTransport;
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
-    HttpClientOptions, HttpClientProfile, build_http_client_profile, parse_and_validate_https_url,
-    read_json_body_after_http_success, redact_url, redact_url_str, send_reqwest,
-    validate_url_path_prefix,
+    parse_and_validate_https_url, read_json_body_after_http_success, redact_url, redact_url_str,
+    send_reqwest, validate_url_path_prefix,
 };
 
 const FEISHU_MAX_CHARS: usize = 4000;
@@ -157,10 +157,9 @@ impl FeishuWebhookConfig {
 
 pub struct FeishuWebhookSink {
     webhook_url: reqwest::Url,
-    http: HttpClientProfile,
+    transport: WebhookTransport,
     secret: Option<SecretString>,
     max_chars: usize,
-    enforce_public_ip: bool,
     enable_markdown_rich_text: bool,
     allow_remote_image_urls: bool,
     allow_local_image_files: bool,
@@ -184,7 +183,10 @@ impl std::fmt::Debug for FeishuWebhookSink {
             .field("webhook_url", &redact_url(&self.webhook_url))
             .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
             .field("max_chars", &self.max_chars)
-            .field("enforce_public_ip", &self.enforce_public_ip)
+            .field(
+                "enforce_public_ip",
+                &self.transport.default_enforce_public_ip(),
+            )
             .field("enable_markdown_rich_text", &self.enable_markdown_rich_text)
             .field("allow_remote_image_urls", &self.allow_remote_image_urls)
             .field("allow_local_image_files", &self.allow_local_image_files)
@@ -255,17 +257,13 @@ impl FeishuWebhookSink {
             &["open.feishu.cn", "open.larksuite.com"],
         )?;
         validate_url_path_prefix(&webhook_url, "/open-apis/bot/v2/hook/")?;
-        let http = build_http_client_profile(&HttpClientOptions {
-            timeout: Some(config.timeout),
-            ..Default::default()
-        })?;
+        let transport = WebhookTransport::new(config.timeout, enforce_public_ip)?;
 
         Ok(Self {
             webhook_url,
-            http,
+            transport,
             secret,
             max_chars: config.max_chars,
-            enforce_public_ip,
             enable_markdown_rich_text: config.enable_markdown_rich_text,
             allow_remote_image_urls: config.allow_remote_image_urls,
             allow_local_image_files: config.allow_local_image_files,
@@ -296,20 +294,16 @@ impl FeishuWebhookSink {
             &["open.feishu.cn", "open.larksuite.com"],
         )?;
         validate_url_path_prefix(&webhook_url, "/open-apis/bot/v2/hook/")?;
-        let http = build_http_client_profile(&HttpClientOptions {
-            timeout: Some(config.timeout),
-            ..Default::default()
-        })?;
+        let transport = WebhookTransport::new(config.timeout, enforce_public_ip)?;
         if validate_public_ip_at_construction {
-            http.select_for_url(&webhook_url, true).await.map(|_| ())?;
+            transport.validate_public_ip(&webhook_url).await?;
         }
 
         Ok(Self {
             webhook_url,
-            http,
+            transport,
             secret,
             max_chars: config.max_chars,
-            enforce_public_ip,
             enable_markdown_rich_text: config.enable_markdown_rich_text,
             allow_remote_image_urls: config.allow_remote_image_urls,
             allow_local_image_files: config.allow_local_image_files,
@@ -347,10 +341,7 @@ impl Sink for FeishuWebhookSink {
 
     fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
-            let client = self
-                .http
-                .select_for_url(&self.webhook_url, self.enforce_public_ip)
-                .await?;
+            let client = self.transport.client_for(&self.webhook_url).await?;
             let (timestamp, sign) = if let Some(secret) = self.secret.as_ref() {
                 let timestamp = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -558,7 +549,7 @@ mod tests {
             let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x");
             let sink = FeishuWebhookSink::new_strict(cfg)
                 .expect("sync strict constructor should not do hidden async work");
-            assert!(sink.enforce_public_ip);
+            assert!(sink.transport.default_enforce_public_ip());
         });
     }
 
@@ -1121,7 +1112,7 @@ mod tests {
             sink.webhook_url =
                 reqwest::Url::parse(&format!("http://{addr}/open-apis/bot/v2/hook/x"))
                     .expect("parse local webhook url");
-            sink.enforce_public_ip = false;
+            sink.transport.set_default_enforce_public_ip(false);
 
             let sink = Arc::new(sink);
             let mut tasks = Vec::new();
@@ -1185,7 +1176,7 @@ mod tests {
             sink.webhook_url =
                 reqwest::Url::parse(&format!("http://{addr}/open-apis/bot/v2/hook/x"))
                     .expect("parse local webhook url");
-            sink.enforce_public_ip = false;
+            sink.transport.set_default_enforce_public_ip(false);
 
             let sink = Arc::new(sink);
             let refresh_task = tokio::spawn({
@@ -1267,7 +1258,7 @@ mod tests {
             sink.webhook_url =
                 reqwest::Url::parse(&format!("http://{addr}/open-apis/bot/v2/hook/x"))
                     .expect("parse local webhook url");
-            sink.enforce_public_ip = false;
+            sink.transport.set_default_enforce_public_ip(false);
 
             let err = sink
                 .ensure_tenant_access_token()
@@ -1398,7 +1389,7 @@ mod tests {
             sink.webhook_url =
                 reqwest::Url::parse(&format!("http://{addr}/open-apis/bot/v2/hook/x"))
                     .expect("parse local webhook url");
-            sink.enforce_public_ip = false;
+            sink.transport.set_default_enforce_public_ip(false);
 
             let image = LoadedImage {
                 bytes: b"png".to_vec(),

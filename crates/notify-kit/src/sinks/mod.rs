@@ -38,6 +38,20 @@ mod telegram;
     feature = "sink-wecom",
 ))]
 mod text;
+#[cfg(any(
+    feature = "sink-bark",
+    feature = "sink-dingtalk",
+    feature = "sink-discord",
+    feature = "sink-feishu",
+    feature = "sink-generic-webhook",
+    feature = "sink-github-comment",
+    feature = "sink-pushplus",
+    feature = "sink-serverchan",
+    feature = "sink-slack",
+    feature = "sink-telegram",
+    feature = "sink-wecom",
+))]
+mod webhook_transport;
 #[cfg(feature = "sink-wecom")]
 mod wecom;
 

@@ -3,11 +3,9 @@ use std::time::Duration;
 use crate::Event;
 use crate::SecretString;
 use crate::sinks::text::{TextLimits, format_event_text_limited, truncate_chars};
+use crate::sinks::webhook_transport::WebhookTransport;
 use crate::sinks::{BoxFuture, Sink};
-use http_kit::{
-    HttpClientOptions, HttpClientProfile, build_http_client_profile,
-    read_json_body_after_http_success, redact_url, send_reqwest,
-};
+use http_kit::{read_json_body_after_http_success, redact_url, send_reqwest};
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 
@@ -67,9 +65,8 @@ pub struct TelegramBotSink {
     api_base: reqwest::Url,
     bot_token: SecretString,
     chat_id: String,
-    http: HttpClientProfile,
+    transport: WebhookTransport,
     max_chars: usize,
-    enforce_public_ip: bool,
 }
 
 impl std::fmt::Debug for TelegramBotSink {
@@ -79,7 +76,10 @@ impl std::fmt::Debug for TelegramBotSink {
             .field("bot_token", &"<redacted>")
             .field("chat_id", &self.chat_id)
             .field("max_chars", &self.max_chars)
-            .field("enforce_public_ip", &self.enforce_public_ip)
+            .field(
+                "enforce_public_ip",
+                &self.transport.default_enforce_public_ip(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -94,17 +94,13 @@ impl TelegramBotSink {
 
         let api_base = reqwest::Url::parse(TELEGRAM_API_BASE)
             .map_err(|err| anyhow::anyhow!("invalid telegram api base url: {err}"))?;
-        let http = build_http_client_profile(&HttpClientOptions {
-            timeout: Some(config.timeout),
-            ..Default::default()
-        })?;
+        let transport = WebhookTransport::new(config.timeout, config.enforce_public_ip)?;
         Ok(Self {
             api_base,
             bot_token,
             chat_id: chat_id.to_string(),
-            http,
+            transport,
             max_chars: config.max_chars,
-            enforce_public_ip: config.enforce_public_ip,
         })
     }
 
@@ -163,10 +159,7 @@ impl Sink for TelegramBotSink {
         Box::pin(async move {
             let payload = Self::build_payload(event, &self.chat_id, self.max_chars);
             let api_url = Self::build_api_url(&self.api_base, &self.bot_token)?;
-            let client = self
-                .http
-                .select_for_url(&api_url, self.enforce_public_ip)
-                .await?;
+            let client = self.transport.client_for(&api_url).await?;
 
             let resp =
                 send_reqwest(client.post(api_url.as_str()).json(&payload), "telegram").await?;

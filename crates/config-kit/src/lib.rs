@@ -7,7 +7,7 @@
 //!
 //! - bounded, fail-closed, no-follow config file loading
 //! - config format detection and typed parse/render helpers
-//! - rooted canonicalization for config paths
+//! - rooted candidate discovery and fail-closed path checks
 //! - strict `${ENV_VAR}` interpolation
 //! - recursive object-layer merge with change reporting
 //! - higher-level typed schema loading for layered config files
@@ -36,8 +36,7 @@ pub use error::{Error, Result};
 pub use format::ConfigFormat;
 pub use load::{
     ConfigDocument, ConfigLoadOptions, DEFAULT_MAX_CONFIG_BYTES, HARD_MAX_CONFIG_BYTES,
-    canonicalize_path_in_root, find_config_document, load_config_document,
-    try_load_config_document,
+    find_config_document, load_config_document, try_load_config_document,
 };
 pub use merge::{
     ConfigLayer, ConfigMergeStep, MergedConfig, merge_config_layers, merge_config_values,

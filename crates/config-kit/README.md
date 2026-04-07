@@ -14,7 +14,7 @@
 
 - 配置文件格式识别（JSON / TOML / YAML）
 - 有界、fail-closed、no-follow 的配置文件读取
-- rooted path canonicalize 与越界拒绝
+- rooted candidate path 边界检查与越界拒绝
 - rooted candidate file discovery（relative-only，拒绝绝对路径、`..` 和中间目录 symlink）
 - 严格 `${ENV_VAR}` 插值
 - 递归对象 merge 与变更路径报告
@@ -35,7 +35,6 @@
 - `ConfigFormatSet`
 - `ConfigLoadOptions`
 - `ConfigDocument`
-- `canonicalize_path_in_root(...)`
 - `find_config_document(...)`
 - `interpolate_env_placeholders(...)`
 - `merge_config_layers(...)`
@@ -57,7 +56,7 @@
 - `src/format.rs`
   - 格式识别、typed parse / value parse、render
 - `src/load.rs`
-  - 文件读取上限、no-follow regular-file open、路径发现与 rooted canonicalize
+  - 文件读取上限、no-follow regular-file open、路径发现与 rooted path 边界检查
 - `src/typed.rs`
   - 业务 schema 的严格格式限制与 typed parse helper
 - `src/env.rs`

@@ -52,6 +52,7 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     "<non-string panic payload>".to_string()
 }
 
+#[cfg(not(windows))]
 fn cwd_test_guard() -> std::sync::MutexGuard<'static, ()> {
     static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
     GUARD

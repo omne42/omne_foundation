@@ -654,6 +654,7 @@ mod tests {
         absolute_test_cwd().join("workspace").join(name)
     }
 
+    #[cfg(not(windows))]
     async fn cwd_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
         static GUARD: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
         GUARD

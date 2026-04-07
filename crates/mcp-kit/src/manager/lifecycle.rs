@@ -9,8 +9,8 @@ use crate::error::{ErrorKind, tagged_message, wrap_kind};
 use crate::{ServerConfig, ServerName};
 
 use super::{
-    Connection, Manager, ProtocolVersionCheck, ProtocolVersionMismatch,
-    handlers::HandlerAttachSnapshot,
+    Connection, Manager, PreparedTransportConnect, ProtocolVersionCheck, ProtocolVersionMismatch,
+    connect_transport, handlers::HandlerAttachSnapshot,
 };
 
 macro_rules! config_bail {
@@ -63,6 +63,18 @@ pub(crate) struct CompletedTransportInstall {
     cwd: std::path::PathBuf,
     server_config: ServerConfig,
     completed: CompletedConnectionInstall,
+}
+
+pub(crate) struct PreparedTransportLifecycle {
+    server_name: ServerName,
+    connect: PreparedTransportConnect,
+    install: PreparedTransportInstall,
+}
+
+pub(crate) struct CompletedTransportLifecycle {
+    server_name: ServerName,
+    cleanup_on_error: bool,
+    outcome: anyhow::Result<CompletedTransportInstall>,
 }
 
 impl InitializeSnapshot {
@@ -264,6 +276,36 @@ impl PreparedTransportInstall {
     }
 }
 
+impl PreparedTransportLifecycle {
+    pub(crate) async fn run(self) -> CompletedTransportLifecycle {
+        let Self {
+            server_name,
+            connect,
+            install,
+        } = self;
+
+        match connect_transport(
+            &connect.ctx,
+            &connect.server_name,
+            &connect.server_cfg,
+            &connect.cwd,
+        )
+        .await
+        {
+            Ok((client, child)) => CompletedTransportLifecycle {
+                server_name,
+                cleanup_on_error: true,
+                outcome: install.run(client, child).await,
+            },
+            Err(err) => CompletedTransportLifecycle {
+                server_name,
+                cleanup_on_error: false,
+                outcome: Err(err),
+            },
+        }
+    }
+}
+
 pub(crate) struct PreparedDisconnect {
     server_name: String,
     connection: Option<Connection>,
@@ -374,6 +416,21 @@ impl Manager {
         }
     }
 
+    pub(crate) fn prepare_transport_lifecycle(
+        &self,
+        connect: PreparedTransportConnect,
+    ) -> PreparedTransportLifecycle {
+        PreparedTransportLifecycle {
+            server_name: connect.server_name_key.clone(),
+            install: self.prepare_transport_install(
+                &connect.server_name_key,
+                &connect.cwd,
+                &connect.server_cfg,
+            ),
+            connect,
+        }
+    }
+
     pub(crate) fn cleanup_failed_connection_install(&mut self, server_name: &ServerName) {
         self.clear_connection_side_state(server_name.as_str(), false);
     }
@@ -412,6 +469,21 @@ impl Manager {
         self.record_connection_server_config(server_name.as_str(), &completed.server_config)?;
         self.record_connection_cwd(server_name.as_str(), &completed.cwd)?;
         Ok(())
+    }
+
+    pub(crate) fn finish_transport_lifecycle(
+        &mut self,
+        completed: CompletedTransportLifecycle,
+    ) -> anyhow::Result<()> {
+        match completed.outcome {
+            Ok(completed) => self.commit_transport_install(completed),
+            Err(err) => {
+                if completed.cleanup_on_error {
+                    self.cleanup_failed_connection_install(&completed.server_name);
+                }
+                Err(err)
+            }
+        }
     }
 
     pub(crate) fn prepare_disconnect_for_wait(&mut self, server_name: &str) -> PreparedDisconnect {

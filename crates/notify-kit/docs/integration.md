@@ -9,6 +9,7 @@
 
 它们是 convenience helper，不是强制协议，也不改变推荐分层。
 公开入口固定为 `notify_kit::env::...`。
+核心抽象建议从 `notify_kit::core::{...}` 引用，具体 sink 建议从 `notify_kit::providers::<provider>::{...}` 引用。
 
 ## 一个推荐的配置层结构
 
@@ -47,10 +48,9 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use notify_kit::{
-    FeishuWebhookConfig, FeishuWebhookSink, Hub, HubConfig, HubLimits, Sink, SoundConfig,
-    SoundSink,
-};
+use notify_kit::core::{Hub, HubConfig, HubLimits, Sink};
+use notify_kit::providers::feishu::{FeishuWebhookConfig, FeishuWebhookSink};
+use notify_kit::providers::sound::{SoundConfig, SoundSink};
 
 fn build_hub_from_env() -> notify_kit::Result<Hub> {
     let mut sinks: Vec<Arc<dyn Sink>> = Vec::new();

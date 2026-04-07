@@ -14,6 +14,7 @@ struct ClassifiedError {
 }
 
 impl ClassifiedError {
+    #[cfg(any(feature = "env-standard", feature = "sink-github-comment", test))]
     fn new(kind: ErrorKind, source: anyhow::Error) -> Self {
         Self { kind, source }
     }
@@ -128,11 +129,19 @@ impl Error {
             return ErrorKind::RuntimeUnavailable;
         }
 
-        if err.chain().any(|cause| {
+        #[cfg(feature = "__http-stack")]
+        let has_http_transport_cause = err.chain().any(|cause| {
             cause.downcast_ref::<http_kit::Error>().is_some()
                 || cause.downcast_ref::<reqwest::Error>().is_some()
-                || cause.downcast_ref::<std::io::Error>().is_some()
-        }) {
+        });
+        #[cfg(not(feature = "__http-stack"))]
+        let has_http_transport_cause = false;
+
+        if has_http_transport_cause
+            || err
+                .chain()
+                .any(|cause| cause.downcast_ref::<std::io::Error>().is_some())
+        {
             return ErrorKind::Transport;
         }
 
@@ -183,6 +192,7 @@ impl From<crate::TryNotifyError> for Error {
     }
 }
 
+#[cfg(feature = "__http-stack")]
 impl From<http_kit::Error> for Error {
     fn from(err: http_kit::Error) -> Self {
         Self::from(anyhow::Error::new(err))
@@ -195,10 +205,12 @@ impl From<std::io::Error> for Error {
     }
 }
 
+#[cfg(any(feature = "env-standard", feature = "sink-github-comment", test))]
 pub(crate) fn tagged_message(kind: ErrorKind, message: impl std::fmt::Display) -> anyhow::Error {
     anyhow::Error::new(ClassifiedError::new(kind, anyhow::anyhow!("{message}")))
 }
 
+#[cfg(any(feature = "env-standard", feature = "sink-github-comment", test))]
 pub(crate) fn wrap_kind(kind: ErrorKind, err: anyhow::Error) -> anyhow::Error {
     if err
         .chain()

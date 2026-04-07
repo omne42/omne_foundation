@@ -96,6 +96,18 @@ notify-kit = { path = "crates/notify-kit" }
 
 如果你在其他仓库中引用，请改成对应的 Git 源或本地路径。
 
+内置 sinks 现在按 feature 裁剪：
+
+```toml
+[dependencies]
+notify-kit = { path = "crates/notify-kit", default-features = false, features = ["sink-sound"] }
+```
+
+- `default` 仍然保留现有默认体验：启用全部内置 sinks 与 `env-standard`
+- `default-features = false` 时，核心 `Event` / `Hub` / `Sink` 仍可用，只是不再自动带入内置 transport sinks
+- 标准 env helper `notify_kit::env` 现在需要 `env-standard` feature；它会自动带上自己依赖的 `sound` / `generic-webhook` / `slack` / `feishu` sinks
+- 额外的 `sound-command` 仍然是对 `SoundSink` 的增量 opt-in，需要与 `sink-sound` 一起使用（或沿用默认 features）
+
 ## 文档
 
 - mdBook：`docs/README.md`（目录：`docs/SUMMARY.md`）

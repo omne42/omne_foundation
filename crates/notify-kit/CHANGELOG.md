@@ -6,6 +6,9 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ## [Unreleased]
 
+### Changed
+- `notify-kit` 现在把内置 sinks 拆成显式 Cargo features：核心 `Event` / `Hub` / `Sink` 可在 `default-features = false` 下单独使用，各 sink 按 `sink-*` feature 裁剪，`env` helper 也收口到 `env-standard` feature，避免 foundation crate 默认把全部通知 transport 和依赖硬绑进单个编译面。
+
 ### Fixed
 - `notify-kit::ErrorKind` 不再把标准 env helper 和 `GitHubCommentSink` 的显式配置失败路径都塌缩成 `Other`；这些 review 命中的配置错误现在会稳定落到 `ErrorKind::Config`，而底层 I/O/HTTP 失败也会落到 `ErrorKind::Transport`，调用方不必再靠错误文本做分类。
 - `notify_kit::env::build_hub_from_standard_env(...)` 不再公开泄露 `anyhow::Result`；现在和 crate 其他 fallible API 一样统一返回 `notify_kit::Result` / `notify_kit::Error`，并在非法 env 值路径上保留稳定的 `ErrorKind::Config`。

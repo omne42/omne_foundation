@@ -21,7 +21,7 @@ const MAX_CATALOG_DIRECTORY_DEPTH: usize = 32;
 pub enum ResourceCatalogError {
     Bootstrap(io::Error),
     Load(DynamicCatalogError),
-    LoadRollback(CatalogBootstrapCleanupError),
+    LoadRollback(Box<CatalogBootstrapCleanupError>),
 }
 
 impl Display for ResourceCatalogError {
@@ -135,9 +135,11 @@ fn map_catalog_bootstrap_result(
         Ok(catalog) => Ok(catalog),
         Err(BootstrapLoadError::Bootstrap(error)) => Err(ResourceCatalogError::Bootstrap(error)),
         Err(BootstrapLoadError::Load(error)) => Err(ResourceCatalogError::Load(error)),
-        Err(BootstrapLoadError::Rollback { load, rollback }) => Err(
-            ResourceCatalogError::LoadRollback(catalog_bootstrap_cleanup_error(load, rollback)),
-        ),
+        Err(BootstrapLoadError::Rollback { load, rollback }) => {
+            Err(ResourceCatalogError::LoadRollback(Box::new(
+                catalog_bootstrap_cleanup_error(load, rollback),
+            )))
+        }
     }
 }
 

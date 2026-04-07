@@ -7,10 +7,13 @@ use std::{
 };
 
 #[cfg(test)]
-use policy_meta::POLICY_META_SCHEMA_FILE;
+use policy_meta::artifacts::POLICY_META_SCHEMA_FILE;
 use policy_meta::{
-    ArtifactGenerationError, POLICY_META_TYPES_FILE, PolicyProfileV1,
-    policy_meta_typescript_bindings, profile_documents, schema_documents,
+    PolicyProfileV1,
+    artifacts::{
+        ArtifactGenerationError, POLICY_META_TYPES_FILE, policy_meta_typescript_bindings,
+        profile_documents, schema_documents,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -1,4 +1,5 @@
 use super::*;
+use crate::ServerName;
 use std::path::PathBuf;
 
 #[tokio::test]
@@ -216,6 +217,19 @@ async fn load_parses_valid_file() {
     assert!(server.env().contains_key("NO_COLOR"));
     assert!(server.stdout_log().is_none());
     assert!(server.unix_path().is_none());
+}
+
+#[test]
+fn config_server_lookup_normalizes_leading_and_trailing_whitespace() {
+    let mut servers = std::collections::BTreeMap::new();
+    servers.insert(
+        ServerName::parse("rg").expect("server name"),
+        ServerConfig::stdio(vec!["mcp-rg".to_string()]).expect("server config"),
+    );
+    let config = Config::new(ClientConfig::default(), servers);
+
+    assert!(config.server("rg").is_some());
+    assert!(config.server("  rg  ").is_some());
 }
 
 #[tokio::test]

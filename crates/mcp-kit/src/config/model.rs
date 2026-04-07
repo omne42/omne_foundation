@@ -760,7 +760,8 @@ impl Config {
     }
 
     pub fn server(&self, name: &str) -> Option<&ServerConfig> {
-        self.servers.get(name)
+        let name = ServerName::parse(name).ok()?;
+        self.servers.get(&name)
     }
 
     pub fn server_named(&self, name: &ServerName) -> Option<&ServerConfig> {

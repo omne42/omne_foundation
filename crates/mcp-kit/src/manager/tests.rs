@@ -1,4 +1,5 @@
 use super::*;
+use crate::Transport;
 #[cfg(unix)]
 use std::ffi::OsString;
 #[cfg(unix)]
@@ -156,6 +157,26 @@ async fn get_or_connect_unknown_server_is_config_error_kind() {
 
     assert_eq!(err.kind(), crate::ErrorKind::Config);
     assert!(err.to_string().contains("unknown mcp server: missing"));
+}
+
+#[test]
+fn prepare_transport_connect_accepts_whitespace_normalized_server_name() {
+    let mut servers = std::collections::BTreeMap::new();
+    servers.insert(
+        ServerName::parse("srv").expect("server name"),
+        ServerConfig::stdio(vec!["mcp-srv".to_string()]).expect("server config"),
+    );
+    let config = Config::new(crate::ClientConfig::default(), servers);
+    let mut manager = Manager::default().with_trust_mode(TrustMode::Trusted);
+    let cwd = absolute_test_cwd();
+
+    let prepared = manager
+        .prepare_transport_connect(&config, "  srv  ", cwd)
+        .expect("prepare transport connect")
+        .expect("prepared transport connect");
+
+    assert_eq!(prepared.server_name_key.as_str(), "srv");
+    assert_eq!(prepared.server_cfg.transport(), Transport::Stdio);
 }
 
 #[tokio::test]

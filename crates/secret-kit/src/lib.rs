@@ -55,7 +55,7 @@
 //!
 //! ### 场景 1：从环境变量读取
 //!
-//! ```ignore
+//! ```
 //! # use secret_kit::{resolve_secret, Result, SecretCommandRuntime, SecretEnvironment};
 //! # async fn example(env: &(impl SecretEnvironment + SecretCommandRuntime)) -> Result<()> {
 //! let api_key = resolve_secret("secret://env/OPENAI_API_KEY", env).await?;
@@ -66,7 +66,7 @@
 //!
 //! ### 场景 2：从文件读取
 //!
-//! ```ignore
+//! ```
 //! # use secret_kit::{resolve_secret, Result, SecretCommandRuntime, SecretEnvironment};
 //! # async fn example(env: &(impl SecretEnvironment + SecretCommandRuntime)) -> Result<()> {
 //! let api_key = resolve_secret(
@@ -80,7 +80,7 @@
 //!
 //! ### 场景 3：从 AWS Secrets Manager 读取
 //!
-//! ```ignore
+//! ```
 //! # use secret_kit::{resolve_secret, Result, SecretCommandRuntime, SecretEnvironment};
 //! # async fn example(env: &(impl SecretEnvironment + SecretCommandRuntime)) -> Result<()> {
 //! let api_key = resolve_secret(
@@ -94,7 +94,7 @@
 //!
 //! ### 场景 4：从 JSON 秘密中提取字段
 //!
-//! ```ignore
+//! ```
 //! # use secret_kit::{resolve_secret, Result, SecretCommandRuntime, SecretEnvironment};
 //! # async fn example(env: &(impl SecretEnvironment + SecretCommandRuntime)) -> Result<()> {
 //! // AWS Secrets Manager 中存储的 JSON：{"api_key": "sk-...", "org_id": "org-..."}

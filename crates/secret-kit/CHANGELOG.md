@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `secret-kit` 的 crate-level 文档示例不再全部标成 `ignore`；环境变量/文件/AWS JSON field extraction 示例现在默认参与 doctest 编译门禁，避免公开示例长期脱离 CI。
 - `CachingSecretResolver` 现在会在 hint 命中时继续校验 prepared cache key；即使 resolver 给出了过宽的 cache hint，也不会静默复用另一个 secret 的缓存值，而是 fail-closed 退化成普通 cache miss。
 - `secret-kit`：Linux process-tree cleanup 的共享后台 worker 在线程创建失败时不再 panic；库现在保留首次 `kill_tree()` 的 best-effort 清理并跳过重试分发，避免把清理退路放大成调用方可见崩溃。
 - 明确内建 provider 的 ambient CLI 发现边界：默认只信任 ambient allowlist 中的系统目录级 `PATH` 项，并把转发给 builtin CLI 子进程的 `PATH` 同步裁剪到同一可信目录集合；工作区 shim 或用户目录二进制仍需通过显式绝对路径 override 接入。

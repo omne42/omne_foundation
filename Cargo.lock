@@ -1051,6 +1051,7 @@ dependencies = [
  "github-kit",
  "hmac",
  "http-kit",
+ "libc",
  "log-kit",
  "omne-fs-primitives",
  "pulldown-cmark",

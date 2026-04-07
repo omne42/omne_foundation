@@ -111,7 +111,8 @@
 解决（任选其一）：
 
 - 关闭 `dns_check`（CLI 使用 `--no-dns-check`）
-- CLI：加 `--allow-private-ip`（允许私网/loopback）
+- 如果这是普通私网目标（例如 RFC1918 / ULA），CLI：加 `--allow-private-ip`
+- 如果这是公网 hostname 解析到 loopback / host-local，本质上会被当作 rebinding 风险；`--allow-private-ip` 也不会放开，只能关闭 `dns_check` 或改用 `Trusted`
 - 或使用 `--trust --yes-trust`（Trusted mode）
 
 ### refusing to connect hostname with failed/timed out dns lookup in untrusted mode

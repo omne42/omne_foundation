@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit`：untrusted `streamable_http` 文档与回归测试现在明确区分 `allow_private_ips` 和 `allow_localhost` 的职责；开启 `allow_private_ips` 后，普通私网解析结果可以放开，但公网 hostname 解析到 loopback/host-local 这类本机地址仍会继续拒绝，避免把 DNS rebinding 风险误解释成“私网放行”。
 - `mcp-kit`：`Config::server(&str)` 与 config-driven `Manager`/`SharedManager` 入口现在会按 `ServerName::parse(...)` 的 `trim()` 契约做查找；带前后空白的合法 server 名不再被误判成 unknown server。
 - `mcp-kit`：untrusted `streamable_http` 连接现在会在 `allow_private_ips=true` 时关闭底层 public-IP pinning，与配置层的 outbound override 保持一致；默认策略仍继续对未放宽的连接启用 public-IP pinning。
 - `mcp-kit`：`SharedManager` 现在会把 handler 重入上下文传播到在 handler 内部 `clone()` 后再 `tokio::spawn(...)` 的子任务；这类跨 task 回调不再退化成普通等锁，而会像同 task 重入一样 fail-fast 返回 `ManagerState`，同时保留“其他外部调用正常等待”的语义。

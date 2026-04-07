@@ -3697,6 +3697,22 @@ fn untrusted_policy_allows_private_ip_when_configured() {
 }
 
 #[test]
+fn untrusted_policy_allow_private_ip_does_not_allow_localhost_hostnames_by_itself() {
+    let policy = UntrustedStreamableHttpPolicy {
+        outbound: http_kit::UntrustedOutboundPolicy {
+            allow_private_ips: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let err =
+        validate_streamable_http_url_untrusted(&policy, "srv", "url", "https://localhost/mcp")
+            .unwrap_err();
+    assert!(err.to_string().contains("localhost/local/single-label"));
+}
+
+#[test]
 fn untrusted_policy_allows_nat64_well_known_prefix_when_embedded_ipv4_is_public() {
     let policy = UntrustedStreamableHttpPolicy::default();
 

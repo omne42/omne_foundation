@@ -42,7 +42,10 @@ use streamable_http_validation::validate_streamable_http_url_untrusted;
 #[cfg(test)]
 use streamable_http_validation::validate_streamable_http_url_untrusted_dns;
 
-pub(crate) use connect::{ConnectContext, connect_transport};
+pub(crate) use connect::{
+    ConnectContext, ConnectionServerConfigIdentity, connect_transport,
+    effective_server_config_identity, raw_server_config_identity,
+};
 pub(crate) use handlers::{current_manager_handler_scope_token, is_in_manager_handler_scope};
 pub(crate) use path_identity::{resolve_connection_cwd, resolve_connection_cwd_with_base};
 pub(crate) use streamable_http_validation::should_disconnect_after_jsonrpc_error;
@@ -238,7 +241,7 @@ pub struct Manager {
     active_handler_scopes: Arc<AtomicU64>,
     conns: HashMap<ServerName, Connection>,
     connection_cwds: HashMap<ServerName, PathBuf>,
-    connection_server_configs: HashMap<ServerName, ServerConfig>,
+    connection_server_configs: HashMap<ServerName, ConnectionServerConfigIdentity>,
     init_results: HashMap<ServerName, Value>,
     client_name: String,
     client_version: String,
@@ -833,6 +836,7 @@ impl Manager {
         self.clear_connection_server_config(server_name);
     }
 
+    #[cfg(test)]
     pub(crate) fn record_connection_server_config(
         &mut self,
         server_name: &str,
@@ -840,7 +844,7 @@ impl Manager {
     ) -> anyhow::Result<()> {
         let server_name = parse_server_name_anyhow(server_name)?;
         self.connection_server_configs
-            .insert(server_name, server_config.clone());
+            .insert(server_name, raw_server_config_identity(server_config));
         Ok(())
     }
 
@@ -851,12 +855,14 @@ impl Manager {
     fn ensure_connection_server_config_matches(
         &self,
         server_name: &str,
-        requested: &ServerConfig,
+        requested: &ConnectionServerConfigIdentity,
     ) -> anyhow::Result<()> {
         let Some(connected) = self.connection_server_configs.get(server_name) else {
             return Err(tagged_message(
                 ErrorKind::ManagerState,
-                "mcp server {server_name} is already connected without reusable config metadata and cannot be reused from config (disconnect first)",
+                format!(
+                    "mcp server {server_name} is already connected without reusable config metadata and cannot be reused from config (disconnect first)"
+                ),
             ));
         };
         if connected == requested {
@@ -931,8 +937,29 @@ impl Manager {
         let Some(prepared) = prepared else {
             return Ok(None);
         };
-        self.ensure_connection_server_config_matches(prepared.server_name.as_str(), server_cfg)?;
+        let requested = if let Some(cwd) = cwd {
+            effective_server_config_identity(
+                &self.connect_context_for_identity(),
+                server_name,
+                server_cfg,
+                cwd,
+            )?
+        } else {
+            raw_server_config_identity(server_cfg)
+        };
+        self.ensure_connection_server_config_matches(prepared.server_name.as_str(), &requested)?;
         Ok(Some(prepared))
+    }
+
+    fn connect_context_for_identity(&self) -> ConnectContext {
+        ConnectContext {
+            trust_mode: self.trust_mode,
+            untrusted_streamable_http_policy: self.untrusted_streamable_http_policy.clone(),
+            allow_stdout_log_outside_root: self.allow_stdout_log_outside_root,
+            stdout_log_root: None,
+            protocol_version: self.protocol_version.clone(),
+            request_timeout: self.request_timeout,
+        }
     }
 
     pub(crate) fn prepare_transport_connect(
@@ -950,9 +977,22 @@ impl Manager {
         let server_name_key = parse_server_name_anyhow(server_name)?;
         let config_root = config.thread_root();
         let cwd = resolve_config_connection_cwd(config_root, cwd)?;
+        let ctx = ConnectContext {
+            trust_mode: self.trust_mode,
+            untrusted_streamable_http_policy: self.untrusted_streamable_http_policy.clone(),
+            allow_stdout_log_outside_root: self.allow_stdout_log_outside_root,
+            stdout_log_root: config_root.map(Path::to_path_buf),
+            protocol_version: self.protocol_version.clone(),
+            request_timeout: self.request_timeout,
+        };
         if self.is_connected_and_alive(server_name_key.as_str()) {
+            let server_cfg_identity =
+                effective_server_config_identity(&ctx, server_name, server_cfg, &cwd)?;
             self.ensure_connection_cwd_matches(server_name_key.as_str(), &cwd, None)?;
-            self.ensure_connection_server_config_matches(server_name_key.as_str(), server_cfg)?;
+            self.ensure_connection_server_config_matches(
+                server_name_key.as_str(),
+                &server_cfg_identity,
+            )?;
             return Ok(None);
         }
         self.clear_connection_cwd(server_name_key.as_str());
@@ -967,14 +1007,7 @@ impl Manager {
             server_name_key,
             server_cfg: server_cfg.clone(),
             cwd,
-            ctx: ConnectContext {
-                trust_mode: self.trust_mode,
-                untrusted_streamable_http_policy: self.untrusted_streamable_http_policy.clone(),
-                allow_stdout_log_outside_root: self.allow_stdout_log_outside_root,
-                stdout_log_root: config_root.map(Path::to_path_buf),
-                protocol_version: self.protocol_version.clone(),
-                request_timeout: self.request_timeout,
-            },
+            ctx,
         }))
     }
 
@@ -1034,9 +1067,22 @@ impl Manager {
     {
         let cwd = resolve_connection_cwd_with_base(cwd_base, cwd)?;
         let server_name_key = build_server_name()?;
+        let ctx = ConnectContext {
+            trust_mode: self.trust_mode,
+            untrusted_streamable_http_policy: self.untrusted_streamable_http_policy.clone(),
+            allow_stdout_log_outside_root: self.allow_stdout_log_outside_root,
+            stdout_log_root: Some(cwd.clone()),
+            protocol_version: self.protocol_version.clone(),
+            request_timeout: self.request_timeout,
+        };
         if self.is_connected_and_alive(server_name_key.as_str()) {
+            let server_cfg_identity =
+                effective_server_config_identity(&ctx, server_name, server_cfg, &cwd)?;
             self.ensure_connection_cwd_matches(server_name_key.as_str(), &cwd, None)?;
-            self.ensure_connection_server_config_matches(server_name_key.as_str(), server_cfg)?;
+            self.ensure_connection_server_config_matches(
+                server_name_key.as_str(),
+                &server_cfg_identity,
+            )?;
             return Ok(());
         }
         self.clear_connection_cwd(server_name_key.as_str());
@@ -1050,14 +1096,7 @@ impl Manager {
             server_name_key,
             server_cfg: server_cfg.clone(),
             cwd: cwd.clone(),
-            ctx: ConnectContext {
-                trust_mode: self.trust_mode,
-                untrusted_streamable_http_policy: self.untrusted_streamable_http_policy.clone(),
-                allow_stdout_log_outside_root: self.allow_stdout_log_outside_root,
-                stdout_log_root: Some(cwd),
-                protocol_version: self.protocol_version.clone(),
-                request_timeout: self.request_timeout,
-            },
+            ctx,
         });
         self.finish_transport_lifecycle(lifecycle.run().await)
     }

@@ -239,10 +239,10 @@ impl FeishuWebhookSink {
     fn new_internal(
         config: FeishuWebhookConfig,
         secret: Option<SecretString>,
-        validate_public_ip_at_construction: bool,
+        require_strict_public_ip: bool,
     ) -> crate::Result<Self> {
         let enforce_public_ip = config.enforce_public_ip;
-        if validate_public_ip_at_construction && !enforce_public_ip {
+        if require_strict_public_ip && !enforce_public_ip {
             return Err(anyhow::anyhow!("feishu strict mode requires public ip check").into());
         }
 
@@ -259,15 +259,6 @@ impl FeishuWebhookSink {
             timeout: Some(config.timeout),
             ..Default::default()
         })?;
-        if validate_public_ip_at_construction {
-            if tokio::runtime::Handle::try_current().is_ok() {
-                return Err(anyhow::anyhow!(
-                    "feishu strict constructor cannot run inside tokio runtime; use new_strict_async/new_with_secret_strict_async"
-                )
-                .into());
-            }
-            Self::validate_public_ip_at_construction_sync(&http, &webhook_url)?;
-        }
 
         Ok(Self {
             webhook_url,
@@ -346,19 +337,6 @@ impl FeishuWebhookSink {
         }
 
         Err(anyhow::anyhow!("feishu api error: code={code} (response body omitted)").into())
-    }
-
-    fn validate_public_ip_at_construction_sync(
-        http: &HttpClientProfile,
-        webhook_url: &reqwest::Url,
-    ) -> crate::Result<()> {
-        let http = http.clone();
-        let webhook_url = webhook_url.clone();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|err| anyhow::anyhow!("build tokio runtime: {err}"))?;
-        Ok(rt.block_on(async move { http.select_for_url(&webhook_url, true).await.map(|_| ()) })?)
     }
 }
 
@@ -570,16 +548,16 @@ mod tests {
     }
 
     #[test]
-    fn strict_sync_constructor_rejects_inside_runtime() {
+    fn strict_sync_constructor_stays_runtime_safe() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("build tokio runtime");
         rt.block_on(async {
             let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x");
-            let err =
-                FeishuWebhookSink::new_strict(cfg).expect_err("expected runtime constructor error");
-            assert!(err.to_string().contains("new_strict_async"), "{err:#}");
+            let sink = FeishuWebhookSink::new_strict(cfg)
+                .expect("sync strict constructor should not do hidden async work");
+            assert!(sink.enforce_public_ip);
         });
     }
 
@@ -969,7 +947,7 @@ mod tests {
                 .load_image(link.to_str().expect("utf8 path"))
                 .await
                 .expect_err("symlinks should be rejected");
-            assert!(err.to_string().contains("symlink component"), "{err:#}");
+            assert!(err.to_string().contains("symlink"), "{err:#}");
 
             let _ = std::fs::remove_file(link);
             let _ = std::fs::remove_file(target);

@@ -51,7 +51,7 @@ sink-telegram = ["__http-stack", "__secret-types"]
 sink-wecom = ["__http-stack"]
 # Allow SoundSink to execute external commands (SoundConfig.command_argv).
 sound-command = ["sink-sound"]
-__feishu-local-files = ["dep:libc"]
+__feishu-local-files = ["dep:libc", "dep:omne-fs-primitives"]
 __github-api = ["dep:github-kit"]
 __http-stack = ["dep:http-kit", "dep:reqwest", "dep:serde_json"]
 __markdown = ["dep:pulldown-cmark"]
@@ -65,8 +65,9 @@ futures-util = "0.3"
 hmac = { version = "0.12", optional = true }
 http-kit = { path = "../http-kit", optional = true }
 github-kit = { path = "../github-kit", optional = true }
-libc = { version = "0.2", optional = true }
+libc = { workspace = true, optional = true }
 log-kit = { path = "../log-kit" }
+omne-fs-primitives = { workspace = true, optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "stream"], optional = true }
 pulldown-cmark = { version = "0.12", optional = true }
 secret-kit = { path = "../secret-kit", optional = true }

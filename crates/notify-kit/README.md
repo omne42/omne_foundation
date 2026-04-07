@@ -152,7 +152,7 @@ hub.notify_best_effort(Event::new("turn_completed", Severity::Success, "done"));
 
 - `SoundConfig.command_argv` 会执行外部命令（需要启用 `notify-kit/sound-command`）；应视为 **受信任/本机配置**。
 - `FeishuWebhookSink` 会校验 webhook URL：仅允许 `https` + `open.feishu.cn` / `open.larksuite.com`，且不会在 `Debug`/错误信息中输出完整 URL。
-- `FeishuWebhookSink` 默认不会因为 Markdown 正文里出现远程图片 URL 就主动发起下载；远程图片上传必须显式 `with_remote_image_urls(true)`，本地图片也必须显式 `with_local_image_files(true)`。绝对路径可以直接读取；相对路径必须额外显式配置 `with_local_image_base_dir(...)`，库不会再偷偷把进程 `cwd` 当作图片解析输入。在无法安全 no-follow 打开的平台上会直接拒绝。
+- `FeishuWebhookSink` 默认不会因为 Markdown 正文里出现远程图片 URL 就主动发起下载；远程图片上传必须显式 `with_remote_image_urls(true)`，本地图片也必须显式 `with_local_image_files(true)`。绝对路径可以直接读取；相对路径必须额外显式配置 `with_local_image_base_dir(...)`，库不会再偷偷把进程 `cwd` 当作图片解析输入。本地图片读取会复用 workspace 的 no-follow 文件系统原语；如果宿主平台拿不到这条安全边界，会直接 fail closed。
 
 ## 配置（环境变量）
 

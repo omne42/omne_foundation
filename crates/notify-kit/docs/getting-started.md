@@ -25,9 +25,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use notify_kit::{
-    Event, Hub, HubConfig, HubLimits, Severity, Sink, SoundConfig, SoundSink, TryNotifyError,
-};
+use notify_kit::core::{Event, Hub, HubConfig, HubLimits, Severity, Sink, TryNotifyError};
+use notify_kit::providers::sound::{SoundConfig, SoundSink};
 
 fn main() -> notify_kit::Result<()> {
     // 组合多个 sinks（示例只启用 sound）
@@ -87,7 +86,8 @@ fn main() -> notify_kit::Result<()> {
 # extern crate notify_kit;
 use std::sync::Arc;
 
-use notify_kit::{Hub, HubConfig, HubLimits, SoundConfig, SoundSink};
+use notify_kit::core::{Hub, HubConfig, HubLimits};
+use notify_kit::providers::sound::{SoundConfig, SoundSink};
 
 let hub = Hub::new_with_limits(
     HubConfig::default(),
@@ -114,7 +114,9 @@ let hub = Hub::new_with_limits(
 # fn main() -> notify_kit::Result<()> {
 use std::sync::Arc;
 
-use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink, Sink, SoundConfig, SoundSink};
+use notify_kit::core::Sink;
+use notify_kit::providers::feishu::{FeishuWebhookConfig, FeishuWebhookSink};
+use notify_kit::providers::sound::{SoundConfig, SoundSink};
 
 let mut sinks: Vec<Arc<dyn Sink>> = Vec::new();
 // 本地提示音
@@ -135,7 +137,7 @@ sinks.push(Arc::new(FeishuWebhookSink::new(FeishuWebhookConfig::new(
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use notify_kit::HubConfig;
+use notify_kit::core::HubConfig;
 
 let enabled_kinds = BTreeSet::from(["turn_completed".to_string(), "message_received".to_string()]);
 let cfg = HubConfig {

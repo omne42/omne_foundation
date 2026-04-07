@@ -14,6 +14,8 @@
 
 补充说明：
 
+- `notify-kit` 现在把公开入口拆成三层：`notify_kit::core`（核心抽象）、`notify_kit::providers::*`（内置 transports）和 `notify_kit::env`（可选 integration helper）。
+- crate root 仍保留兼容 re-export，但新代码不再推荐把 provider 类型直接从 root 当作默认 foundation surface 引用。
 - 库中提供的 `notify_kit::env::build_hub_from_standard_env(...)` / `notify_kit::env::StandardEnvHubOptions` 只是 convenience helper，用于快速接线或复用一套简单约定。
 - 它们不改变整体分层：配置协议依然属于 integration layer，而不是 `notify-kit` 的核心职责。
 - 公开入口统一使用 `notify_kit::env::...` 路径，不在 crate root 再叠兼容入口。

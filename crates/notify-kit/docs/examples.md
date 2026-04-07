@@ -12,7 +12,8 @@
 # fn main() -> notify_kit::Result<()> {
 use std::sync::Arc;
 
-use notify_kit::{Event, Hub, HubConfig, Severity, SoundConfig, SoundSink};
+use notify_kit::core::{Event, Hub, HubConfig, Severity};
+use notify_kit::providers::sound::{SoundConfig, SoundSink};
 
 let hub = Hub::new(
     HubConfig::default(),
@@ -39,8 +40,9 @@ rt.block_on(hub.send(Event::new("task_done", Severity::Success, "done")))?;
 # fn main() -> notify_kit::Result<()> {
 use std::sync::Arc;
 
-use notify_kit::{Event, Hub, HubConfig, Severity, SoundConfig, SoundSink};
-use notify_kit::{FeishuWebhookConfig, FeishuWebhookSink};
+use notify_kit::core::{Event, Hub, HubConfig, Severity};
+use notify_kit::providers::feishu::{FeishuWebhookConfig, FeishuWebhookSink};
+use notify_kit::providers::sound::{SoundConfig, SoundSink};
 
 let sink_sound = Arc::new(SoundSink::new(SoundConfig { command_argv: None }));
 let sink_feishu = Arc::new(FeishuWebhookSink::new(FeishuWebhookConfig::new(
@@ -69,8 +71,8 @@ rt.block_on(hub.send(
 # fn main() -> notify_kit::Result<()> {
 use std::sync::Arc;
 
-use notify_kit::{Event, Hub, HubConfig, Severity};
-use notify_kit::{GenericWebhookConfig, GenericWebhookSink};
+use notify_kit::core::{Event, Hub, HubConfig, Severity};
+use notify_kit::providers::generic_webhook::{GenericWebhookConfig, GenericWebhookSink};
 
 let sink = Arc::new(GenericWebhookSink::new_strict(GenericWebhookConfig::new_strict(
     "https://example.com/webhook/notify",
@@ -100,7 +102,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use notify_kit::{Event, Hub, HubConfig, Severity, SoundConfig, SoundSink};
+use notify_kit::core::{Event, Hub, HubConfig, Severity};
+use notify_kit::providers::sound::{SoundConfig, SoundSink};
 
 let enabled_kinds = BTreeSet::from(["turn_completed".to_string(), "approval_requested".to_string()]);
 let hub = Hub::new(

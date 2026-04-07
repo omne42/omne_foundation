@@ -3,6 +3,16 @@
 //! `notify-kit` keeps the core `Event` / `Hub` / `Sink` surface always available, while built-in
 //! sink implementations are feature-gated so downstream workspaces can trim transport-specific
 //! code and dependencies.
+//!
+//! Recommended layering:
+//! - [`crate::core`]: provider-agnostic foundation surface
+//! - [`crate::providers`]: built-in transport integrations
+//! - [`crate::env`]: optional bootstrap helper for a small shared env convention
+//!
+//! The crate root keeps compatibility re-exports for existing callers, but new code should prefer
+//! the namespaced modules so the core/provider boundary stays explicit.
+
+pub mod core;
 
 /// Convenience env wiring helpers.
 ///
@@ -15,6 +25,7 @@ mod error;
 mod event;
 mod hub;
 mod log;
+pub mod providers;
 mod sinks;
 
 pub use crate::error::{Error, ErrorKind, SinkFailure};

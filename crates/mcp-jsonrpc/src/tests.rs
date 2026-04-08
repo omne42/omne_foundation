@@ -1393,6 +1393,7 @@ mod stats_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::background_runtime::reset_detached_runtime_test_state();
+        let spawn_count_before = crate::background_runtime::shared_worker_spawn_count();
 
         let first = test_detached_spawner();
         let second = test_detached_spawner();
@@ -1417,7 +1418,12 @@ mod stats_tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("second detached worker should run");
 
-        assert_eq!(crate::background_runtime::shared_worker_spawn_count(), 2);
+        let spawned_workers = crate::background_runtime::shared_worker_spawn_count()
+            .saturating_sub(spawn_count_before);
+        assert!(
+            spawned_workers >= 2,
+            "distinct detached spawners should start at least two shared workers, got {spawned_workers}"
+        );
     }
 
     fn detached_runtime_test_guard() -> &'static std::sync::Mutex<()> {

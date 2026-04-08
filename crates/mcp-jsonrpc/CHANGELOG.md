@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：`detached_spawners_do_not_share_process_global_worker` 回归测试不再把 shared-worker spawn 次数钉死为恰好 `2`；现在校验“至少新起了两个 worker”，避免 worker 重建路径把实现细节误判成 CI flake。
 - `mcp-jsonrpc`：detached cleanup/runtime 不再复用 crate 级隐藏单例 worker；后台补偿任务现在由每个 client lifecycle 自己持有和调度，`ClientHandle` 无生命周期时才退化到单任务 fallback runtime，避免跨 client 偷偷共享全进程 runtime/thread。
 - `mcp-jsonrpc`：detached runtime 回归测试现在显式创建独立 spawner，并新增“两个 spawner 会各自起 worker”覆盖，防止后续重构重新把生命周期收口成进程级全局状态。
 - `mcp-jsonrpc`：无 Tokio runtime 的 batch flush 补偿现在和 dropped-response 补偿一样带有明确超时；坏写端不会把后台 flush 任务无限挂住，超时后会 fail closed 关闭 transport。

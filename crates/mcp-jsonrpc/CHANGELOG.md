@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：`streamable_http` 在 `request_timeout=None` 下读取成功 JSON body 时不再死等 EOF；对无 `Content-Length` 的 keep-alive 响应，现在会在读到完整 JSON 文档后立即桥接回 JSON-RPC，避免默认配置下的永久挂起。
 - `mcp-jsonrpc` manifest 现在为内部 path 依赖补上显式 version 约束，并显式标记 `publish = false`；在 runtime primitives 形成独立发布链之前，crate 不再把 Git/monorepo 复用边界伪装成 crates.io 可直接发布。
 - `mcp-jsonrpc`：`IncomingRequest` 现在用显式 owner 计数而不是 `Arc::strong_count()` 判断“最后一个未响应 clone 被 drop”，并补上并发 drop 回归测试；handler clone 并发释放时不再因为竞态漏发自动 `internal error` 响应。
 - `mcp-jsonrpc`：no-runtime detached fallback 现在显式保留“每任务独立 fallback thread + runtime”的隔离语义，并补上 fallback 线程创建失败注入；`schedule_close_once(...)` 与 dropped-request 回归测试现在覆盖“helper/thread 起不来时 fail-closed 但不 panic”以及“一个阻塞 fallback 任务不会把后续 close/response/batch flush 串行拖死”。

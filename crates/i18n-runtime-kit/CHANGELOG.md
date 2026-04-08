@@ -30,6 +30,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `i18n-runtime-kit`：Unix socket 目录回归测试不再硬编码 `/var/tmp`；现在使用 `tempfile` 选择的环境临时根，并在 socket setup 本身不可用时显式跳过，避免受限 runner 因非业务性临时目录或磁盘问题误报失败。
 - `i18n-runtime-kit`：Unix socket 目录回归测试现在也支持 `OMNE_TEST_SHORT_TMPDIR`，让 harness 能在 `cargo test` 重写 `TMPDIR` 到长路径时显式提供一个更短的可写根。
 - `i18n-runtime-kit`：managed resource bootstrap 回归测试现在也会在 `OMNE_TEST_SHORT_TMPDIR`、`/var/tmp` 和环境临时根之间探测可写目录；如果宿主临时盘不可用，会显式跳过而不是在创建测试根时直接 panic。
+- `i18n-runtime-kit`：当 runner 没显式设置 `TMPDIR` 且默认临时根仍是 `/tmp` 时，测试辅助代码现在会优先尝试环境临时根，再回退到 `/var/tmp`；不会再把 `/var/tmp` 当作默认首选根去掩盖 harness 已经提供的临时目录约束。
 - Removed a redundant borrow in the explicit-base catalog directory scan path so the crate continues to pass the workspace `clippy -D warnings` gate.
 
 ### Added

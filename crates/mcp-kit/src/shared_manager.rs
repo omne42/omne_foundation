@@ -746,7 +746,12 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn shared_manager_cold_start_requests_can_overlap_on_same_server() {
-        let socket_path = unique_socket_path("shared-overlap");
+        let Some(socket_path) = unique_socket_path(
+            "shared_manager_cold_start_requests_can_overlap_on_same_server",
+            "shared-overlap",
+        ) else {
+            return;
+        };
         let _ = std::fs::remove_file(&socket_path);
         let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
             return;
@@ -1564,7 +1569,12 @@ mod tests {
     async fn shared_manager_disconnect_and_wait_blocks_same_server_reconnect_until_wait_finishes() {
         use tokio::sync::oneshot;
 
-        let socket_path = unique_socket_path("disconnect-wait-gate");
+        let Some(socket_path) = unique_socket_path(
+            "shared_manager_disconnect_and_wait_blocks_same_server_reconnect_until_wait_finishes",
+            "disconnect-wait-gate",
+        ) else {
+            return;
+        };
         let _ = std::fs::remove_file(&socket_path);
         let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
             return;
@@ -1752,7 +1762,12 @@ mod tests {
     async fn shared_manager_disconnect_waits_for_inflight_connect_and_prevents_revival() {
         use tokio::sync::oneshot;
 
-        let socket_path = unique_socket_path("disconnect-race");
+        let Some(socket_path) = unique_socket_path(
+            "shared_manager_disconnect_waits_for_inflight_connect_and_prevents_revival",
+            "disconnect-race",
+        ) else {
+            return;
+        };
         let _ = std::fs::remove_file(&socket_path);
         let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
             return;
@@ -2371,7 +2386,36 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn unique_socket_path(label: &str) -> std::path::PathBuf {
+    fn unix_socket_temp_roots() -> Vec<std::path::PathBuf> {
+        let mut roots = Vec::new();
+
+        if let Some(root) = std::env::var_os("OMNE_TEST_SHORT_TMPDIR") {
+            let root = std::path::PathBuf::from(root);
+            if !roots.iter().any(|candidate| candidate == &root) {
+                roots.push(root);
+            }
+        }
+
+        let temp_dir = std::env::temp_dir();
+        if !roots.iter().any(|candidate| candidate == &temp_dir) {
+            roots.push(temp_dir);
+        }
+
+        if std::env::var_os("TMPDIR").is_none()
+            && std::env::temp_dir() == std::path::Path::new("/tmp")
+        {
+            let root = std::path::PathBuf::from("/var/tmp");
+            if !roots.iter().any(|candidate| candidate == &root) {
+                roots.push(root);
+            }
+        }
+
+        roots
+    }
+
+    #[cfg(unix)]
+    fn unique_socket_path(test_name: &str, label: &str) -> Option<std::path::PathBuf> {
+        use std::os::unix::net::UnixListener;
         use std::time::{SystemTime, UNIX_EPOCH};
 
         let short_label: String = label
@@ -2379,20 +2423,45 @@ mod tests {
             .filter(|ch| ch.is_ascii_alphanumeric())
             .take(8)
             .collect();
-        let base_dir = if std::path::Path::new("/tmp").is_dir() {
-            std::path::PathBuf::from("/tmp")
-        } else {
-            std::env::temp_dir()
-        };
 
-        base_dir.join(format!(
-            "mcp-sm-{short_label}-{}-{}.sock",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+        for root in unix_socket_temp_roots() {
+            if !root.exists() && std::fs::create_dir_all(&root).is_err() {
+                continue;
+            }
+            let Ok(metadata) = std::fs::symlink_metadata(&root) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+
+            let Ok(tempdir) = tempfile::Builder::new()
+                .prefix("of-sm-")
+                .rand_bytes(3)
+                .tempdir_in(&root)
+            else {
+                continue;
+            };
+
+            let path = tempdir.path().join(format!(
+                "{short_label}-{}-{}.sock",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            if let Ok(listener) = UnixListener::bind(&path) {
+                drop(listener);
+                let _ = std::fs::remove_file(&path);
+                return Some(path);
+            }
+        }
+
+        eprintln!(
+            "skipping {test_name}: unable to create a short writable temp dir for unix socket test"
+        );
+        None
     }
 
     #[cfg(unix)]
@@ -2417,8 +2486,18 @@ mod tests {
     async fn shared_manager_cold_start_initialize_does_not_block_other_servers() {
         use tokio::sync::oneshot;
 
-        let slow_socket_path = unique_socket_path("slow");
-        let fast_socket_path = unique_socket_path("fast");
+        let Some(slow_socket_path) = unique_socket_path(
+            "shared_manager_cold_start_initialize_does_not_block_other_servers",
+            "slow",
+        ) else {
+            return;
+        };
+        let Some(fast_socket_path) = unique_socket_path(
+            "shared_manager_cold_start_initialize_does_not_block_other_servers",
+            "fast",
+        ) else {
+            return;
+        };
         let _ = std::fs::remove_file(&slow_socket_path);
         let _ = std::fs::remove_file(&fast_socket_path);
 
@@ -2712,7 +2791,12 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn shared_manager_reentrant_handler_cold_start_fails_fast_on_connect_gate() {
-        let socket_path = unique_socket_path("reentrant-cold-start");
+        let Some(socket_path) = unique_socket_path(
+            "shared_manager_reentrant_handler_cold_start_fails_fast_on_connect_gate",
+            "reentrant-cold-start",
+        ) else {
+            return;
+        };
         let _ = std::fs::remove_file(&socket_path);
         let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
             return;
@@ -3033,7 +3117,12 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn shared_manager_request_rejects_different_cwd_on_reuse() {
-        let socket_path = unique_socket_path("cwd-reuse");
+        let Some(socket_path) = unique_socket_path(
+            "shared_manager_request_rejects_different_cwd_on_reuse",
+            "cwd-reuse",
+        ) else {
+            return;
+        };
         let _ = std::fs::remove_file(&socket_path);
         let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
             return;
@@ -3137,7 +3226,12 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn shared_manager_concurrent_cold_start_requests_share_single_connection() {
-        let socket_path = unique_socket_path("single-flight");
+        let Some(socket_path) = unique_socket_path(
+            "shared_manager_concurrent_cold_start_requests_share_single_connection",
+            "single-flight",
+        ) else {
+            return;
+        };
         let _ = std::fs::remove_file(&socket_path);
         let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
             return;
@@ -3229,7 +3323,12 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn shared_manager_disconnect_waits_until_borrowed_client_gate_is_released() {
-        let socket_path = unique_socket_path("borrowed-client-gate");
+        let Some(socket_path) = unique_socket_path(
+            "shared_manager_disconnect_waits_until_borrowed_client_gate_is_released",
+            "borrowed-client-gate",
+        ) else {
+            return;
+        };
         let _ = std::fs::remove_file(&socket_path);
         let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
             return;
@@ -3355,7 +3454,12 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn shared_manager_cold_start_request_holds_gate_until_first_io_completes() {
-        let socket_path = unique_socket_path("request-first-io-gate");
+        let Some(socket_path) = unique_socket_path(
+            "shared_manager_cold_start_request_holds_gate_until_first_io_completes",
+            "request-first-io-gate",
+        ) else {
+            return;
+        };
         let _ = std::fs::remove_file(&socket_path);
         let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
             return;

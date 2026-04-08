@@ -229,7 +229,7 @@ async fn load_discovers_mcp_json_when_dot_mcp_json_missing() {
 #[test]
 fn with_path_binds_relative_config_path_to_current_dir_once() {
     let _guard = cwd_test_guard();
-    let _cwd_restore = CurrentDirRestoreGuard::capture();
+    let cwd_restore = CurrentDirRestoreGuard::capture();
     let workspace = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     let config_dir = workspace.path().join("configs");
@@ -243,6 +243,43 @@ fn with_path_binds_relative_config_path_to_current_dir_once() {
 
     assert_eq!(config.path(), Some(config_dir.join("mcp.json").as_path()));
     assert_eq!(config.thread_root(), Some(config_dir.as_path()));
+
+    std::env::set_current_dir(&cwd_restore.original_cwd).expect("restore original cwd early");
+}
+
+#[cfg(not(windows))]
+#[test]
+fn load_binds_relative_override_path_to_current_dir_once() {
+    let _guard = cwd_test_guard();
+    let cwd_restore = CurrentDirRestoreGuard::capture();
+    let workspace = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let config_dir = workspace.path().join("configs");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("mcp.json"),
+        r#"{ "version": 1, "servers": { "a": { "transport": "stdio", "argv": ["mcp-a"] } } }"#,
+    )
+    .unwrap();
+
+    std::env::set_current_dir(workspace.path()).expect("enter workspace");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+    let cfg = rt
+        .block_on(Config::load(
+            PathBuf::from(".").as_path(),
+            Some(PathBuf::from("configs/mcp.json")),
+        ))
+        .expect("load config");
+
+    std::env::set_current_dir(outside.path()).expect("leave workspace");
+
+    assert_eq!(cfg.path(), Some(config_dir.join("mcp.json").as_path()));
+    assert_eq!(cfg.thread_root(), Some(config_dir.as_path()));
+
+    std::env::set_current_dir(&cwd_restore.original_cwd).expect("restore original cwd early");
 }
 
 #[tokio::test]
@@ -772,6 +809,43 @@ async fn load_denies_streamable_http_with_invalid_http_header_name() {
         err.to_string().contains("invalid http_headers key"),
         "err={err:#}"
     );
+}
+
+#[tokio::test]
+async fn load_denies_streamable_http_with_invalid_url_syntax() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{
+  "version": 1,
+  "servers": {
+    "litellm": {
+      "transport": "streamable_http",
+      "url": "https://exa mple.com/mcp"
+    }
+  }
+}"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(err.to_string().contains("invalid url"), "err={err:#}");
+}
+
+#[test]
+fn streamable_http_constructor_rejects_invalid_url_syntax() {
+    let err = ServerConfig::streamable_http("https://exa mple.com/mcp")
+        .expect_err("invalid streamable_http url should fail fast");
+    assert!(err.to_string().contains("invalid url"), "err={err:#}");
+}
+
+#[test]
+fn streamable_http_split_constructor_rejects_invalid_url_syntax() {
+    let err =
+        ServerConfig::streamable_http_split("https://example.com/sse", "https://exa mple.com/mcp")
+            .expect_err("invalid streamable_http split url should fail fast");
+    assert!(err.to_string().contains("invalid http_url"), "err={err:#}");
 }
 
 #[tokio::test]

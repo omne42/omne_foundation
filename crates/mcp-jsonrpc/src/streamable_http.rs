@@ -763,7 +763,7 @@ impl HttpPostBridge {
                             }
                         }
                     }
-                    None => read_response_body_limited(resp, max_message_bytes).await,
+                    None => read_json_response_body_limited(resp, max_message_bytes).await,
                 };
                 match body {
                     Err(ReadBodyError::TooLarge { actual_bytes }) => {
@@ -1089,6 +1089,73 @@ async fn read_response_body_limited(
         out.extend_from_slice(&chunk);
     }
     Ok(out)
+}
+
+async fn read_json_response_body_limited(
+    resp: reqwest::Response,
+    max_message_bytes: usize,
+) -> Result<Vec<u8>, ReadBodyError> {
+    let content_length = resp.content_length();
+    let content_length_usize = content_length.and_then(|len| usize::try_from(len).ok());
+    if let Some(actual_bytes) = content_length_usize {
+        if actual_bytes > max_message_bytes {
+            return Err(ReadBodyError::TooLarge { actual_bytes });
+        }
+        return read_response_body_limited(resp, max_message_bytes).await;
+    } else if content_length.is_some() {
+        return Err(ReadBodyError::TooLarge {
+            actual_bytes: usize::MAX,
+        });
+    }
+
+    let initial_capacity = max_message_bytes
+        .min(HTTP_RESPONSE_UNKNOWN_LENGTH_INITIAL_CAP_BYTES)
+        .min(HTTP_RESPONSE_INITIAL_CAP_BYTES);
+    let mut out = Vec::with_capacity(initial_capacity);
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(ReadBodyError::Http)?;
+        let next_len = out.len().saturating_add(chunk.len());
+        if next_len > max_message_bytes {
+            return Err(ReadBodyError::TooLarge {
+                actual_bytes: next_len,
+            });
+        }
+        out.extend_from_slice(&chunk);
+
+        // Keep-alive HTTP/1.1 responses without an explicit length can legally defer EOF
+        // indefinitely. For JSON success bodies we can stop as soon as one complete document
+        // has arrived instead of waiting for the socket to close.
+        match complete_json_document_len(&out) {
+            Ok(Some(document_len)) => {
+                out.truncate(document_len);
+                return Ok(out);
+            }
+            Ok(None) => {}
+            Err(_) => return Ok(out),
+        }
+    }
+    Ok(out)
+}
+
+fn complete_json_document_len(body: &[u8]) -> Result<Option<usize>, serde_json::Error> {
+    let mut stream = serde_json::Deserializer::from_slice(body).into_iter::<Value>();
+    match stream.next() {
+        Some(Ok(_)) => {
+            let offset = stream.byte_offset();
+            if body[offset..].iter().all(u8::is_ascii_whitespace) {
+                Ok(Some(body.len()))
+            } else {
+                Err(serde_json::Error::io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "trailing non-whitespace after json response body",
+                )))
+            }
+        }
+        None => Ok(None),
+        Some(Err(err)) if err.is_eof() => Ok(None),
+        Some(Err(err)) => Err(err),
+    }
 }
 
 async fn pump_sse_response(

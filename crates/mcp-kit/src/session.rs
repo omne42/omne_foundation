@@ -162,13 +162,6 @@ impl Session {
                     "mcp notification timed out after {timeout:?}: {method} (server={})",
                     self.server_name
                 );
-
-                // Best-effort close: schedule only once so repeated timeout calls do not spawn
-                // unbounded close tasks, and abort the client's background reader/transport
-                // tasks so the timed-out session does not stay half-open.
-                self.connection
-                    .client()
-                    .close_in_background_once(timeout_message.clone());
                 Err(anyhow::Error::new(mcp_jsonrpc::Error::protocol(
                     mcp_jsonrpc::ProtocolErrorKind::WaitTimeout,
                     timeout_message,

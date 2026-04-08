@@ -1909,7 +1909,7 @@ async fn session_notify_timeout_returns_without_waiting_for_close_budget() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn session_notify_timeout_marks_closed_once_with_first_reason() {
+async fn session_notify_timeout_leaves_client_open_for_retry() {
     use std::io;
     use std::pin::Pin;
     use std::sync::Arc;
@@ -1976,50 +1976,39 @@ async fn session_notify_timeout_marks_closed_once_with_first_reason() {
     );
 
     let handle = session.connection().client().handle();
-    assert!(handle.is_closed(), "timeout should mark client closed");
-    let close_reason = handle.close_reason().expect("close reason set");
     assert!(
-        close_reason.contains("demo/first"),
-        "close reason should come from first timeout, got={close_reason:?}"
+        !handle.is_closed(),
+        "timeout should not mark the client closed"
+    );
+    assert_eq!(
+        handle.close_reason(),
+        None,
+        "timeout should not stamp a close reason when the client stays open"
     );
 
     let second_started = tokio::time::Instant::now();
     let second_err = session
         .notify("demo/second", Some(serde_json::json!({ "x": 2 })))
         .await
-        .expect_err("second notify should fail fast as closed");
+        .expect_err("second notify should time out again");
     assert!(
-        second_started.elapsed() < Duration::from_millis(5),
-        "closed client should fail fast, elapsed={:?}",
+        second_started.elapsed() < Duration::from_millis(30),
+        "repeated timeout should still stay bounded, elapsed={:?}",
         second_started.elapsed()
     );
     assert!(
-        !contains_wait_timeout(second_err.as_anyhow()),
-        "second notify should not re-timeout once closed, err={second_err:#}"
-    );
-    assert!(
-        second_err.chain().any(|cause| {
-            cause
-                .downcast_ref::<mcp_jsonrpc::Error>()
-                .is_some_and(|err| {
-                    matches!(
-                        err,
-                        mcp_jsonrpc::Error::Protocol(protocol_err)
-                            if protocol_err.kind == mcp_jsonrpc::ProtocolErrorKind::Closed
-                    )
-                })
-        }),
-        "second notify should surface closed error, err={second_err:#}"
+        contains_wait_timeout(second_err.as_anyhow()),
+        "second notify should keep surfacing wait-timeout, err={second_err:#}"
     );
     assert_eq!(
         session.connection().client().handle().close_reason(),
-        Some(close_reason),
-        "subsequent timeout attempts should not overwrite close reason"
+        None,
+        "repeated timeouts should not invent a close reason"
     );
 }
 
 #[tokio::test]
-async fn session_notify_timeout_aborts_background_reader_task() {
+async fn session_notify_timeout_keeps_background_reader_task_running() {
     use std::io;
     use std::pin::Pin;
     use std::sync::Arc;
@@ -2098,13 +2087,11 @@ async fn session_notify_timeout_aborts_background_reader_task() {
         "timeout should preserve structured wait-timeout error, err={err:#}"
     );
 
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while !reader_dropped.load(Ordering::Relaxed) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("timeout-driven background close should abort the reader task");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !reader_dropped.load(Ordering::Relaxed),
+        "timeout should not abort the background reader task"
+    );
 }
 
 #[tokio::test]
@@ -2324,7 +2311,7 @@ async fn notify_connected_timeout_disconnects_connection() {
 }
 
 #[tokio::test]
-async fn session_notify_timeout_closes_client() {
+async fn session_notify_timeout_keeps_client_open() {
     let (client_stream, server_stream) = tokio::io::duplex(256);
     let (client_read, client_write) = tokio::io::split(client_stream);
     let (server_read, mut server_write) = tokio::io::split(server_stream);
@@ -2376,14 +2363,11 @@ async fn session_notify_timeout_closes_client() {
         err.to_string().contains("timed out"),
         "unexpected error: {err:#}"
     );
-
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while !session.connection().client().handle().is_closed() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !session.connection().client().handle().is_closed(),
+        "notify timeout should not close the session client"
+    );
 
     server_task.await.unwrap();
 }
@@ -3273,7 +3257,7 @@ async fn connect_io_reconnects_when_existing_connection_is_closed() {
 }
 
 #[tokio::test]
-async fn connect_io_with_spaced_name_does_not_replace_existing_connection() {
+async fn connect_io_with_spaced_name_rejects_duplicate_live_connection() {
     let (client_stream, server_stream) = tokio::io::duplex(1024);
     let (client_read, client_write) = tokio::io::split(client_stream);
     let (server_read, mut server_write) = tokio::io::split(server_stream);
@@ -3356,12 +3340,16 @@ async fn connect_io_with_spaced_name_does_not_replace_existing_connection() {
         true
     });
 
-    manager
+    let err = manager
         .connect_io(" srv ", client_read2, client_write2)
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(err.to_string().contains("already connected"), "{err}");
+    assert!(
+        err.to_string().contains("custom JSON-RPC IO transport"),
+        "{err}"
+    );
 
-    // The second connect should no-op against the existing normalized name.
     assert_eq!(
         manager.initialize_result("srv").unwrap()["marker"],
         serde_json::json!(1)
@@ -3369,7 +3357,7 @@ async fn connect_io_with_spaced_name_does_not_replace_existing_connection() {
     let saw_second_initialize = server2_task.await.unwrap();
     assert!(
         !saw_second_initialize,
-        "second connection should not send initialize when normalized name is already connected"
+        "duplicate connection should not send initialize when normalized name is already connected"
     );
 
     let status = manager
@@ -3579,6 +3567,125 @@ async fn untrusted_manager_refuses_streamable_http_env_header_secrets() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("http header env vars"));
+}
+
+#[tokio::test]
+async fn untrusted_manager_refuses_streamable_http_auth_like_static_headers() {
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
+    assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
+
+    for header in ["X-Api-Key", "X-Auth-Token", "X-Client-Secret"] {
+        let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+        server_cfg
+            .http_headers_mut()
+            .unwrap()
+            .insert(header.to_string(), "secret".to_string());
+
+        let err = manager
+            .connect("srv", &server_cfg, absolute_test_cwd())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("sensitive http header"),
+            "header={header} err={err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn session_notify_timeout_does_not_close_client() {
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
+
+    struct SwitchableWrite {
+        blocked: Arc<AtomicBool>,
+        init_seen: Arc<tokio::sync::Notify>,
+    }
+
+    impl tokio::io::AsyncWrite for SwitchableWrite {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if self.blocked.load(Ordering::Relaxed) {
+                return Poll::Pending;
+            }
+            self.init_seen.notify_one();
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            if self.blocked.load(Ordering::Relaxed) {
+                return Poll::Pending;
+            }
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    let (client_stream, mut server_stream) = tokio::io::duplex(1024);
+    let (client_read, _unused_client_write) = tokio::io::split(client_stream);
+    let blocked = Arc::new(AtomicBool::new(false));
+    let init_seen = Arc::new(tokio::sync::Notify::new());
+
+    let server_task = {
+        let init_seen = Arc::clone(&init_seen);
+        tokio::spawn(async move {
+            init_seen.notified().await;
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": { "protocolVersion": MCP_PROTOCOL_VERSION }
+            });
+            let mut response_line = serde_json::to_string(&response).unwrap();
+            response_line.push('\n');
+            server_stream
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            server_stream.flush().await.unwrap();
+            std::future::pending::<()>().await;
+        })
+    };
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_millis(20))
+        .with_trust_mode(TrustMode::Trusted);
+    manager
+        .connect_io(
+            "srv",
+            client_read,
+            SwitchableWrite {
+                blocked: Arc::clone(&blocked),
+                init_seen: Arc::clone(&init_seen),
+            },
+        )
+        .await
+        .unwrap();
+
+    let session = manager.take_session("srv").expect("take session");
+    blocked.store(true, Ordering::Relaxed);
+
+    let err = session
+        .notify("notifications/progress", None)
+        .await
+        .expect_err("notify should time out");
+    assert!(
+        err.to_string().contains("timed out"),
+        "unexpected notify timeout error: {err}"
+    );
+    assert!(
+        !session.connection().client().is_closed(),
+        "notify timeout should not implicitly close the session client"
+    );
+
+    server_task.abort();
+    let _ = server_task.await;
 }
 
 #[tokio::test]

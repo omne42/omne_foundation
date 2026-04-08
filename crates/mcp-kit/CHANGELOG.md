@@ -10,6 +10,9 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit`：`connect_io*` 遇到已连接的同名 server 时不再静默 `Ok(())` 吞掉新传入 transport；现在会显式返回 `ManagerState` 错误，避免调用方误以为拿到的是新连接。
+- `mcp-kit`：`Session::notify()` 超时时不再隐式关闭底层 client；超时只返回稳定的 `WaitTimeout` 错误，避免一次通知超时偷偷改变整条 session 的生命周期。
+- `mcp-kit`：untrusted `streamable_http` 现在会拒绝更广义的认证类静态 header 名，不再只拦 `Authorization`/`Proxy-Authorization`/`Cookie`；`X-Api-Key`、`X-Auth-Token`、`X-Client-Secret` 这类仓库配置中的常见密钥头会直接 fail-closed。
 - `mcp-kit`：`SharedManager` 现在把 same-server connect/disconnect 生命周期串行化与已连接 request/notify 的飞行中 I/O 跟踪拆开；config-driven 与 connected 两条入口在拿到连接后都可并发发起请求，而 same-server disconnect 会等待这些飞行中 I/O 结束后再拆 transport，并保留现有 handler 重入 fail-fast 语义。
 - `mcp-kit`：`streamable_http` 的 programmatic `http_headers_mut()` 现在也会把 `Authorization` 当作 transport reserved header 拒绝；手写 `ServerConfig` 不再能绕过配置文件同样的鉴权头约束。
 - `mcp-kit`：`SharedManager` 的 Unix socket 回归测试现在会探测 `OMNE_TEST_SHORT_TMPDIR`、环境临时根和 `/var/tmp` fallback，并在没有可用短路径 socket 根时显式跳过；测试不再把 `/tmp` 当成永远可写的固定前提。

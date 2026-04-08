@@ -84,6 +84,15 @@ fn normalize_server_name_lookup(server_name: &str) -> &str {
     server_name.trim()
 }
 
+fn duplicate_live_connection_error(server_name: &ServerName, target: &str) -> anyhow::Error {
+    tagged_message(
+        ErrorKind::ManagerState,
+        format!(
+            "mcp server {server_name} is already connected; refusing to drop an unused {target} (disconnect first)"
+        ),
+    )
+}
+
 fn reject_duplicate_custom_jsonrpc_client(
     server_name: &ServerName,
     client: &mut mcp_jsonrpc::Client,
@@ -94,12 +103,7 @@ fn reject_duplicate_custom_jsonrpc_client(
     if let Some(child) = client.take_child() {
         lifecycle::reap_stale_child_best_effort(child);
     }
-    tagged_message(
-        ErrorKind::ManagerState,
-        format!(
-            "mcp server {server_name} is already connected; refusing to drop an unused custom JSON-RPC client (disconnect first)"
-        ),
-    )
+    duplicate_live_connection_error(server_name, "custom JSON-RPC client")
 }
 
 pub(crate) fn contains_wait_timeout(err: &anyhow::Error) -> bool {
@@ -1320,7 +1324,13 @@ impl Manager {
     {
         let server_name_key = parse_server_name_anyhow(server_name)?;
         if self.is_connected_and_alive(server_name_key.as_str()) {
-            return Ok(());
+            let _ = read;
+            let _ = write;
+            return Err(duplicate_live_connection_error(
+                &server_name_key,
+                "custom JSON-RPC IO transport",
+            )
+            .into());
         }
         self.clear_connection_cwd(server_name_key.as_str());
 

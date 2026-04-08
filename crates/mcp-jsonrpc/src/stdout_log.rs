@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use cap_fs_ext::{OpenOptionsExt, OpenOptionsFollowExt};
+#[cfg(unix)]
+use cap_fs_ext::OpenOptionsExt;
+use cap_fs_ext::OpenOptionsFollowExt;
 use cap_std::fs::OpenOptions;
 use omne_fs_primitives::{MissingRootPolicy, open_root};
 use tokio::io::AsyncWriteExt;

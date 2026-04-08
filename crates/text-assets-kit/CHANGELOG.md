@@ -16,7 +16,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Added `LazyInitConflictKind` plus `LazyInitError::conflict_kind()`, so compat-shim callers can distinguish stable blocking/conflict causes without relying on display-string matching.
 
 ### Fixed
-- `LazyValue` 现在只把当前调用栈上的真实重入视为 `ReentrantInitialization`；如果已有初始化恰好记录在同一 OS 线程上，后续访问会像其他 waiters 一样等待既有结果，不再被误判成 `SameThreadInitializationConflict`。
+- `resolve_data_root_with_base(...)` / `ensure_data_root_with_base(...)` 现在会把相对 `data_dir` 和相对 `TEXT_ASSETS_DIR` override 先锚到显式 base，而不是继续要求调用方退回 ambient `current_dir()` / `HOME` 语义才能落到稳定路径。
+- `LazyValue` 现在只把当前调用栈上的真实重入视为 `ReentrantInitialization`；如果已有初始化恰好记录在同一 OS 线程上，会返回显式的 `SameThreadInitializationConflict`，避免 blocking compatibility shim 把这类可诊断冲突退化成死锁。
 - `LazyValue` no longer tears down its cross-thread wait edge on every `Condvar` wake-up; spurious or unrelated `notify_all()` calls now keep the tracked wait relationship alive until the in-flight attempt actually settles, so cycle detection does not silently lose visibility mid-wait.
 - `text-assets-kit` no longer vendors `omne-fs-primitives` inside `omne_foundation`; it now resolves filesystem primitives from the canonical `omne-runtime` crate instead of maintaining a second workspace-local copy.
 - `text-assets-kit` 现在显式标记 `publish = false`，因为它当前直接依赖 workspace-only 的 `omne-fs-primitives`，不再让 manifest 暗示可单独 crates.io 发布。

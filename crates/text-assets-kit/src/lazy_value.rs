@@ -107,9 +107,11 @@ impl<T: ?Sized, E> LazyValue<T, E> {
     /// successful initialization attempt.
     ///
     /// Direct recursive initialization from the current call stack is rejected
-    /// explicitly. Other callers, including ones that happen to resume on the
-    /// same OS thread, wait for the in-flight attempt to settle and then
-    /// observe its result.
+    /// explicitly. If another access reaches the same `LazyValue` on the same
+    /// OS thread while initialization is still in flight, the compatibility
+    /// shim fails fast instead of blocking the thread behind its own unfinished
+    /// attempt. Other callers wait for the in-flight attempt to settle and
+    /// then observe its result.
     ///
     /// Thread-level cross-thread wait cycles between tracked `LazyValue`
     /// initializers/waiters are rejected before blocking.
@@ -143,9 +145,12 @@ impl<T: ?Sized, E> LazyValue<T, E> {
                         return Err(LazyInitError::ReentrantInitialization);
                     }
 
+                    if *owner_thread_id == thread_id {
+                        return Err(LazyInitError::SameThreadInitializationConflict);
+                    }
+
                     if !waiting_for_current_attempt {
-                        let should_track_wait = *owner_thread_id != thread_id;
-                        if should_track_wait && !begin_lazy_wait(thread_id, lazy_id) {
+                        if !begin_lazy_wait(thread_id, lazy_id) {
                             return Err(LazyInitError::CrossThreadCycleDetected);
                         }
                         *waiting_threads += 1;
@@ -757,30 +762,29 @@ mod tests {
     }
 
     #[test]
-    fn same_thread_waits_for_existing_initialization_attempt() {
+    fn same_thread_initialization_conflict_fails_fast() {
         let _guard = lazy_value_test_lock()
             .lock()
             .expect("lazy value test mutex poisoned");
         reset_lazy_wait_graph_for_test();
 
-        let lazy = Arc::new(LazyValue::<u32, &'static str>::new());
+        let lazy = LazyValue::<u32, &'static str>::new();
         *lock_unpoisoned(&lazy.state) = LazyState::Initializing {
             thread_id: std::thread::current().id(),
             waiting_threads: 0,
         };
 
-        let lazy_for_set = Arc::clone(&lazy);
-        let setter = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(20));
-            lazy_for_set.set(Arc::new(7));
-        });
-
-        let value = lazy
+        let error = lazy
             .get_or_init(|| -> Result<Arc<u32>, &'static str> { Ok(Arc::new(1)) })
-            .expect("same-thread in-flight state should wait for the existing attempt");
-        assert_eq!(*value, 7);
-
-        setter.join().expect("join setter");
+            .expect_err("same-thread in-flight state should fail fast");
+        assert!(matches!(
+            error,
+            LazyInitError::SameThreadInitializationConflict
+        ));
+        assert_eq!(
+            error.conflict_kind(),
+            Some(LazyInitConflictKind::SameThreadInitializationConflict)
+        );
     }
 
     #[test]
@@ -842,11 +846,11 @@ mod tests {
             let result = a_for_first
                 .get_or_init(|| {
                     barrier_for_first.wait();
-                    match b_for_first.get_or_init(|| Ok(Arc::new(200))) {
+                    match b_for_first.get_or_init(|| Ok(Arc::new(2_000))) {
                         Ok(value) => Ok(Arc::new(*value + 1)),
                         Err(LazyInitError::CrossThreadCycleDetected) => {
                             cycles_for_first.fetch_add(1, Ordering::SeqCst);
-                            Ok(Arc::new(100))
+                            Ok(Arc::new(1_000))
                         }
                         Err(_) => panic!("unexpected nested lazy init result"),
                     }
@@ -868,7 +872,7 @@ mod tests {
                         Ok(value) => Ok(Arc::new(*value + 10)),
                         Err(LazyInitError::CrossThreadCycleDetected) => {
                             cycles_for_second.fetch_add(1, Ordering::SeqCst);
-                            Ok(Arc::new(200))
+                            Ok(Arc::new(2_000))
                         }
                         Err(_) => panic!("unexpected nested lazy init result"),
                     }
@@ -899,14 +903,139 @@ mod tests {
         assert!(
             [first_result, second_result]
                 .iter()
-                .any(|value| matches!(*value, 100 | 200)),
+                .any(|value| matches!(*value, 1_000 | 2_000)),
             "one initializer should fall back to its cycle-detected sentinel",
         );
         assert!(
             [first_result, second_result]
                 .iter()
-                .any(|value| matches!(*value, 110 | 201)),
+                .any(|value| matches!(*value, 2_001 | 1_010)),
             "the sibling initializer should complete after the cycle breaks",
+        );
+    }
+
+    #[test]
+    fn three_thread_cycle_is_rejected_instead_of_deadlocking() {
+        let _guard = lazy_value_test_lock()
+            .lock()
+            .expect("lazy value test mutex poisoned");
+        reset_lazy_wait_graph_for_test();
+        let lazy_a = Arc::new(LazyValue::<u32, &'static str>::new());
+        let lazy_b = Arc::new(LazyValue::<u32, &'static str>::new());
+        let lazy_c = Arc::new(LazyValue::<u32, &'static str>::new());
+        let barrier = Arc::new(Barrier::new(3));
+        let cycle_count = Arc::new(AtomicUsize::new(0));
+        let (result_tx, result_rx) = mpsc::channel();
+
+        let a_for_first = Arc::clone(&lazy_a);
+        let b_for_first = Arc::clone(&lazy_b);
+        let barrier_for_first = Arc::clone(&barrier);
+        let cycles_for_first = Arc::clone(&cycle_count);
+        let result_tx_first = result_tx.clone();
+        let first = thread::spawn(move || {
+            let result = a_for_first
+                .get_or_init(|| {
+                    barrier_for_first.wait();
+                    match b_for_first.get_or_init(|| Ok(Arc::new(2_000))) {
+                        Ok(value) => Ok(Arc::new(*value + 1)),
+                        Err(LazyInitError::CrossThreadCycleDetected) => {
+                            cycles_for_first.fetch_add(1, Ordering::SeqCst);
+                            Ok(Arc::new(1_000))
+                        }
+                        Err(_) => panic!("unexpected nested lazy init result"),
+                    }
+                })
+                .map(|value| *value);
+            result_tx_first.send(result).expect("publish first result");
+        });
+
+        let b_for_second = Arc::clone(&lazy_b);
+        let c_for_second = Arc::clone(&lazy_c);
+        let barrier_for_second = Arc::clone(&barrier);
+        let cycles_for_second = Arc::clone(&cycle_count);
+        let result_tx_second = result_tx.clone();
+        let second = thread::spawn(move || {
+            let result = b_for_second
+                .get_or_init(|| {
+                    barrier_for_second.wait();
+                    match c_for_second.get_or_init(|| Ok(Arc::new(3_000))) {
+                        Ok(value) => Ok(Arc::new(*value + 10)),
+                        Err(LazyInitError::CrossThreadCycleDetected) => {
+                            cycles_for_second.fetch_add(1, Ordering::SeqCst);
+                            Ok(Arc::new(2_000))
+                        }
+                        Err(_) => panic!("unexpected nested lazy init result"),
+                    }
+                })
+                .map(|value| *value);
+            result_tx_second
+                .send(result)
+                .expect("publish second result");
+        });
+
+        let c_for_third = Arc::clone(&lazy_c);
+        let a_for_third = Arc::clone(&lazy_a);
+        let barrier_for_third = Arc::clone(&barrier);
+        let cycles_for_third = Arc::clone(&cycle_count);
+        let result_tx_third = result_tx;
+        let third = thread::spawn(move || {
+            let result = c_for_third
+                .get_or_init(|| {
+                    barrier_for_third.wait();
+                    match a_for_third.get_or_init(|| Ok(Arc::new(20))) {
+                        Ok(value) => Ok(Arc::new(*value + 100)),
+                        Err(LazyInitError::CrossThreadCycleDetected) => {
+                            cycles_for_third.fetch_add(1, Ordering::SeqCst);
+                            Ok(Arc::new(3_000))
+                        }
+                        Err(_) => panic!("unexpected nested lazy init result"),
+                    }
+                })
+                .map(|value| *value);
+            result_tx_third.send(result).expect("publish third result");
+        });
+
+        let first_result = result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first thread should not deadlock")
+            .expect("first initializer should recover");
+        let second_result = result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("second thread should not deadlock")
+            .expect("second initializer should recover");
+        let third_result = result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("third thread should not deadlock")
+            .expect("third initializer should recover");
+
+        first.join().expect("join first thread");
+        second.join().expect("join second thread");
+        third.join().expect("join third thread");
+
+        assert_eq!(
+            cycle_count.load(Ordering::SeqCst),
+            1,
+            "exactly one thread should observe the cycle and fail fast",
+        );
+        assert!(
+            [first_result, second_result, third_result]
+                .iter()
+                .any(|value| matches!(*value, 1_000 | 2_000 | 3_000)),
+            "one initializer should fall back to its cycle-detected sentinel",
+        );
+        assert!(
+            [first_result, second_result, third_result]
+                .iter()
+                .filter(|value| matches!(**value, 1_000 | 2_000 | 3_000))
+                .count()
+                == 1,
+            "only one initializer should consume the cycle-detected sentinel path",
+        );
+        assert!(
+            [first_result, second_result, third_result]
+                .iter()
+                .any(|value| !matches!(*value, 1_000 | 2_000 | 3_000)),
+            "the remaining initializers should complete after the cycle breaks",
         );
     }
 

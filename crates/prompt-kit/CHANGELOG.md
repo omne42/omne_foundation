@@ -13,7 +13,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `prompt-kit` 的资源 bootstrap 回归测试现在会先探测 `OMNE_TEST_SHORT_TMPDIR`、环境临时根和 Unix `/var/tmp` fallback 是否可用；tempdir 创建本身失败或 `StorageFull` 等非业务性临时目录故障时都会显式跳过，避免受限 runner 因磁盘/临时目录条件误报失败。
 
 ### Changed
-- `LazyPromptDirectory` 的 blocking-shim 契约继续保持“并发访问等待既有初始化结果”，不再因为底层 `LazyValue` 把同线程 in-flight 状态误判成递归而提前 fail-fast；直接递归初始化仍然显式拒绝。
+- `LazyPromptDirectory` 的 blocking-shim 契约继续保持“其他线程上的并发访问等待既有初始化结果”；直接递归初始化、同线程 in-flight 初始化冲突和可检测的线程级跨线程环路都继续显式报错，避免把这类可诊断冲突退化成阻塞。
 - `prompt-kit` 现在显式标记 `publish = false`，因为它当前直接依赖 workspace-only 的 `text-assets-kit`，发布契约收口为 Git / monorepo 复用而不是暗示可独立 crates.io 发布。
 - Reused `text-assets-kit` shared lazy-init and bootstrap+rollback primitives instead of maintaining a prompt-local `lazy_state` and duplicate bootstrap orchestration.
 - Clarified that the shared bootstrap/rollback primitives used here provide best-effort cleanup for the current attempt, not crash-safe transactions.

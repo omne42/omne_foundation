@@ -5,10 +5,9 @@ use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 
 use i18n_kit::{Catalog, Locale, TemplateArg};
-#[allow(deprecated)]
-use text_assets_kit::{LazyInitError, LazyValue};
 
 use crate::catalog_error::{CatalogInitError, CatalogLocaleError};
+use crate::lazy_compat::{BlockingLazyInitError, BlockingLazyValue};
 use crate::{resolve_locale_from_argv, resolve_locale_from_cli_args};
 
 /// Legacy blocking catalog shim.
@@ -26,7 +25,7 @@ use crate::{resolve_locale_from_argv, resolve_locale_from_cli_args};
 )]
 #[allow(deprecated)]
 pub struct LazyCatalog {
-    inner: LazyValue<dyn Catalog, CatalogInitError>,
+    inner: BlockingLazyValue<dyn Catalog, CatalogInitError>,
     initializer: Box<dyn Fn() -> Result<Arc<dyn Catalog>, CatalogInitError> + Send + Sync>,
 }
 
@@ -38,7 +37,7 @@ impl LazyCatalog {
         I: Fn() -> Result<Arc<dyn Catalog>, CatalogInitError> + Send + Sync + 'static,
     {
         Self {
-            inner: LazyValue::new(),
+            inner: BlockingLazyValue::new(),
             initializer: Box::new(initializer),
         }
     }
@@ -113,16 +112,16 @@ impl LazyCatalog {
 }
 
 #[allow(deprecated)]
-fn shared_lazy_catalog_error(error: LazyInitError<CatalogInitError>) -> CatalogInitError {
+fn shared_lazy_catalog_error(error: BlockingLazyInitError<CatalogInitError>) -> CatalogInitError {
     match error {
-        LazyInitError::Inner(error) => error.as_ref().clone(),
-        LazyInitError::ReentrantInitialization => {
+        BlockingLazyInitError::Inner(error) => error.as_ref().clone(),
+        BlockingLazyInitError::ReentrantInitialization => {
             CatalogInitError::new(ReentrantCatalogInitialization)
         }
-        LazyInitError::SameThreadInitializationConflict => {
+        BlockingLazyInitError::SameThreadInitializationConflict => {
             CatalogInitError::new(SameThreadCatalogInitializationConflict)
         }
-        LazyInitError::CrossThreadCycleDetected => {
+        BlockingLazyInitError::CrossThreadCycleDetected => {
             CatalogInitError::new(CrossThreadCatalogInitialization)
         }
     }
@@ -443,7 +442,8 @@ mod tests {
 
     #[test]
     fn lazy_catalog_reports_same_thread_conflict() {
-        let error = shared_lazy_catalog_error(LazyInitError::SameThreadInitializationConflict);
+        let error =
+            shared_lazy_catalog_error(BlockingLazyInitError::SameThreadInitializationConflict);
         assert_eq!(
             error.to_string(),
             "same-thread catalog initialization conflict; LazyCatalog is a blocking compatibility shim, so runtime-facing callers should prefer GlobalCatalog plus eager load/bootstrap"

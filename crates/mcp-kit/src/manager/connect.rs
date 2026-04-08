@@ -526,6 +526,7 @@ fn build_streamable_http_headers(
 
 fn is_reserved_streamable_http_header(header: &str) -> bool {
     header.eq_ignore_ascii_case(MCP_PROTOCOL_VERSION_HEADER)
+        || header.eq_ignore_ascii_case(AUTHORIZATION_HEADER)
         || header.eq_ignore_ascii_case(STREAMABLE_HTTP_SESSION_ID_HEADER)
 }
 
@@ -585,6 +586,24 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("http header env var targets a reserved transport header"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn http_headers_cannot_override_authorization() {
+        let ctx = trusted_connect_context();
+        let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+        server_cfg.http_headers_mut().unwrap().insert(
+            AUTHORIZATION_HEADER.to_string(),
+            "Bearer forged".to_string(),
+        );
+
+        let err = build_streamable_http_headers(&ctx, "srv", &server_cfg, Path::new("."))
+            .expect_err("reserved Authorization header should be rejected");
+        assert!(
+            err.to_string()
+                .contains("http header is reserved by transport"),
             "{err:#}"
         );
     }

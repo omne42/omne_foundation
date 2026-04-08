@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit`：`streamable_http` 的 programmatic `http_headers_mut()` 现在也会把 `Authorization` 当作 transport reserved header 拒绝；手写 `ServerConfig` 不再能绕过配置文件同样的鉴权头约束。
 - `mcp-kit`：`PreparedConnectedClient` 现在统一承载 request/notify 的“是否需要断连清理”判定，`Manager` 与 `SharedManager` 只保留各自的清理执行；同一套 JSON-RPC / timeout 清理规则不再在两条状态机路径里各自维护，降低 wrapper/core 漂移风险。
 - `mcp-kit`：连接复用元数据现在记录 transport 的 effective config identity，而不再只比较原始 `ServerConfig`；`streamable_http` 的 placeholder 展开、env header / bearer token 注入，以及 `stdio` 的 argv/env 展开变化都不会再静默复用旧连接。
 - `mcp-kit`：Windows 下被条件裁剪掉的 thread-root 相对路径测试辅助函数现在也会随平台条件一起裁剪，避免 `-D warnings` 把未使用的 `cwd_test_guard` helper 误报成跨平台 CI 失败。

@@ -422,11 +422,11 @@ fn build_v1_config(
         insert_server_unique(&mut servers, &name, server_name_key, server_cfg)?;
     }
 
-    Ok(Config {
-        path,
-        client,
-        servers,
-    })
+    let mut config = Config::new(client, servers);
+    if let Some(path) = path {
+        config = config.with_path(path);
+    }
+    Ok(config)
 }
 
 fn parse_stdout_log_config(

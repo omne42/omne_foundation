@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit`：`streamable_http` URL 语法校验现在前移到 `ServerConfig` / `Config` 不变量边界；无效 `url`、`sse_url`、`http_url` 会在构造或加载阶段直接 fail-fast，而不再拖到首次连接时才暴露。`Config::load*()` 产出的 `Config.path` 也会像 `with_path(...)` 一样一次性绑定到绝对路径，避免后续 `cwd` 变化再偷偷影响 thread root / 相对 `cwd` 身份语义。
 - `mcp-kit` manifest 现在为 foundation 内部 path 依赖补上显式 version 约束；即使继续保持 `publish = false`，导出 manifest 也不再额外丢失内部 semver 边界信息。
 - `mcp-kit`：`connect_io*` 遇到已连接的同名 server 时不再静默 `Ok(())` 吞掉新传入 transport；现在会显式返回 `ManagerState` 错误，避免调用方误以为拿到的是新连接。
 - `mcp-kit`：`Session::notify()` 超时时不再隐式关闭底层 client；超时只返回稳定的 `WaitTimeout` 错误，避免一次通知超时偷偷改变整条 session 的生命周期。

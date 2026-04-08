@@ -181,6 +181,17 @@ fn is_reserved_streamable_http_env_header(header: &HeaderName) -> bool {
     is_reserved_streamable_http_header(header)
 }
 
+fn validate_streamable_http_url_syntax(url_field: &str, url: &str) -> anyhow::Result<()> {
+    reqwest::Url::parse(url).map(|_| ()).map_err(|err| {
+        wrap_kind(
+            ErrorKind::Config,
+            anyhow::Error::new(err).context(format!(
+                "mcp server transport=streamable_http: invalid {url_field} (url redacted)"
+            )),
+        )
+    })
+}
+
 impl ServerConfig {
     pub fn stdio(argv: Vec<String>) -> crate::Result<Self> {
         validate_argv(Transport::Stdio, &argv)?;
@@ -204,6 +215,7 @@ impl ServerConfig {
         if url.trim().is_empty() {
             public_bail!("mcp server transport=streamable_http: url must not be empty");
         }
+        validate_streamable_http_url_syntax("url", &url)?;
         Ok(Self::StreamableHttp(StreamableHttpServerConfig {
             urls: StreamableHttpUrls::Single { url },
             bearer_token_env_var: None,
@@ -224,6 +236,8 @@ impl ServerConfig {
         if http_url.trim().is_empty() {
             public_bail!("mcp server transport=streamable_http: http_url must not be empty");
         }
+        validate_streamable_http_url_syntax("sse_url", &sse_url)?;
+        validate_streamable_http_url_syntax("http_url", &http_url)?;
         Ok(Self::StreamableHttp(StreamableHttpServerConfig {
             urls: StreamableHttpUrls::Split { sse_url, http_url },
             bearer_token_env_var: None,
@@ -266,6 +280,7 @@ impl ServerConfig {
                                 "mcp server transport=streamable_http: url must not be empty"
                             );
                         }
+                        validate_streamable_http_url_syntax("url", url)?;
                     }
                     StreamableHttpUrls::Split { sse_url, http_url } => {
                         if sse_url.trim().is_empty() {
@@ -278,6 +293,8 @@ impl ServerConfig {
                                 "mcp server transport=streamable_http: http_url must not be empty"
                             );
                         }
+                        validate_streamable_http_url_syntax("sse_url", sse_url)?;
+                        validate_streamable_http_url_syntax("http_url", http_url)?;
                     }
                 }
 
@@ -766,5 +783,31 @@ impl Config {
 
     pub fn server_named(&self, name: &ServerName) -> Option<&ServerConfig> {
         self.servers.get(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ServerConfig;
+
+    #[test]
+    fn streamable_http_constructor_rejects_invalid_url_syntax() {
+        let err =
+            ServerConfig::streamable_http("https://exa mple.invalid").expect_err("invalid url");
+        let message = err.to_string();
+        assert!(message.contains("invalid url"), "{message}");
+        assert!(
+            !message.contains("exa mple.invalid"),
+            "url should stay redacted"
+        );
+    }
+
+    #[test]
+    fn streamable_http_split_constructor_rejects_invalid_url_syntax() {
+        let err = ServerConfig::streamable_http_split("https://example.invalid/sse", "not a url")
+            .expect_err("invalid split url");
+        let message = err.to_string();
+        assert!(message.contains("invalid http_url"), "{message}");
+        assert!(!message.contains("not a url"), "url should stay redacted");
     }
 }

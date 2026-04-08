@@ -13,6 +13,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `notify-kit` 的 webhook/API sinks 现在共享一个内部 outbound transport helper，统一 `HttpClientProfile` 创建、公网 IP 选择和 strict eager 校验入口，后续新增 transport 级约束时不再需要在每个 sink 里散弹式重复接线。
 
 ### Fixed
+- `Hub` 现在会在 sink 首次 panic（包含 `Sink::send()` panic 与 `Sink::name()` panic）后将该 sink poison/disable；首次事件仍保留原有聚合诊断，后续事件会跳过故障 sink 并继续把通知发送给其他健康 sinks，避免每条事件重复触发同一个 panic。
 - `FeishuWebhookSink` 的同步 strict 构造函数不再在库内部偷偷做 DNS 校验并私起 Tokio runtime；同步入口现在只收紧 strict 配置契约，需要 eager 网络校验的调用方必须显式使用 async strict 构造。
 - `FeishuWebhookSink` 的本地图片读取现在复用 workspace 的 no-follow 文件系统原语，而不是在 sink 私有模块里继续手写一套 symlink/path 打开边界；相同 allowlist/path 语义下会继续 fail closed。
 - `notify-kit::ErrorKind` 不再把标准 env helper 和 `GitHubCommentSink` 的显式配置失败路径都塌缩成 `Other`；这些 review 命中的配置错误现在会稳定落到 `ErrorKind::Config`，而底层 I/O/HTTP 失败也会落到 `ErrorKind::Transport`，调用方不必再靠错误文本做分类。

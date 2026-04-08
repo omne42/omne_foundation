@@ -14,24 +14,19 @@ use crate::lazy_compat::{BlockingLazyInitError, BlockingLazyValue};
 
 #[derive(Debug)]
 pub struct PromptBootstrapCleanupError {
-    rollback: PromptBootstrapRollbackError,
-}
-
-#[derive(Debug)]
-struct PromptBootstrapRollbackError {
-    rollback: io::Error,
     load: io::Error,
+    rollback: io::Error,
 }
 
 impl PromptBootstrapCleanupError {
     #[must_use]
     pub fn load_error(&self) -> &io::Error {
-        &self.rollback.load
+        &self.load
     }
 
     #[must_use]
     pub fn rollback_error(&self) -> &io::Error {
-        &self.rollback.rollback
+        &self.rollback
     }
 }
 
@@ -48,19 +43,9 @@ impl std::fmt::Display for PromptBootstrapCleanupError {
 
 impl std::error::Error for PromptBootstrapCleanupError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.load_error())
-    }
-}
-
-impl std::fmt::Display for PromptBootstrapRollbackError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "rollback failed: {}", self.rollback)
-    }
-}
-
-impl std::error::Error for PromptBootstrapRollbackError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.load)
+        // Keep the prompt load failure in the top-level display/accessors, but let the standard
+        // error chain expose the cleanup failure directly.
+        Some(self.rollback_error())
     }
 }
 
@@ -121,12 +106,7 @@ pub fn bootstrap_prompt_directory_with_base(
 }
 
 fn prompt_bootstrap_cleanup_error(load: io::Error, rollback: io::Error) -> io::Error {
-    io::Error::new(
-        load.kind(),
-        PromptBootstrapCleanupError {
-            rollback: PromptBootstrapRollbackError { rollback, load },
-        },
-    )
+    io::Error::new(load.kind(), PromptBootstrapCleanupError { load, rollback })
 }
 
 /// Runtime-owned prompt directory handle.
@@ -906,10 +886,9 @@ mod tests {
         assert_eq!(cleanup.load_error().to_string(), "load failed");
         assert_eq!(cleanup.rollback_error().to_string(), "rollback failed");
         assert_eq!(
-            cleanup.source().expect("load source").to_string(),
-            "load failed"
+            cleanup.source().expect("rollback source").to_string(),
+            "rollback failed"
         );
-        assert_eq!(cleanup.rollback_error().to_string(), "rollback failed");
         assert_eq!(
             cleanup.to_string(),
             "prompt directory load error: load failed; rollback failed: rollback failed"

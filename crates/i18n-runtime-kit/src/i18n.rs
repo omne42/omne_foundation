@@ -74,7 +74,9 @@ impl Display for CatalogBootstrapCleanupError {
 
 impl StdError for CatalogBootstrapCleanupError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        Some(&self.load)
+        // Keep the catalog parse/load failure in the top-level display and accessors, but let the
+        // standard error chain expose the cleanup fault directly.
+        Some(&self.rollback)
     }
 }
 
@@ -1588,9 +1590,9 @@ mod tests {
         assert!(matches!(
             cleanup
                 .source()
-                .expect("load source")
-                .downcast_ref::<DynamicCatalogError>(),
-            Some(DynamicCatalogError::LocaleSourceJson { .. })
+                .expect("rollback source")
+                .downcast_ref::<io::Error>(),
+            Some(error) if error.to_string() == "rollback failed"
         ));
         assert!(cleanup.to_string().contains("catalog load error:"));
         assert!(

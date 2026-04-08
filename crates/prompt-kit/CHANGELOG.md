@@ -9,6 +9,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `prompt-kit`：当 prompt directory load 失败且后续 best-effort rollback 也失败时，返回的 `io::Error` 现在保留原始 load `ErrorKind`，并通过 `PromptBootstrapCleanupError` 同时暴露 rollback 失败；主错误语义不再被 rollback 覆盖。
 
 ### Fixed
+- `PromptBootstrapCleanupError` 现在继续通过 display 和访问器保留原始 prompt load failure，同时把标准错误链的 `source()` 指向 rollback failure，避免 cleanup 原因只能靠 downcast 后的专用访问器获取。
 - `bootstrap_prompt_directory(...)` 在 load 失败后又遇到 rollback 失败时，错误链和 `io::ErrorKind` 现在都继续对齐到 load failure；rollback 失败继续通过 `PromptBootstrapCleanupError` 的访问器保留，不再把主因重分类成 cleanup。
 - `prompt-kit` 的资源 bootstrap 回归测试现在会先探测 `OMNE_TEST_SHORT_TMPDIR`、环境临时根和 Unix `/var/tmp` fallback 是否可用；tempdir 创建本身失败或 `StorageFull` 等非业务性临时目录故障时都会显式跳过，避免受限 runner 因磁盘/临时目录条件误报失败。
 

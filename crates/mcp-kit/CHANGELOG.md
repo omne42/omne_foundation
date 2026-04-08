@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit`：`SharedManager` 现在把 same-server connect/disconnect 生命周期串行化与已连接 request/notify 的飞行中 I/O 跟踪拆开；config-driven 与 connected 两条入口在拿到连接后都可并发发起请求，而 same-server disconnect 会等待这些飞行中 I/O 结束后再拆 transport，并保留现有 handler 重入 fail-fast 语义。
 - `mcp-kit`：`streamable_http` 的 programmatic `http_headers_mut()` 现在也会把 `Authorization` 当作 transport reserved header 拒绝；手写 `ServerConfig` 不再能绕过配置文件同样的鉴权头约束。
 - `mcp-kit`：`SharedManager` 的 Unix socket 回归测试现在会探测 `OMNE_TEST_SHORT_TMPDIR`、环境临时根和 `/var/tmp` fallback，并在没有可用短路径 socket 根时显式跳过；测试不再把 `/tmp` 当成永远可写的固定前提。
 - `mcp-kit`：`PreparedConnectedClient` 现在统一承载 request/notify 的“是否需要断连清理”判定，`Manager` 与 `SharedManager` 只保留各自的清理执行；同一套 JSON-RPC / timeout 清理规则不再在两条状态机路径里各自维护，降低 wrapper/core 漂移风险。

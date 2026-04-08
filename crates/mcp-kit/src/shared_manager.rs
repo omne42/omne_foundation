@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
@@ -16,10 +17,10 @@ const REENTRANT_HANDLER_ERROR: &str = "SharedManager async operations cannot be 
 /// This wrapper is intentionally a single-flight lifecycle gate, not an actor. It serializes
 /// manager state access through a single async mutex, while same-server connect/disconnect paths
 /// also share a per-server gate so cold starts and teardown cannot overlap. Connected
-/// request/notify operations downgrade that same-server gate to a read lock before awaiting
-/// JSON-RPC I/O so sibling request/notify calls can overlap while same-server disconnect still
-/// waits for the borrowed connection to be released. Lifecycle and inspection operations still
-/// execute under the shared lock.
+/// request/notify operations only hold that same-server gate long enough to borrow the current
+/// connection and register an in-flight I/O guard, so sibling request/notify calls can overlap
+/// while same-server disconnect still waits for the borrowed I/O to drain. Lifecycle and
+/// inspection operations still execute under the shared lock.
 ///
 /// Reentrant fail-fast is scoped to the current manager handler task, not to global handler
 /// activity. If some other handler for the same `Manager` is active elsewhere, external callers
@@ -36,7 +37,7 @@ const REENTRANT_HANDLER_ERROR: &str = "SharedManager async operations cannot be 
 ///   with a replacement cold start
 pub struct SharedManager {
     inner: Arc<Mutex<Manager>>,
-    connect_gates: Arc<StdMutex<HashMap<String, Weak<RwLock<()>>>>>,
+    server_states: Arc<StdMutex<HashMap<String, Weak<ServerState>>>>,
     manager_id: u64,
     captured_handler_scope: Option<Weak<()>>,
 }
@@ -53,7 +54,7 @@ impl SharedManager {
         let manager_id = manager.instance_id();
         Self {
             inner: Arc::new(Mutex::new(manager)),
-            connect_gates: Arc::new(StdMutex::new(HashMap::new())),
+            server_states: Arc::new(StdMutex::new(HashMap::new())),
             manager_id,
             captured_handler_scope: None,
         }
@@ -64,7 +65,7 @@ impl SharedManager {
             Ok(inner) => Ok(inner.into_inner()),
             Err(inner) => Err(Self {
                 inner,
-                connect_gates: self.connect_gates,
+                server_states: self.server_states,
                 manager_id: self.manager_id,
                 captured_handler_scope: self.captured_handler_scope,
             }),
@@ -99,20 +100,20 @@ impl SharedManager {
         })
     }
 
-    fn connect_gate_for(&self, server_name: &str) -> Arc<RwLock<()>> {
+    fn server_state_for(&self, server_name: &str) -> Arc<ServerState> {
         let key = server_name.trim().to_string();
-        let mut gates = self
-            .connect_gates
+        let mut states = self
+            .server_states
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        gates.retain(|_, gate| gate.strong_count() > 0);
-        if let Some(existing) = gates.get(&key).and_then(Weak::upgrade) {
+        states.retain(|_, state| state.strong_count() > 0);
+        if let Some(existing) = states.get(&key).and_then(Weak::upgrade) {
             return existing;
         }
 
-        let gate = Arc::new(RwLock::new(()));
-        gates.insert(key, Arc::downgrade(&gate));
-        gate
+        let state = Arc::new(ServerState::default());
+        states.insert(key, Arc::downgrade(&state));
+        state
     }
 
     async fn lock_for_async_op(
@@ -138,28 +139,62 @@ impl SharedManager {
         &self,
         operation: &'static str,
         server_name: &str,
-    ) -> anyhow::Result<OwnedRwLockWriteGuard<()>> {
-        let gate = self.connect_gate_for(server_name);
+    ) -> anyhow::Result<ServerLifecycleWriteGuard> {
+        let state = self.server_state_for(server_name);
+        let gate = Arc::clone(&state.lifecycle_gate);
         if let Some(guard) =
             self.fail_fast_if_reentrant(operation, || gate.clone().try_write_owned())?
         {
-            return Ok(guard);
+            return Ok(ServerLifecycleWriteGuard {
+                _state: state,
+                guard,
+            });
         }
-        Ok(gate.write_owned().await)
+        Ok(ServerLifecycleWriteGuard {
+            _state: state,
+            guard: gate.write_owned().await,
+        })
     }
 
     async fn lock_connect_gate_read(
         &self,
         operation: &'static str,
         server_name: &str,
-    ) -> anyhow::Result<OwnedRwLockReadGuard<()>> {
-        let gate = self.connect_gate_for(server_name);
+    ) -> anyhow::Result<ServerLifecycleReadGuard> {
+        let state = self.server_state_for(server_name);
+        let gate = Arc::clone(&state.lifecycle_gate);
         if let Some(guard) =
             self.fail_fast_if_reentrant(operation, || gate.clone().try_read_owned())?
         {
-            return Ok(guard);
+            return Ok(ServerLifecycleReadGuard {
+                _state: state,
+                guard,
+            });
         }
-        Ok(gate.read_owned().await)
+        Ok(ServerLifecycleReadGuard {
+            _state: state,
+            guard: gate.read_owned().await,
+        })
+    }
+
+    async fn wait_for_server_io_to_finish(
+        &self,
+        operation: &'static str,
+        state: &ServerState,
+    ) -> anyhow::Result<()> {
+        if state.in_flight_io_count() == 0 {
+            return Ok(());
+        }
+
+        if self.is_reentrant_handler_call() {
+            return Err(tagged_message(
+                ErrorKind::ManagerState,
+                format!("{REENTRANT_HANDLER_ERROR}: {operation}"),
+            ));
+        }
+
+        state.wait_for_in_flight_io().await;
+        Ok(())
     }
 
     /// Inspect manager state under the shared lock without exposing borrowed data directly.
@@ -236,6 +271,7 @@ impl SharedManager {
         operation: &'static str,
         server_name: &str,
     ) -> anyhow::Result<PreparedSharedClient> {
+        let state = self.server_state_for(server_name);
         let gate = self.lock_connect_gate_read(operation, server_name).await?;
         let prepared = self
             .try_prepare_connected_client(operation, server_name, None)
@@ -246,9 +282,11 @@ impl SharedManager {
                     format!("mcp server not connected: {}", server_name.trim()),
                 )
             })?;
+        let in_flight_io = state.start_in_flight_io();
+        drop(gate);
         Ok(PreparedSharedClient {
             prepared,
-            same_server_gate: Some(gate),
+            in_flight_io: Some(in_flight_io),
         })
     }
 
@@ -260,15 +298,18 @@ impl SharedManager {
         cwd: &Path,
     ) -> anyhow::Result<PreparedSharedClient> {
         let cwd = crate::manager::resolve_config_connection_cwd(config.thread_root(), cwd)?;
+        let state = self.server_state_for(server_name);
         let read_gate = self.lock_connect_gate_read(operation, server_name).await?;
 
         if let Some(prepared) = self
             .try_prepare_reusable_connected_client(operation, config, server_name, Some(&cwd))
             .await?
         {
+            let in_flight_io = state.start_in_flight_io();
+            drop(read_gate);
             return Ok(PreparedSharedClient {
                 prepared,
-                same_server_gate: Some(read_gate),
+                in_flight_io: Some(in_flight_io),
             });
         }
         drop(read_gate);
@@ -279,9 +320,11 @@ impl SharedManager {
             .try_prepare_reusable_connected_client(operation, config, server_name, Some(&cwd))
             .await?
         {
+            let in_flight_io = state.start_in_flight_io();
+            drop(write_gate);
             return Ok(PreparedSharedClient {
                 prepared,
-                same_server_gate: Some(OwnedRwLockWriteGuard::downgrade(write_gate)),
+                in_flight_io: Some(in_flight_io),
             });
         }
 
@@ -300,13 +343,34 @@ impl SharedManager {
                     ),
                 )
             })?;
+        let in_flight_io = state.start_in_flight_io();
+        drop(write_gate);
         Ok(PreparedSharedClient {
             prepared,
-            same_server_gate: Some(OwnedRwLockWriteGuard::downgrade(write_gate)),
+            in_flight_io: Some(in_flight_io),
         })
     }
 
     async fn cleanup_connection_after_error(&self, server_name: String, connection_id: u64) {
+        let state = self.server_state_for(&server_name);
+        let _gate = match self
+            .lock_connect_gate_write("cleanup_connection_after_error", &server_name)
+            .await
+        {
+            Ok(guard) => guard,
+            Err(_) => {
+                self.spawn_connection_cleanup(server_name, connection_id);
+                return;
+            }
+        };
+        if self
+            .wait_for_server_io_to_finish("cleanup_connection_after_error", state.as_ref())
+            .await
+            .is_err()
+        {
+            self.spawn_connection_cleanup(server_name, connection_id);
+            return;
+        }
         let disconnect = if self.is_reentrant_handler_call() {
             match self.inner.try_lock() {
                 Ok(mut manager) => manager
@@ -332,6 +396,21 @@ impl SharedManager {
     fn spawn_connection_cleanup(&self, server_name: String, connection_id: u64) {
         let shared = self.clone();
         tokio::spawn(async move {
+            let state = shared.server_state_for(&server_name);
+            let _gate = match shared
+                .lock_connect_gate_write("cleanup_connection_after_error", &server_name)
+                .await
+            {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            if shared
+                .wait_for_server_io_to_finish("cleanup_connection_after_error", state.as_ref())
+                .await
+                .is_err()
+            {
+                return;
+            }
             let disconnect = {
                 let mut manager = shared.inner.lock().await;
                 manager.prepare_disconnect_for_wait_if_connection_with_cwd_cleanup(
@@ -345,11 +424,16 @@ impl SharedManager {
 
     async fn run_prepared_request(
         &self,
-        prepared: crate::manager::PreparedConnectedClient,
+        prepared: PreparedSharedClient,
         method: &str,
         params: Option<Value>,
     ) -> crate::Result<Value> {
+        let PreparedSharedClient {
+            prepared,
+            in_flight_io,
+        } = prepared;
         let call = prepared.request_call(method, params).await;
+        drop(in_flight_io);
         if call.cleanup().should_disconnect() {
             self.cleanup_connection_after_error(
                 prepared.server_name.clone(),
@@ -362,11 +446,16 @@ impl SharedManager {
 
     async fn run_prepared_notify(
         &self,
-        prepared: crate::manager::PreparedConnectedClient,
+        prepared: PreparedSharedClient,
         method: &str,
         params: Option<Value>,
     ) -> crate::Result<()> {
+        let PreparedSharedClient {
+            prepared,
+            in_flight_io,
+        } = prepared;
         let call = prepared.notify_call(method, params).await;
+        drop(in_flight_io);
         if call.cleanup().should_disconnect() {
             self.cleanup_connection_after_error(
                 prepared.server_name.clone(),
@@ -392,8 +481,11 @@ impl SharedManager {
     }
 
     pub async fn disconnect(&self, server_name: &str) -> crate::Result<bool> {
+        let state = self.server_state_for(server_name);
         let _gate = self
             .lock_connect_gate_write("disconnect", server_name)
+            .await?;
+        self.wait_for_server_io_to_finish("disconnect", state.as_ref())
             .await?;
         Ok(self
             .with_manager_lock("disconnect", |manager| manager.disconnect(server_name))
@@ -406,8 +498,11 @@ impl SharedManager {
         timeout: Duration,
         on_timeout: mcp_jsonrpc::WaitOnTimeout,
     ) -> crate::Result<Option<std::process::ExitStatus>> {
+        let state = self.server_state_for(server_name);
         let _gate = self
             .lock_connect_gate_write("disconnect_and_wait", server_name)
+            .await?;
+        self.wait_for_server_io_to_finish("disconnect_and_wait", state.as_ref())
             .await?;
         let disconnect = self
             .lock_for_async_op("disconnect_and_wait")
@@ -424,10 +519,7 @@ impl SharedManager {
         params: Option<Value>,
         cwd: &Path,
     ) -> crate::Result<Value> {
-        let PreparedSharedClient {
-            prepared,
-            same_server_gate: _same_server_gate,
-        } = self
+        let prepared = self
             .prepare_connected_client_with_gate("request", config, server_name, cwd)
             .await?;
         self.run_prepared_request(prepared, method, params).await
@@ -439,10 +531,7 @@ impl SharedManager {
         method: &str,
         params: Option<Value>,
     ) -> crate::Result<Value> {
-        let PreparedSharedClient {
-            prepared,
-            same_server_gate: _same_server_gate,
-        } = self
+        let prepared = self
             .prepare_existing_connected_client_with_gate("request_connected", server_name)
             .await?;
         self.run_prepared_request(prepared, method, params).await
@@ -482,10 +571,7 @@ impl SharedManager {
         params: Option<Value>,
         cwd: &Path,
     ) -> crate::Result<()> {
-        let PreparedSharedClient {
-            prepared,
-            same_server_gate: _same_server_gate,
-        } = self
+        let prepared = self
             .prepare_connected_client_with_gate("notify", config, server_name, cwd)
             .await?;
         self.run_prepared_notify(prepared, method, params).await
@@ -497,10 +583,7 @@ impl SharedManager {
         method: &str,
         params: Option<Value>,
     ) -> crate::Result<()> {
-        let PreparedSharedClient {
-            prepared,
-            same_server_gate: _same_server_gate,
-        } = self
+        let prepared = self
             .prepare_existing_connected_client_with_gate("notify_connected", server_name)
             .await?;
         self.run_prepared_notify(prepared, method, params).await
@@ -580,7 +663,7 @@ impl Clone for SharedManager {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
-            connect_gates: Arc::clone(&self.connect_gates),
+            server_states: Arc::clone(&self.server_states),
             manager_id: self.manager_id,
             captured_handler_scope: self
                 .captured_handler_scope
@@ -592,7 +675,70 @@ impl Clone for SharedManager {
 
 struct PreparedSharedClient {
     prepared: crate::manager::PreparedConnectedClient,
-    same_server_gate: Option<OwnedRwLockReadGuard<()>>,
+    in_flight_io: Option<InFlightIoGuard>,
+}
+
+struct ServerLifecycleReadGuard {
+    _state: Arc<ServerState>,
+    guard: OwnedRwLockReadGuard<()>,
+}
+
+struct ServerLifecycleWriteGuard {
+    _state: Arc<ServerState>,
+    guard: OwnedRwLockWriteGuard<()>,
+}
+
+#[derive(Default)]
+struct ServerState {
+    lifecycle_gate: Arc<RwLock<()>>,
+    in_flight_io: AtomicUsize,
+    in_flight_idle: tokio::sync::Notify,
+}
+
+impl ServerState {
+    fn start_in_flight_io(self: &Arc<Self>) -> InFlightIoGuard {
+        self.in_flight_io.fetch_add(1, AtomicOrdering::AcqRel);
+        InFlightIoGuard {
+            state: Some(Arc::clone(self)),
+        }
+    }
+
+    fn in_flight_io_count(&self) -> usize {
+        self.in_flight_io.load(AtomicOrdering::Acquire)
+    }
+
+    async fn wait_for_in_flight_io(&self) {
+        while self.in_flight_io_count() != 0 {
+            self.in_flight_idle.notified().await;
+        }
+    }
+}
+
+struct InFlightIoGuard {
+    state: Option<Arc<ServerState>>,
+}
+
+impl Drop for InFlightIoGuard {
+    fn drop(&mut self) {
+        let Some(state) = self.state.take() else {
+            return;
+        };
+        if state.in_flight_io.fetch_sub(1, AtomicOrdering::AcqRel) == 1 {
+            state.in_flight_idle.notify_waiters();
+        }
+    }
+}
+
+impl Drop for ServerLifecycleReadGuard {
+    fn drop(&mut self) {
+        let _ = &self.guard;
+    }
+}
+
+impl Drop for ServerLifecycleWriteGuard {
+    fn drop(&mut self) {
+        let _ = &self.guard;
+    }
 }
 
 #[cfg(test)]
@@ -675,6 +821,49 @@ mod tests {
     impl Drop for CurrentDirRestoreGuard {
         fn drop(&mut self) {
             let _ = std::env::set_current_dir(&self.original_cwd);
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum SharedRequestPath {
+        ConfigDriven,
+        Connected,
+    }
+
+    impl SharedRequestPath {
+        const fn label(self) -> &'static str {
+            match self {
+                Self::ConfigDriven => "config-driven",
+                Self::Connected => "connected",
+            }
+        }
+    }
+
+    fn record_reusable_connection(
+        manager: &mut Manager,
+        config: &Config,
+        server_name: &str,
+        cwd: &Path,
+    ) {
+        manager.record_connection_cwd(server_name, cwd).unwrap();
+        manager
+            .record_connection_server_config(server_name, config.server(server_name).unwrap())
+            .unwrap();
+    }
+
+    async fn shared_request_via_path(
+        path: SharedRequestPath,
+        shared: SharedManager,
+        config: Arc<Config>,
+        cwd: PathBuf,
+    ) -> crate::Result<Value> {
+        match path {
+            SharedRequestPath::ConfigDriven => {
+                shared
+                    .request(config.as_ref(), "srv", "ping", None::<Value>, &cwd)
+                    .await
+            }
+            SharedRequestPath::Connected => shared.request_connected("srv", "ping", None).await,
         }
     }
 
@@ -837,6 +1026,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shared_manager_request_paths_overlap_on_same_connected_server() {
+        for path in [
+            SharedRequestPath::ConfigDriven,
+            SharedRequestPath::Connected,
+        ] {
+            let (client_stream, server_stream) = tokio::io::duplex(1024);
+            let (client_read, client_write) = tokio::io::split(client_stream);
+            let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+            let server_task = tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+                let init_line = lines.next_line().await.unwrap().unwrap();
+                let init_value: Value = serde_json::from_str(&init_line).unwrap();
+                assert_eq!(init_value["method"], "initialize");
+                let init_id = init_value["id"].clone();
+
+                let init_response = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": init_id,
+                    "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+                });
+                let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+                init_response_line.push('\n');
+                server_write
+                    .write_all(init_response_line.as_bytes())
+                    .await
+                    .unwrap();
+                server_write.flush().await.unwrap();
+
+                let initialized_line = lines.next_line().await.unwrap().unwrap();
+                let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+                assert_eq!(initialized_value["method"], "notifications/initialized");
+
+                let first_request_line = lines.next_line().await.unwrap().unwrap();
+                let first_request: Value = serde_json::from_str(&first_request_line).unwrap();
+                assert_eq!(first_request["method"], "ping");
+
+                let second_request_line =
+                    tokio::time::timeout(Duration::from_millis(200), lines.next_line())
+                        .await
+                        .expect("second request should overlap before the first response")
+                        .unwrap()
+                        .unwrap();
+                let second_request: Value = serde_json::from_str(&second_request_line).unwrap();
+                assert_eq!(second_request["method"], "ping");
+
+                for request in [&first_request, &second_request] {
+                    let response = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request["id"].clone(),
+                        "result": { "ok": true },
+                    });
+                    let mut response_line = serde_json::to_string(&response).unwrap();
+                    response_line.push('\n');
+                    server_write
+                        .write_all(response_line.as_bytes())
+                        .await
+                        .unwrap();
+                    server_write.flush().await.unwrap();
+                }
+            });
+
+            let cwd = test_workspace_path(path.label());
+            let mut servers = BTreeMap::new();
+            servers.insert(
+                ServerName::parse("srv").unwrap(),
+                ServerConfig::stdio(vec!["mock-server".to_string()]).unwrap(),
+            );
+            let config = Arc::new(Config::new(ClientConfig::default(), servers));
+
+            let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+                .with_trust_mode(TrustMode::Trusted);
+            manager
+                .connect_io("srv", client_read, client_write)
+                .await
+                .unwrap();
+            record_reusable_connection(&mut manager, config.as_ref(), "srv", &cwd);
+
+            let shared = manager.into_shared();
+            let (first, second) = tokio::join!(
+                shared_request_via_path(path, shared.clone(), Arc::clone(&config), cwd.clone()),
+                shared_request_via_path(path, shared.clone(), Arc::clone(&config), cwd.clone()),
+            );
+            assert_eq!(first.unwrap(), serde_json::json!({ "ok": true }));
+            assert_eq!(second.unwrap(), serde_json::json!({ "ok": true }));
+
+            server_task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn shared_manager_request_connected_holds_gate_until_io_finishes() {
         let (client_stream, server_stream) = tokio::io::duplex(1024);
         let (client_read, client_write) = tokio::io::split(client_stream);
@@ -944,6 +1225,134 @@ mod tests {
             .await
             .expect("server should observe request then disconnect")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn shared_manager_disconnect_waits_for_in_flight_request_across_request_paths() {
+        for path in [
+            SharedRequestPath::ConfigDriven,
+            SharedRequestPath::Connected,
+        ] {
+            let (client_stream, server_stream) = tokio::io::duplex(1024);
+            let (client_read, client_write) = tokio::io::split(client_stream);
+            let (server_read, mut server_write) = tokio::io::split(server_stream);
+            let (request_seen_tx, request_seen_rx) = oneshot::channel();
+            let (release_response_tx, release_response_rx) = oneshot::channel();
+
+            let server_task = tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+                let init_line = lines.next_line().await.unwrap().unwrap();
+                let init_value: Value = serde_json::from_str(&init_line).unwrap();
+                assert_eq!(init_value["method"], "initialize");
+                let init_id = init_value["id"].clone();
+
+                let init_response = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": init_id,
+                    "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+                });
+                let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+                init_response_line.push('\n');
+                server_write
+                    .write_all(init_response_line.as_bytes())
+                    .await
+                    .unwrap();
+                server_write.flush().await.unwrap();
+
+                let initialized_line = lines.next_line().await.unwrap().unwrap();
+                let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+                assert_eq!(initialized_value["method"], "notifications/initialized");
+
+                let request_line = lines.next_line().await.unwrap().unwrap();
+                let request_value: Value = serde_json::from_str(&request_line).unwrap();
+                assert_eq!(request_value["method"], "ping");
+                let request_id = request_value["id"].clone();
+                request_seen_tx.send(()).unwrap();
+                release_response_rx.await.unwrap();
+
+                let response = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": { "ok": true },
+                });
+                let mut response_line = serde_json::to_string(&response).unwrap();
+                response_line.push('\n');
+                server_write
+                    .write_all(response_line.as_bytes())
+                    .await
+                    .unwrap();
+                server_write.flush().await.unwrap();
+
+                let eof = lines.next_line().await.unwrap();
+                assert!(
+                    eof.is_none(),
+                    "disconnect should close after request finishes"
+                );
+            });
+
+            let cwd = test_workspace_path(path.label());
+            let mut servers = BTreeMap::new();
+            servers.insert(
+                ServerName::parse("srv").unwrap(),
+                ServerConfig::stdio(vec!["mock-server".to_string()]).unwrap(),
+            );
+            let config = Arc::new(Config::new(ClientConfig::default(), servers));
+
+            let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+                .with_trust_mode(TrustMode::Trusted);
+            manager
+                .connect_io("srv", client_read, client_write)
+                .await
+                .unwrap();
+            record_reusable_connection(&mut manager, config.as_ref(), "srv", &cwd);
+            let shared = manager.into_shared();
+
+            let request_task = tokio::spawn(shared_request_via_path(
+                path,
+                shared.clone(),
+                Arc::clone(&config),
+                cwd.clone(),
+            ));
+            request_seen_rx.await.unwrap();
+
+            let disconnect_task = tokio::spawn({
+                let shared = shared.clone();
+                async move { shared.disconnect("srv").await }
+            });
+
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(
+                !disconnect_task.is_finished(),
+                "{} disconnect should wait for in-flight request IO",
+                path.label()
+            );
+
+            release_response_tx.send(()).unwrap();
+
+            let result = tokio::time::timeout(Duration::from_secs(1), request_task)
+                .await
+                .expect("request should finish after releasing response")
+                .unwrap()
+                .unwrap();
+            assert_eq!(result, serde_json::json!({ "ok": true }));
+
+            let disconnected = tokio::time::timeout(Duration::from_secs(1), disconnect_task)
+                .await
+                .expect("disconnect should finish after request drains")
+                .unwrap()
+                .unwrap();
+            assert!(
+                disconnected,
+                "{} disconnect should remove the server after in-flight request completes",
+                path.label()
+            );
+
+            tokio::time::timeout(Duration::from_secs(1), server_task)
+                .await
+                .expect("server should observe request then disconnect")
+                .unwrap();
+        }
     }
 
     #[tokio::test]
@@ -1910,29 +2319,29 @@ mod tests {
     }
 
     #[test]
-    fn shared_manager_connect_gates_prune_stale_entries() {
+    fn shared_manager_server_states_prune_stale_entries() {
         let shared = Manager::new("test-client", "0.0.0", Duration::from_secs(1)).into_shared();
 
-        let first = shared.connect_gate_for(" alpha ");
+        let first = shared.server_state_for(" alpha ");
         {
-            let gates = shared
-                .connect_gates
+            let states = shared
+                .server_states
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            assert_eq!(gates.len(), 1);
-            assert_eq!(gates.get("alpha").unwrap().strong_count(), 1);
+            assert_eq!(states.len(), 1);
+            assert_eq!(states.get("alpha").unwrap().strong_count(), 1);
         }
         drop(first);
 
-        let second = shared.connect_gate_for("beta");
+        let second = shared.server_state_for("beta");
         {
-            let gates = shared
-                .connect_gates
+            let states = shared
+                .server_states
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            assert_eq!(gates.len(), 1);
-            assert!(gates.get("alpha").is_none());
-            assert_eq!(gates.get("beta").unwrap().strong_count(), 1);
+            assert_eq!(states.len(), 1);
+            assert!(states.get("alpha").is_none());
+            assert_eq!(states.get("beta").unwrap().strong_count(), 1);
         }
         drop(second);
     }
@@ -3384,7 +3793,7 @@ mod tests {
             .into_shared();
 
         let (prepared_ready_tx, prepared_ready_rx) = oneshot::channel();
-        let (release_gate_tx, release_gate_rx) = oneshot::channel();
+        let (release_io_tx, release_io_rx) = oneshot::channel();
         let first_shared = shared.clone();
         let first_config = Arc::clone(&config);
         let prepared_client = tokio::spawn(async move {
@@ -3398,12 +3807,12 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let gate = prepared
-                .same_server_gate
-                .expect("prepared client should retain a same-server gate");
+            let in_flight_io = prepared
+                .in_flight_io
+                .expect("prepared client should retain an in-flight IO guard");
             prepared_ready_tx.send(()).unwrap();
-            release_gate_rx.await.unwrap();
-            drop(gate);
+            release_io_rx.await.unwrap();
+            drop(in_flight_io);
         });
 
         first_init_seen_rx.await.unwrap();
@@ -3428,16 +3837,16 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(
             !disconnect_finished.load(Ordering::SeqCst),
-            "disconnect should still be blocked while the borrowed client gate is held"
+            "disconnect should still be blocked while the borrowed client IO guard is held"
         );
 
-        release_gate_tx.send(()).unwrap();
+        release_io_tx.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(1), async {
             disconnect_task.await.unwrap();
             connection_closed_rx.await.unwrap()
         })
         .await
-        .expect("disconnect should finish once the borrowed client gate is released");
+        .expect("disconnect should finish once the borrowed client IO guard is released");
 
         tokio::time::timeout(Duration::from_secs(1), prepared_client)
             .await

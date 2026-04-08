@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use futures_util::FutureExt;
@@ -122,7 +123,51 @@ struct HubInner {
 
 struct HubSink {
     sink: Arc<dyn Sink>,
-    name: Option<&'static str>,
+    name: &'static str,
+    state: AtomicU8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum HubSinkState {
+    Ready = 0,
+    NamePanicked = 1,
+    Poisoned = 2,
+}
+
+impl HubSinkState {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            x if x == Self::Ready as u8 => Self::Ready,
+            x if x == Self::NamePanicked as u8 => Self::NamePanicked,
+            x if x == Self::Poisoned as u8 => Self::Poisoned,
+            _ => unreachable!("invalid hub sink state"),
+        }
+    }
+}
+
+impl HubSink {
+    const UNKNOWN_SINK_NAME: &str = "<unknown>";
+
+    fn state(&self) -> HubSinkState {
+        HubSinkState::from_u8(self.state.load(Ordering::Acquire))
+    }
+
+    fn report_name_panic_once(&self) -> bool {
+        self.state
+            .compare_exchange(
+                HubSinkState::NamePanicked as u8,
+                HubSinkState::Poisoned as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn poison(&self) {
+        self.state
+            .store(HubSinkState::Poisoned as u8, Ordering::Release);
+    }
 }
 
 impl Hub {
@@ -152,9 +197,17 @@ impl Hub {
             .with_max_sink_sends_in_parallel(limits.max_sink_sends_in_parallel);
         let sinks = sinks
             .into_iter()
-            .map(|sink| HubSink {
-                name: std::panic::catch_unwind(AssertUnwindSafe(|| sink.name())).ok(),
-                sink,
+            .map(|sink| {
+                let (name, state) = match std::panic::catch_unwind(AssertUnwindSafe(|| sink.name()))
+                {
+                    Ok(name) => (name, HubSinkState::Ready),
+                    Err(_) => (HubSink::UNKNOWN_SINK_NAME, HubSinkState::NamePanicked),
+                };
+                HubSink {
+                    sink,
+                    name,
+                    state: AtomicU8::new(state as u8),
+                }
             })
             .collect();
         let inner = HubInner {
@@ -293,24 +346,34 @@ impl HubInner {
         sink: &HubSink,
         event: &Event,
     ) -> (usize, &'static str, crate::Result<()>) {
-        const UNKNOWN_SINK_NAME: &str = "<unknown>";
+        let name = sink.name;
 
-        let Some(name) = sink.name else {
-            return (
-                idx,
-                UNKNOWN_SINK_NAME,
-                Err(anyhow::anyhow!("sink panicked").into()),
-            );
-        };
+        match sink.state() {
+            HubSinkState::Ready => {}
+            HubSinkState::NamePanicked => {
+                return if sink.report_name_panic_once() {
+                    (idx, name, Err(anyhow::anyhow!("sink panicked").into()))
+                } else {
+                    (idx, name, Ok(()))
+                };
+            }
+            HubSinkState::Poisoned => return (idx, name, Ok(())),
+        }
+
         let result = AssertUnwindSafe(async move {
             tokio::time::timeout(timeout, sink.sink.send(event))
                 .await
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("timeout after {timeout:?}").into()))
         })
         .catch_unwind()
-        .await
-        .unwrap_or_else(|_| Err(anyhow::anyhow!("sink panicked").into()));
-        (idx, name, result)
+        .await;
+        match result {
+            Ok(result) => (idx, name, result),
+            Err(_) => {
+                sink.poison();
+                (idx, name, Err(anyhow::anyhow!("sink panicked").into()))
+            }
+        }
     }
 
     async fn send(&self, event: &Event) -> crate::Result<()> {
@@ -406,6 +469,7 @@ mod tests {
     struct TestSink {
         name: &'static str,
         behavior: TestSinkBehavior,
+        sends: Arc<AtomicUsize>,
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -427,6 +491,7 @@ mod tests {
 
         fn send<'a>(&'a self, _event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
             Box::pin(async move {
+                self.sends.fetch_add(1, Ordering::SeqCst);
                 match self.behavior {
                     TestSinkBehavior::Ok => Ok(()),
                     TestSinkBehavior::Err => Err(anyhow::anyhow!("boom").into()),
@@ -446,6 +511,7 @@ mod tests {
         let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
             name: "ok",
             behavior: TestSinkBehavior::Ok,
+            sends: Arc::new(AtomicUsize::new(0)),
         })];
         let hub = Hub::new(HubConfig::default(), sinks);
         let event = Event::new("kind", Severity::Info, "title");
@@ -500,10 +566,12 @@ mod tests {
                 Arc::new(TestSink {
                     name: "ok",
                     behavior: TestSinkBehavior::Ok,
+                    sends: Arc::new(AtomicUsize::new(0)),
                 }),
                 Arc::new(TestSink {
                     name: "bad",
                     behavior: TestSinkBehavior::Err,
+                    sends: Arc::new(AtomicUsize::new(0)),
                 }),
             ];
 
@@ -540,6 +608,7 @@ mod tests {
             let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
                 name: "slow",
                 behavior: TestSinkBehavior::Sleep(Duration::from_millis(50)),
+                sends: Arc::new(AtomicUsize::new(0)),
             })];
 
             let hub = Hub::new(
@@ -624,6 +693,7 @@ mod tests {
             let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
                 name: "panic",
                 behavior: TestSinkBehavior::Panic,
+                sends: Arc::new(AtomicUsize::new(0)),
             })];
 
             let hub = Hub::new(
@@ -653,6 +723,7 @@ mod tests {
             let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
                 name: "ignored",
                 behavior: TestSinkBehavior::PanicName,
+                sends: Arc::new(AtomicUsize::new(0)),
             })];
 
             let hub = Hub::new(
@@ -846,6 +917,7 @@ mod tests {
             let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
                 name: "ok",
                 behavior: TestSinkBehavior::Ok,
+                sends: Arc::new(AtomicUsize::new(0)),
             })];
             let hub = Hub::new(HubConfig::default(), sinks);
 
@@ -860,6 +932,100 @@ mod tests {
     }
 
     #[test]
+    fn send_poisons_panicking_sink_after_first_failure() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let panic_sends = Arc::new(AtomicUsize::new(0));
+            let healthy_sends = Arc::new(AtomicUsize::new(0));
+            let sinks: Vec<Arc<dyn Sink>> = vec![
+                Arc::new(TestSink {
+                    name: "panic",
+                    behavior: TestSinkBehavior::Panic,
+                    sends: panic_sends.clone(),
+                }),
+                Arc::new(TestSink {
+                    name: "healthy",
+                    behavior: TestSinkBehavior::Ok,
+                    sends: healthy_sends.clone(),
+                }),
+            ];
+
+            let hub = Hub::new(
+                HubConfig {
+                    enabled_kinds: None,
+                    per_sink_timeout: Duration::from_secs(1),
+                },
+                sinks,
+            );
+
+            let first_err = hub
+                .send(Event::new("kind", Severity::Info, "first"))
+                .await
+                .expect_err("first send should report panic sink");
+            let failures = first_err.sink_failures().expect("structured sink failures");
+            assert_eq!(failures.len(), 1);
+            assert_eq!(failures[0].sink_name(), "panic");
+
+            hub.send(Event::new("kind", Severity::Info, "second"))
+                .await
+                .expect("poisoned sink should be skipped");
+
+            assert_eq!(panic_sends.load(Ordering::SeqCst), 1);
+            assert_eq!(healthy_sends.load(Ordering::SeqCst), 2);
+        });
+    }
+
+    #[test]
+    fn send_poisons_sink_whose_name_panics() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let sends = Arc::new(AtomicUsize::new(0));
+            let sinks: Vec<Arc<dyn Sink>> = vec![
+                Arc::new(TestSink {
+                    name: "ignored",
+                    behavior: TestSinkBehavior::PanicName,
+                    sends: sends.clone(),
+                }),
+                Arc::new(TestSink {
+                    name: "healthy",
+                    behavior: TestSinkBehavior::Ok,
+                    sends: Arc::new(AtomicUsize::new(0)),
+                }),
+            ];
+
+            let hub = Hub::new(
+                HubConfig {
+                    enabled_kinds: None,
+                    per_sink_timeout: Duration::from_secs(1),
+                },
+                sinks,
+            );
+
+            let first_err = hub
+                .send(Event::new("kind", Severity::Info, "first"))
+                .await
+                .expect_err("first send should report name panic");
+            let failures = first_err.sink_failures().expect("structured sink failures");
+            assert_eq!(failures.len(), 1);
+            assert_eq!(failures[0].sink_name(), "<unknown>");
+
+            hub.send(Event::new("kind", Severity::Info, "second"))
+                .await
+                .expect("poisoned sink should be skipped");
+
+            assert_eq!(sends.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
     fn try_notify_errors_without_tokio_time_driver() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
@@ -869,6 +1035,7 @@ mod tests {
             let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
                 name: "ok",
                 behavior: TestSinkBehavior::Ok,
+                sends: Arc::new(AtomicUsize::new(0)),
             })];
             let hub = Hub::new(HubConfig::default(), sinks);
 

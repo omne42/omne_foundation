@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：`stdout_log` 的 capability-style open 现在按平台条件导入 `OpenOptionsExt`；Unix 继续保留 `mode(0o600)` 权限收敛，Windows 不再因未使用 import 被 `-D warnings` 门禁拦下。
 - `mcp-jsonrpc`：stdout log 现在通过 capability-style no-follow open 同步创建缺失父目录，而不是在 symlink 预检后再调用 ambient `create_dir_all`；缺失父目录场景不再暴露“检查后被竞态替换”的 TOCTOU 窗口。
 - `mcp-jsonrpc`：`detached_spawners_do_not_share_process_global_worker` 回归测试不再把 shared-worker spawn 次数钉死为恰好 `2`；现在校验“至少新起了两个 worker”，避免 worker 重建路径把实现细节误判成 CI flake。
 - `mcp-jsonrpc`：detached cleanup/runtime 不再复用 crate 级隐藏单例 worker；后台补偿任务现在由每个 client lifecycle 自己持有和调度，`ClientHandle` 无生命周期时才退化到单任务 fallback runtime，避免跨 client 偷偷共享全进程 runtime/thread。

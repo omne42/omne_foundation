@@ -1,5 +1,6 @@
 mod bootstrap_lock;
 mod data_root;
+#[cfg(test)]
 mod lazy_value;
 mod managed_bootstrap;
 mod resource_bootstrap;
@@ -20,12 +21,6 @@ pub use data_root::{
     DataRootOptions, DataRootScope, ensure_data_root, ensure_data_root_with_base,
     resolve_data_root, resolve_data_root_with_base,
 };
-#[deprecated(
-    since = "0.1.0",
-    note = "LazyValue and LazyInitError are blocking, thread-oriented compatibility primitives. Prefer eager snapshots or runtime-owned handles at crate boundaries."
-)]
-#[allow(deprecated)]
-pub use lazy_value::{LazyInitError, LazyValue};
 pub use managed_bootstrap::{
     BootstrapLoadError, bootstrap_text_resources_then_load,
     bootstrap_text_resources_then_load_with_base,

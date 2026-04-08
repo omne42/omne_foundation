@@ -4,12 +4,13 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
+use text_assets_kit::SharedRuntimeHandle;
 use text_assets_kit::{
     BootstrapLoadError, ResourceManifest, TextDirectory, bootstrap_text_resources_then_load,
     bootstrap_text_resources_then_load_with_base,
 };
-#[allow(deprecated)]
-use text_assets_kit::{LazyInitError, LazyValue, SharedRuntimeHandle};
+
+use crate::lazy_compat::{BlockingLazyInitError, BlockingLazyValue};
 
 #[derive(Debug)]
 pub struct PromptBootstrapCleanupError {
@@ -186,7 +187,7 @@ impl Default for PromptDirectoryHandle {
 )]
 #[allow(deprecated)]
 pub struct LazyPromptDirectory {
-    inner: LazyValue<TextDirectory, io::Error>,
+    inner: BlockingLazyValue<TextDirectory, io::Error>,
     initializer: Box<dyn Fn() -> Result<TextDirectory, io::Error> + Send + Sync>,
 }
 
@@ -225,7 +226,7 @@ impl LazyPromptDirectory {
         I: Fn() -> Result<TextDirectory, io::Error> + Send + Sync + 'static,
     {
         Self {
-            inner: LazyValue::new(),
+            inner: BlockingLazyValue::new(),
             initializer: Box::new(initializer),
         }
     }
@@ -241,23 +242,23 @@ impl LazyPromptDirectory {
 }
 
 #[allow(deprecated)]
-fn shared_prompt_error_detail(error: LazyInitError<io::Error>) -> Arc<io::Error> {
+fn shared_prompt_error_detail(error: BlockingLazyInitError<io::Error>) -> Arc<io::Error> {
     match error {
-        LazyInitError::Inner(error) => error,
-        LazyInitError::ReentrantInitialization => Arc::new(io::Error::other(
+        BlockingLazyInitError::Inner(error) => error,
+        BlockingLazyInitError::ReentrantInitialization => Arc::new(io::Error::other(
             "reentrant prompt directory initialization",
         )),
-        LazyInitError::SameThreadInitializationConflict => Arc::new(io::Error::other(
+        BlockingLazyInitError::SameThreadInitializationConflict => Arc::new(io::Error::other(
             "same-thread prompt directory initialization conflict; LazyPromptDirectory is a blocking compatibility shim, so runtime-facing callers should prefer PromptDirectoryHandle plus eager load/bootstrap",
         )),
-        LazyInitError::CrossThreadCycleDetected => Arc::new(io::Error::other(
+        BlockingLazyInitError::CrossThreadCycleDetected => Arc::new(io::Error::other(
             "cross-thread prompt directory initialization cycle detected",
         )),
     }
 }
 
 #[allow(deprecated)]
-fn shared_prompt_error(error: LazyInitError<io::Error>) -> PromptDirectoryError {
+fn shared_prompt_error(error: BlockingLazyInitError<io::Error>) -> PromptDirectoryError {
     PromptDirectoryError::new(shared_prompt_error_detail(error))
 }
 
@@ -814,7 +815,8 @@ mod tests {
 
     #[test]
     fn lazy_prompt_directory_exposes_same_thread_conflict_message() {
-        let error = shared_prompt_error_detail(LazyInitError::SameThreadInitializationConflict);
+        let error =
+            shared_prompt_error_detail(BlockingLazyInitError::SameThreadInitializationConflict);
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_eq!(
             error.to_string(),

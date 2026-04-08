@@ -49,14 +49,17 @@
 
 - `src/prompts.rs`
   - prompt bootstrap、runtime 目录句柄与错误包装
-- 共享懒初始化并发控制与 best-effort bootstrap/rollback 流程
-  - 由 [`text-assets-kit`](../text-assets-kit/README.md) 提供通用原语，`prompt-kit` 只保留 prompt 域错误映射与 runtime 句柄
+- best-effort bootstrap/rollback 流程
+  - 由 [`text-assets-kit`](../text-assets-kit/README.md) 提供通用文本资源原语
+- `src/lazy_compat.rs`
+  - `LazyPromptDirectory` 专用的私有阻塞 compat shim，不再把通用 blocking lazy primitive 暴露回 foundation crate 边界
 
 ## 当前定位
 
 - 代码上它本质是建立在 [`text-assets-kit`](../text-assets-kit/README.md) 之上的薄封装。
 - `PromptDirectoryHandle` 是当前推荐的 runtime-facing 共享句柄；`LazyPromptDirectory` 仅保留为已废弃的阻塞式兼容层。
 - `LazyPromptDirectory` 对同线程递归初始化、同线程初始化冲突以及可检测的线程级跨线程初始化环路都会返回显式错误，但它仍然是阻塞式兼容层，不应继续扩张成 runtime-facing canonical API。
+- 这个阻塞 compat shim 现在收口在 `prompt-kit` 私有模块里；`text-assets-kit` 继续只暴露文本资源 runtime adapter 能力，不再承担通用 blocking lazy public surface。
 - 当前跨仓库已证明的 prompt 复用面，并不主要是“prompt 目录加载”。
 - 因此当前不应该继续往 `prompt-kit` 塞入模板 DSL、版本管理、schema 绑定、fingerprint 或 cache-key 语义。
 

@@ -62,8 +62,10 @@
   - CLI / argv locale 解析与 env fallback 选择
 - `src/catalog_error.rs`
   - runtime 初始化错误、CLI locale 错误和句柄级 locale 错误包装
-- 共享懒初始化并发控制与 best-effort bootstrap/rollback 流程
-  - 由 [`text-assets-kit`](../text-assets-kit/README.md) 提供通用原语，`i18n-runtime-kit` 只保留 i18n 域加载与错误映射
+- `src/lazy_compat.rs`
+  - `LazyCatalog` 专用的私有阻塞 compat shim，不再把通用 blocking lazy primitive 暴露回 foundation crate 边界
+- best-effort bootstrap/rollback 流程
+  - 由 [`text-assets-kit`](../text-assets-kit/README.md) 提供通用文本资源原语，`i18n-runtime-kit` 只保留 i18n 域加载与错误映射
 
 ## 与其他 crate 的关系
 

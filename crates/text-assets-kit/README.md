@@ -8,8 +8,6 @@
 
 它解决的问题不是“文本资源的业务语义是什么”，而是“文本资源如何在受控目录中被安全地 bootstrap、落盘、扫描、读取和回滚”。
 
-它内部仍保留共享的阻塞式 lazy-init 兼容原语，供更高层 crate 在迁移路径里复用；但这不是推荐直接暴露给 async runtime 边界的 canonical API。
-
 ## 边界
 
 负责：
@@ -69,9 +67,6 @@
   - bootstrap、创建报告与失败回滚
 - `src/bootstrap_lock.rs`
   - bootstrap 并发串行化与跨进程协调；仅作为低层兼容原语保留
-- `src/lazy_value.rs`
-  - 仅供兼容层复用的阻塞式 lazy-init 原语；模块和类型本体都已显式标记为 deprecated compatibility shim，同线程重入、同线程 in-flight 初始化冲突和可检测的线程级跨线程等待环路都会显式报错，不作为 async runtime-facing canonical 边界
-
 ## bootstrap/rollback 语义
 
 - `text-assets-kit` 会串行化同一 resource root 上的并发 bootstrap 尝试，避免一个尝试的 rollback 与另一个尝试的 load 互相踩到。
@@ -84,5 +79,6 @@
 - 当前不依赖 `omne_foundation` 内其他 crate
 - 被 [`i18n-runtime-kit`](../i18n-runtime-kit/README.md) 和 [`prompt-kit`](../prompt-kit/README.md) 作为更高层 runtime adapter 复用
 - 由它统一承载通用文本资源 root 规范化与目录扫描，不再让上层 runtime adapter 直接下钻 `omne-fs-primitives`
+- `prompt-kit` 这类上层 crate 如果仍需要阻塞式兼容 shim，应把那类 compat 逻辑私有地保留在自己的领域边界里，而不是继续从 `text-assets-kit` 暴露成通用 public surface
 - 当调用方已经持有 workspace/root 事实时，应优先使用 `*_with_base(...)` 入口；`materialize_resource_root(...)`、`resolve_data_root(...)`、`ensure_data_root(...)` 现在只作为 compatibility shim 保留，不再视为 canonical foundation 边界
 - 刻意不反向承载 i18n 或 prompt 语义，避免把通用文本资源边界重新做宽

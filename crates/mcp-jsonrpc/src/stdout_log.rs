@@ -1,8 +1,13 @@
 use std::path::{Path, PathBuf};
 
+use cap_fs_ext::{OpenOptionsExt, OpenOptionsFollowExt};
+use cap_std::fs::OpenOptions;
+use omne_fs_primitives::{MissingRootPolicy, open_root};
 use tokio::io::AsyncWriteExt;
 
 use crate::StdoutLog;
+
+const APPENDABLE_OPEN_NOT_FOUND_RETRIES: usize = 4;
 
 async fn ensure_stdout_log_path_has_no_symlink(path: &Path) -> Result<(), std::io::Error> {
     use std::path::Component;
@@ -50,24 +55,97 @@ async fn ensure_stdout_log_path_has_no_symlink(path: &Path) -> Result<(), std::i
 async fn open_stdout_log_append(path: &Path) -> Result<tokio::fs::File, std::io::Error> {
     ensure_stdout_log_path_has_no_symlink(path).await?;
 
-    let mut options = tokio::fs::OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    {
-        // Best-effort: ensure new log files are not world-readable. Existing files keep their
-        // original permissions.
-        options.mode(0o600);
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    #[cfg(windows)]
-    {
-        // Best-effort: avoid following reparse points (including symlinks) on open.
-        // This mitigates TOCTOU risks where the log path could be replaced between checks.
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let path = path.to_path_buf();
+    let file = tokio::task::spawn_blocking(move || open_stdout_log_append_std(&path))
+        .await
+        .map_err(|err| {
+            std::io::Error::other(format!("open stdout_log path task failed: {err}"))
+        })??;
+    Ok(tokio::fs::File::from_std(file))
+}
+
+fn open_stdout_log_append_std(path: &Path) -> Result<std::fs::File, std::io::Error> {
+    let mut last_not_found = None;
+
+    for attempt in 0..APPENDABLE_OPEN_NOT_FOUND_RETRIES {
+        match open_stdout_log_append_std_once(path) {
+            Ok(file) => return Ok(file),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                last_not_found = Some(err);
+                if attempt + 1 < APPENDABLE_OPEN_NOT_FOUND_RETRIES {
+                    std::thread::yield_now();
+                    continue;
+                }
+            }
+            Err(err) => return Err(err),
+        }
     }
 
-    options.open(path).await
+    Err(last_not_found
+        .unwrap_or_else(|| std::io::Error::other("stdout_log open failed without an error")))
+}
+
+fn open_stdout_log_append_std_once(path: &Path) -> Result<std::fs::File, std::io::Error> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "stdout_log path must include a parent directory: {}",
+                path.display()
+            ),
+        )
+    })?;
+    let leaf = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "stdout_log path must include a file name: {}",
+                path.display()
+            ),
+        )
+    })?;
+
+    let root = open_root(
+        parent,
+        "stdout_log path",
+        MissingRootPolicy::Create,
+        |_, _, _, error| error,
+    )?
+    .ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "stdout_log parent directory not found: {}",
+                parent.display()
+            ),
+        )
+    })?;
+
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    options.follow(cap_fs_ext::FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+
+    let file = root.into_dir().open_with(Path::new(leaf), &options)?;
+    ensure_regular_stdout_log_file(file.into_std(), path)
+}
+
+fn ensure_regular_stdout_log_file(
+    file: std::fs::File,
+    path: &Path,
+) -> Result<std::fs::File, std::io::Error> {
+    let metadata = file.metadata()?;
+    if metadata.is_file() {
+        return Ok(file);
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("stdout_log path must be a regular file: {}", path.display()),
+    ))
 }
 
 pub(crate) struct LogState {
@@ -86,10 +164,6 @@ impl LogState {
         let max_parts = opts.max_parts.filter(|v| *v > 0);
 
         ensure_stdout_log_path_has_no_symlink(&base_path).await?;
-        if let Some(parent) = base_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-
         let file = open_stdout_log_append(&base_path).await?;
         let current_len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
         let next_part = next_rotating_log_part(&base_path).await.unwrap_or(1);
@@ -409,6 +483,29 @@ mod tests {
             err.to_string()
                 .contains("stdout_log path contains symlink component")
         );
+    }
+
+    #[tokio::test]
+    async fn stdout_log_creates_missing_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir
+            .path()
+            .join("nested")
+            .join("logs")
+            .join("server.stdout.log");
+
+        let mut state = LogState::new(StdoutLog {
+            path: base.clone(),
+            max_bytes_per_part: 1024,
+            max_parts: None,
+        })
+        .await
+        .expect("missing parents should be created securely");
+        state.write_line_bytes(b"ok").await.unwrap();
+        drop(state);
+
+        assert!(base.parent().unwrap().is_dir());
+        assert_eq!(tokio::fs::read(&base).await.unwrap(), b"ok\n");
     }
 
     #[tokio::test]

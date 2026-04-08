@@ -11,24 +11,41 @@ pub(crate) fn resolve_connection_cwd_with_base(
     base: Option<&Path>,
     cwd: &Path,
 ) -> anyhow::Result<PathBuf> {
-    let resolved = if cwd.is_absolute() {
-        cwd.to_path_buf()
-    } else {
-        let base = match base {
-            Some(base) if base.is_absolute() => base.to_path_buf(),
-            Some(base) => bail!("relative MCP cwd base must be absolute: {}", base.display()),
-            None => bail!(
-                "relative MCP cwd requires an explicit absolute base: {}",
-                cwd.display()
-            ),
-        };
-        base.join(cwd)
+    if cwd.is_absolute() {
+        return stable_connection_cwd_identity(cwd);
+    }
+
+    let base = match base {
+        Some(base) if base.is_absolute() => base,
+        Some(base) => bail!("relative MCP cwd base must be absolute: {}", base.display()),
+        None => bail!(
+            "relative MCP cwd requires an explicit absolute base: {}",
+            cwd.display()
+        ),
     };
-    stable_connection_cwd_identity(&resolved)
+    resolve_relative_path_within_base(base, cwd, "relative MCP cwd")
 }
 
 pub(crate) fn stable_connection_cwd_identity(path: &Path) -> anyhow::Result<PathBuf> {
     stable_path_identity(path).map_err(Into::into)
+}
+
+pub(crate) fn resolve_relative_path_within_base(
+    base: &Path,
+    relative: &Path,
+    label: &str,
+) -> anyhow::Result<PathBuf> {
+    debug_assert!(relative.is_relative(), "{label} must be relative");
+    let resolved_base = stable_path_identity(base)?;
+    let resolved_path = stable_path_identity(&base.join(relative))?;
+    if !resolved_path.starts_with(&resolved_base) {
+        bail!(
+            "{label} must stay within root {}: {}",
+            base.display(),
+            relative.display()
+        );
+    }
+    Ok(resolved_path)
 }
 
 pub(crate) fn stable_path_identity(path: &Path) -> io::Result<PathBuf> {

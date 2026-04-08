@@ -101,6 +101,38 @@ fn config_base_dir<'a>(thread_root: &'a Path, path: Option<&'a Path>) -> &'a Pat
     path.and_then(Path::parent).unwrap_or(thread_root)
 }
 
+fn resolve_relative_unix_path(
+    config_root: &Path,
+    server_name: &str,
+    unix_path: PathBuf,
+) -> anyhow::Result<PathBuf> {
+    let resolved_root = crate::manager::stable_path_identity(config_root).map_err(|err| {
+        wrap_kind(
+            ErrorKind::Config,
+            anyhow::Error::new(err).context(format!(
+                "mcp server {server_name}: resolve config thread root boundary"
+            )),
+        )
+    })?;
+    let resolved_unix_path = crate::manager::stable_path_identity(&config_root.join(&unix_path))
+        .map_err(|err| {
+            wrap_kind(
+                ErrorKind::Config,
+                anyhow::Error::new(err).context(format!(
+                    "mcp server {server_name}: resolve relative unix_path boundary"
+                )),
+            )
+        })?;
+    if !resolved_unix_path.starts_with(&resolved_root) {
+        config_bail!(
+            "mcp server {server_name}: relative unix_path must stay within config thread root {}: {}",
+            config_root.display(),
+            unix_path.display()
+        );
+    }
+    Ok(resolved_unix_path)
+}
+
 async fn load_initial_path_and_value(
     thread_root: &Path,
     override_path: Option<PathBuf>,
@@ -342,13 +374,16 @@ fn build_v1_config(
             _ => Vec::new(),
         };
         let unix_path = match server.transport {
-            Transport::Unix => server.unix_path.map(|unix_path| {
-                if unix_path.is_absolute() {
-                    unix_path
-                } else {
-                    config_base_dir.join(unix_path)
-                }
-            }),
+            Transport::Unix => server
+                .unix_path
+                .map(|unix_path| {
+                    if unix_path.is_absolute() {
+                        Ok(unix_path)
+                    } else {
+                        resolve_relative_unix_path(config_base_dir, &name, unix_path)
+                    }
+                })
+                .transpose()?,
             _ => server.unix_path,
         };
 

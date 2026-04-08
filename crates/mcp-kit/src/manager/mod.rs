@@ -47,7 +47,9 @@ pub(crate) use connect::{
     effective_server_config_identity, raw_server_config_identity,
 };
 pub(crate) use handlers::{current_manager_handler_scope_token, is_in_manager_handler_scope};
-pub(crate) use path_identity::{resolve_connection_cwd, resolve_connection_cwd_with_base};
+pub(crate) use path_identity::{
+    resolve_connection_cwd, resolve_connection_cwd_with_base, stable_path_identity,
+};
 pub(crate) use streamable_http_validation::should_disconnect_after_jsonrpc_error;
 
 static NEXT_MANAGER_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);

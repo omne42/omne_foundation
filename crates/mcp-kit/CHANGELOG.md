@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit` manifest 现在为 foundation 内部 path 依赖补上显式 version 约束；即使继续保持 `publish = false`，导出 manifest 也不再额外丢失内部 semver 边界信息。
 - `mcp-kit`：`connect_io*` 遇到已连接的同名 server 时不再静默 `Ok(())` 吞掉新传入 transport；现在会显式返回 `ManagerState` 错误，避免调用方误以为拿到的是新连接。
 - `mcp-kit`：`Session::notify()` 超时时不再隐式关闭底层 client；超时只返回稳定的 `WaitTimeout` 错误，避免一次通知超时偷偷改变整条 session 的生命周期。
 - `mcp-kit`：untrusted `streamable_http` 现在会拒绝更广义的认证类静态 header 名，不再只拦 `Authorization`/`Proxy-Authorization`/`Cookie`；`X-Api-Key`、`X-Auth-Token`、`X-Client-Secret` 这类仓库配置中的常见密钥头会直接 fail-closed。

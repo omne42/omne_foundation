@@ -95,7 +95,7 @@
 - 可扩展：后续追加 email/discord/slack/tgbot/桌宠…只需要新增 sink
 - 不阻塞：通知发送失败/超时不会卡住主流程（每个 sink 有超时）
 
-## 安装
+## 集成方式
 
 当前 `notify-kit` 仅按 workspace / Git 源方式使用：
 
@@ -122,7 +122,7 @@ notify-kit = { path = "crates/notify-kit", default-features = false, features = 
 ## 文档
 
 - mdBook：`docs/README.md`（目录：`docs/SUMMARY.md`）
-- 本地预览（含搜索）：`./scripts/docs.sh serve`（需要先 `cargo install mdbook --locked`）
+- 本地预览（含搜索）：`./scripts/docs.sh serve`（需要先准备好 `mdbook` 可执行文件）
 - Rustdoc：`cargo doc -p notify-kit --open`
 - LLM 友好入口：`llms.txt`（由 `./scripts/build-llms-txt.sh` 生成）
 

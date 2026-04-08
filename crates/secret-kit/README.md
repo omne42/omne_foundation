@@ -8,6 +8,9 @@
 
 它把 secret 输入统一到 `secret://` 语法下，并在读取、命令执行、JSON 提取和内存持有阶段尽量减少泄露面。
 
+当前它还直接依赖 `omne-runtime` 提供的 primitives，因此 manifest 明确保持 `publish = false`：
+在 `omne-fs-primitives` / `omne-process-primitives` 形成独立发布链之前，这个 crate 只承诺 Git / monorepo 复用边界，不把 crates.io 单独发布写成错误信号。
+
 ## 边界
 
 负责：

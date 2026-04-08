@@ -15,6 +15,7 @@ class WorkspacePackage:
     publish: list[str] | None
     dependency_names: tuple[str, ...]
     external_path_dependencies: tuple[tuple[str, Path], ...]
+    source_dependencies: tuple[tuple[str, str | None, str], ...]
 
     @property
     def is_publish_false(self) -> bool:
@@ -44,7 +45,15 @@ def _workspace_packages(ctx: CheckContext) -> dict[str, WorkspacePackage]:
             continue
         dependency_names = []
         external_path_dependencies = []
+        source_dependencies = []
         for dependency in package["dependencies"]:
+            source_dependencies.append(
+                (
+                    dependency["name"],
+                    dependency.get("source"),
+                    dependency.get("req", ""),
+                )
+            )
             dependency_path = dependency.get("path")
             if not dependency_path:
                 continue
@@ -59,6 +68,7 @@ def _workspace_packages(ctx: CheckContext) -> dict[str, WorkspacePackage]:
             publish=package.get("publish"),
             dependency_names=tuple(dependency_names),
             external_path_dependencies=tuple(external_path_dependencies),
+            source_dependencies=tuple(source_dependencies),
         )
     return packages
 
@@ -101,22 +111,29 @@ def _check_publish_false_readme_contract(
     packages: dict[str, WorkspacePackage],
 ) -> None:
     violations: list[str] = []
+    install_markers = (
+        "cargo add ",
+        "cargo install ",
+        "https://crates.io/crates/",
+        "https://img.shields.io/crates/",
+        "https://badge.fury.io/rb/",
+    )
     for package in sorted(packages.values(), key=lambda item: item.name):
         if not package.is_publish_false or not package.readme_path.is_file():
             continue
-        readme = package.readme_path.read_text(encoding="utf-8")
-        if "crates.io" not in readme:
+        readme = package.readme_path.read_text(encoding="utf-8").lower()
+        if not any(marker in readme for marker in install_markers):
             continue
         rel_readme = package.readme_path.relative_to(ctx.repo_root)
         violations.append(
-            f"{package.name}: {rel_readme} mentions crates.io but {package.manifest_path.relative_to(ctx.repo_root)} is publish = false"
+            f"{package.name}: {rel_readme} advertises crates.io installation/badges but {package.manifest_path.relative_to(ctx.repo_root)} is publish = false"
         )
 
     if violations:
         details = "\n".join(f"- {violation}" for violation in violations)
         raise SystemExit(
             "check-workspace: publish contract regression detected.\n"
-            "publish = false crates must not advertise crates.io installation in their README.\n"
+            "publish = false crates must not advertise crates.io installation or crates.io badges in their README.\n"
             f"{details}"
         )
 
@@ -161,7 +178,27 @@ def run_publish_contract_checks(ctx: CheckContext) -> None:
     violations: list[str] = []
     for manifest_path in sorted(changed_manifests):
         package = manifest_to_package.get(manifest_path)
-        if package is None or package.is_publish_false:
+        if package is None:
+            continue
+
+        missing_version_requirements = [
+            dependency_name
+            for dependency_name, dependency_source, dependency_req in package.source_dependencies
+            if (
+                dependency_name in package.dependency_names
+                or (dependency_source and dependency_source.startswith("git+"))
+            )
+            and dependency_req in ("", "*")
+        ]
+        if missing_version_requirements:
+            deps = ", ".join(sorted(missing_version_requirements))
+            rel_manifest = manifest_path.relative_to(ctx.repo_root)
+            violations.append(
+                f"{package.name}: {rel_manifest} has path/git dependency declaration(s) without "
+                f"an explicit version requirement: {deps}"
+            )
+
+        if package.is_publish_false:
             continue
 
         unpublished_deps = [
@@ -177,11 +214,25 @@ def run_publish_contract_checks(ctx: CheckContext) -> None:
                 f"{deps}; mark this package publish = false or remove the unpublished dependency"
             )
 
+        git_deps = [
+            dependency_name
+            for dependency_name, dependency_source, _dependency_req in package.source_dependencies
+            if dependency_source and dependency_source.startswith("git+")
+        ]
+        if git_deps:
+            deps = ", ".join(sorted(git_deps))
+            rel_manifest = manifest_path.relative_to(ctx.repo_root)
+            violations.append(
+                f"{package.name}: {rel_manifest} depends on git-sourced crate(s) {deps}; "
+                "registry-publishable packages must not rely on git-only foundation/runtime deps"
+            )
+
     if violations:
         details = "\n".join(f"- {violation}" for violation in violations)
         raise SystemExit(
             "check-workspace: publish contract regression detected.\n"
-            "A changed crate cannot keep implicit registry-publishable intent while depending on "
-            "workspace-only crates declared with publish = false.\n"
+            "Changed manifests must keep publish intent honest: path/git dependencies need explicit "
+            "versions, registry-publishable crates cannot depend on publish=false workspace crates, "
+            "and registry-publishable crates cannot rely on git-only deps.\n"
             f"{details}"
         )

@@ -8,6 +8,9 @@
 
 它是 MCP 友好的 transport 基础库，但本身不承担 MCP 语义管理。
 
+当前它仍通过 `omne-runtime` 的 `omne-fs-primitives` 承接 stdout log 与文件系统原语，因此 manifest 明确保持 `publish = false`：
+在 runtime primitives 形成独立发布链之前，这个 crate 只承诺 Git / monorepo 复用边界，不把 crates.io 单独发布写成错误信号。
+
 ## 边界
 
 负责：

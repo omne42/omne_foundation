@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- add explicit internal dependency version constraints so `cargo package` no longer exports a manifest that drops `http-kit`'s semver edge
 - add regression coverage that keeps trusted custom bearer-token API bases fail-closed unless they stay on HTTPS and omit URL credentials
 - add `fetch_latest_release_with_profile(...)` and make bearer-token latest-release calls fail closed unless they run through `http-kit::HttpClientProfile`, so GitHub credentials bind to the same DNS/public-IP/pinned-client path as other strict outbound foundations
 - make `apply_github_api_headers(...)` validate the target URL before attaching a bearer token so the public helper itself cannot leak credentials to an untrusted custom GitHub API host

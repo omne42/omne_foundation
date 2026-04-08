@@ -633,10 +633,9 @@ async fn load_parses_unix_transport_and_resolves_relative_path() {
     let server = cfg.servers().get("sock").unwrap();
     assert_eq!(server.transport(), Transport::Unix);
     assert!(server.argv().is_empty());
-    assert_eq!(
-        server.unix_path().as_ref().unwrap(),
-        &dir.path().join("./sock/mcp.sock")
-    );
+    let expected = crate::manager::stable_path_identity(&dir.path().join("sock/mcp.sock"))
+        .expect("stable unix path identity");
+    assert_eq!(server.unix_path().as_ref().unwrap(), &expected);
 }
 
 #[tokio::test]
@@ -1311,9 +1310,11 @@ async fn load_with_policy_resolves_relative_paths_from_override_file_parent() {
 
     let config_dir = outside_config.parent().unwrap();
     assert_eq!(cfg.path(), Some(outside_config.as_path()));
+    let expected = crate::manager::stable_path_identity(&config_dir.join("sock/mcp.sock"))
+        .expect("stable unix path identity");
     assert_eq!(
         cfg.server("sock").unwrap().unix_path().as_ref().unwrap(),
-        &config_dir.join("./sock/mcp.sock")
+        &expected
     );
     assert_eq!(
         cfg.server("stdio").unwrap().stdout_log().unwrap().path,

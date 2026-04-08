@@ -477,8 +477,10 @@ fn resolve_connection_cwd_with_base_rejects_relative_base() {
 
 #[test]
 fn resolve_config_connection_cwd_rejects_relative_escape_outside_thread_root() {
-    let thread_root = Path::new("/tmp/mcp-kit-thread-root");
-    let err = resolve_config_connection_cwd(Some(thread_root), Path::new("../outside"))
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let thread_root = tempdir.path().join("thread-root");
+    std::fs::create_dir_all(&thread_root).expect("create thread root");
+    let err = resolve_config_connection_cwd(Some(&thread_root), Path::new("../outside"))
         .expect_err("relative cwd escape should be rejected");
     assert!(
         err.to_string()

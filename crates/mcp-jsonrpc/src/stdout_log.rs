@@ -504,6 +504,7 @@ mod tests {
         .await
         .expect("missing parents should be created securely");
         state.write_line_bytes(b"ok").await.unwrap();
+        state.file.flush().await.unwrap();
         drop(state);
 
         assert!(base.parent().unwrap().is_dir());

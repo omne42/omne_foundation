@@ -16,6 +16,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Added `LazyInitConflictKind` plus `LazyInitError::conflict_kind()`, so compat-shim callers can distinguish stable blocking/conflict causes without relying on display-string matching.
 
 ### Fixed
+- `BootstrapLoadError::Rollback` 现在继续通过 display 和访问器保留原始 load failure，同时把标准错误链的 `source()` 指向 rollback failure；调用方不再需要先做 enum/downcast 才能看见 cleanup 失败原因。
 - `resolve_data_root_with_base(...)` / `ensure_data_root_with_base(...)` 现在会把相对 `data_dir` 和相对 `TEXT_ASSETS_DIR` override 先锚到显式 base，而不是继续要求调用方退回 ambient `current_dir()` / `HOME` 语义才能落到稳定路径。
 - `LazyValue` 现在只把当前调用栈上的真实重入视为 `ReentrantInitialization`；如果已有初始化恰好记录在同一 OS 线程上，会返回显式的 `SameThreadInitializationConflict`，避免 blocking compatibility shim 把这类可诊断冲突退化成死锁。
 - `LazyValue` no longer tears down its cross-thread wait edge on every `Condvar` wake-up; spurious or unrelated `notify_all()` calls now keep the tracked wait relationship alive until the in-flight attempt actually settles, so cycle detection does not silently lose visibility mid-wait.

@@ -30,6 +30,22 @@ impl<E> BootstrapLoadError<E> {
             },
         }
     }
+
+    #[must_use]
+    pub fn load_error(&self) -> Option<&E> {
+        match self {
+            Self::Load(error) | Self::Rollback { load: error, .. } => Some(error),
+            Self::Bootstrap(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn rollback_error(&self) -> Option<&io::Error> {
+        match self {
+            Self::Rollback { rollback, .. } => Some(rollback),
+            Self::Bootstrap(_) | Self::Load(_) => None,
+        }
+    }
 }
 
 impl<E> Display for BootstrapLoadError<E>
@@ -55,7 +71,10 @@ where
         match self {
             Self::Bootstrap(error) => Some(error),
             Self::Load(error) => Some(error),
-            Self::Rollback { load, .. } => Some(load),
+            // Preserve the load failure in the top-level display/accessors, but point the
+            // standard error chain at the cleanup failure so callers can inspect the rollback
+            // fault without downcasting first.
+            Self::Rollback { rollback, .. } => Some(rollback),
         }
     }
 }
@@ -132,6 +151,7 @@ mod tests {
     use super::*;
 
     use crate::TextResource;
+    use std::error::Error as _;
     use std::fs;
     use std::path::Path;
     use tempfile::TempDir;
@@ -280,6 +300,31 @@ mod tests {
         assert_eq!(
             fs::read_to_string(workspace_a.join("prompts").join("default.md")).expect("read"),
             "hello"
+        );
+    }
+
+    #[test]
+    fn bootstrap_load_error_rollback_preserves_load_and_sources_cleanup_failure() {
+        let err = BootstrapLoadError::Rollback {
+            load: io::Error::other("load failed"),
+            rollback: io::Error::other("rollback failed"),
+        };
+
+        assert_eq!(
+            err.load_error().expect("load error").to_string(),
+            "load failed"
+        );
+        assert_eq!(
+            err.rollback_error().expect("rollback error").to_string(),
+            "rollback failed"
+        );
+        assert_eq!(
+            err.source().expect("cleanup source").to_string(),
+            "rollback failed"
+        );
+        assert_eq!(
+            err.to_string(),
+            "load failed: load failed; rollback failed: rollback failed"
         );
     }
 }

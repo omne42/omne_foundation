@@ -1,7 +1,7 @@
 use super::*;
 use error_kit::{ErrorCategory, ErrorRetryAdvice};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize};
 use structured_text_kit::StructuredText;
 
 fn detached_runtime_test_guard() -> &'static std::sync::Mutex<()> {
@@ -1907,6 +1907,7 @@ mod background_close_tests {
             method: "demo/test".to_string(),
             params: None,
             responder: RequestResponder::direct(handle.clone()),
+            owner_count: Arc::new(AtomicUsize::new(1)),
         });
 
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -1922,6 +1923,56 @@ mod background_close_tests {
             close_reason.contains("simulated dropped-response write failure"),
             "{close_reason}"
         );
+    }
+
+    #[tokio::test]
+    async fn only_last_dropped_request_clone_emits_internal_error_response() {
+        let (client_stream, server_stream) = tokio::io::duplex(2048);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let mut client = Client::connect_io(client_read, client_write)
+            .await
+            .expect("connect client");
+        let mut requests = client.take_requests().expect("request receiver");
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        server_write
+            .write_all(br#"{"jsonrpc":"2.0","id":1,"method":"first"}"#)
+            .await
+            .expect("write request");
+        server_write.write_all(b"\n").await.expect("write newline");
+        server_write.flush().await.expect("flush request");
+
+        let request = tokio::time::timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .expect("request timeout")
+            .expect("request");
+        let clone = request.clone();
+
+        drop(clone);
+        let no_response = tokio::time::timeout(Duration::from_millis(20), lines.next_line()).await;
+        assert!(
+            no_response.is_err(),
+            "non-final clone drop should not emit a response, got {no_response:?}"
+        );
+
+        drop(request);
+
+        let response_line = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+            .await
+            .expect("response timeout")
+            .expect("read response")
+            .expect("response line");
+        let response: Value = serde_json::from_str(&response_line).expect("parse response");
+        assert_eq!(response["id"], 1);
+        assert_eq!(response["error"]["code"], -32603);
+        assert_eq!(
+            response["error"]["message"],
+            "request handler dropped request without responding"
+        );
+
+        drop(client);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

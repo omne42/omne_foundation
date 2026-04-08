@@ -176,11 +176,10 @@ impl Sink for TelegramBotSink {
 }
 
 fn normalize_secret(secret: SecretString, field: &str) -> crate::Result<SecretString> {
-    let secret = secret.expose_secret().trim();
-    if secret.is_empty() {
+    if secret.expose_secret().trim().is_empty() {
         return Err(anyhow::anyhow!("telegram {field} must not be empty").into());
     }
-    Ok(SecretString::new(secret))
+    Ok(secret)
 }
 
 #[cfg(test)]
@@ -233,11 +232,11 @@ mod tests {
     }
 
     #[test]
-    fn trims_bot_token_and_chat_id() {
+    fn preserves_bot_token_and_trims_chat_id() {
         let cfg = TelegramBotConfig::new(" token:secret ", " 123 ");
         let sink = TelegramBotSink::new(cfg).expect("build sink");
         assert_eq!(sink.chat_id, "123");
-        assert_eq!(sink.bot_token.expose_secret(), "token:secret");
+        assert_eq!(sink.bot_token.expose_secret(), " token:secret ");
         let api_url = TelegramBotSink::build_api_url(&sink.api_base, &sink.bot_token)
             .expect("build request url");
         assert!(api_url.path().starts_with("/bot"), "{}", api_url.path());
@@ -246,7 +245,6 @@ mod tests {
             "{}",
             api_url.path()
         );
-        assert!(!api_url.as_str().contains("%20"), "{}", api_url.as_str());
     }
 
     #[test]

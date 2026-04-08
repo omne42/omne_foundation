@@ -270,15 +270,14 @@ impl Sink for GitHubCommentSink {
 }
 
 fn normalize_secret(secret: SecretString, field: &str) -> crate::Result<SecretString> {
-    let secret = secret.expose_secret().trim();
-    if secret.is_empty() {
+    if secret.expose_secret().trim().is_empty() {
         return Err(crate::error::tagged_message(
             crate::ErrorKind::Config,
             format!("github {field} must not be empty"),
         )
         .into());
     }
-    Ok(SecretString::new(secret))
+    Ok(secret)
 }
 
 #[cfg(test)]
@@ -351,12 +350,12 @@ mod tests {
     }
 
     #[test]
-    fn trims_owner_repo_and_token() {
+    fn trims_owner_repo_and_preserves_token() {
         let cfg = GitHubCommentConfig::new(" owner ", " repo ", 1, " tok ");
         let sink = GitHubCommentSink::new(cfg).expect("build sink");
         assert_eq!(sink.owner, "owner");
         assert_eq!(sink.repo, "repo");
-        assert_eq!(sink.token.expose_secret(), "tok");
+        assert_eq!(sink.token.expose_secret(), " tok ");
     }
 
     #[test]

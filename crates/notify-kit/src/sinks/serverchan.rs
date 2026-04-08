@@ -165,8 +165,8 @@ impl ServerChanSink {
 }
 
 fn normalize_serverchan_send_key(send_key: &SecretString) -> crate::Result<&str> {
-    let send_key = send_key.expose_secret().trim();
-    if send_key.is_empty() {
+    let send_key = send_key.expose_secret();
+    if send_key.trim().is_empty() {
         return Err(anyhow::anyhow!("serverchan send_key must not be empty").into());
     }
     if !send_key.chars().all(|ch| ch.is_ascii_alphanumeric()) {
@@ -176,8 +176,8 @@ fn normalize_serverchan_send_key(send_key: &SecretString) -> crate::Result<&str>
 }
 
 fn normalize_send_key(send_key: SecretString) -> crate::Result<SecretString> {
-    let send_key = normalize_serverchan_send_key(&send_key)?;
-    Ok(SecretString::new(send_key))
+    normalize_serverchan_send_key(&send_key)?;
+    Ok(send_key)
 }
 
 fn build_serverchan_base_url(send_key: &str) -> crate::Result<(ServerChanKind, reqwest::Url)> {
@@ -302,6 +302,16 @@ mod tests {
     fn rejects_send_key_with_reserved_url_chars() {
         let cfg = ServerChanConfig::new("SCTbad?x=1");
         let err = ServerChanSink::new(cfg).expect_err("expected invalid send_key");
+        assert!(
+            err.to_string().contains("invalid serverchan send_key"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn rejects_send_key_with_wrapping_whitespace() {
+        let cfg = ServerChanConfig::new(" SCT123tABC ");
+        let err = ServerChanSink::new(cfg).expect_err("wrapped whitespace should stay invalid");
         assert!(
             err.to_string().contains("invalid serverchan send_key"),
             "{err:#}"

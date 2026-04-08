@@ -142,11 +142,10 @@ fn normalize_optional_trimmed(value: Option<String>) -> Option<String> {
 }
 
 fn normalize_secret(secret: SecretString, field: &str) -> crate::Result<SecretString> {
-    let secret = secret.expose_secret().trim();
-    if secret.is_empty() {
+    if secret.expose_secret().trim().is_empty() {
         return Err(anyhow::anyhow!("bark {field} must not be empty").into());
     }
-    Ok(SecretString::new(secret))
+    Ok(secret)
 }
 
 fn bark_api_error(code: i64, message: &str) -> crate::Error {
@@ -286,10 +285,10 @@ mod tests {
     }
 
     #[test]
-    fn trims_device_key_and_group() {
+    fn preserves_device_key_and_trims_group() {
         let cfg = BarkConfig::new(" key ").with_group(" team ");
         let sink = BarkSink::new(cfg).expect("build sink");
-        assert_eq!(sink.device_key.expose_secret(), "key");
+        assert_eq!(sink.device_key.expose_secret(), " key ");
         assert_eq!(sink.group.as_deref(), Some("team"));
     }
 

@@ -583,13 +583,13 @@ mod tests {
     }
 
     #[test]
-    fn trims_secret() {
+    fn preserves_secret() {
         let cfg = FeishuWebhookConfig::new("https://open.feishu.cn/open-apis/bot/v2/hook/x");
         let sink =
             FeishuWebhookSink::new_with_secret(cfg, "  my_secret  ").expect("build secret sink");
         assert_eq!(
             sink.secret.as_ref().map(SecretString::expose_secret),
-            Some("my_secret")
+            Some("  my_secret  ")
         );
     }
 
@@ -609,7 +609,7 @@ mod tests {
         let sink = FeishuWebhookSink::new(cfg).expect("build sink");
         let creds = sink.app_credentials.expect("credentials");
         assert_eq!(creds.app_id, "app_id");
-        assert_eq!(creds.app_secret.expose_secret(), "app_secret");
+        assert_eq!(creds.app_secret.expose_secret(), "  app_secret  ");
     }
 
     #[test]

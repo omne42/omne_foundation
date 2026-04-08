@@ -7,15 +7,117 @@ fn derive_plain_fallback(text: &StructuredText) -> Option<String> {
     text.freeform_text().map(ToOwned::to_owned)
 }
 
-fn updated_plain_fallback(previous: Option<String>, text: &StructuredText) -> Option<String> {
-    derive_plain_fallback(text).or(previous)
-}
-
 fn render_text<'a>(plain: Option<&'a str>, text: &'a StructuredText) -> Cow<'a, str> {
     plain
         .map(Cow::Borrowed)
         .or_else(|| text.freeform_text().map(Cow::Borrowed))
         .unwrap_or(Cow::Borrowed(""))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TextProjection {
+    plain_fallback: Option<String>,
+    structured: StructuredText,
+}
+
+impl TextProjection {
+    fn new(structured: StructuredText) -> Self {
+        Self {
+            plain_fallback: derive_plain_fallback(&structured),
+            structured,
+        }
+    }
+
+    fn render(&self) -> Cow<'_, str> {
+        render_text(self.plain_fallback.as_deref(), &self.structured)
+    }
+
+    fn structured(&self) -> &StructuredText {
+        &self.structured
+    }
+
+    fn set_plain(&mut self, plain: String) {
+        self.plain_fallback = Some(plain.clone());
+        self.structured = StructuredText::freeform(plain);
+    }
+
+    fn set_structured(&mut self, structured: StructuredText) {
+        self.plain_fallback = derive_plain_fallback(&structured).or(self.plain_fallback.take());
+        self.structured = structured;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct OptionalTextProjection {
+    plain_fallback: Option<String>,
+    structured: Option<StructuredText>,
+}
+
+impl OptionalTextProjection {
+    fn render(&self) -> Option<Cow<'_, str>> {
+        self.structured
+            .as_ref()
+            .map(|text| render_text(self.plain_fallback.as_deref(), text))
+    }
+
+    fn structured(&self) -> Option<&StructuredText> {
+        self.structured.as_ref()
+    }
+
+    fn clear(&mut self) {
+        self.plain_fallback = None;
+        self.structured = None;
+    }
+
+    fn set_plain(&mut self, plain: String) {
+        self.plain_fallback = Some(plain.clone());
+        self.structured = Some(StructuredText::freeform(plain));
+    }
+
+    fn set_structured(&mut self, structured: StructuredText) {
+        self.plain_fallback = derive_plain_fallback(&structured).or(self.plain_fallback.take());
+        self.structured = Some(structured);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct TagProjection {
+    plain_fallbacks: BTreeMap<String, String>,
+    structured: BTreeMap<String, StructuredText>,
+}
+
+impl TagProjection {
+    fn render(&self) -> impl Iterator<Item = (&str, Cow<'_, str>)> + '_ {
+        self.structured.iter().map(|(key, value)| {
+            (
+                key.as_str(),
+                render_text(self.plain_fallbacks.get(key).map(String::as_str), value),
+            )
+        })
+    }
+
+    fn structured(&self) -> &BTreeMap<String, StructuredText> {
+        &self.structured
+    }
+
+    fn insert_plain(&mut self, key: String, plain: String) {
+        self.plain_fallbacks.insert(key.clone(), plain.clone());
+        self.structured.insert(key, StructuredText::freeform(plain));
+    }
+
+    fn insert_structured(&mut self, key: String, value: StructuredText) {
+        let plain_fallback =
+            derive_plain_fallback(&value).or_else(|| self.plain_fallbacks.remove(&key));
+        if let Some(plain_fallback) = plain_fallback {
+            self.plain_fallbacks.insert(key.clone(), plain_fallback);
+        }
+        self.structured.insert(key, value);
+    }
+
+    fn remove(&mut self, key: &str) {
+        self.plain_fallbacks.remove(key);
+        self.structured.remove(key);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -30,12 +132,9 @@ pub enum Severity {
 pub struct Event {
     pub kind: String,
     pub severity: Severity,
-    title_plain_fallback: Option<String>,
-    title_text: StructuredText,
-    body_plain_fallback: Option<String>,
-    body_text: Option<StructuredText>,
-    tag_plain_fallbacks: BTreeMap<String, String>,
-    tag_texts: BTreeMap<String, StructuredText>,
+    title: TextProjection,
+    body: OptionalTextProjection,
+    tags: TagProjection,
 }
 
 impl Event {
@@ -51,99 +150,74 @@ impl Event {
         Self {
             kind: kind.into(),
             severity,
-            title_plain_fallback: derive_plain_fallback(&title_text),
-            title_text,
-            body_plain_fallback: None,
-            body_text: None,
-            tag_plain_fallbacks: BTreeMap::new(),
-            tag_texts: BTreeMap::new(),
+            title: TextProjection::new(title_text),
+            body: OptionalTextProjection::default(),
+            tags: TagProjection::default(),
         }
     }
 
     /// Renders the canonical title text into the plain-text view sinks consume.
     #[must_use]
     pub fn title(&self) -> Cow<'_, str> {
-        render_text(self.title_plain_fallback.as_deref(), &self.title_text)
+        self.title.render()
     }
 
     #[must_use]
     pub fn title_text(&self) -> &StructuredText {
-        &self.title_text
+        self.title.structured()
     }
 
     /// Renders the canonical body text into the plain-text view sinks consume.
     #[must_use]
     pub fn body(&self) -> Option<Cow<'_, str>> {
-        self.body_text
-            .as_ref()
-            .map(|body_text| render_text(self.body_plain_fallback.as_deref(), body_text))
+        self.body.render()
     }
 
     #[must_use]
     pub fn body_text(&self) -> Option<&StructuredText> {
-        self.body_text.as_ref()
+        self.body.structured()
     }
 
     /// Iterates rendered plain-text tags derived from the canonical structured tags.
     pub fn tags(&self) -> impl Iterator<Item = (&str, Cow<'_, str>)> + '_ {
-        self.tag_texts.iter().map(|(key, value)| {
-            (
-                key.as_str(),
-                render_text(self.tag_plain_fallbacks.get(key).map(String::as_str), value),
-            )
-        })
+        self.tags.render()
     }
 
     #[must_use]
     pub fn tag_texts(&self) -> &BTreeMap<String, StructuredText> {
-        &self.tag_texts
+        self.tags.structured()
     }
 
     pub fn set_title(&mut self, title: impl Into<String>) {
-        let title = title.into();
-        self.title_plain_fallback = Some(title.clone());
-        self.title_text = StructuredText::freeform(title);
+        self.title.set_plain(title.into());
     }
 
     pub fn set_title_text(&mut self, title_text: StructuredText) {
-        self.title_plain_fallback =
-            updated_plain_fallback(self.title_plain_fallback.take(), &title_text);
-        self.title_text = title_text;
+        self.title.set_structured(title_text);
     }
 
     pub fn set_body(&mut self, body: impl Into<String>) {
-        let body = body.into();
-        self.body_plain_fallback = Some(body.clone());
-        self.body_text = Some(StructuredText::freeform(body));
+        self.body.set_plain(body.into());
     }
 
     pub fn clear_body(&mut self) {
-        self.body_plain_fallback = None;
-        self.body_text = None;
+        self.body.clear();
     }
 
     pub fn set_body_text(&mut self, body_text: StructuredText) {
-        self.body_plain_fallback =
-            updated_plain_fallback(self.body_plain_fallback.take(), &body_text);
-        self.body_text = Some(body_text);
+        self.body.set_structured(body_text);
     }
 
     pub fn insert_tag(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        self.insert_tag_text(key, StructuredText::freeform(value.into()));
+        self.tags.insert_plain(key.into(), value.into());
     }
 
     pub fn insert_tag_text(&mut self, key: impl Into<String>, value: StructuredText) {
-        let key = key.into();
-        let plain_fallback = updated_plain_fallback(self.tag_plain_fallbacks.remove(&key), &value);
-        if let Some(value_text) = plain_fallback {
-            self.tag_plain_fallbacks.insert(key.clone(), value_text);
-        }
-        self.tag_texts.insert(key, value);
+        self.tags.insert_structured(key.into(), value);
     }
 
     pub fn remove_tag(&mut self, key: &str) {
-        self.tag_plain_fallbacks.remove(key);
-        self.tag_texts.remove(key);
+        self.tags.remove(key);
     }
 
     #[must_use]

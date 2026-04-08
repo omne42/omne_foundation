@@ -464,7 +464,7 @@ fn normalize_local_image_base(base_dir: PathBuf) -> crate::Result<PathBuf> {
         .into());
     }
 
-    Ok(normalize_path(&base_dir))
+    Ok(base_dir)
 }
 
 fn normalize_local_image_root(root: PathBuf) -> crate::Result<PathBuf> {
@@ -476,8 +476,6 @@ fn normalize_local_image_root(root: PathBuf) -> crate::Result<PathBuf> {
         .into());
     }
 
-    let root = normalize_path(&root);
-
     #[cfg(unix)]
     {
         let _ = open_root(
@@ -488,6 +486,8 @@ fn normalize_local_image_root(root: PathBuf) -> crate::Result<PathBuf> {
         )
         .map_err(|err| crate::Error::from(anyhow::anyhow!("{err}")))?;
     }
+
+    let root = normalize_path(&root);
 
     let metadata = std::fs::symlink_metadata(&root).map_err(|err| {
         crate::Error::from(anyhow::anyhow!("read local image root metadata: {err}"))
@@ -516,20 +516,16 @@ fn resolve_allowed_local_image_path(
     }
 
     let resolved = resolve_local_image_path(Path::new(src), base_dir)?;
+
     for root in roots {
-        let Ok(relative) = resolved.strip_prefix(root) else {
+        let Some(relative) =
+            resolve_relative_local_image_path_within_root(root, Path::new(src), base_dir)?
+        else {
             continue;
         };
-        let relative = relative.to_path_buf();
-        if relative.as_os_str().is_empty() {
-            return Err(anyhow::anyhow!(
-                "image path must reference a file within configured local image roots: {}",
-                resolved.display()
-            )
-            .into());
-        }
+        let absolute = root.join(&relative);
         return Ok(AllowedLocalImagePath {
-            absolute: resolved.clone(),
+            absolute,
             root: root.clone(),
             relative,
         });
@@ -540,6 +536,94 @@ fn resolve_allowed_local_image_path(
         resolved.display()
     )
     .into())
+}
+
+fn resolve_relative_local_image_path_within_root(
+    root: &Path,
+    path: &Path,
+    base_dir: Option<&Path>,
+) -> crate::Result<Option<PathBuf>> {
+    let relative = if path.is_absolute() {
+        match path.strip_prefix(root) {
+            Ok(relative) => relative.to_path_buf(),
+            Err(_) => return Ok(None),
+        }
+    } else {
+        let Some(base_dir) = base_dir else {
+            return Err(anyhow::anyhow!(
+                "relative local image paths require explicit local image base dir"
+            )
+            .into());
+        };
+        if !base_dir.is_absolute() {
+            return Err(anyhow::anyhow!(
+                "local image base dir must be absolute: {}",
+                base_dir.display()
+            )
+            .into());
+        }
+        let Ok(base_relative) = base_dir.strip_prefix(root) else {
+            return Ok(None);
+        };
+        base_relative.join(path)
+    };
+
+    normalize_relative_local_image_path(root, &relative)
+}
+
+fn normalize_relative_local_image_path(
+    root: &Path,
+    relative: &Path,
+) -> crate::Result<Option<PathBuf>> {
+    let mut normalized = PathBuf::new();
+
+    for component in relative.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => {
+                normalized.push(part);
+                validate_local_image_component_not_symlink(root, &normalized)?;
+            }
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Ok(None);
+                }
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(anyhow::anyhow!(
+                    "image path contains unsupported absolute component: {}",
+                    root.join(relative).display()
+                )
+                .into());
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err(anyhow::anyhow!(
+            "image path must reference a file within configured local image roots: {}",
+            root.join(relative).display()
+        )
+        .into());
+    }
+
+    Ok(Some(normalized))
+}
+
+fn validate_local_image_component_not_symlink(root: &Path, relative: &Path) -> crate::Result<()> {
+    let target = root.join(relative);
+    match std::fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(anyhow::anyhow!(
+            "image path must not traverse symlink component: {}",
+            target.display()
+        )
+        .into()),
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => {
+            Err(anyhow::anyhow!("read image path metadata {}: {err}", target.display()).into())
+        }
+    }
 }
 
 fn resolve_local_image_path(path: &Path, base_dir: Option<&Path>) -> crate::Result<PathBuf> {
@@ -872,6 +956,7 @@ fn normalize_optional_secret(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::Duration;
@@ -1033,6 +1118,44 @@ mod tests {
             resolved.absolute,
             PathBuf::from("/workspace/images/demo.png")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_allowed_local_image_path_rejects_symlink_parent_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "notify-kit-feishu-local-image-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        ));
+        let nested = root.join("nested");
+        let escaped = root.join("escaped");
+        let symlink_path = nested.join("link");
+
+        fs::create_dir_all(&nested).expect("create nested root");
+        fs::create_dir_all(&escaped).expect("create escaped dir");
+        symlink(&escaped, &symlink_path).expect("create symlink");
+
+        let err = resolve_allowed_local_image_path(
+            "link/../secret.png",
+            Some(&nested),
+            std::slice::from_ref(&root),
+        )
+        .expect_err("symlink traversal should fail closed");
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("image path must not traverse symlink component"),
+            "{msg}"
+        );
+
+        let _ = fs::remove_file(&symlink_path);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

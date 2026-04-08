@@ -179,7 +179,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match &self.repr {
-            ErrorRepr::Other(err) => err.source(),
+            ErrorRepr::Other(err) => Some(err.as_ref()),
             ErrorRepr::SinkFailures(failures) => failures
                 .first()
                 .map(|failure| failure as &(dyn std::error::Error + 'static)),
@@ -284,5 +284,18 @@ mod tests {
         assert_eq!(source.to_string(), "- bad: dial failed");
         let nested = source.source().expect("nested error");
         assert_eq!(nested.to_string(), "dial failed");
+    }
+
+    #[test]
+    fn wrapped_anyhow_error_remains_visible_via_source() {
+        let err = Error::from(wrap_kind(
+            ErrorKind::Config,
+            anyhow::Error::new(std::io::Error::other("bad env")),
+        ));
+
+        let source = err.source().expect("wrapped anyhow source");
+        assert_eq!(source.to_string(), "bad env");
+        let nested = source.source().expect("nested io source");
+        assert_eq!(nested.to_string(), "bad env");
     }
 }

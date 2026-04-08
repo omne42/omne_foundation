@@ -842,10 +842,8 @@ mod tests {
                 .source()
                 .expect("sink failure source");
             assert_eq!(failure.to_string(), "dial failed");
-            assert!(
-                failure.source().is_none(),
-                "root error should stay unchanged"
-            );
+            let nested = failure.source().expect("wrapped root cause");
+            assert_eq!(nested.to_string(), "dial failed");
         });
     }
 

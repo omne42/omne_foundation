@@ -723,10 +723,16 @@ mod retry_tests {
         dispatcher.reset_for_test();
         force_linux_cleanup_worker_spawn_failures(1);
         let _ = take_linux_cleanup_warning_for_test();
+        let before = linux_cleanup_worker_spawn_count();
 
         assert!(
             !dispatcher.ensure_worker_for_test(),
             "cleanup dispatcher should degrade gracefully when worker spawn fails"
+        );
+        assert_eq!(
+            linux_cleanup_worker_spawn_count(),
+            before,
+            "failed worker startup should not look like a live cleanup worker"
         );
         let warning = take_linux_cleanup_warning_for_test()
             .expect("forced spawn failure should record a warning");
@@ -736,6 +742,19 @@ mod retry_tests {
             dispatcher.ensure_worker_for_test(),
             "dispatcher should recover once worker spawn succeeds again"
         );
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[test]
+    fn build_linux_cleanup_dispatcher_returns_error_when_worker_start_fails() {
+        let err = build_linux_cleanup_dispatcher(|_| {
+            Err(std::io::Error::other(
+                "secret-kit test cleanup worker start failure",
+            ))
+        })
+        .expect_err("worker start failure should be returned");
+
+        assert!(err.to_string().contains("start failure"), "{err}");
     }
 }
 

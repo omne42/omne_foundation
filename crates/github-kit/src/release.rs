@@ -12,6 +12,12 @@ use crate::error::{GitHubApiError, Result};
 
 const GITHUB_LATEST_RELEASE_MAX_JSON_BYTES: usize = 512 * 1024;
 
+fn bearer_token_profile_required_error() -> GitHubApiError {
+    GitHubApiError::InvalidApiBase {
+        details: "bearer token release requests require fetch_latest_release_with_profile(...) so github-kit can validate DNS, enforce public-IP policy, and bind the request to the selected http-kit transport".to_string(),
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct GitHubRelease {
     pub tag_name: String,
@@ -32,9 +38,7 @@ pub async fn fetch_latest_release<S: AsRef<str>>(
     options: GitHubApiRequestOptions<'_>,
 ) -> Result<GitHubRelease> {
     if options.requires_public_ip_pinning() {
-        return Err(GitHubApiError::InvalidApiBase {
-            details: "bearer token release requests require fetch_latest_release_with_profile(...) so the request can bind to http-kit public-ip pinning".to_string(),
-        });
+        return Err(bearer_token_profile_required_error());
     }
     let (owner, name) = normalize_repository(repo)?;
     let repo = format!("{owner}/{name}");
@@ -445,6 +449,9 @@ mod tests {
             message.contains("fetch_latest_release_with_profile"),
             "{message}"
         );
+        assert!(message.contains("validate DNS"), "{message}");
+        assert!(message.contains("public-IP policy"), "{message}");
+        assert!(message.contains("http-kit transport"), "{message}");
     }
 
     #[tokio::test]

@@ -22,7 +22,7 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -1548,12 +1548,13 @@ pub struct Notification {
     pub params: Option<Value>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct IncomingRequest {
     pub id: Id,
     pub method: String,
     pub params: Option<Value>,
     responder: RequestResponder,
+    owner_count: Arc<AtomicUsize>,
 }
 
 impl IncomingRequest {
@@ -1573,10 +1574,27 @@ impl IncomingRequest {
     }
 }
 
+impl Clone for IncomingRequest {
+    fn clone(&self) -> Self {
+        self.owner_count.fetch_add(1, Ordering::Relaxed);
+        Self {
+            id: self.id.clone(),
+            method: self.method.clone(),
+            params: self.params.clone(),
+            responder: self.responder.clone(),
+            owner_count: Arc::clone(&self.owner_count),
+        }
+    }
+}
+
 impl Drop for IncomingRequest {
     fn drop(&mut self) {
         const INTERNAL_ERROR: i64 = -32603;
         const DROPPED_REQUEST_MESSAGE: &str = "request handler dropped request without responding";
+
+        if self.owner_count.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
+        }
 
         if !self.responder.begin_drop_without_response() {
             return;
@@ -1973,6 +1991,7 @@ async fn handle_incoming_item(
                                 Some(batch) => RequestResponder::batch(batch.clone()),
                                 None => RequestResponder::direct(ctx.responder.clone()),
                             },
+                            owner_count: Arc::new(AtomicUsize::new(1)),
                         };
 
                         match ctx.request_tx.try_send(request) {

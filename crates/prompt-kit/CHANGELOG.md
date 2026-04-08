@@ -10,7 +10,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ### Fixed
 - `bootstrap_prompt_directory(...)` 在 load 失败后又遇到 rollback 失败时，错误链和 `io::ErrorKind` 现在都继续对齐到 load failure；rollback 失败继续通过 `PromptBootstrapCleanupError` 的访问器保留，不再把主因重分类成 cleanup。
-- `prompt-kit` 的资源 bootstrap 回归测试现在会先探测环境临时根是否可用，并在 `StorageFull` 等非业务性临时目录故障下显式跳过，避免受限 runner 因磁盘/临时目录条件误报失败。
+- `prompt-kit` 的资源 bootstrap 回归测试现在会先探测 `OMNE_TEST_SHORT_TMPDIR`、环境临时根和 Unix `/var/tmp` fallback 是否可用；tempdir 创建本身失败或 `StorageFull` 等非业务性临时目录故障时都会显式跳过，避免受限 runner 因磁盘/临时目录条件误报失败。
 
 ### Changed
 - `LazyPromptDirectory` 的 blocking-shim 契约继续保持“并发访问等待既有初始化结果”，不再因为底层 `LazyValue` 把同线程 in-flight 状态误判成递归而提前 fail-fast；直接递归初始化仍然显式拒绝。

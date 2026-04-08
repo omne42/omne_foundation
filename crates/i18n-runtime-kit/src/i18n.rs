@@ -454,7 +454,13 @@ mod tests {
             }
         }
 
-        for root in [std::path::PathBuf::from("/var/tmp"), std::env::temp_dir()] {
+        let temp_dir = std::env::temp_dir();
+        if !roots.iter().any(|candidate| candidate == &temp_dir) {
+            roots.push(temp_dir);
+        }
+
+        if std::env::var_os("TMPDIR").is_none() && std::env::temp_dir() == Path::new("/tmp") {
+            let root = std::path::PathBuf::from("/var/tmp");
             if !roots.iter().any(|candidate| candidate == &root) {
                 roots.push(root);
             }
@@ -474,7 +480,7 @@ mod tests {
         }
 
         #[cfg(unix)]
-        {
+        if std::env::var_os("TMPDIR").is_none() && std::env::temp_dir() == Path::new("/tmp") {
             let root = std::path::PathBuf::from("/var/tmp");
             if !roots.iter().any(|candidate| candidate == &root) {
                 roots.push(root);

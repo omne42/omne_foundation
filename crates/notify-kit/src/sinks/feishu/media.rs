@@ -901,11 +901,10 @@ fn is_heic_image(bytes: &[u8]) -> bool {
 
 pub(super) fn normalize_secret(secret: impl Into<SecretString>) -> crate::Result<SecretString> {
     let secret = secret.into();
-    let secret = secret.expose_secret().trim();
-    if secret.is_empty() {
+    if secret.expose_secret().trim().is_empty() {
         return Err(anyhow::anyhow!("feishu secret must not be empty").into());
     }
-    Ok(SecretString::new(secret))
+    Ok(secret)
 }
 
 pub(super) fn normalize_app_credentials(
@@ -944,11 +943,10 @@ fn normalize_optional_secret(
 ) -> crate::Result<Option<SecretString>> {
     match value {
         Some(value) => {
-            let value = value.expose_secret().trim();
-            if value.is_empty() {
+            if value.expose_secret().trim().is_empty() {
                 return Err(anyhow::anyhow!("feishu {field} must not be empty").into());
             }
-            Ok(Some(SecretString::new(value)))
+            Ok(Some(value))
         }
         None => Ok(None),
     }
@@ -961,10 +959,12 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use secret_kit::SecretString;
+
     use super::{
         TenantAccessTokenRefreshGuard, detect_image_content_type, finalize_loaded_image,
-        normalize_local_image_base_dir, normalize_local_image_roots,
-        resolve_allowed_local_image_path, resolve_local_image_path,
+        normalize_app_credentials, normalize_local_image_base_dir, normalize_local_image_roots,
+        normalize_secret, resolve_allowed_local_image_path, resolve_local_image_path,
         resolve_local_image_path_with_base, tenant_access_token_cache_ttl,
         tenant_access_token_refresh_waiter,
     };
@@ -1088,6 +1088,24 @@ mod tests {
             err.to_string().contains("base dir must be absolute"),
             "{err:#}"
         );
+    }
+
+    #[test]
+    fn normalize_secret_preserves_exact_value() {
+        let secret = normalize_secret(" token ").expect("normalize secret");
+        assert_eq!(secret.expose_secret(), " token ");
+    }
+
+    #[test]
+    fn normalize_app_credentials_preserves_app_secret() {
+        let credentials = normalize_app_credentials(
+            Some(" app-id ".to_string()),
+            Some(SecretString::from(" secret ")),
+        )
+        .expect("normalize credentials")
+        .expect("credentials present");
+        assert_eq!(credentials.app_id, "app-id");
+        assert_eq!(credentials.app_secret.expose_secret(), " secret ");
     }
 
     #[test]

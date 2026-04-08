@@ -190,9 +190,9 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `dingtalk` sink：当启用签名但原始 webhook URL 不含 `timestamp/sign` 时，不再无条件重写 query，避免原始参数编码被不必要地规范化导致的潜在兼容性问题。
 - `Hub::send`：无 sink 时即使当前不在 Tokio runtime 中也会直接成功返回（no-op），避免误报 `NoTokioRuntime`。
 - `Hub::try_notify`：无 sink 时改为直接返回 `Ok(())`，避免空配置场景下出现不必要的 `NoTokioRuntime` / `Overloaded`。
-- `DingTalkWebhookSink` / `FeishuWebhookSink`：`secret` 在构造阶段统一去除首尾空白，修复“配置含空白导致签名错误、发送失败”的问题。
+- `DingTalkWebhookSink` / `FeishuWebhookSink`：`secret` 现在只做 blank-only 校验，不再在构造阶段偷偷改写凭证字节；非 secret 配置字段仍按各自约定继续做空白归一化。
 - `GenericWebhookSink`：`payload_field` / `allowed_hosts` / `path_prefix` 现在会在构造阶段去除首尾空白，避免配置含空白时误判 host/path 或生成错误字段名。
-- `GitHubCommentSink` / `TelegramBotSink` / `BarkSink` / `PushPlusSink`：关键配置（token、chat_id、device_key 等）现在会在构造阶段去除首尾空白，修复“校验通过但请求参数含空白导致发送失败”的问题。
+- `GitHubCommentSink` / `TelegramBotSink` / `BarkSink` / `PushPlusSink` / `ServerChanSink`：credential-like 配置现在只拒绝 blank-only 输入，不再在构造阶段偷偷 `trim()` 凭证；非 secret 字段（如 owner/repo、chat_id、topic）仍按文档约定继续归一化。
 - `bots/_shared/session_store`：删除不存在 key 时不再标记 dirty 并触发 flush，避免无效磁盘写入与多余 I/O。
 - `bots/_shared/session_store`：进程收到 `SIGINT`/`SIGTERM` 时，flush 后改用信号语义退出码（130/143），避免中断流程被误报为成功退出。
 - `SlackWebhookSink` / `DiscordWebhookSink` / `BarkSink`：当错误信息已包含响应摘要时，不再附加“response body omitted”的矛盾文案。

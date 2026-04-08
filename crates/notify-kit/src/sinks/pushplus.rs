@@ -229,11 +229,10 @@ impl Sink for PushPlusSink {
 }
 
 fn normalize_secret(secret: SecretString, field: &str) -> crate::Result<SecretString> {
-    let secret = secret.expose_secret().trim();
-    if secret.is_empty() {
+    if secret.expose_secret().trim().is_empty() {
         return Err(anyhow::anyhow!("pushplus {field} must not be empty").into());
     }
-    Ok(SecretString::new(secret))
+    Ok(secret)
 }
 
 #[cfg(test)]
@@ -279,13 +278,13 @@ mod tests {
     }
 
     #[test]
-    fn trims_token_and_optional_fields() {
+    fn preserves_token_and_trims_optional_fields() {
         let cfg = PushPlusConfig::new(" tok ")
             .with_channel(" chan ")
             .with_template(" txt ")
             .with_topic(" topic ");
         let sink = PushPlusSink::new(cfg).expect("build sink");
-        assert_eq!(sink.token.expose_secret(), "tok");
+        assert_eq!(sink.token.expose_secret(), " tok ");
         assert_eq!(sink.channel.as_deref(), Some("chan"));
         assert_eq!(sink.template.as_deref(), Some("txt"));
         assert_eq!(sink.topic.as_deref(), Some("topic"));

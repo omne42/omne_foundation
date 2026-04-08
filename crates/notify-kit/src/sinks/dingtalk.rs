@@ -156,11 +156,10 @@ impl DingTalkWebhookSink {
 fn normalize_optional_trimmed(value: Option<SecretString>) -> crate::Result<Option<SecretString>> {
     match value {
         Some(value) => {
-            let value = value.expose_secret().trim();
-            if value.is_empty() {
+            if value.expose_secret().trim().is_empty() {
                 return Err(anyhow::anyhow!("dingtalk secret must not be empty").into());
             }
-            Ok(Some(SecretString::new(value)))
+            Ok(Some(value))
         }
         None => Ok(None),
     }
@@ -313,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn trims_secret() {
+    fn preserves_secret() {
         let cfg = DingTalkWebhookConfig::new("https://oapi.dingtalk.com/robot/send?access_token=x")
             .with_secret("  s3cr3t  ");
         let sink = DingTalkWebhookSink::new(cfg).expect("build sink");
@@ -321,7 +320,7 @@ mod tests {
             sink.secret
                 .as_ref()
                 .map(secret_kit::SecretString::expose_secret),
-            Some("s3cr3t")
+            Some("  s3cr3t  ")
         );
     }
 }

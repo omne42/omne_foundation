@@ -11,6 +11,8 @@
 
 ### Fixed
 - `mcp-kit`：`streamable_http` URL 语法校验现在前移到 `ServerConfig` / `Config` 不变量边界；无效 `url`、`sse_url`、`http_url` 会在构造或加载阶段直接 fail-fast，而不再拖到首次连接时才暴露。`Config::load*()` 产出的 `Config.path` 也会像 `with_path(...)` 一样一次性绑定到绝对路径，避免后续 `cwd` 变化再偷偷影响 thread root / 相对 `cwd` 身份语义。
+- `mcp-kit`：config-driven 相对 `unix_path` 与相对 `cwd` 现在都会绑定并限制在 config thread root 之内；`..` 或 symlink 逃逸不再能把 Unix socket 连接或 child `cwd` 静默带出 `--root`，同时继续保留现有的非 `NotFound` 文件系统错误上抛语义。
+- `mcp-kit`：相对 `unix_path` / `cwd` 新边界的回归测试现在改为断言稳定路径身份而不是 Unix 风格词法拼法，避免 Windows runner 因 verbatim/canonical path 表示差异把同一安全语义误报成失败。
 - `mcp-kit` manifest 现在为 foundation 内部 path 依赖补上显式 version 约束；即使继续保持 `publish = false`，导出 manifest 也不再额外丢失内部 semver 边界信息。
 - `mcp-kit`：`connect_io*` 遇到已连接的同名 server 时不再静默 `Ok(())` 吞掉新传入 transport；现在会显式返回 `ManagerState` 错误，避免调用方误以为拿到的是新连接。
 - `mcp-kit`：`Session::notify()` 超时时不再隐式关闭底层 client；超时只返回稳定的 `WaitTimeout` 错误，避免一次通知超时偷偷改变整条 session 的生命周期。

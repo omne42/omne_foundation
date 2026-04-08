@@ -633,9 +633,47 @@ async fn load_parses_unix_transport_and_resolves_relative_path() {
     let server = cfg.servers().get("sock").unwrap();
     assert_eq!(server.transport(), Transport::Unix);
     assert!(server.argv().is_empty());
-    assert_eq!(
-        server.unix_path().as_ref().unwrap(),
-        &dir.path().join("./sock/mcp.sock")
+    let expected = crate::manager::stable_path_identity(&dir.path().join("sock/mcp.sock"))
+        .expect("stable unix path identity");
+    assert_eq!(server.unix_path().as_ref().unwrap(), &expected);
+}
+
+#[tokio::test]
+async fn load_rejects_relative_unix_path_outside_thread_root() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{ "version": 1, "servers": { "sock": { "transport": "unix", "unix_path": "../sock/mcp.sock" } } }"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("relative unix_path must stay within config thread root"),
+        "{err:#}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn load_rejects_relative_unix_path_symlink_escape() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("escape-link")).unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{ "version": 1, "servers": { "sock": { "transport": "unix", "unix_path": "./escape-link/mcp.sock" } } }"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("relative unix_path must stay within config thread root"),
+        "{err:#}"
     );
 }
 
@@ -1272,9 +1310,11 @@ async fn load_with_policy_resolves_relative_paths_from_override_file_parent() {
 
     let config_dir = outside_config.parent().unwrap();
     assert_eq!(cfg.path(), Some(outside_config.as_path()));
+    let expected = crate::manager::stable_path_identity(&config_dir.join("sock/mcp.sock"))
+        .expect("stable unix path identity");
     assert_eq!(
         cfg.server("sock").unwrap().unix_path().as_ref().unwrap(),
-        &config_dir.join("./sock/mcp.sock")
+        &expected
     );
     assert_eq!(
         cfg.server("stdio").unwrap().stdout_log().unwrap().path,

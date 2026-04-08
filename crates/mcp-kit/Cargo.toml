@@ -11,15 +11,15 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 clap = { workspace = true, optional = true }
-config-kit = { path = "../config-kit" }
-error-kit = { path = "../error-kit" }
+config-kit = { version = "0.1.0", path = "../config-kit" }
+error-kit = { version = "0.1.0", path = "../error-kit" }
 futures-util.workspace = true
-http-kit = { path = "../http-kit" }
-mcp-jsonrpc = { path = "../mcp-jsonrpc" }
+http-kit = { version = "0.1.0", path = "../http-kit" }
+mcp-jsonrpc = { version = "0.1.0", path = "../mcp-jsonrpc" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-structured-text-kit = { path = "../structured-text-kit" }
+structured-text-kit = { version = "0.1.0", path = "../structured-text-kit" }
 tokio.workspace = true
 thiserror.workspace = true
 

@@ -175,7 +175,9 @@ static FORCE_SHARED_WORKER_SPAWN_FAILURES: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static FORCE_SHARED_WORKER_RUNTIME_BUILD_FAILURES: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
-static FORCE_INLINE_RUNTIME_BUILD_FAILURES: AtomicUsize = AtomicUsize::new(0);
+static FORCE_FALLBACK_THREAD_SPAWN_FAILURES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static FORCE_FALLBACK_RUNTIME_BUILD_FAILURES: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static FORCE_SHARED_WORKER_DROP_BEFORE_START: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
@@ -293,18 +295,32 @@ fn run_detached_runtime_worker(
 
 fn spawn_fallback_detached_task(task_name: &str, task: DetachedTask) -> std::io::Result<()> {
     #[cfg(test)]
-    if FORCE_INLINE_RUNTIME_BUILD_FAILURES
+    if FORCE_FALLBACK_THREAD_SPAWN_FAILURES
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+            remaining.checked_sub(1)
+        })
+        .is_ok()
+    {
+        return Err(std::io::Error::other(format!(
+            "injected detached mcp-jsonrpc fallback thread spawn failure ({task_name})"
+        )));
+    }
+
+    #[cfg(test)]
+    if FORCE_FALLBACK_RUNTIME_BUILD_FAILURES
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
             remaining.checked_sub(1)
         })
         .is_ok()
     {
         return Err(std::io::Error::other(
-            "injected detached mcp-jsonrpc inline runtime build failure",
+            "injected detached mcp-jsonrpc fallback runtime build failure",
         ));
     }
 
     let (ready_tx, ready_rx) = std_mpsc::channel::<std::io::Result<()>>();
+    // Keep fallback work isolated per task so a blocked no-runtime close/response/batch flush
+    // cannot serialize unrelated cleanup behind a hidden process-global executor.
     let spawn_result = std::thread::Builder::new()
         .name("mcp-jsonrpc-detached-fallback".to_string())
         .spawn(move || {
@@ -344,7 +360,8 @@ fn spawn_fallback_detached_task(task_name: &str, task: DetachedTask) -> std::io:
 pub(super) fn reset_detached_runtime_test_state() {
     FORCE_SHARED_WORKER_SPAWN_FAILURES.store(0, Ordering::Relaxed);
     FORCE_SHARED_WORKER_RUNTIME_BUILD_FAILURES.store(0, Ordering::Relaxed);
-    FORCE_INLINE_RUNTIME_BUILD_FAILURES.store(0, Ordering::Relaxed);
+    FORCE_FALLBACK_THREAD_SPAWN_FAILURES.store(0, Ordering::Relaxed);
+    FORCE_FALLBACK_RUNTIME_BUILD_FAILURES.store(0, Ordering::Relaxed);
     FORCE_SHARED_WORKER_DROP_BEFORE_START.store(0, Ordering::Relaxed);
     SHARED_WORKER_SPAWN_COUNT.store(0, Ordering::Relaxed);
 }
@@ -360,14 +377,19 @@ impl DetachedSpawner {
 }
 
 #[cfg(test)]
-pub(super) fn force_detached_runtime_spawn_failures(shared_worker: usize, inline_runtime: usize) {
+pub(super) fn force_detached_runtime_spawn_failures(shared_worker: usize, fallback_thread: usize) {
     FORCE_SHARED_WORKER_SPAWN_FAILURES.store(shared_worker, Ordering::Relaxed);
-    FORCE_INLINE_RUNTIME_BUILD_FAILURES.store(inline_runtime, Ordering::Relaxed);
+    FORCE_FALLBACK_THREAD_SPAWN_FAILURES.store(fallback_thread, Ordering::Relaxed);
 }
 
 #[cfg(test)]
 pub(super) fn force_shared_worker_runtime_build_failures(count: usize) {
     FORCE_SHARED_WORKER_RUNTIME_BUILD_FAILURES.store(count, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(super) fn force_fallback_runtime_build_failures(count: usize) {
+    FORCE_FALLBACK_RUNTIME_BUILD_FAILURES.store(count, Ordering::Relaxed);
 }
 
 #[cfg(test)]

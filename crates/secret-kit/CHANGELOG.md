@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `secret-kit`：Linux process-tree cleanup 的 best-effort worker 启动失败路径现在由 crate-local 回归测试明确钉住：失败不会伪装成活跃 worker，也不会升级成 panic，而是保留同步 `kill_tree()` 后仅记录告警并允许后续恢复重建 dispatcher。
 - `secret-kit` 的 crate-level README 现在明确把 `SECRET_COMMAND_TIMEOUT_MS` / `SECRET_COMMAND_TIMEOUT_SECS` 描述为显式 command-env snapshot 的调优入口，不再把 ambient `export` 误写成默认生效的公开契约。
 - `secret-kit` 的 crate-level 文档示例不再全部标成 `ignore`；环境变量/文件/AWS JSON field extraction 示例现在默认参与 doctest 编译门禁，避免公开示例长期脱离 CI。
 - `CachingSecretResolver` 现在会在 hint 命中时继续校验 prepared cache key；即使 resolver 给出了过宽的 cache hint，也不会静默复用另一个 secret 的缓存值，而是 fail-closed 退化成普通 cache miss。

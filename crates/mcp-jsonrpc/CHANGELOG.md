@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：no-runtime detached fallback 现在显式保留“每任务独立 fallback thread + runtime”的隔离语义，并补上 fallback 线程创建失败注入；`schedule_close_once(...)` 与 dropped-request 回归测试现在覆盖“helper/thread 起不来时 fail-closed 但不 panic”以及“一个阻塞 fallback 任务不会把后续 close/response/batch flush 串行拖死”。
 - `mcp-jsonrpc`：`stdout_log` 的 capability-style open 现在按平台条件导入 `OpenOptionsExt`；Unix 继续保留 `mode(0o600)` 权限收敛，Windows 不再因未使用 import 被 `-D warnings` 门禁拦下。
 - `mcp-jsonrpc`：`stdout_log_creates_missing_parent_dirs` 回归测试现在在读取文件前显式 flush；断言不再依赖 Tokio 文件句柄 drop 时机，避免 Linux CI 上出现假阴性。
 - `mcp-jsonrpc`：stdout log 现在通过 capability-style no-follow open 同步创建缺失父目录，而不是在 symlink 预检后再调用 ambient `create_dir_all`；缺失父目录场景不再暴露“检查后被竞态替换”的 TOCTOU 窗口。

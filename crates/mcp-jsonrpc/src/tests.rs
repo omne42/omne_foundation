@@ -824,12 +824,13 @@ mod incoming_value_tests {
     }
 
     #[test]
-    fn dropped_direct_request_without_runtime_closes_client_when_detached_runtime_is_unavailable() {
+    fn dropped_direct_request_without_runtime_closes_client_when_detached_helpers_are_unavailable()
+    {
         let _guard = detached_runtime_test_guard()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::background_runtime::reset_detached_runtime_test_state();
-        crate::background_runtime::force_detached_runtime_spawn_failures(2, 1);
+        crate::background_runtime::force_detached_runtime_spawn_failures(4, 2);
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1124,7 +1125,7 @@ mod stats_tests {
     }
 
     #[test]
-    fn spawn_detached_reports_error_when_worker_and_inline_runtime_are_unavailable() {
+    fn spawn_detached_reports_error_when_worker_and_fallback_thread_are_unavailable() {
         let _guard = detached_runtime_test_guard()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1140,7 +1141,7 @@ mod stats_tests {
                 counter_for_task.fetch_add(1, AtomicOrdering::Relaxed);
                 done_tx
                     .send(())
-                    .expect("signal inline fallback task completion");
+                    .expect("signal failed fallback task completion");
             })
             .expect_err("double detached-runtime failure should be reported");
 
@@ -1153,6 +1154,36 @@ mod stats_tests {
             "failed detached-runtime scheduling must not silently run the task"
         );
         assert_eq!(counter.load(AtomicOrdering::Relaxed), 0);
+        crate::background_runtime::reset_detached_runtime_test_state();
+    }
+
+    #[test]
+    fn spawn_detached_reports_error_when_worker_and_fallback_runtime_build_are_unavailable() {
+        let _guard = detached_runtime_test_guard()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let spawner = test_detached_spawner();
+        crate::background_runtime::force_detached_runtime_spawn_failures(2, 0);
+        crate::background_runtime::force_fallback_runtime_build_failures(1);
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let err = spawner
+            .spawn("test detached runtime fallback build failure", async move {
+                done_tx
+                    .send(())
+                    .expect("signal failed fallback runtime build task completion");
+            })
+            .expect_err("fallback runtime build failure should be reported");
+
+        assert!(
+            err.to_string().contains("fallback runtime unavailable"),
+            "{err}"
+        );
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "failed detached-runtime scheduling must not silently run the task"
+        );
         crate::background_runtime::reset_detached_runtime_test_state();
     }
 
@@ -1242,6 +1273,56 @@ mod stats_tests {
         join_handle
             .join()
             .expect("fallback detached runtime scheduling thread should exit cleanly");
+        crate::background_runtime::reset_detached_runtime_test_state();
+    }
+
+    #[test]
+    fn spawn_detached_fallback_runtime_keeps_blocked_tasks_isolated() {
+        let _guard = detached_runtime_test_guard()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let spawner = test_detached_spawner();
+        crate::background_runtime::force_detached_runtime_spawn_failures(4, 0);
+
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let (first_started_tx, first_started_rx) = std::sync::mpsc::channel();
+        let (first_done_tx, first_done_rx) = std::sync::mpsc::channel();
+        let (second_done_tx, second_done_rx) = std::sync::mpsc::channel();
+
+        spawner
+            .spawn("test detached fallback blocked task", async move {
+                first_started_tx
+                    .send(())
+                    .expect("signal detached fallback blocked task start");
+                let _ = release_rx.await;
+                first_done_tx
+                    .send(())
+                    .expect("signal detached fallback blocked task completion");
+            })
+            .expect("first task should fall back to a dedicated runtime");
+
+        first_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first fallback task should start");
+
+        spawner
+            .spawn("test detached fallback second task", async move {
+                second_done_tx
+                    .send(())
+                    .expect("signal second detached fallback task completion");
+            })
+            .expect("second task should get an independent fallback runtime");
+
+        second_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("second fallback task should not be serialized behind the first");
+
+        release_tx
+            .send(())
+            .expect("release blocked detached fallback task");
+        first_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("blocked detached fallback task should finish after release");
         crate::background_runtime::reset_detached_runtime_test_state();
     }
 
@@ -1693,6 +1774,12 @@ mod background_close_tests {
 
     #[test]
     fn schedule_close_once_without_runtime_drains_pending_without_panic() {
+        let _guard = detached_runtime_test_guard()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::background_runtime::reset_detached_runtime_test_state();
+        crate::background_runtime::force_detached_runtime_spawn_failures(0, 1);
+
         let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
         let (tx, rx) = oneshot::channel();
         lock_pending(&pending).insert(Id::Integer(1), tx);
@@ -1734,6 +1821,8 @@ mod background_close_tests {
                 ..
             })
         ));
+
+        crate::background_runtime::reset_detached_runtime_test_state();
     }
 
     #[test]

@@ -87,10 +87,23 @@ fn parse_streamable_http_url(
 }
 
 fn is_untrusted_sensitive_http_header(header: &str) -> bool {
-    let header = header.trim();
-    header.eq_ignore_ascii_case("authorization")
-        || header.eq_ignore_ascii_case("proxy-authorization")
-        || header.eq_ignore_ascii_case("cookie")
+    let normalized = header.trim().to_ascii_lowercase();
+    normalized == "authorization"
+        || normalized == "proxy-authorization"
+        || normalized == "cookie"
+        || normalized
+            .split(|ch: char| !ch.is_ascii_alphanumeric())
+            .filter(|segment| !segment.is_empty())
+            .any(looks_like_sensitive_header_segment)
+}
+
+fn looks_like_sensitive_header_segment(segment: &str) -> bool {
+    matches!(
+        segment,
+        "auth" | "authorization" | "bearer" | "cookie" | "credential" | "credentials"
+    ) || segment.ends_with("token")
+        || segment.ends_with("secret")
+        || segment.ends_with("key")
 }
 
 fn map_untrusted_outbound_url_error(

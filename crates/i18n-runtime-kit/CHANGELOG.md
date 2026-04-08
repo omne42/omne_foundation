@@ -10,7 +10,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `i18n-runtime-kit`：`ResourceCatalogError::LoadRollback(...)` 现在对 cleanup payload 做 `Box` 封装，保持双错误语义不变，同时继续满足 workspace 的 `clippy::result_large_err` 质量门禁。
 
 ### Changed
-- `LazyCatalog` 的 blocking-shim 契约继续保持“并发访问等待既有初始化结果”，不再因为 `LazyValue` 把同线程 in-flight 状态误判成递归而提前 fail-fast；直接递归初始化仍然显式拒绝。
+- `LazyCatalog` 的 blocking-shim 契约继续保持“其他线程上的并发访问等待既有初始化结果”；直接递归初始化、同线程 in-flight 初始化冲突和可检测的线程级跨线程环路都继续显式报错，避免把这类可诊断冲突退化成阻塞。
 - `i18n-runtime-kit::lazy_catalog` 不再作为 public implementation module 暴露；crate root 继续提供稳定的 runtime adapter 入口，并移除实现模块路径这条可误用的兼容面。
 - `i18n-runtime-kit` 现在显式标记 `publish = false`，因为它当前直接依赖 workspace-only 的 `text-assets-kit`，发布契约收口为 Git / monorepo 复用而不是暗示可独立 crates.io 发布。
 - Reused `text-assets-kit` shared lazy-init and bootstrap+rollback primitives instead of maintaining a second copy inside `i18n-runtime-kit`.

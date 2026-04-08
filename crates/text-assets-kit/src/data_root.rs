@@ -118,11 +118,16 @@ pub(crate) fn resolve_data_root_from_current_dir(options: &DataRootOptions) -> i
         &std::env::current_dir,
         &workspace_root_state,
         &materialize_data_root,
+        None,
     )
 }
 
 /// Resolves the runtime data root relative to an explicit absolute workspace
 /// directory instead of ambient `current_dir()`.
+///
+/// Relative `data_dir` or `env_var` overrides are resolved against
+/// `workspace_cwd`, so callers can keep the base explicit instead of letting
+/// landing paths drift with ambient process state.
 pub fn resolve_data_root_with_base(
     options: &DataRootOptions,
     workspace_cwd: &Path,
@@ -143,6 +148,7 @@ pub fn resolve_data_root_with_base(
         &|| Ok(workspace_cwd.to_path_buf()),
         &workspace_root_state,
         &materialize_data_root,
+        Some(workspace_cwd),
     )
 }
 
@@ -152,6 +158,7 @@ fn resolve_data_root_with<F, C, E, N>(
     current_dir: &C,
     workspace_root_state: &E,
     normalize_root: &N,
+    explicit_base: Option<&Path>,
 ) -> io::Result<PathBuf>
 where
     F: Fn(&str) -> Option<OsString>,
@@ -160,11 +167,12 @@ where
     N: Fn(&Path) -> io::Result<PathBuf>,
 {
     if let Some(data_dir) = &options.data_dir {
-        validate_absolute_data_root_path(data_dir, "data_dir")?;
-        return normalize_root(data_dir);
+        let data_dir = resolve_explicit_data_root_path(data_dir, "data_dir", explicit_base)?;
+        return normalize_root(&data_dir);
     }
 
-    if let Some(data_dir) = lookup_absolute_env_path(env_lookup, options.env_var)? {
+    if let Some(data_dir) = lookup_env_path(env_lookup, options.env_var) {
+        let data_dir = resolve_explicit_data_root_path(&data_dir, options.env_var, explicit_base)?;
         return normalize_root(&data_dir);
     }
 
@@ -244,9 +252,17 @@ where
         .map(PathBuf::from)
 }
 
-fn validate_absolute_data_root_path(path: &Path, label: &str) -> io::Result<()> {
+fn resolve_explicit_data_root_path(
+    path: &Path,
+    label: &str,
+    explicit_base: Option<&Path>,
+) -> io::Result<PathBuf> {
     if path.is_absolute() {
-        return Ok(());
+        return Ok(path.to_path_buf());
+    }
+
+    if let Some(base) = explicit_base {
+        return Ok(base.join(path));
     }
 
     Err(io::Error::new(
@@ -378,6 +394,7 @@ mod tests {
             &|| Ok(PathBuf::from("/workspace")),
             &|_| Ok(WorkspaceRootState::Missing),
             &passthrough_root,
+            None,
         )
         .expect("resolve root");
         assert_eq!(root, PathBuf::from("/tmp/runtime_assets"));
@@ -394,6 +411,7 @@ mod tests {
             &|| Ok(PathBuf::from("/workspace")),
             &|_| Ok(WorkspaceRootState::Missing),
             &passthrough_root,
+            None,
         )
         .expect_err("relative explicit data dir should fail");
 
@@ -412,6 +430,7 @@ mod tests {
             &|| Ok(PathBuf::from("/workspace")),
             &|_| Ok(WorkspaceRootState::Missing),
             &passthrough_root,
+            None,
         )
         .expect("resolve root");
         assert_eq!(root, PathBuf::from("/tmp/text_assets_env"));
@@ -428,6 +447,7 @@ mod tests {
             &|| Ok(PathBuf::from("/workspace")),
             &|_| Ok(WorkspaceRootState::Missing),
             &passthrough_root,
+            None,
         )
         .expect_err("relative env data dir should fail");
 
@@ -446,6 +466,7 @@ mod tests {
             &|| Ok(PathBuf::from("/workspace")),
             &|_| Ok(WorkspaceRootState::Missing),
             &passthrough_root,
+            None,
         )
         .expect("resolve root");
         assert_eq!(root, PathBuf::from("/workspace/.text_assets"));
@@ -465,6 +486,7 @@ mod tests {
             &|| Ok(PathBuf::from("/workspace")),
             &|_| Ok(WorkspaceRootState::Missing),
             &passthrough_root,
+            None,
         )
         .expect("global root from home");
         assert_eq!(
@@ -488,6 +510,7 @@ mod tests {
             &|| Ok(PathBuf::from("/workspace")),
             &|_| Ok(WorkspaceRootState::Missing),
             &passthrough_root,
+            None,
         )
         .expect("global root from userprofile");
         assert_eq!(
@@ -512,6 +535,7 @@ mod tests {
             &|| Ok(PathBuf::from("/workspace")),
             &|_| Ok(WorkspaceRootState::Missing),
             &passthrough_root,
+            None,
         )
         .expect("global root from userprofile");
         assert_eq!(
@@ -536,6 +560,7 @@ mod tests {
             &|| Ok(PathBuf::from("/workspace")),
             &|_| Ok(WorkspaceRootState::Missing),
             &passthrough_root,
+            None,
         )
         .expect_err("unix fallback should ignore USERPROFILE");
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
@@ -558,6 +583,7 @@ mod tests {
             &|| Ok(PathBuf::from("/workspace")),
             &|_| Ok(WorkspaceRootState::Missing),
             &passthrough_root,
+            None,
         )
         .expect("global root from userprofile");
         assert_eq!(
@@ -581,6 +607,7 @@ mod tests {
             &|| Ok(PathBuf::from("/workspace")),
             &|_| Ok(WorkspaceRootState::Missing),
             &passthrough_root,
+            None,
         )
         .expect_err("relative home should fail");
 
@@ -604,6 +631,7 @@ mod tests {
             &|| Ok(PathBuf::from("/workspace")),
             &|_| Ok(WorkspaceRootState::Missing),
             &passthrough_root,
+            None,
         )
         .expect_err("relative home should fail");
 
@@ -628,6 +656,7 @@ mod tests {
             &|| Ok(PathBuf::from("/workspace")),
             &|_| Ok(WorkspaceRootState::Missing),
             &passthrough_root,
+            None,
         )
         .expect("global root from home drive and path");
         assert_eq!(root, home_root.join(".text_assets"));
@@ -649,6 +678,7 @@ mod tests {
             &|| Ok(PathBuf::from("/workspace")),
             &|_| Ok(WorkspaceRootState::Missing),
             &passthrough_root,
+            None,
         )
         .expect_err("unix fallback should ignore HOMEDRIVE/HOMEPATH");
 
@@ -667,6 +697,7 @@ mod tests {
             &|| Ok(PathBuf::from("/workspace")),
             &|_| Ok(WorkspaceRootState::Missing),
             &passthrough_root,
+            None,
         )
         .expect_err("missing home should fail");
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
@@ -689,6 +720,7 @@ mod tests {
                 })
             },
             &passthrough_root,
+            None,
         )
         .expect("auto root");
         assert_eq!(root, PathBuf::from("/workspace/.text_assets"));
@@ -702,6 +734,7 @@ mod tests {
             &|| Ok(PathBuf::from("/workspace")),
             &|_| Ok(WorkspaceRootState::Missing),
             &passthrough_root,
+            None,
         )
         .expect("auto root");
         assert_eq!(root, PathBuf::from("/workspace/.text_assets"));
@@ -724,6 +757,7 @@ mod tests {
                 })
             },
             &passthrough_root,
+            None,
         )
         .expect_err("invalid workspace root should fail");
 
@@ -757,6 +791,7 @@ mod tests {
                     Ok(path.to_path_buf())
                 }
             },
+            None,
         )
         .expect_err("invalid workspace root should fail");
 
@@ -791,6 +826,7 @@ mod tests {
             &|| Ok(workspace.clone()),
             &workspace_root_state,
             &materialize_data_root,
+            None,
         )
         .expect_err("symlinked workspace root should fail");
 
@@ -830,6 +866,35 @@ mod tests {
     }
 
     #[test]
+    fn resolve_data_root_with_base_anchors_relative_data_dir_to_explicit_base() {
+        let root = resolve_data_root_with_base(
+            &DataRootOptions::default().with_data_dir("cache/text-assets"),
+            Path::new("/workspace/project"),
+        )
+        .expect("resolve root with explicit base and relative override");
+
+        assert_eq!(root, PathBuf::from("/workspace/project/cache/text-assets"));
+    }
+
+    #[test]
+    fn resolve_data_root_with_explicit_base_anchors_relative_env_var() {
+        let root = resolve_data_root_with(
+            &DataRootOptions::default(),
+            &|key| match key {
+                "TEXT_ASSETS_DIR" => Some(OsString::from("cache/text-assets")),
+                _ => None,
+            },
+            &|| Ok(PathBuf::from("/ignored/cwd")),
+            &|_| Ok(WorkspaceRootState::Missing),
+            &passthrough_root,
+            Some(Path::new("/workspace/project")),
+        )
+        .expect("resolve root with explicit base and relative env override");
+
+        assert_eq!(root, PathBuf::from("/workspace/project/cache/text-assets"));
+    }
+
+    #[test]
     fn resolve_data_root_with_base_rejects_relative_workspace_base() {
         let error = resolve_data_root_with_base(
             &DataRootOptions::default(),
@@ -843,6 +908,30 @@ mod tests {
                 .to_string()
                 .contains("workspace_cwd must be an absolute path")
         );
+    }
+
+    #[test]
+    fn resolve_data_root_with_base_is_stable_across_cwd_changes() {
+        let temp = TempDir::new().expect("temp dir");
+        let workspace_a = temp.path().join("workspace-a");
+        let workspace_b = temp.path().join("workspace-b");
+        std::fs::create_dir_all(&workspace_a).expect("mkdir workspace-a");
+        std::fs::create_dir_all(&workspace_b).expect("mkdir workspace-b");
+
+        let original_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        std::env::set_current_dir(&workspace_b).expect("set cwd");
+
+        let root = resolve_data_root_with_base(
+            &DataRootOptions::default().with_data_dir("cache/text-assets"),
+            &workspace_a,
+        )
+        .expect("resolve root with explicit base");
+
+        if std::env::set_current_dir(&original_cwd).is_err() {
+            std::env::set_current_dir("/").expect("restore cwd fallback");
+        }
+
+        assert_eq!(root, workspace_a.join("cache/text-assets"));
     }
 
     #[cfg(unix)]

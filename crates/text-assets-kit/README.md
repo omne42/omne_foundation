@@ -34,7 +34,7 @@
 覆盖：
 
 - 中性默认 data root（`./.text_assets`、`TEXT_ASSETS_DIR`）以及调用方显式覆写后的 data root
-- 显式 base 驱动的 root/data-root 解析（`materialize_resource_root_with_base(...)`、`resolve_data_root_with_base(...)`、`ensure_data_root_with_base(...)`）
+- 显式 base 驱动的 root/data-root 解析（`materialize_resource_root_with_base(...)`、`resolve_data_root_with_base(...)`、`ensure_data_root_with_base(...)`；相对 resource root、`data_dir` 和 `TEXT_ASSETS_DIR` override 都会先锚到传入 base）
 - 显式 base 驱动的高层目录/manifest 入口（`TextDirectory::load_with_base(...)`、`TextDirectory::load_resource_files_with_base(...)`、`bootstrap_text_resources_then_load_with_base(...)`、`bootstrap_text_resources_with_report_with_base(...)`、`scan_text_directory_with_base(...)`）
 - 已降级为 compatibility-only ambient 入口（`materialize_resource_root(...)`、`resolve_data_root(...)`、`ensure_data_root(...)`）
 - 文本文件大小和目录总大小限制
@@ -54,7 +54,7 @@
 ## 结构设计
 
 - `src/data_root.rs`
-  - data root scope、路径优先级和根目录决议；显式 base variants 是 canonical 边界，ambient `current_dir()` 入口只作为 compatibility shim 保留
+  - data root scope、路径优先级和根目录决议；显式 base variants 是 canonical 边界，相对 `data_dir` / `TEXT_ASSETS_DIR` override 会先锚到 base，ambient `current_dir()` 入口只作为 compatibility shim 保留
 - `src/resource_path.rs`
   - 资源相对路径规范化、identity 规则与 resource root 规范化；显式 base 是 canonical 入口，ambient compatibility helper 仅保留兼容语义
 - `src/secure_fs.rs`
@@ -70,7 +70,7 @@
 - `src/bootstrap_lock.rs`
   - bootstrap 并发串行化与跨进程协调；仅作为低层兼容原语保留
 - `src/lazy_value.rs`
-  - 仅供兼容层复用的阻塞式 lazy-init 原语；模块和类型本体都已显式标记为 deprecated compatibility shim，同线程重入和可检测的线程级跨线程等待环路会显式报错，不作为 async runtime-facing canonical 边界
+  - 仅供兼容层复用的阻塞式 lazy-init 原语；模块和类型本体都已显式标记为 deprecated compatibility shim，同线程重入、同线程 in-flight 初始化冲突和可检测的线程级跨线程等待环路都会显式报错，不作为 async runtime-facing canonical 边界
 
 ## bootstrap/rollback 语义
 

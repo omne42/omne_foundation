@@ -965,10 +965,13 @@ name = "mcp-jsonrpc"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "cap-fs-ext",
+ "cap-std",
  "error-kit",
  "futures-util",
  "http-kit",
  "libc",
+ "omne-fs-primitives",
  "reqwest",
  "serde",
  "serde_json",

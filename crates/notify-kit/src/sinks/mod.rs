@@ -55,6 +55,7 @@ mod webhook_transport;
 #[cfg(feature = "sink-wecom")]
 mod wecom;
 
+use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -89,5 +90,14 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub trait Sink: Send + Sync {
     fn name(&self) -> &'static str;
+
+    fn label(&self) -> Cow<'_, str> {
+        Cow::Borrowed(self.name())
+    }
+
+    fn identity(&self) -> Cow<'_, str> {
+        self.label()
+    }
+
     fn send<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, crate::Result<()>>;
 }

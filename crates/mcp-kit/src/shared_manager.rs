@@ -2814,6 +2814,17 @@ mod tests {
             .take(8)
             .collect();
 
+        let unique_name = |prefix: &str| {
+            format!(
+                "{prefix}{short_label}-{}-{}.sock",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )
+        };
+
         for root in unix_socket_temp_roots() {
             if !root.exists() && std::fs::create_dir_all(&root).is_err() {
                 continue;
@@ -2825,26 +2836,11 @@ mod tests {
                 continue;
             }
 
-            let Ok(tempdir) = tempfile::Builder::new()
-                .prefix("of-sm-")
-                .rand_bytes(3)
-                .tempdir_in(&root)
-            else {
-                continue;
-            };
-
-            let path = tempdir.path().join(format!(
-                "{short_label}-{}-{}.sock",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            if let Ok(listener) = UnixListener::bind(&path) {
+            let probe_path = root.join(unique_name("of-sm-probe-"));
+            if let Ok(listener) = UnixListener::bind(&probe_path) {
                 drop(listener);
-                let _ = std::fs::remove_file(&path);
-                return Some(path);
+                let _ = std::fs::remove_file(&probe_path);
+                return Some(root.join(unique_name("of-sm-")));
             }
         }
 

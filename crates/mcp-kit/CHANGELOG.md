@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit`：`SharedManager` 的 Unix socket 测试辅助函数不再返回一个父目录已被临时目录析构删除的路径；启用 `OMNE_TEST_SHORT_TMPDIR` 时，这批并发连接/断连回归测试现在会真正执行并稳定通过，而不是在 pre-commit / `scripts/check-workspace.sh local` 中因 `No such file or directory` 偶发失败。
 - `mcp-kit`：相对 Unix socket 路径的回归测试现在使用更短且可覆盖的临时目录前缀；较长 worktree 路径下的 workspace `ci` / pre-commit 不再因为超过 `SUN_LEN` 而偶发失败。
 - `mcp-kit`：programmatic `ServerConfig::unix(...)` 的相对 `unix_path` 现在会和 `mcp.json` 加载路径一样，统一按连接 `cwd` / config root 解析成稳定绝对路径；连接身份比较、实际 `connect_unix`，以及覆盖这条边界的 shared-manager 测试 metadata 记录都不再偷偷依赖进程级 `current_dir()` 或 raw config identity，Windows 回归断言也改为比较稳定路径身份而不是绝对路径显示格式。
 - `mcp-kit`：所有会改动进程 `current_dir()` 的测试现在共享同一套 crate 级 `cwd` 锁与 restore helper，并统一收口到 `test_support`；`config`、`manager`、`shared_manager` 三组回归测试不再各自持有独立锁，避免 `cargo test --workspace` / `scripts/check-workspace.sh local` 下因全局工作目录竞争产生的偶发失败。

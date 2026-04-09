@@ -707,11 +707,14 @@ mod tests {
 
         let identity = effective_server_config_identity(&ctx, "srv", &server_cfg, &cwd)
             .expect("resolve unix identity");
+        let expected =
+            crate::manager::stable_path_identity(&tempdir.path().join("workspace/mcp.sock"))
+                .expect("stable unix path identity");
 
         assert_eq!(
             identity,
             ConnectionServerConfigIdentity::Unix {
-                unix_path: tempdir.path().join("workspace/mcp.sock"),
+                unix_path: expected,
             }
         );
     }

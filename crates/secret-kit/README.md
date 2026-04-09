@@ -7,6 +7,7 @@
 `secret-kit` 负责 secret 规范、解析和安全持有。
 
 它把 secret 输入统一到 `secret://` 语法下，并在读取、命令执行、JSON 提取和内存持有阶段尽量减少泄露面。
+公开 resolver 扩展边界也以 parsed `SecretSpec` 为主路径：调用方可以继续传 `&str`，但实现方和装饰器不再需要把已解析 spec 降回原始字符串。
 
 当前它还直接依赖 `omne-runtime` 提供的 primitives，因此 manifest 明确保持 `publish = false`：
 在 `omne-fs-primitives` / `omne-process-primitives` 形成独立发布链之前，这个 crate 只承诺 Git / monorepo 复用边界，不把 crates.io 单独发布写成错误信号。
@@ -58,9 +59,10 @@
   - `SecretString`
   - `SecretError`
   - 运行时 trait
+  - `SecretResolver` / `CacheAwareSecretResolver` 的 typed `SecretSpec` 边界
   - 默认 resolver 主体
 - `src/spec.rs`
-  - `secret://` 解析、provider 分派、命令构建
+  - `secret://` 解析、typed `SecretSpec` helper、provider 分派、命令构建
 - `src/file.rs`
   - 受限 secret 文件读取与 symlink 约束
 - `src/command.rs`

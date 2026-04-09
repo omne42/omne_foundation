@@ -127,27 +127,25 @@ impl SecretSpec {
     }
 }
 
-pub(crate) async fn prepare_default_secret_resolution(
-    spec: &str,
-) -> Result<PreparedSecretResolution<DefaultPreparedSecret>> {
-    let parsed = SecretSpec::parse(spec)?;
-    let prepared = DefaultPreparedSecret { spec: parsed };
-    Ok(PreparedSecretResolution::uncached(prepared))
+pub fn prepare_default_secret_spec_resolution(
+    spec: SecretSpec,
+) -> PreparedSecretResolution<DefaultPreparedSecret> {
+    PreparedSecretResolution::uncached(DefaultPreparedSecret { spec })
 }
 
-pub(crate) async fn resolve_prepared_default_secret(
+pub async fn resolve_prepared_default_secret(
     prepared: DefaultPreparedSecret,
     context: SecretResolutionContext<'_>,
 ) -> Result<SecretString> {
-    resolve_secret_spec(&prepared.spec, context).await
+    resolve_secret_spec_in_context(&prepared.spec, context).await
 }
 
 pub(crate) async fn resolve_secret_in_context(
     spec: &str,
     context: SecretResolutionContext<'_>,
 ) -> Result<SecretString> {
-    let prepared = prepare_default_secret_resolution(spec).await?;
-    resolve_prepared_default_secret(prepared.into_prepared(), context).await
+    let parsed = SecretSpec::parse(spec)?;
+    resolve_secret_spec_in_context(&parsed, context).await
 }
 
 pub async fn resolve_secret<E>(spec: &str, env: &E) -> Result<SecretString>
@@ -169,7 +167,26 @@ pub async fn resolve_secret_with_runtime(
     .await
 }
 
-pub(crate) async fn resolve_secret_spec(
+pub async fn resolve_secret_spec<E>(spec: &SecretSpec, env: &E) -> Result<SecretString>
+where
+    E: SecretEnvironment + SecretCommandRuntime,
+{
+    resolve_secret_spec_in_context(spec, SecretResolutionContext::new(env, env)).await
+}
+
+pub async fn resolve_secret_spec_with_runtime(
+    spec: &SecretSpec,
+    environment: &dyn SecretEnvironment,
+    command_runtime: &dyn SecretCommandRuntime,
+) -> Result<SecretString> {
+    resolve_secret_spec_in_context(
+        spec,
+        SecretResolutionContext::new(environment, command_runtime),
+    )
+    .await
+}
+
+pub(crate) async fn resolve_secret_spec_in_context(
     spec: &SecretSpec,
     context: SecretResolutionContext<'_>,
 ) -> Result<SecretString> {

@@ -13,7 +13,7 @@ use crate::command::{
 };
 use crate::json::extract_json_key;
 use crate::spec::{
-    SecretCommand, build_secret_command, prepare_default_secret_resolution,
+    SecretCommand, build_secret_command, prepare_default_secret_spec_resolution,
     resolve_prepared_default_secret,
 };
 use error_kit::{ErrorCategory, ErrorRetryAdvice};
@@ -135,7 +135,28 @@ where
         .map(|secret| secret.expose_secret().to_owned())
 }
 
+fn test_env_spec(key: &str) -> String {
+    format!("secret://env/{key}")
+}
+
+fn env_spec_key(spec: &SecretSpec) -> &str {
+    match spec {
+        SecretSpec::Env { key } => key,
+        other => panic!("expected env secret spec, got {other:?}"),
+    }
+}
+
 trait TestSecretResolverExt: SecretResolver {
+    async fn resolve_secret_spec_text(
+        &self,
+        spec: &SecretSpec,
+        env: &dyn SecretEnvironment,
+    ) -> Result<String> {
+        self.resolve_secret_spec(spec, SecretResolutionContext::ambient(env))
+            .await
+            .map(|secret| secret.expose_secret().to_owned())
+    }
+
     async fn resolve_secret_text(&self, spec: &str, env: &dyn SecretEnvironment) -> Result<String> {
         self.resolve_secret(spec, SecretResolutionContext::ambient(env))
             .await
@@ -177,10 +198,28 @@ async fn secret_resolver_trait_object_resolves_secret() -> Result<()> {
     Ok(())
 }
 
-fn test_cache_scope(spec: &str) -> Option<String> {
-    match SecretSpec::parse(spec).ok()? {
-        SecretSpec::File { path } if Path::new(&path).is_absolute() => {
-            let metadata = std::fs::metadata(&path).ok()?;
+#[tokio::test]
+async fn secret_resolver_trait_object_resolves_parsed_secret() -> Result<()> {
+    let mut env = TestEnv::default();
+    env.vars
+        .insert("OPENAI_API_KEY".to_string(), "test-secret".to_string());
+    let spec = SecretSpec::parse("secret://env/OPENAI_API_KEY")?;
+
+    let boxed_resolver: Box<dyn SecretResolver> = Box::new(DefaultSecretResolver);
+    let boxed_value = boxed_resolver.resolve_secret_spec_text(&spec, &env).await?;
+    assert_eq!(boxed_value, "test-secret");
+
+    let arc_resolver: Arc<dyn SecretResolver> = Arc::new(DefaultSecretResolver);
+    let arc_value = arc_resolver.resolve_secret_spec_text(&spec, &env).await?;
+
+    assert_eq!(arc_value, "test-secret");
+    Ok(())
+}
+
+fn test_cache_scope(spec: &SecretSpec) -> Option<String> {
+    match spec {
+        SecretSpec::File { path } if Path::new(path).is_absolute() => {
+            let metadata = std::fs::metadata(path).ok()?;
             Some(format!("test-file:{path}:{}", metadata.len()))
         }
         _ => None,
@@ -193,9 +232,9 @@ struct CountingResolver {
 }
 
 impl SecretResolver for CountingResolver {
-    fn resolve_secret<'a>(
+    fn resolve_secret_spec<'a>(
         &'a self,
-        _spec: &'a str,
+        _spec: &'a SecretSpec,
         _context: SecretResolutionContext<'a>,
     ) -> SecretResolveFuture<'a> {
         Box::pin(async move {
@@ -208,9 +247,9 @@ impl SecretResolver for CountingResolver {
 impl CacheAwareSecretResolver for CountingResolver {
     type Prepared = ();
 
-    async fn prepare_secret_resolution(
+    async fn prepare_secret_spec_resolution(
         &self,
-        spec: &str,
+        spec: &SecretSpec,
         _context: SecretResolutionContext<'_>,
     ) -> Result<PreparedSecretResolution<Self::Prepared>> {
         Ok(match test_cache_scope(spec) {
@@ -224,7 +263,8 @@ impl CacheAwareSecretResolver for CountingResolver {
         _prepared: Self::Prepared,
         context: SecretResolutionContext<'_>,
     ) -> Result<SecretString> {
-        self.resolve_secret("", context).await
+        self.resolve_secret_spec(&SecretSpec::Env { key: String::new() }, context)
+            .await
     }
 }
 
@@ -234,9 +274,9 @@ struct RetryResolver {
 }
 
 impl SecretResolver for RetryResolver {
-    fn resolve_secret<'a>(
+    fn resolve_secret_spec<'a>(
         &'a self,
-        _spec: &'a str,
+        _spec: &'a SecretSpec,
         _context: SecretResolutionContext<'a>,
     ) -> SecretResolveFuture<'a> {
         Box::pin(async move {
@@ -252,9 +292,9 @@ impl SecretResolver for RetryResolver {
 impl CacheAwareSecretResolver for RetryResolver {
     type Prepared = ();
 
-    async fn prepare_secret_resolution(
+    async fn prepare_secret_spec_resolution(
         &self,
-        spec: &str,
+        spec: &SecretSpec,
         _context: SecretResolutionContext<'_>,
     ) -> Result<PreparedSecretResolution<Self::Prepared>> {
         Ok(match test_cache_scope(spec) {
@@ -268,7 +308,8 @@ impl CacheAwareSecretResolver for RetryResolver {
         _prepared: Self::Prepared,
         context: SecretResolutionContext<'_>,
     ) -> Result<SecretString> {
-        self.resolve_secret("", context).await
+        self.resolve_secret_spec(&SecretSpec::Env { key: String::new() }, context)
+            .await
     }
 }
 
@@ -287,9 +328,9 @@ impl Default for SlowResolver {
 }
 
 impl SecretResolver for SlowResolver {
-    fn resolve_secret<'a>(
+    fn resolve_secret_spec<'a>(
         &'a self,
-        _spec: &'a str,
+        _spec: &'a SecretSpec,
         _context: SecretResolutionContext<'a>,
     ) -> SecretResolveFuture<'a> {
         Box::pin(async move {
@@ -303,9 +344,9 @@ impl SecretResolver for SlowResolver {
 impl CacheAwareSecretResolver for SlowResolver {
     type Prepared = ();
 
-    async fn prepare_secret_resolution(
+    async fn prepare_secret_spec_resolution(
         &self,
-        spec: &str,
+        spec: &SecretSpec,
         _context: SecretResolutionContext<'_>,
     ) -> Result<PreparedSecretResolution<Self::Prepared>> {
         Ok(match test_cache_scope(spec) {
@@ -319,7 +360,8 @@ impl CacheAwareSecretResolver for SlowResolver {
         _prepared: Self::Prepared,
         context: SecretResolutionContext<'_>,
     ) -> Result<SecretString> {
-        self.resolve_secret("", context).await
+        self.resolve_secret_spec(&SecretSpec::Env { key: String::new() }, context)
+            .await
     }
 }
 
@@ -329,14 +371,15 @@ struct MismatchedHintResolver {
 }
 
 impl SecretResolver for MismatchedHintResolver {
-    fn resolve_secret<'a>(
+    fn resolve_secret_spec<'a>(
         &'a self,
-        spec: &'a str,
+        spec: &'a SecretSpec,
         _context: SecretResolutionContext<'a>,
     ) -> SecretResolveFuture<'a> {
         Box::pin(async move {
+            let key = env_spec_key(spec);
             Ok(SecretString::from(format!(
-                "{spec}-{}",
+                "{key}-{}",
                 self.calls.fetch_add(1, Ordering::SeqCst) + 1
             )))
         })
@@ -351,49 +394,50 @@ struct SlowMismatchedHintResolver {
 }
 
 impl SecretResolver for SlowMismatchedHintResolver {
-    fn resolve_secret<'a>(
+    fn resolve_secret_spec<'a>(
         &'a self,
-        spec: &'a str,
+        spec: &'a SecretSpec,
         _context: SecretResolutionContext<'a>,
     ) -> SecretResolveFuture<'a> {
         Box::pin(async move {
+            let key = env_spec_key(spec).to_string();
             self.calls.fetch_add(1, Ordering::SeqCst);
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_active.fetch_max(active, Ordering::SeqCst);
             tokio::time::sleep(Duration::from_millis(50)).await;
             self.active.fetch_sub(1, Ordering::SeqCst);
-            Ok(SecretString::from(spec.to_string()))
+            Ok(SecretString::from(key))
         })
     }
 }
 
 impl CacheAwareSecretResolver for SlowMismatchedHintResolver {
-    type Prepared = String;
+    type Prepared = SecretSpec;
 
-    fn lookup_secret_cache_scope(
+    fn lookup_secret_cache_scope_for_spec(
         &self,
-        _spec: &str,
+        _spec: &SecretSpec,
         _context: SecretResolutionContext<'_>,
     ) -> Result<Option<String>> {
         Ok(Some("shared-hint".to_string()))
     }
 
-    fn lookup_secret_cache_partitioning(
+    fn lookup_secret_cache_partitioning_for_spec(
         &self,
-        _spec: &str,
+        _spec: &SecretSpec,
         _context: SecretResolutionContext<'_>,
     ) -> Option<SecretCachePartitioning> {
         Some(SecretCachePartitioning::Environment)
     }
 
-    async fn prepare_secret_resolution(
+    async fn prepare_secret_spec_resolution(
         &self,
-        spec: &str,
+        spec: &SecretSpec,
         _context: SecretResolutionContext<'_>,
     ) -> Result<PreparedSecretResolution<Self::Prepared>> {
         Ok(PreparedSecretResolution::cached(
-            spec.to_string(),
-            format!("prepared:{spec}"),
+            spec.clone(),
+            format!("prepared:{}", env_spec_key(spec)),
         ))
     }
 
@@ -402,37 +446,37 @@ impl CacheAwareSecretResolver for SlowMismatchedHintResolver {
         prepared: Self::Prepared,
         context: SecretResolutionContext<'_>,
     ) -> Result<SecretString> {
-        self.resolve_secret(prepared.as_str(), context).await
+        self.resolve_secret_spec(&prepared, context).await
     }
 }
 
 impl CacheAwareSecretResolver for MismatchedHintResolver {
-    type Prepared = String;
+    type Prepared = SecretSpec;
 
-    fn lookup_secret_cache_scope(
+    fn lookup_secret_cache_scope_for_spec(
         &self,
-        _spec: &str,
+        _spec: &SecretSpec,
         _context: SecretResolutionContext<'_>,
     ) -> Result<Option<String>> {
         Ok(Some("shared-hint".to_string()))
     }
 
-    fn lookup_secret_cache_partitioning(
+    fn lookup_secret_cache_partitioning_for_spec(
         &self,
-        _spec: &str,
+        _spec: &SecretSpec,
         _context: SecretResolutionContext<'_>,
     ) -> Option<SecretCachePartitioning> {
         Some(SecretCachePartitioning::Environment)
     }
 
-    async fn prepare_secret_resolution(
+    async fn prepare_secret_spec_resolution(
         &self,
-        spec: &str,
+        spec: &SecretSpec,
         _context: SecretResolutionContext<'_>,
     ) -> Result<PreparedSecretResolution<Self::Prepared>> {
         Ok(PreparedSecretResolution::cached(
-            spec.to_string(),
-            format!("prepared:{spec}"),
+            spec.clone(),
+            format!("prepared:{}", env_spec_key(spec)),
         ))
     }
 
@@ -441,7 +485,7 @@ impl CacheAwareSecretResolver for MismatchedHintResolver {
         prepared: Self::Prepared,
         context: SecretResolutionContext<'_>,
     ) -> Result<SecretString> {
-        self.resolve_secret(prepared.as_str(), context).await
+        self.resolve_secret_spec(&prepared, context).await
     }
 }
 
@@ -456,51 +500,50 @@ struct MixedHintResolver {
 }
 
 impl SecretResolver for MixedHintResolver {
-    fn resolve_secret<'a>(
+    fn resolve_secret_spec<'a>(
         &'a self,
-        spec: &'a str,
+        spec: &'a SecretSpec,
         _context: SecretResolutionContext<'a>,
     ) -> SecretResolveFuture<'a> {
         Box::pin(async move {
+            let key = env_spec_key(spec);
             let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-            Ok(SecretString::from(format!("{spec}-{call}")))
+            Ok(SecretString::from(format!("{key}-{call}")))
         })
     }
 }
 
 impl CacheAwareSecretResolver for MixedHintResolver {
-    type Prepared = String;
+    type Prepared = SecretSpec;
 
-    fn lookup_secret_cache_scope(
+    fn lookup_secret_cache_scope_for_spec(
         &self,
-        _spec: &str,
+        _spec: &SecretSpec,
         _context: SecretResolutionContext<'_>,
     ) -> Result<Option<String>> {
         Ok(Some("shared-hint".to_string()))
     }
 
-    fn lookup_secret_cache_partitioning(
+    fn lookup_secret_cache_partitioning_for_spec(
         &self,
-        _spec: &str,
+        _spec: &SecretSpec,
         _context: SecretResolutionContext<'_>,
     ) -> Option<SecretCachePartitioning> {
         Some(SecretCachePartitioning::Environment)
     }
 
-    async fn prepare_secret_resolution(
+    async fn prepare_secret_spec_resolution(
         &self,
-        spec: &str,
+        spec: &SecretSpec,
         _context: SecretResolutionContext<'_>,
     ) -> Result<PreparedSecretResolution<Self::Prepared>> {
-        let cache_scope = if spec == "spec-a" {
+        let key = env_spec_key(spec);
+        let cache_scope = if key == "SPEC_A" {
             "shared-hint".to_string()
         } else {
-            format!("prepared:{spec}")
+            format!("prepared:{key}")
         };
-        Ok(PreparedSecretResolution::cached(
-            spec.to_string(),
-            cache_scope,
-        ))
+        Ok(PreparedSecretResolution::cached(spec.clone(), cache_scope))
     }
 
     async fn resolve_prepared_secret(
@@ -508,54 +551,52 @@ impl CacheAwareSecretResolver for MixedHintResolver {
         prepared: Self::Prepared,
         context: SecretResolutionContext<'_>,
     ) -> Result<SecretString> {
-        self.resolve_secret(prepared.as_str(), context).await
+        self.resolve_secret_spec(&prepared, context).await
     }
 }
 
 impl SecretResolver for EnvironmentScopedResolver {
-    fn resolve_secret<'a>(
+    fn resolve_secret_spec<'a>(
         &'a self,
-        spec: &'a str,
+        spec: &'a SecretSpec,
         context: SecretResolutionContext<'a>,
     ) -> SecretResolveFuture<'a> {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(context
                 .environment()
-                .get_secret(spec)
+                .get_secret(env_spec_key(spec))
                 .expect("test env secret should exist for environment-scoped cache test"))
         })
     }
 }
 
 impl CacheAwareSecretResolver for EnvironmentScopedResolver {
-    type Prepared = String;
+    type Prepared = SecretSpec;
 
-    fn lookup_secret_cache_scope(
+    fn lookup_secret_cache_scope_for_spec(
         &self,
-        spec: &str,
+        spec: &SecretSpec,
         _context: SecretResolutionContext<'_>,
     ) -> Result<Option<String>> {
-        Ok(Some(spec.to_string()))
+        Ok(Some(env_spec_key(spec).to_string()))
     }
 
-    fn lookup_secret_cache_partitioning(
+    fn lookup_secret_cache_partitioning_for_spec(
         &self,
-        _spec: &str,
+        _spec: &SecretSpec,
         _context: SecretResolutionContext<'_>,
     ) -> Option<SecretCachePartitioning> {
         Some(SecretCachePartitioning::Environment)
     }
 
-    async fn prepare_secret_resolution(
+    async fn prepare_secret_spec_resolution(
         &self,
-        spec: &str,
+        spec: &SecretSpec,
         _context: SecretResolutionContext<'_>,
     ) -> Result<PreparedSecretResolution<Self::Prepared>> {
-        Ok(PreparedSecretResolution::cached(
-            spec.to_string(),
-            spec.to_string(),
-        ))
+        let key = env_spec_key(spec).to_string();
+        Ok(PreparedSecretResolution::cached(spec.clone(), key))
     }
 
     async fn resolve_prepared_secret(
@@ -563,7 +604,7 @@ impl CacheAwareSecretResolver for EnvironmentScopedResolver {
         prepared: Self::Prepared,
         context: SecretResolutionContext<'_>,
     ) -> Result<SecretString> {
-        self.resolve_secret(prepared.as_str(), context).await
+        self.resolve_secret_spec(&prepared, context).await
     }
 }
 
@@ -573,9 +614,9 @@ struct RuntimeScopedResolver {
 }
 
 impl SecretResolver for RuntimeScopedResolver {
-    fn resolve_secret<'a>(
+    fn resolve_secret_spec<'a>(
         &'a self,
-        _spec: &'a str,
+        _spec: &'a SecretSpec,
         context: SecretResolutionContext<'a>,
     ) -> SecretResolveFuture<'a> {
         Box::pin(async move {
@@ -590,32 +631,33 @@ impl SecretResolver for RuntimeScopedResolver {
 }
 
 impl CacheAwareSecretResolver for RuntimeScopedResolver {
-    type Prepared = String;
+    type Prepared = SecretSpec;
 
-    fn lookup_secret_cache_scope(
+    fn lookup_secret_cache_scope_for_spec(
         &self,
-        spec: &str,
+        spec: &SecretSpec,
         _context: SecretResolutionContext<'_>,
     ) -> Result<Option<String>> {
-        Ok(Some(spec.to_string()))
+        Ok(Some(env_spec_key(spec).to_string()))
     }
 
-    fn lookup_secret_cache_partitioning(
+    fn lookup_secret_cache_partitioning_for_spec(
         &self,
-        _spec: &str,
+        _spec: &SecretSpec,
         _context: SecretResolutionContext<'_>,
     ) -> Option<SecretCachePartitioning> {
         Some(SecretCachePartitioning::EnvironmentAndCommandRuntime)
     }
 
-    async fn prepare_secret_resolution(
+    async fn prepare_secret_spec_resolution(
         &self,
-        spec: &str,
+        spec: &SecretSpec,
         _context: SecretResolutionContext<'_>,
     ) -> Result<PreparedSecretResolution<Self::Prepared>> {
+        let key = env_spec_key(spec).to_string();
         Ok(PreparedSecretResolution::cached_with_partitioning(
-            spec.to_string(),
-            spec.to_string(),
+            spec.clone(),
+            key,
             SecretCachePartitioning::EnvironmentAndCommandRuntime,
         ))
     }
@@ -625,7 +667,7 @@ impl CacheAwareSecretResolver for RuntimeScopedResolver {
         prepared: Self::Prepared,
         context: SecretResolutionContext<'_>,
     ) -> Result<SecretString> {
-        self.resolve_secret(prepared.as_str(), context).await
+        self.resolve_secret_spec(&prepared, context).await
     }
 }
 
@@ -2652,13 +2694,15 @@ async fn caching_resolver_ignores_mismatched_hint_scopes() -> Result<()> {
         CachingSecretResolver::new(MismatchedHintResolver::default(), Duration::from_secs(60));
     let env = TestEnv::default();
 
-    let first = resolver.resolve_secret_text("spec-a", &env).await?;
-    let second = resolver.resolve_secret_text("spec-a", &env).await?;
-    let third = resolver.resolve_secret_text("spec-b", &env).await?;
+    let spec_a = test_env_spec("SPEC_A");
+    let spec_b = test_env_spec("SPEC_B");
+    let first = resolver.resolve_secret_text(&spec_a, &env).await?;
+    let second = resolver.resolve_secret_text(&spec_a, &env).await?;
+    let third = resolver.resolve_secret_text(&spec_b, &env).await?;
 
-    assert_eq!(first, "spec-a-1");
-    assert_eq!(second, "spec-a-1");
-    assert_eq!(third, "spec-b-2");
+    assert_eq!(first, "SPEC_A-1");
+    assert_eq!(second, "SPEC_A-1");
+    assert_eq!(third, "SPEC_B-2");
     assert_eq!(resolver.inner().calls.load(Ordering::SeqCst), 2);
     Ok(())
 }
@@ -2669,13 +2713,15 @@ async fn caching_resolver_validates_hint_hits_against_prepared_cache_key() -> Re
         CachingSecretResolver::new(MixedHintResolver::default(), Duration::from_secs(60));
     let env = TestEnv::default();
 
-    let first = resolver.resolve_secret_text("spec-a", &env).await?;
-    let second = resolver.resolve_secret_text("spec-b", &env).await?;
-    let third = resolver.resolve_secret_text("spec-a", &env).await?;
+    let spec_a = test_env_spec("SPEC_A");
+    let spec_b = test_env_spec("SPEC_B");
+    let first = resolver.resolve_secret_text(&spec_a, &env).await?;
+    let second = resolver.resolve_secret_text(&spec_b, &env).await?;
+    let third = resolver.resolve_secret_text(&spec_a, &env).await?;
 
-    assert_eq!(first, "spec-a-1");
-    assert_eq!(second, "spec-b-2");
-    assert_eq!(third, "spec-a-1");
+    assert_eq!(first, "SPEC_A-1");
+    assert_eq!(second, "SPEC_B-2");
+    assert_eq!(third, "SPEC_A-1");
     assert_eq!(resolver.inner().calls.load(Ordering::SeqCst), 2);
     Ok(())
 }
@@ -2688,12 +2734,14 @@ async fn caching_resolver_does_not_serialize_distinct_specs_on_mismatched_hint()
     );
     let env = TestEnv::default();
 
-    let first = resolver.resolve_secret_text("spec-a", &env);
-    let second = resolver.resolve_secret_text("spec-b", &env);
+    let spec_a = test_env_spec("SPEC_A");
+    let spec_b = test_env_spec("SPEC_B");
+    let first = resolver.resolve_secret_text(&spec_a, &env);
+    let second = resolver.resolve_secret_text(&spec_b, &env);
     let (first, second) = tokio::join!(first, second);
 
-    assert_eq!(first?, "spec-a");
-    assert_eq!(second?, "spec-b");
+    assert_eq!(first?, "SPEC_A");
+    assert_eq!(second?, "SPEC_B");
     assert_eq!(resolver.inner().calls.load(Ordering::SeqCst), 2);
     assert!(
         resolver.inner().max_active.load(Ordering::SeqCst) >= 2,
@@ -2719,9 +2767,10 @@ async fn caching_resolver_partitions_cache_by_environment_partition() -> Result<
         ..TestEnv::default()
     };
 
-    let first = resolver.resolve_secret_text("API_KEY", &env_a).await?;
-    let second = resolver.resolve_secret_text("API_KEY", &env_b).await?;
-    let third = resolver.resolve_secret_text("API_KEY", &env_a).await?;
+    let spec = test_env_spec("API_KEY");
+    let first = resolver.resolve_secret_text(&spec, &env_a).await?;
+    let second = resolver.resolve_secret_text(&spec, &env_b).await?;
+    let third = resolver.resolve_secret_text(&spec, &env_a).await?;
 
     assert_eq!(first, "prod");
     assert_eq!(second, "staging");
@@ -2747,8 +2796,9 @@ async fn caching_resolver_reuses_cache_across_equivalent_environment_instances()
         ..TestEnv::default()
     };
 
-    let first = resolver.resolve_secret_text("API_KEY", &env_a).await?;
-    let second = resolver.resolve_secret_text("API_KEY", &env_b).await?;
+    let spec = test_env_spec("API_KEY");
+    let first = resolver.resolve_secret_text(&spec, &env_a).await?;
+    let second = resolver.resolve_secret_text(&spec, &env_b).await?;
 
     assert_eq!(first, "prod");
     assert_eq!(second, "prod");
@@ -2776,13 +2826,25 @@ async fn caching_resolver_partitions_runtime_sensitive_cache_by_runtime_partitio
     };
 
     let first = resolver
-        .resolve_secret_text_with_runtime("runtime-sensitive", &environment, &runtime_a)
+        .resolve_secret_text_with_runtime(
+            &test_env_spec("RUNTIME_SECRET"),
+            &environment,
+            &runtime_a,
+        )
         .await?;
     let second = resolver
-        .resolve_secret_text_with_runtime("runtime-sensitive", &environment, &runtime_b)
+        .resolve_secret_text_with_runtime(
+            &test_env_spec("RUNTIME_SECRET"),
+            &environment,
+            &runtime_b,
+        )
         .await?;
     let third = resolver
-        .resolve_secret_text_with_runtime("runtime-sensitive", &environment, &runtime_a)
+        .resolve_secret_text_with_runtime(
+            &test_env_spec("RUNTIME_SECRET"),
+            &environment,
+            &runtime_a,
+        )
         .await?;
 
     assert_eq!(first, "alpha");
@@ -2807,10 +2869,10 @@ async fn caching_resolver_skips_runtime_sensitive_cache_without_runtime_partitio
     };
 
     let first = resolver
-        .resolve_secret_text_with_runtime("runtime-sensitive", &environment, &runtime)
+        .resolve_secret_text_with_runtime(&test_env_spec("RUNTIME_SECRET"), &environment, &runtime)
         .await?;
     let second = resolver
-        .resolve_secret_text_with_runtime("runtime-sensitive", &environment, &runtime)
+        .resolve_secret_text_with_runtime(&test_env_spec("RUNTIME_SECRET"), &environment, &runtime)
         .await?;
 
     assert_eq!(first, "alpha");
@@ -2827,16 +2889,16 @@ async fn caching_resolver_skips_runtime_sensitive_cache_with_ambient_runtime() -
     }
 
     impl SecretResolver for AmbientRuntimeResolver {
-        fn resolve_secret<'a>(
+        fn resolve_secret_spec<'a>(
             &'a self,
-            spec: &'a str,
+            spec: &'a SecretSpec,
             context: SecretResolutionContext<'a>,
         ) -> SecretResolveFuture<'a> {
             Box::pin(async move {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 let value = context
                     .command_runtime()
-                    .get_command_env(spec)
+                    .get_command_env(env_spec_key(spec))
                     .expect("ambient runtime variable should exist");
                 Ok(SecretString::from(value))
             })
@@ -2844,32 +2906,33 @@ async fn caching_resolver_skips_runtime_sensitive_cache_with_ambient_runtime() -
     }
 
     impl CacheAwareSecretResolver for AmbientRuntimeResolver {
-        type Prepared = String;
+        type Prepared = SecretSpec;
 
-        fn lookup_secret_cache_scope(
+        fn lookup_secret_cache_scope_for_spec(
             &self,
-            spec: &str,
+            spec: &SecretSpec,
             _context: SecretResolutionContext<'_>,
         ) -> Result<Option<String>> {
-            Ok(Some(spec.to_string()))
+            Ok(Some(env_spec_key(spec).to_string()))
         }
 
-        fn lookup_secret_cache_partitioning(
+        fn lookup_secret_cache_partitioning_for_spec(
             &self,
-            _spec: &str,
+            _spec: &SecretSpec,
             _context: SecretResolutionContext<'_>,
         ) -> Option<SecretCachePartitioning> {
             Some(SecretCachePartitioning::EnvironmentAndCommandRuntime)
         }
 
-        async fn prepare_secret_resolution(
+        async fn prepare_secret_spec_resolution(
             &self,
-            spec: &str,
+            spec: &SecretSpec,
             _context: SecretResolutionContext<'_>,
         ) -> Result<PreparedSecretResolution<Self::Prepared>> {
+            let key = env_spec_key(spec).to_string();
             Ok(PreparedSecretResolution::cached_with_partitioning(
-                spec.to_string(),
-                spec.to_string(),
+                spec.clone(),
+                key,
                 SecretCachePartitioning::EnvironmentAndCommandRuntime,
             ))
         }
@@ -2879,7 +2942,7 @@ async fn caching_resolver_skips_runtime_sensitive_cache_with_ambient_runtime() -
             prepared: Self::Prepared,
             context: SecretResolutionContext<'_>,
         ) -> Result<SecretString> {
-            self.resolve_secret(prepared.as_str(), context).await
+            self.resolve_secret_spec(&prepared, context).await
         }
     }
 
@@ -2890,8 +2953,12 @@ async fn caching_resolver_skips_runtime_sensitive_cache_with_ambient_runtime() -
         ..TestEnv::default()
     };
 
-    let first = resolver.resolve_secret_text("PATH", &environment).await?;
-    let second = resolver.resolve_secret_text("PATH", &environment).await?;
+    let first = resolver
+        .resolve_secret_text(&test_env_spec("PATH"), &environment)
+        .await?;
+    let second = resolver
+        .resolve_secret_text(&test_env_spec("PATH"), &environment)
+        .await?;
 
     assert!(!first.is_empty(), "ambient PATH should be non-empty");
     assert_eq!(first, second);
@@ -2955,9 +3022,9 @@ async fn caching_resolver_skips_cache_with_empty_scope() -> Result<()> {
     }
 
     impl SecretResolver for EmptyScopeResolver {
-        fn resolve_secret<'a>(
+        fn resolve_secret_spec<'a>(
             &'a self,
-            _spec: &'a str,
+            _spec: &'a SecretSpec,
             _context: SecretResolutionContext<'a>,
         ) -> SecretResolveFuture<'a> {
             Box::pin(async move {
@@ -2970,9 +3037,9 @@ async fn caching_resolver_skips_cache_with_empty_scope() -> Result<()> {
     impl CacheAwareSecretResolver for EmptyScopeResolver {
         type Prepared = ();
 
-        async fn prepare_secret_resolution(
+        async fn prepare_secret_spec_resolution(
             &self,
-            _spec: &str,
+            _spec: &SecretSpec,
             _context: SecretResolutionContext<'_>,
         ) -> Result<PreparedSecretResolution<Self::Prepared>> {
             Ok(PreparedSecretResolution::cached((), ""))
@@ -2983,7 +3050,8 @@ async fn caching_resolver_skips_cache_with_empty_scope() -> Result<()> {
             _prepared: Self::Prepared,
             context: SecretResolutionContext<'_>,
         ) -> Result<SecretString> {
-            self.resolve_secret("", context).await
+            self.resolve_secret_spec(&SecretSpec::Env { key: String::new() }, context)
+                .await
         }
     }
 
@@ -2991,8 +3059,12 @@ async fn caching_resolver_skips_cache_with_empty_scope() -> Result<()> {
         CachingSecretResolver::new(EmptyScopeResolver::default(), Duration::from_secs(60));
     let env = TestEnv::default();
 
-    let first = resolver.resolve_secret_text("empty-scope", &env).await?;
-    let second = resolver.resolve_secret_text("empty-scope", &env).await?;
+    let first = resolver
+        .resolve_secret_text(&test_env_spec("EMPTY_SCOPE"), &env)
+        .await?;
+    let second = resolver
+        .resolve_secret_text(&test_env_spec("EMPTY_SCOPE"), &env)
+        .await?;
 
     assert_eq!(first, "value-1");
     assert_eq!(second, "value-2");
@@ -3048,8 +3120,9 @@ async fn default_caching_resolver_refreshes_when_file_contents_change_without_me
 #[tokio::test]
 async fn default_prepared_resolution_keeps_absolute_files_uncached() -> Result<()> {
     let (_dir, spec) = temp_file_spec("cached.txt", b"cached").await?;
+    let spec = SecretSpec::parse(&spec)?;
 
-    let prepared = prepare_default_secret_resolution(&spec).await?;
+    let prepared = prepare_default_secret_spec_resolution(spec);
 
     assert!(prepared.cache_scope().is_none());
     Ok(())
@@ -3061,8 +3134,9 @@ async fn default_prepared_resolution_reads_file_at_resolve_time() -> Result<()> 
     let path = dir.path().join("cached.txt");
     tokio::fs::write(&path, b"v1").await?;
     let spec = format!("secret://file?path={}", path.to_string_lossy());
+    let spec = SecretSpec::parse(&spec)?;
 
-    let prepared = prepare_default_secret_resolution(&spec).await?;
+    let prepared = prepare_default_secret_spec_resolution(spec);
     tokio::fs::write(&path, b"v2").await?;
 
     let env = TestEnv::default();
@@ -3078,7 +3152,8 @@ async fn default_prepared_resolution_reads_file_at_resolve_time() -> Result<()> 
 
 #[tokio::test]
 async fn default_prepared_resolution_leaves_env_specs_uncached() -> Result<()> {
-    let prepared = prepare_default_secret_resolution("secret://env/TEST_SECRET").await?;
+    let prepared =
+        prepare_default_secret_spec_resolution(SecretSpec::parse("secret://env/TEST_SECRET")?);
 
     assert!(prepared.cache_scope().is_none());
     Ok(())
@@ -3087,11 +3162,26 @@ async fn default_prepared_resolution_leaves_env_specs_uncached() -> Result<()> {
 #[tokio::test]
 async fn default_secret_resolver_does_not_hint_file_cache_scope() -> Result<()> {
     let (_dir, spec) = temp_file_spec("cached.txt", b"cached").await?;
+    let spec = SecretSpec::parse(&spec)?;
     let env = TestEnv::default();
     let hint = DefaultSecretResolver
-        .lookup_secret_cache_scope(&spec, SecretResolutionContext::new(&env, &env))?;
+        .lookup_secret_cache_scope_for_spec(&spec, SecretResolutionContext::new(&env, &env))?;
 
     assert_eq!(hint, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolve_secret_spec_helper_resolves_parsed_secret() -> Result<()> {
+    let env = TestEnv {
+        vars: BTreeMap::from([("TEST_SECRET".to_string(), "ok".to_string())]),
+        ..TestEnv::default()
+    };
+    let spec = SecretSpec::parse("secret://env/TEST_SECRET")?;
+
+    let value = resolve_secret_spec(&spec, &env).await?;
+
+    assert_eq!(value.expose_secret(), "ok");
     Ok(())
 }
 

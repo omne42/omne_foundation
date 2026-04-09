@@ -39,15 +39,15 @@ impl std::error::Error for ClassifiedError {
 #[derive(Debug)]
 pub struct SinkFailure {
     index: usize,
-    sink_name: &'static str,
+    sink_id: String,
     error: Box<Error>,
 }
 
 impl SinkFailure {
-    pub fn new(index: usize, sink_name: &'static str, error: Error) -> Self {
+    pub fn new(index: usize, sink_id: impl Into<String>, error: Error) -> Self {
         Self {
             index,
-            sink_name,
+            sink_id: sink_id.into(),
             error: Box::new(error),
         }
     }
@@ -58,8 +58,13 @@ impl SinkFailure {
     }
 
     #[must_use]
-    pub fn sink_name(&self) -> &'static str {
-        self.sink_name
+    pub fn sink_id(&self) -> &str {
+        self.sink_id.as_str()
+    }
+
+    #[must_use]
+    pub fn sink_name(&self) -> &str {
+        self.sink_id()
     }
 
     #[must_use]
@@ -71,9 +76,9 @@ impl SinkFailure {
 impl std::fmt::Display for SinkFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if f.alternate() {
-            write!(f, "- {}: {:#}", self.sink_name, self.error)
+            write!(f, "- {}: {:#}", self.sink_id(), self.error)
         } else {
-            write!(f, "- {}: {}", self.sink_name, self.error)
+            write!(f, "- {}: {}", self.sink_id(), self.error)
         }
     }
 }
@@ -264,6 +269,9 @@ mod tests {
             "bad",
             Error::from(anyhow::Error::new(std::io::Error::other("dial failed"))),
         );
+
+        assert_eq!(failure.sink_id(), "bad");
+        assert_eq!(failure.sink_name(), "bad");
 
         let source = failure.source().expect("sink failure source");
         assert_eq!(source.to_string(), "dial failed");

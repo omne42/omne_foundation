@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -123,7 +123,7 @@ struct HubInner {
 
 struct HubSink {
     sink: Arc<dyn Sink>,
-    name: &'static str,
+    identity: String,
     state: AtomicU8,
 }
 
@@ -131,7 +131,7 @@ struct HubSink {
 #[repr(u8)]
 enum HubSinkState {
     Ready = 0,
-    NamePanicked = 1,
+    IdentityPanicked = 1,
     Poisoned = 2,
 }
 
@@ -139,7 +139,7 @@ impl HubSinkState {
     fn from_u8(value: u8) -> Self {
         match value {
             x if x == Self::Ready as u8 => Self::Ready,
-            x if x == Self::NamePanicked as u8 => Self::NamePanicked,
+            x if x == Self::IdentityPanicked as u8 => Self::IdentityPanicked,
             x if x == Self::Poisoned as u8 => Self::Poisoned,
             _ => unreachable!("invalid hub sink state"),
         }
@@ -147,16 +147,16 @@ impl HubSinkState {
 }
 
 impl HubSink {
-    const UNKNOWN_SINK_NAME: &str = "<unknown>";
+    const UNKNOWN_SINK_IDENTITY: &str = "<unknown>";
 
     fn state(&self) -> HubSinkState {
         HubSinkState::from_u8(self.state.load(Ordering::Acquire))
     }
 
-    fn report_name_panic_once(&self) -> bool {
+    fn report_identity_panic_once(&self) -> bool {
         self.state
             .compare_exchange(
-                HubSinkState::NamePanicked as u8,
+                HubSinkState::IdentityPanicked as u8,
                 HubSinkState::Poisoned as u8,
                 Ordering::AcqRel,
                 Ordering::Acquire,
@@ -195,21 +195,26 @@ impl Hub {
         let limits = HubLimits::default()
             .with_max_inflight_events(limits.max_inflight_events)
             .with_max_sink_sends_in_parallel(limits.max_sink_sends_in_parallel);
-        let sinks = sinks
+        let mut sinks: Vec<_> = sinks
             .into_iter()
             .map(|sink| {
-                let (name, state) = match std::panic::catch_unwind(AssertUnwindSafe(|| sink.name()))
-                {
-                    Ok(name) => (name, HubSinkState::Ready),
-                    Err(_) => (HubSink::UNKNOWN_SINK_NAME, HubSinkState::NamePanicked),
+                let (identity, state) = match std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    sink.identity().into_owned()
+                })) {
+                    Ok(identity) => (identity, HubSinkState::Ready),
+                    Err(_) => (
+                        HubSink::UNKNOWN_SINK_IDENTITY.to_string(),
+                        HubSinkState::IdentityPanicked,
+                    ),
                 };
                 HubSink {
                     sink,
-                    name,
+                    identity,
                     state: AtomicU8::new(state as u8),
                 }
             })
             .collect();
+        assign_distinct_sink_identities(&mut sinks);
         let inner = HubInner {
             enabled_kinds: config
                 .enabled_kinds
@@ -345,19 +350,19 @@ impl HubInner {
         idx: usize,
         sink: &HubSink,
         event: &Event,
-    ) -> (usize, &'static str, crate::Result<()>) {
-        let name = sink.name;
+    ) -> (usize, String, crate::Result<()>) {
+        let identity = sink.identity.clone();
 
         match sink.state() {
             HubSinkState::Ready => {}
-            HubSinkState::NamePanicked => {
-                return if sink.report_name_panic_once() {
-                    (idx, name, Err(anyhow::anyhow!("sink panicked").into()))
+            HubSinkState::IdentityPanicked => {
+                return if sink.report_identity_panic_once() {
+                    (idx, identity, Err(anyhow::anyhow!("sink panicked").into()))
                 } else {
-                    (idx, name, Ok(()))
+                    (idx, identity, Ok(()))
                 };
             }
-            HubSinkState::Poisoned => return (idx, name, Ok(())),
+            HubSinkState::Poisoned => return (idx, identity, Ok(())),
         }
 
         let result = AssertUnwindSafe(async move {
@@ -368,10 +373,10 @@ impl HubInner {
         .catch_unwind()
         .await;
         match result {
-            Ok(result) => (idx, name, result),
+            Ok(result) => (idx, identity, result),
             Err(_) => {
                 sink.poison();
-                (idx, name, Err(anyhow::anyhow!("sink panicked").into()))
+                (idx, identity, Err(anyhow::anyhow!("sink panicked").into()))
             }
         }
     }
@@ -384,14 +389,15 @@ impl HubInner {
 
         let timeout = self.per_sink_timeout;
         if self.sinks.len() == 1 {
-            let (_idx, name, result) = Self::send_one_sink(timeout, 0, &self.sinks[0], event).await;
+            let (_idx, identity, result) =
+                Self::send_one_sink(timeout, 0, &self.sinks[0], event).await;
             if let Err(err) = result {
-                return Err(Self::build_failures_error(vec![(0, name, err)]));
+                return Err(Self::build_failures_error(vec![(0, identity, err)]));
             }
             return Ok(());
         }
 
-        let mut failures: Vec<(usize, &'static str, crate::Error)> = Vec::new();
+        let mut failures: Vec<(usize, String, crate::Error)> = Vec::new();
         let max_parallel = self.max_sink_sends_in_parallel.max(1);
         let mut sink_iter = self.sinks.iter().enumerate();
 
@@ -403,9 +409,9 @@ impl HubInner {
             pending.push(Self::send_one_sink(timeout, idx, hub_sink, event));
         }
 
-        while let Some((idx, name, result)) = pending.next().await {
+        while let Some((idx, identity, result)) = pending.next().await {
             if let Err(err) = result {
-                failures.push((idx, name, err));
+                failures.push((idx, identity, err));
             }
             if let Some((next_idx, next_hub_sink)) = sink_iter.next() {
                 pending.push(Self::send_one_sink(timeout, next_idx, next_hub_sink, event));
@@ -419,9 +425,7 @@ impl HubInner {
         Err(Self::build_failures_error(failures))
     }
 
-    fn build_failures_error(
-        mut failures: Vec<(usize, &'static str, crate::Error)>,
-    ) -> crate::Error {
+    fn build_failures_error(mut failures: Vec<(usize, String, crate::Error)>) -> crate::Error {
         if failures.len() > 1 {
             failures.sort_unstable_by_key(|(idx, _, _)| *idx);
         }
@@ -434,8 +438,44 @@ impl HubInner {
     }
 }
 
+fn assign_distinct_sink_identities(sinks: &mut [HubSink]) {
+    let mut totals = HashMap::<String, usize>::new();
+    for sink in sinks.iter() {
+        *totals.entry(sink.identity.clone()).or_default() += 1;
+    }
+
+    let mut reserved = HashSet::<String>::new();
+    for sink in sinks.iter() {
+        if totals.get(&sink.identity).copied().unwrap_or_default() == 1 {
+            reserved.insert(sink.identity.clone());
+        }
+    }
+
+    let mut seen = HashMap::<String, usize>::new();
+    for sink in sinks.iter_mut() {
+        let Some(total) = totals.get(&sink.identity).copied() else {
+            continue;
+        };
+        if total <= 1 {
+            continue;
+        }
+
+        let base = sink.identity.clone();
+        let ordinal = seen.entry(base.clone()).or_default();
+        loop {
+            *ordinal += 1;
+            let candidate = format!("{base}#{}", *ordinal);
+            if reserved.insert(candidate.clone()) {
+                sink.identity = candidate;
+                break;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
     use std::collections::BTreeSet;
     use std::error::Error as _;
     use std::sync::Arc;
@@ -797,6 +837,173 @@ mod tests {
             let first = msg.find("- first:").expect("contains first");
             let second = msg.find("- second:").expect("contains second");
             assert!(first < second, "{msg}");
+        });
+    }
+
+    #[test]
+    fn send_disambiguates_duplicate_sink_labels() {
+        #[derive(Debug)]
+        struct DuplicateSink;
+
+        impl Sink for DuplicateSink {
+            fn name(&self) -> &'static str {
+                "dup"
+            }
+
+            fn send<'a>(&'a self, _event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
+                Box::pin(async move { Err(anyhow::anyhow!("boom").into()) })
+            }
+        }
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(DuplicateSink), Arc::new(DuplicateSink)];
+            let hub = Hub::new(HubConfig::default(), sinks);
+
+            let err = hub
+                .send(Event::new("kind", Severity::Info, "title"))
+                .await
+                .expect_err("expected sink failure");
+
+            let failures = err.sink_failures().expect("structured sink failures");
+            assert_eq!(failures[0].sink_name(), "dup#1");
+            assert_eq!(failures[1].sink_name(), "dup#2");
+
+            let msg = err.to_string();
+            assert!(msg.contains("- dup#1: boom"), "{msg}");
+            assert!(msg.contains("- dup#2: boom"), "{msg}");
+        });
+    }
+
+    #[test]
+    fn send_prefers_custom_sink_labels_over_static_names() {
+        #[derive(Debug)]
+        struct LabeledSink;
+
+        impl Sink for LabeledSink {
+            fn name(&self) -> &'static str {
+                "generic"
+            }
+
+            fn label(&self) -> Cow<'_, str> {
+                Cow::Borrowed("generic(repo=docs)")
+            }
+
+            fn send<'a>(&'a self, _event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
+                Box::pin(async move { Err(anyhow::anyhow!("boom").into()) })
+            }
+        }
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(LabeledSink)];
+            let hub = Hub::new(HubConfig::default(), sinks);
+
+            let err = hub
+                .send(Event::new("kind", Severity::Info, "title"))
+                .await
+                .expect_err("expected sink failure");
+
+            let failures = err.sink_failures().expect("structured sink failures");
+            assert_eq!(failures[0].sink_name(), "generic(repo=docs)");
+        });
+    }
+
+    #[test]
+    fn send_prefers_explicit_sink_identity_over_label() {
+        #[derive(Debug)]
+        struct IdentifiedSink;
+
+        impl Sink for IdentifiedSink {
+            fn name(&self) -> &'static str {
+                "generic"
+            }
+
+            fn label(&self) -> Cow<'_, str> {
+                Cow::Borrowed("generic")
+            }
+
+            fn identity(&self) -> Cow<'_, str> {
+                Cow::Borrowed("generic(repo=docs)")
+            }
+
+            fn send<'a>(&'a self, _event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
+                Box::pin(async move { Err(anyhow::anyhow!("boom").into()) })
+            }
+        }
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(IdentifiedSink)];
+            let hub = Hub::new(HubConfig::default(), sinks);
+
+            let err = hub
+                .send(Event::new("kind", Severity::Info, "title"))
+                .await
+                .expect_err("expected sink failure");
+
+            let failures = err.sink_failures().expect("structured sink failures");
+            assert_eq!(failures[0].sink_id(), "generic(repo=docs)");
+            assert_eq!(failures[0].sink_name(), "generic(repo=docs)");
+            assert!(err.to_string().contains("- generic(repo=docs): boom"));
+        });
+    }
+
+    #[test]
+    fn send_disambiguates_duplicate_identities_around_existing_suffixes() {
+        #[derive(Debug)]
+        struct CollisionSink {
+            identity: &'static str,
+        }
+
+        impl Sink for CollisionSink {
+            fn name(&self) -> &'static str {
+                "dup"
+            }
+
+            fn identity(&self) -> Cow<'_, str> {
+                Cow::Borrowed(self.identity)
+            }
+
+            fn send<'a>(&'a self, _event: &'a Event) -> BoxFuture<'a, crate::Result<()>> {
+                Box::pin(async move { Err(anyhow::anyhow!("boom").into()) })
+            }
+        }
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let sinks: Vec<Arc<dyn Sink>> = vec![
+                Arc::new(CollisionSink { identity: "dup" }),
+                Arc::new(CollisionSink { identity: "dup" }),
+                Arc::new(CollisionSink { identity: "dup#1" }),
+            ];
+            let hub = Hub::new(HubConfig::default(), sinks);
+
+            let err = hub
+                .send(Event::new("kind", Severity::Info, "title"))
+                .await
+                .expect_err("expected sink failure");
+
+            let failures = err.sink_failures().expect("structured sink failures");
+            assert_eq!(failures[0].sink_id(), "dup#2");
+            assert_eq!(failures[1].sink_id(), "dup#3");
+            assert_eq!(failures[2].sink_id(), "dup#1");
         });
     }
 

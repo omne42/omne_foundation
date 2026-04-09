@@ -758,6 +758,8 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     use tokio::sync::oneshot;
 
+    #[cfg(not(windows))]
+    use crate::test_support::{CurrentDirRestoreGuard, cwd_test_guard_async};
     use crate::{
         ClientConfig, Config, Manager, McpRequest, ProtocolVersionCheck, ServerConfig, ServerName,
         ServerRequestHandler, ServerRequestOutcome, SharedManager, TrustMode,
@@ -784,44 +786,17 @@ mod tests {
     fn absolute_test_cwd() -> &'static Path {
         static CWD: OnceLock<PathBuf> = OnceLock::new();
         CWD.get_or_init(|| {
-            std::env::current_dir()
-                .expect("shared manager tests require an absolute current directory")
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .nth(2)
+                .expect("mcp-kit tests require a stable workspace root")
+                .to_path_buf()
         })
         .as_path()
     }
 
     fn test_workspace_path(name: &str) -> PathBuf {
         absolute_test_cwd().join("workspace").join(name)
-    }
-
-    #[cfg(not(windows))]
-    async fn cwd_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
-        static GUARD: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-        GUARD
-            .get_or_init(|| tokio::sync::Mutex::new(()))
-            .lock()
-            .await
-    }
-
-    #[cfg(not(windows))]
-    struct CurrentDirRestoreGuard {
-        original_cwd: PathBuf,
-    }
-
-    #[cfg(not(windows))]
-    impl CurrentDirRestoreGuard {
-        fn capture() -> Self {
-            Self {
-                original_cwd: std::env::current_dir().expect("original cwd"),
-            }
-        }
-    }
-
-    #[cfg(not(windows))]
-    impl Drop for CurrentDirRestoreGuard {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.original_cwd);
-        }
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -847,7 +822,13 @@ mod tests {
     ) {
         manager.record_connection_cwd(server_name, cwd).unwrap();
         manager
-            .record_connection_server_config(server_name, config.server(server_name).unwrap())
+            .record_connection_server_config_effective_with_base(
+                server_name,
+                config.server(server_name).unwrap(),
+                cwd,
+                None,
+                Some(cwd),
+            )
             .unwrap();
     }
 
@@ -3355,7 +3336,7 @@ mod tests {
     #[cfg(not(windows))]
     #[tokio::test]
     async fn shared_manager_request_resolves_relative_cwd_from_config_thread_root() {
-        let _guard = cwd_test_guard().await;
+        let _guard = cwd_test_guard_async().await;
         let _cwd_restore = CurrentDirRestoreGuard::capture();
         let tempdir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
@@ -3433,7 +3414,13 @@ mod tests {
             )
             .expect("record cwd identity");
         manager
-            .record_connection_server_config("srv", config.server("srv").expect("config server"))
+            .record_connection_server_config_effective_with_base(
+                "srv",
+                config.server("srv").expect("config server"),
+                Path::new("workspace/demo"),
+                config.thread_root(),
+                config.thread_root(),
+            )
             .expect("record config identity");
 
         let shared = manager.into_shared();

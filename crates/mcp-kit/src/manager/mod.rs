@@ -967,8 +967,33 @@ impl Manager {
         server_config: &ServerConfig,
     ) -> anyhow::Result<()> {
         let server_name = parse_server_name_anyhow(server_name)?;
-        self.connection_server_configs
-            .insert(server_name, raw_server_config_identity(server_config));
+        let identity = if let Some(cwd) = self.connection_cwds.get(server_name.as_str()) {
+            let mut ctx = self.connect_context_for_identity();
+            ctx.stdout_log_root = Some(cwd.clone());
+            effective_server_config_identity(&ctx, server_name.as_str(), server_config, cwd)?
+        } else {
+            raw_server_config_identity(server_config)
+        };
+        self.connection_server_configs.insert(server_name, identity);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_connection_server_config_effective_with_base(
+        &mut self,
+        server_name: &str,
+        server_config: &ServerConfig,
+        cwd: &Path,
+        cwd_base: Option<&Path>,
+        stdout_log_root: Option<&Path>,
+    ) -> anyhow::Result<()> {
+        let server_name = parse_server_name_anyhow(server_name)?;
+        let cwd = resolve_connection_cwd_with_base(cwd_base, cwd)?;
+        let mut ctx = self.connect_context_for_identity();
+        ctx.stdout_log_root = stdout_log_root.map(Path::to_path_buf);
+        let identity =
+            effective_server_config_identity(&ctx, server_name.as_str(), server_config, &cwd)?;
+        self.connection_server_configs.insert(server_name, identity);
         Ok(())
     }
 

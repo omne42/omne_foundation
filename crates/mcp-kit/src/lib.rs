@@ -55,6 +55,47 @@ mod server_name;
 mod session;
 mod shared_manager;
 
+#[cfg(all(test, not(windows)))]
+pub(crate) mod test_support {
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+
+    fn cwd_mutex() -> &'static tokio::sync::Mutex<()> {
+        static GUARD: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        GUARD.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    pub(crate) fn cwd_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        cwd_mutex().blocking_lock()
+    }
+
+    pub(crate) async fn cwd_test_guard_async() -> tokio::sync::MutexGuard<'static, ()> {
+        cwd_mutex().lock().await
+    }
+
+    pub(crate) struct CurrentDirRestoreGuard {
+        original_cwd: PathBuf,
+    }
+
+    impl CurrentDirRestoreGuard {
+        pub(crate) fn capture() -> Self {
+            Self {
+                original_cwd: std::env::current_dir().expect("original cwd"),
+            }
+        }
+
+        pub(crate) fn restore_now(&self) {
+            std::env::set_current_dir(&self.original_cwd).expect("restore original cwd early");
+        }
+    }
+
+    impl Drop for CurrentDirRestoreGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original_cwd);
+        }
+    }
+}
+
 pub use config::{
     ClientConfig, Config, ConfigLoadPolicy, Root, ServerConfig, StdioServerConfigMut,
     StdioServerConfigRef, StdoutLogConfig, StreamableHttpServerConfigMut,

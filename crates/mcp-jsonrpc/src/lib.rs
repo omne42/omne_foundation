@@ -109,14 +109,12 @@ impl Default for SpawnOptions {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum StreamableHttpProxyMode {
     /// Ignore proxy environment variables such as `HTTP_PROXY` / `HTTPS_PROXY`.
-    ///
-    /// This remains the safer default for generic or untrusted streamable HTTP transports.
-    #[default]
     IgnoreSystem,
     /// Allow `reqwest` to read the process proxy environment.
     ///
     /// Note: when `StreamableHttpOptions.enforce_public_ip` is true, the pinned public-IP path
     /// still disables proxies so the socket cannot be redirected to an intermediate endpoint.
+    #[default]
     UseSystem,
 }
 
@@ -151,7 +149,7 @@ impl Default for StreamableHttpOptions {
         Self {
             headers: HashMap::new(),
             enforce_public_ip: false,
-            proxy_mode: StreamableHttpProxyMode::IgnoreSystem,
+            proxy_mode: StreamableHttpProxyMode::default(),
             connect_timeout: Some(Duration::from_secs(10)),
             request_timeout: None,
             follow_redirects: false,

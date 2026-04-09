@@ -246,7 +246,11 @@ fn ends_with_ignore_ascii_case(haystack: &str, suffix: &str) -> bool {
         .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
 }
 
-fn host_matches_allowlist(host: &str, allowed: &str) -> bool {
+/// Returns whether `host` matches an allowlist entry.
+///
+/// Hostname entries match the exact hostname plus any subdomain boundary
+/// underneath it. IP-literal entries must match exactly.
+pub fn host_matches_allowlist(host: &str, allowed: &str) -> bool {
     let host = host.trim().trim_end_matches('.');
     let allowed = allowed.trim().trim_end_matches('.');
     if allowed.is_empty() {

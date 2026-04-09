@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Fix `read_json_body_after_http_success_limited(...)` so non-2xx error summaries honor the caller-provided `max_bytes` limit instead of silently falling back to the crate default cap.
+- Export the shared host allowlist matcher so downstream crates can reuse the same exact-host/IP and subdomain-boundary semantics instead of drifting into private reimplementations.
 - Return typed transport errors instead of panicking when DNS timeout paths run on a Tokio runtime without the time driver enabled, and keep regression coverage for both untrusted outbound validation and public-IP-pinned client selection.
 - Keep untrusted DNS post-validation rejecting always-disallowed targets such as multicast addresses even when `allow_private_ips=true`, so hostnames cannot widen past the hard IP denylist.
 - Replace the public `http-kit::Error` wrapper's opaque `anyhow::Error` storage with a structured `kind + message + optional source` boundary, so downstream crates can match stable failure classes without inheriting `anyhow` as the effective public contract.

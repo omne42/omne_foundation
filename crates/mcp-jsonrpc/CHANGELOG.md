@@ -10,6 +10,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `mcp-jsonrpc`：`streamable_http` 的成功 JSON body 现在在 `request_timeout=None` 且响应未声明长度时，会在读到完整 JSON 文档后立即返回；keep-alive 但不关连接的服务端不再把成功请求无限挂住。
 - `mcp-jsonrpc` manifest 现在为内部 path 依赖补上显式 version 约束，并显式标记 `publish = false`；在 runtime primitives 形成独立发布链之前，crate 不再把 Git/monorepo 复用边界伪装成 crates.io 可直接发布。
 - `mcp-jsonrpc`：`IncomingRequest` 现在用显式 owner 计数而不是 `Arc::strong_count()` 判断“最后一个未响应 clone 被 drop”，并补上并发 drop 回归测试；handler clone 并发释放时不再因为竞态漏发自动 `internal error` 响应。
+- `mcp-jsonrpc`：`spawn_detached_falls_back_when_shared_worker_drops_task_before_start` 回归测试现在会先 reset detached runtime 的注入/worker 状态，再验证 worker-drop fallback；同模块前序测试不再通过残留全局状态把这条用例误打成 `Disconnected` 假阴性。
 - `mcp-jsonrpc`：no-runtime detached fallback 现在显式保留“每任务独立 fallback thread + runtime”的隔离语义，并补上 fallback 线程创建失败注入；`schedule_close_once(...)` 与 dropped-request 回归测试现在覆盖“helper/thread 起不来时 fail-closed 但不 panic”以及“一个阻塞 fallback 任务不会把后续 close/response/batch flush 串行拖死”。
 - `mcp-jsonrpc`：`stdout_log` 的 capability-style open 现在按平台条件导入 `OpenOptionsExt`；Unix 继续保留 `mode(0o600)` 权限收敛，Windows 不再因未使用 import 被 `-D warnings` 门禁拦下。
 - `mcp-jsonrpc`：`stdout_log_creates_missing_parent_dirs` 回归测试现在在读取文件前显式 flush；断言不再依赖 Tokio 文件句柄 drop 时机，避免 Linux CI 上出现假阴性。

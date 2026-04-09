@@ -1385,6 +1385,7 @@ mod stats_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let spawner = test_detached_spawner();
+        crate::background_runtime::reset_detached_runtime_test_state();
         crate::background_runtime::force_shared_worker_drop_before_start(1);
 
         let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();

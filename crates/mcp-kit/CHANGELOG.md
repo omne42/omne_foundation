@@ -51,6 +51,7 @@
 - `mcp-kit`：strict 协议协商现在要求 `initialize.result.protocolVersion` 必须存在且是字符串；缺失该字段的服务端不再被误接入成功。
 
 ### Changed
+- `mcp-kit`：`streamable_http` 文档现在明确 `request_timeout` 只约束单次 POST 的 send 与非流式响应读取；POST 成功返回 `text/event-stream` 时，持续产出的 SSE 响应流本身不受总时长限制，避免文档继续和 `mcp-jsonrpc` 的既有行为/回归测试相冲突。
 - `mcp-kit`：`Manager` 的高层 convenience wrapper 现在拆到独立的 `manager/convenience.rs`，并与 `Session` 一起统一复用 `mcp.rs` 中已有的 typed MCP method metadata/params 序列化 helper，减少 `manager/mod.rs` 神对象继续膨胀，也避免同一批 method string 与 JSON payload 在两条入口上漂移。
 - `Manager::from_config` 的契约现在显式收紧为“只接受已校验 `Config`”：仍保留原返回类型，但会在构造期 panic 并提示改用 `try_from_config` 获取 typed 错误。
 - `mcp-kit`：新补的“非 `NotFound` 文件系统错误上抛”回归测试改为 Unix 专属，避免把 Windows 路径解析差异误报成实现回归；产品行为不变。

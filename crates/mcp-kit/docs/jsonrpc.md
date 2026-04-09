@@ -106,7 +106,7 @@ if let Some(status) = status {
 
 - `headers`：额外 header
 - `connect_timeout`：建立连接超时（默认 10s）
-- `request_timeout`：用于单次 POST 的 send/response（包括 POST 返回 SSE 时的响应流）；不要用于限制主 SSE（GET）长连接
+- `request_timeout`：用于单次 POST 的 send，以及非流式响应体读取；如果 POST 成功返回 `text/event-stream`，该 SSE 响应流本身不受总时长限制。不要用于限制主 SSE（GET）长连接
 - `follow_redirects`：是否跟随 HTTP redirects（默认 `false`，减少 SSRF 风险）
 - `error_body_preview_bytes`：HTTP 错误/非 JSON 响应时，桥接到 JSON-RPC error data 的 body 预览最大字节数（默认 `0`，避免意外泄露）
 

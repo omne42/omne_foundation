@@ -56,6 +56,7 @@
 - `mcp-kit`：`streamable_http.http_headers` 现在允许合法的空字符串 value，保持和 HTTP 头语义一致；仍继续拒绝空 key、保留 transport-owned header 和非法 header value。
 
 ### Changed
+- `mcp-kit`：relative unix socket 连接回归测试现在改用更短的临时目录和 socket 文件名，并支持 `OMNE_TEST_SHORT_TMPDIR` 覆盖；workspace `ci` 在较长 worktree 路径下不再因为 `SUN_LEN` 限制偶发失败。
 - `mcp-kit`：`streamable_http` 文档现在明确 `request_timeout` 只约束单次 POST 的 send 与非流式响应读取；POST 成功返回 `text/event-stream` 时，持续产出的 SSE 响应流本身不受总时长限制，避免文档继续和 `mcp-jsonrpc` 的既有行为/回归测试相冲突。
 - `mcp-kit`：`Manager` 的高层 convenience wrapper 现在拆到独立的 `manager/convenience.rs`，并与 `Session` 一起统一复用 `mcp.rs` 中已有的 typed MCP method metadata/params 序列化 helper，减少 `manager/mod.rs` 神对象继续膨胀，也避免同一批 method string 与 JSON payload 在两条入口上漂移。
 - `Manager::from_config` 的契约现在显式收紧为“只接受已校验 `Config`”：仍保留原返回类型，但会在构造期 panic 并提示改用 `try_from_config` 获取 typed 错误。

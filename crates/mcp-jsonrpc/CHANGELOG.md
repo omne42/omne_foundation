@@ -39,6 +39,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `Limits::max_message_bytes` 现在重新同时约束出站 request / notification / response 的序列化大小；超限帧会在写入前 fail-fast 返回稳定错误，避免配置名和实际行为继续脱节。
 - `mcp-jsonrpc`：`ClientHandle::close_reason()` 的文档现在明确它只暴露 first-writer best-effort close diagnostics；并发关闭路径里哪一个 source 先写入并不构成稳定契约。
 - `mcp-jsonrpc`：`StreamableHttpOptions.proxy_mode` 现在真正贯通到底层 HTTP client；显式选择 `UseSystem` 时会读取系统代理环境，只有 `enforce_public_ip` 的 pinned socket 路径仍会继续禁用代理。
+- `mcp-jsonrpc`：`StreamableHttpOptions` 默认代理模式现在改为 `UseSystem`，依赖 `HTTP_PROXY` / `HTTPS_PROXY` 的环境不再需要额外配置才能使用 streamable HTTP；只有显式 `IgnoreSystem` 或 public-IP pinning 路径才会继续禁用代理。
 - `mcp-jsonrpc`：`streamable_http` 的独立 SSE 读侧现在会在正常 EOF 后自动重连，而不是把整个 transport 直接关闭；会 idle-close/轮换 SSE 的服务端不会再把客户端无谓打死。
 - `mcp-jsonrpc`：`streamable_http` 的 SSE 唤醒信号改为无丢失传递，`SessionChanged` 不会再被排队中的 `Connect` 挤掉，活跃 SSE 在 session rollover 后会可靠切到新会话。
 - `mcp-jsonrpc`：入站 server notification 在本地通知队列过载或接收端已关闭时不再静默丢弃；transport 现在会记录 stats 并主动关闭连接，把数据丢失显式暴露给调用方。

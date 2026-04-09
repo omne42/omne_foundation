@@ -36,6 +36,20 @@ fn test_client_handle(write: impl tokio::io::AsyncWrite + Send + Unpin + 'static
     }
 }
 
+#[test]
+fn streamable_http_options_default_to_system_proxy_support() {
+    let options = StreamableHttpOptions::default();
+    assert_eq!(options.proxy_mode, StreamableHttpProxyMode::UseSystem);
+}
+
+#[test]
+fn streamable_http_proxy_mode_default_uses_system_proxy_support() {
+    assert_eq!(
+        StreamableHttpProxyMode::default(),
+        StreamableHttpProxyMode::UseSystem
+    );
+}
+
 struct AlwaysFailWrite;
 
 impl tokio::io::AsyncWrite for AlwaysFailWrite {

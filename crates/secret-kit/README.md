@@ -59,7 +59,7 @@
   - `SecretString`
   - `SecretError`
   - 运行时 trait
-  - `SecretResolver` / `CacheAwareSecretResolver` 的 typed `SecretSpec` 边界
+  - `SecretResolver` / `CacheAwareSecretResolver` 的 typed `SecretSpec` 边界，以及对既有 `&str` 实现的兼容转发
   - 默认 resolver 主体
 - `src/spec.rs`
   - `secret://` 解析、typed `SecretSpec` helper、provider 分派、命令构建

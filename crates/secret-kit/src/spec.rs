@@ -93,6 +93,86 @@ impl std::fmt::Debug for SecretSpec {
     }
 }
 
+impl std::fmt::Display for SecretSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("secret://")?;
+        match self {
+            Self::Env { key } => write!(f, "env/{}", encode_secret_component(key)),
+            Self::File { path } => write!(f, "file?path={}", encode_secret_component(path)),
+            Self::Vault {
+                path,
+                field,
+                namespace,
+            } => {
+                write!(f, "vault/{}", encode_secret_component(path))?;
+                let mut first = true;
+                if field != "token" {
+                    write_query_param(f, &mut first, "field", field)?;
+                }
+                if let Some(namespace) = namespace {
+                    write_query_param(f, &mut first, "namespace", namespace)?;
+                }
+                Ok(())
+            }
+            Self::AwsSecretsManager {
+                secret_id,
+                region,
+                profile,
+                json_key,
+            } => {
+                write!(f, "aws-sm/{}", encode_secret_component(secret_id))?;
+                let mut first = true;
+                if let Some(region) = region {
+                    write_query_param(f, &mut first, "region", region)?;
+                }
+                if let Some(profile) = profile {
+                    write_query_param(f, &mut first, "profile", profile)?;
+                }
+                if let Some(json_key) = json_key {
+                    write_query_param(f, &mut first, "json_key", json_key)?;
+                }
+                Ok(())
+            }
+            Self::GcpSecretManager {
+                secret,
+                project,
+                version,
+                json_key,
+            } => {
+                write!(f, "gcp-sm/{}", encode_secret_component(secret))?;
+                let mut first = true;
+                if let Some(project) = project {
+                    write_query_param(f, &mut first, "project", project)?;
+                }
+                if version != "latest" {
+                    write_query_param(f, &mut first, "version", version)?;
+                }
+                if let Some(json_key) = json_key {
+                    write_query_param(f, &mut first, "json_key", json_key)?;
+                }
+                Ok(())
+            }
+            Self::AzureKeyVault {
+                vault,
+                name,
+                version,
+            } => {
+                write!(
+                    f,
+                    "azure-kv/{}/{}",
+                    encode_secret_component(vault),
+                    encode_secret_component(name)
+                )?;
+                let mut first = true;
+                if let Some(version) = version {
+                    write_query_param(f, &mut first, "version", version)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct SecretCommand {
     pub program: String,
@@ -390,4 +470,32 @@ fn decode_hex_nibble(value: u8) -> Option<u8> {
         b'A'..=b'F' => Some(value - b'A' + 10),
         _ => None,
     }
+}
+
+fn encode_secret_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(char::from(byte));
+            }
+            _ => {
+                out.push('%');
+                out.push(char::from(b"0123456789ABCDEF"[(byte >> 4) as usize]));
+                out.push(char::from(b"0123456789ABCDEF"[(byte & 0x0f) as usize]));
+            }
+        }
+    }
+    out
+}
+
+fn write_query_param(
+    f: &mut std::fmt::Formatter<'_>,
+    first: &mut bool,
+    key: &str,
+    value: &str,
+) -> std::fmt::Result {
+    let separator = if *first { '?' } else { '&' };
+    *first = false;
+    write!(f, "{separator}{key}={}", encode_secret_component(value))
 }

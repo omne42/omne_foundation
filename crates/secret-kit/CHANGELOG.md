@@ -7,7 +7,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
-- `secret-kit`：`SecretResolver` / `CacheAwareSecretResolver` 现在把 `SecretSpec` 提升为公开扩展主边界；实现方新增 `resolve_secret_spec(...)` / `prepare_secret_spec_resolution(...)` / parsed hint hooks 后，`&str` 入口只保留 parse 转发，不再要求已解析 spec 在抽象边界外退回原始字符串。
+- `secret-kit`：`SecretResolver` / `CacheAwareSecretResolver` 现在把 `SecretSpec` 提升为公开扩展主边界，同时保留对既有 `&str`-first 实现者的默认兼容转发；typed hooks 会通过 canonical `secret://` 渲染回退到旧入口，避免把这次边界收口变成一次公开 trait breaking change。
+- `secret-kit`：typed `SecretSpec` 默认回退到 legacy `&str` resolver / cache hooks 时，现会先渲染为 canonical `secret://...` 文本再转发；只实现旧字符串入口的 resolver 继续可用，不会因为 typed 边界默认实现而静默失效。
 - `secret-kit` manifest 现在为内部 path/runtime 依赖补上显式 version 约束，并显式标记 `publish = false`；在 runtime primitives 形成独立发布链之前，crate 不再把 Git/monorepo 复用边界伪装成 crates.io 可直接发布。
 - `secret-kit`：Linux process-tree cleanup 的 best-effort worker 启动失败路径现在由 crate-local 回归测试明确钉住：失败不会伪装成活跃 worker，也不会升级成 panic，而是保留同步 `kill_tree()` 后仅记录告警并允许后续恢复重建 dispatcher。
 - `secret-kit` 的 crate-level README 现在明确把 `SECRET_COMMAND_TIMEOUT_MS` / `SECRET_COMMAND_TIMEOUT_SECS` 描述为显式 command-env snapshot 的调优入口，不再把 ambient `export` 误写成默认生效的公开契约。

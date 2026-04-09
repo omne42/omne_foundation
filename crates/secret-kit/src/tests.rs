@@ -177,6 +177,18 @@ trait TestSecretResolverExt: SecretResolver {
 
 impl<T> TestSecretResolverExt for T where T: SecretResolver + ?Sized {}
 
+struct LegacyStringResolver;
+
+impl SecretResolver for LegacyStringResolver {
+    fn resolve_secret<'a>(
+        &'a self,
+        spec: &'a str,
+        context: SecretResolutionContext<'a>,
+    ) -> SecretResolveFuture<'a> {
+        Box::pin(async move { resolve_secret_in_context(spec, context).await })
+    }
+}
+
 #[tokio::test]
 async fn secret_resolver_trait_object_resolves_secret() -> Result<()> {
     let mut env = TestEnv::default();
@@ -216,6 +228,21 @@ async fn secret_resolver_trait_object_resolves_parsed_secret() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn legacy_secret_resolver_still_resolves_parsed_secret() -> Result<()> {
+    let mut env = TestEnv::default();
+    env.vars
+        .insert("OPENAI_API_KEY".to_string(), "test-secret".to_string());
+    let spec = SecretSpec::parse("secret://env/OPENAI_API_KEY")?;
+
+    let value = LegacyStringResolver
+        .resolve_secret_spec_text(&spec, &env)
+        .await?;
+
+    assert_eq!(value, "test-secret");
+    Ok(())
+}
+
 fn test_cache_scope(spec: &SecretSpec) -> Option<String> {
     match spec {
         SecretSpec::File { path } if Path::new(path).is_absolute() => {
@@ -223,6 +250,49 @@ fn test_cache_scope(spec: &SecretSpec) -> Option<String> {
             Some(format!("test-file:{path}:{}", metadata.len()))
         }
         _ => None,
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Default)]
+struct LegacyCountingResolver {
+    calls: AtomicUsize,
+}
+
+impl SecretResolver for LegacyCountingResolver {
+    fn resolve_secret<'a>(
+        &'a self,
+        _spec: &'a str,
+        _context: SecretResolutionContext<'a>,
+    ) -> SecretResolveFuture<'a> {
+        Box::pin(async move {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(SecretString::from(format!("value-{call}")))
+        })
+    }
+}
+
+impl CacheAwareSecretResolver for LegacyCountingResolver {
+    type Prepared = ();
+
+    async fn prepare_secret_resolution(
+        &self,
+        spec: &str,
+        _context: SecretResolutionContext<'_>,
+    ) -> Result<PreparedSecretResolution<Self::Prepared>> {
+        let parsed = SecretSpec::parse(spec)?;
+        Ok(match test_cache_scope(&parsed) {
+            Some(scope) => PreparedSecretResolution::cached((), scope),
+            None => PreparedSecretResolution::uncached(()),
+        })
+    }
+
+    async fn resolve_prepared_secret(
+        &self,
+        _prepared: Self::Prepared,
+        context: SecretResolutionContext<'_>,
+    ) -> Result<SecretString> {
+        self.resolve_secret("secret://env/IGNORED", context).await
     }
 }
 
@@ -2612,6 +2682,23 @@ async fn caching_resolver_reuses_successful_values() -> Result<()> {
 }
 
 #[tokio::test]
+async fn legacy_cache_aware_resolver_still_supports_parsed_secret_calls() -> Result<()> {
+    let resolver =
+        CachingSecretResolver::new(LegacyCountingResolver::default(), Duration::from_secs(60));
+    let env = TestEnv::default();
+    let (_dir, spec) = temp_file_spec("cached.txt", b"cached").await?;
+    let spec = SecretSpec::parse(&spec)?;
+
+    let first = resolver.resolve_secret_spec_text(&spec, &env).await?;
+    let second = resolver.resolve_secret_spec_text(&spec, &env).await?;
+
+    assert_eq!(first, "value-1");
+    assert_eq!(second, "value-1");
+    assert_eq!(resolver.inner().calls.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn default_secret_resolver_rejects_relative_file_specs() {
     let err = resolve_secret_text("secret://file?path=relative.txt", &TestEnv::default())
         .await
@@ -3405,6 +3492,48 @@ fn secret_error_into_error_record_preserves_source() {
             .to_string(),
         "boom"
     );
+}
+
+#[test]
+fn secret_spec_display_round_trips_to_parse() -> Result<()> {
+    let specs = [
+        SecretSpec::Env {
+            key: "OPENAI API/KEY".to_string(),
+        },
+        SecretSpec::File {
+            path: "/tmp/secret value.txt".to_string(),
+        },
+        SecretSpec::Vault {
+            path: "secret/data/demo token".to_string(),
+            field: "api key".to_string(),
+            namespace: Some("team/core".to_string()),
+        },
+        SecretSpec::AwsSecretsManager {
+            secret_id: "demo/primary".to_string(),
+            region: Some("us-east-1".to_string()),
+            profile: Some("prod profile".to_string()),
+            json_key: Some("outer.token".to_string()),
+        },
+        SecretSpec::GcpSecretManager {
+            secret: "demo/value".to_string(),
+            project: Some("proj one".to_string()),
+            version: "7".to_string(),
+            json_key: Some("outer.token".to_string()),
+        },
+        SecretSpec::AzureKeyVault {
+            vault: "vault one".to_string(),
+            name: "secret/name".to_string(),
+            version: Some("123".to_string()),
+        },
+    ];
+
+    for spec in specs {
+        let rendered = spec.to_string();
+        let reparsed = SecretSpec::parse(&rendered)?;
+        assert_eq!(reparsed, spec, "{rendered}");
+    }
+
+    Ok(())
 }
 
 #[test]

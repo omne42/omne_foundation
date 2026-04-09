@@ -196,7 +196,10 @@ pub trait SecretResolver: Send + Sync {
         &'a self,
         spec: &'a crate::spec::SecretSpec,
         context: SecretResolutionContext<'a>,
-    ) -> SecretResolveFuture<'a>;
+    ) -> SecretResolveFuture<'a> {
+        let spec = spec.to_string();
+        Box::pin(async move { self.resolve_secret(&spec, context).await })
+    }
 
     fn resolve_secret<'a>(
         &'a self,
@@ -326,18 +329,17 @@ pub trait CacheAwareSecretResolver: SecretResolver {
         _spec: &str,
         _context: SecretResolutionContext<'_>,
     ) -> Result<Option<String>> {
-        let spec = crate::spec::SecretSpec::parse(_spec)?;
-        self.lookup_secret_cache_scope_for_spec(&spec, _context)
+        Ok(None)
     }
 
     /// Optionally provide a cache-scope hint for a parsed secret spec before preparing the
     /// resolution.
     fn lookup_secret_cache_scope_for_spec(
         &self,
-        _spec: &crate::spec::SecretSpec,
-        _context: SecretResolutionContext<'_>,
+        spec: &crate::spec::SecretSpec,
+        context: SecretResolutionContext<'_>,
     ) -> Result<Option<String>> {
-        Ok(None)
+        self.lookup_secret_cache_scope(&spec.to_string(), context)
     }
 
     /// Declare how a cache-scope hint should be partitioned.
@@ -350,17 +352,16 @@ pub trait CacheAwareSecretResolver: SecretResolver {
         _spec: &str,
         _context: SecretResolutionContext<'_>,
     ) -> Option<SecretCachePartitioning> {
-        let spec = crate::spec::SecretSpec::parse(_spec).ok()?;
-        self.lookup_secret_cache_partitioning_for_spec(&spec, _context)
+        None
     }
 
     /// Declare how a parsed cache-scope hint should be partitioned.
     fn lookup_secret_cache_partitioning_for_spec(
         &self,
-        _spec: &crate::spec::SecretSpec,
-        _context: SecretResolutionContext<'_>,
+        spec: &crate::spec::SecretSpec,
+        context: SecretResolutionContext<'_>,
     ) -> Option<SecretCachePartitioning> {
-        None
+        self.lookup_secret_cache_partitioning(&spec.to_string(), context)
     }
 
     fn prepare_secret_resolution(
@@ -378,7 +379,10 @@ pub trait CacheAwareSecretResolver: SecretResolver {
         &self,
         spec: &crate::spec::SecretSpec,
         context: SecretResolutionContext<'_>,
-    ) -> impl Future<Output = Result<PreparedSecretResolution<Self::Prepared>>> + Send;
+    ) -> impl Future<Output = Result<PreparedSecretResolution<Self::Prepared>>> + Send {
+        let spec = spec.to_string();
+        async move { self.prepare_secret_resolution(&spec, context).await }
+    }
 
     fn resolve_prepared_secret(
         &self,

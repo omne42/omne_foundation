@@ -967,8 +967,14 @@ impl Manager {
         server_config: &ServerConfig,
     ) -> anyhow::Result<()> {
         let server_name = parse_server_name_anyhow(server_name)?;
-        self.connection_server_configs
-            .insert(server_name, raw_server_config_identity(server_config));
+        let identity = if let Some(cwd) = self.connection_cwds.get(server_name.as_str()) {
+            let mut ctx = self.connect_context_for_identity();
+            ctx.stdout_log_root = Some(cwd.clone());
+            effective_server_config_identity(&ctx, server_name.as_str(), server_config, cwd)?
+        } else {
+            raw_server_config_identity(server_config)
+        };
+        self.connection_server_configs.insert(server_name, identity);
         Ok(())
     }
 

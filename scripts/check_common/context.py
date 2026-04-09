@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -134,7 +135,25 @@ def clear_directory_contents(directory: Path) -> None:
         return
 
     for child in directory.iterdir():
-        if child.is_dir() and not child.is_symlink():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
+        _remove_path(child)
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        _remove_directory(path)
+        return
+
+    path.unlink()
+
+
+def _remove_directory(path: Path) -> None:
+    for attempt in range(3):
+        try:
+            shutil.rmtree(path)
+            return
+        except OSError as err:
+            # Some generated target trees briefly report ENOTEMPTY while directory entries settle.
+            if path.exists() and err.errno in {39, 66} and attempt < 2:
+                time.sleep(0.05)
+                continue
+            raise

@@ -325,11 +325,6 @@ impl ServerConfig {
                             "mcp server transport=streamable_http: http_headers key is reserved by transport: {header}"
                         );
                     }
-                    if value.trim().is_empty() {
-                        public_bail!(
-                            "mcp server transport=streamable_http: http_headers[{header}] must not be empty"
-                        );
-                    }
                     HeaderValue::from_str(value).map_err(|_| {
                         wrap_kind(
                             ErrorKind::Config,

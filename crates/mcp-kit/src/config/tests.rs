@@ -887,6 +887,33 @@ async fn load_denies_streamable_http_with_invalid_http_header_value() {
 }
 
 #[tokio::test]
+async fn load_allows_streamable_http_with_empty_http_header_value() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{
+  "version": 1,
+  "servers": {
+    "litellm": {
+      "transport": "streamable_http",
+      "url": "http://example.com/mcp",
+      "http_headers": { "X-Test": "" }
+    }
+  }
+}"#,
+    )
+    .await
+    .unwrap();
+
+    let cfg = Config::load(dir.path(), None).await.unwrap();
+    let server = cfg.servers().get("litellm").unwrap();
+    assert_eq!(
+        server.http_headers().get("X-Test").map(String::as_str),
+        Some("")
+    );
+}
+
+#[tokio::test]
 async fn load_denies_streamable_http_with_invalid_env_http_header_name() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(

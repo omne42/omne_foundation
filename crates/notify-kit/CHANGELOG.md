@@ -15,6 +15,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `notify-kit` 的 webhook/API sinks 现在共享一个内部 outbound transport helper，统一 `HttpClientProfile` 创建、公网 IP 选择和 strict eager 校验入口，后续新增 transport 级约束时不再需要在每个 sink 里散弹式重复接线。
 
 ### Fixed
+- `notify-kit` 的 docs/mdBook 资产检查现在为每次 `mdbook test` 使用独立的临时 `CARGO_TARGET_DIR`，并在清理 generated target tree 时对短暂的目录竞争做重试；workspace `ci` / pre-commit 不再偶发卡在 `target/mdbook-test/notify-kit` 下的缺失目录写入错误。
 - `GenericWebhookSink` 的 `allowed_hosts` 校验现在直接复用 `http-kit` 的统一 allowlist 语义；严格模式会继续保留 path/public-IP 约束，但 host allowlist 不再错误退化成“只允许精确字符串相等”，从而恢复对子域名匹配规则的一致处理。
 - `notify-kit::Event` 的 plain/structured 文本投影现在收口到内部单点同步 helper，`env` helper 不再静默忽略非法 legacy timeout 值，`Error::source()` 会保留顶层包装链路，Feishu 本地图片路径解析也会在 `symlink/..` 组合上 fail closed。
 - `Hub` 现在会在 sink 首次 panic（包含 `Sink::send()` panic 与 `Sink::name()` panic）后将该 sink poison/disable；首次事件仍保留原有聚合诊断，后续事件会跳过故障 sink 并继续把通知发送给其他健康 sinks，避免每条事件重复触发同一个 panic。

@@ -48,9 +48,9 @@ case "$cmd" in
     ;;
   test)
     shift || true
-    docs_target_dir="$workspace_root/target/mdbook-test/notify-kit"
-    mkdir -p "$docs_target_dir"
-    clear_directory_contents "$docs_target_dir"
+    mkdir -p "$workspace_root/target/mdbook-test"
+    docs_target_dir="$(mktemp -d "$workspace_root/target/mdbook-test/notify-kit.XXXXXX")"
+    trap 'rm -rf "$docs_target_dir"' EXIT
     (
       cd "$workspace_root"
       CARGO_TARGET_DIR="$docs_target_dir" run_with_rust_exdev_workaround cargo build --manifest-path "$crate_root/Cargo.toml"

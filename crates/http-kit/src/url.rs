@@ -1,4 +1,5 @@
 use crate::error::{ErrorKind, tagged_message};
+use crate::outbound_policy::{host_for_ip_literal, is_local_or_single_label_host};
 
 pub fn parse_and_validate_https_url_basic(url_str: &str) -> crate::Result<reqwest::Url> {
     let url = reqwest::Url::parse(url_str)
@@ -23,7 +24,10 @@ pub fn parse_and_validate_https_url_basic(url_str: &str) -> crate::Result<reqwes
             "url must have a host",
         ));
     };
-    if host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok() {
+    let host_for_ip = host_for_ip_literal(host);
+    if host_for_ip.parse::<std::net::IpAddr>().is_ok()
+        || is_local_or_single_label_host(host, host_for_ip)
+    {
         return Err(tagged_message(
             ErrorKind::InvalidInput,
             "url host is not allowed",
@@ -191,6 +195,25 @@ mod tests {
         )
         .expect_err("expected invalid url");
         assert!(err.to_string().contains("port"), "{err:#}");
+    }
+
+    #[test]
+    fn rejects_local_and_single_label_hosts_in_basic_https_validation() {
+        for url in [
+            "https://localhost/hook",
+            "https://demo.localhost/hook",
+            "https://service.local/hook",
+            "https://service.localdomain/hook",
+            "https://internal/hook",
+            "https://127.0.0.1/hook",
+            "https://[::1]/hook",
+        ] {
+            let err = parse_and_validate_https_url_basic(url).expect_err("host should be rejected");
+            assert!(
+                err.to_string().contains("host is not allowed"),
+                "url={url} err={err:#}"
+            );
+        }
     }
 
     #[test]

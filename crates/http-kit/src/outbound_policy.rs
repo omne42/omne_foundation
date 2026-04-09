@@ -218,17 +218,17 @@ fn normalized_host(url: &reqwest::Url) -> Result<&str, UntrustedOutboundError> {
         .ok_or(UntrustedOutboundError::MissingHost)
 }
 
-fn host_for_ip_literal(host: &str) -> &str {
+pub(crate) fn host_for_ip_literal(host: &str) -> &str {
     host.trim_start_matches('[').trim_end_matches(']')
 }
 
-fn is_loopback_hostname(host: &str) -> bool {
+pub(crate) fn is_loopback_hostname(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost")
         || host.eq_ignore_ascii_case("localhost.localdomain")
         || ends_with_ignore_ascii_case(host, ".localhost")
 }
 
-fn is_local_or_single_label_host(host: &str, host_for_ip: &str) -> bool {
+pub(crate) fn is_local_or_single_label_host(host: &str, host_for_ip: &str) -> bool {
     let is_ip_literal = host_for_ip.parse::<IpAddr>().is_ok();
     let is_single_label = !is_ip_literal && !host.contains('.');
     is_loopback_hostname(host)
@@ -237,7 +237,7 @@ fn is_local_or_single_label_host(host: &str, host_for_ip: &str) -> bool {
         || is_single_label
 }
 
-fn ends_with_ignore_ascii_case(haystack: &str, suffix: &str) -> bool {
+pub(crate) fn ends_with_ignore_ascii_case(haystack: &str, suffix: &str) -> bool {
     if suffix.len() > haystack.len() {
         return false;
     }

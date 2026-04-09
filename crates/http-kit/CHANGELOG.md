@@ -16,6 +16,7 @@
 - Rejoin `http-kit` to workspace dependency/lint governance via workspace-managed dependencies and `[lints] workspace = true`.
 - Fix `validate_untrusted_outbound_url_dns(...)` so `allow_private_ips=true` still rejects loopback and always-disallowed resolved addresses instead of short-circuiting DNS validation entirely.
 - Narrow `allow_localhost` so it only exempts loopback-style hostnames (`localhost`, `localhost.localdomain`, `*.localhost`) instead of also allowing `*.local`, `*.localdomain`, or single-label hosts.
+- Make `parse_and_validate_https_url_basic(...)` share the same localhost/internal-host denylist shape, so direct HTTPS sink validators no longer accept `*.localhost`, `.local`, `.localdomain`, or single-label hosts while outbound-policy rejects them.
 - Require exact IP-literal matches in `allowed_hosts` so malformed suffix entries such as `2.3.4` can no longer allow `1.2.3.4`.
 - Re-resolve DNS on every public-IP-pinned client selection instead of reusing a cross-request pinned client cache entry, so DNS failover or rebinding cannot keep routing traffic to a stale address set after connection errors.
 - Add the standalone `http-kit` crate with reusable HTTP client, body, URL, and outbound policy helpers.

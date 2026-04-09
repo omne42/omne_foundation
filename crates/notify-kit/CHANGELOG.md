@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- docs: `notify-kit` README 的结构入口现在改成真实存在的 `src/sinks/webhook_transport.rs`，不再继续引用已经删除的 `src/sinks/http/` 目录。
 - `notify-kit` manifest 现在为内部 path/runtime 依赖补上显式 version 约束；即使当前继续保持 `publish = false`，feature-gated sink 依赖也不再丢失 semver 信息。
 - `notify-kit` 公开入口现在显式拆成 `notify_kit::core`（核心 foundation 抽象）和 `notify_kit::providers::*`（内置 sink/integration），并把 README/mdBook 示例同步切到这条分层路径；crate root 仍保留兼容 re-export，但不再作为推荐边界。
 - `notify-kit` 现在把内置 sinks 拆成显式 Cargo features：核心 `Event` / `Hub` / `Sink` 可在 `default-features = false` 下单独使用，各 sink 按 `sink-*` feature 裁剪，`env` helper 也收口到 `env-standard` feature，避免 foundation crate 默认把全部通知 transport 和依赖硬绑进单个编译面。

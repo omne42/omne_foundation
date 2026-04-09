@@ -61,8 +61,8 @@
   - 内置 sink 的 feature-gated 命名空间
 - `src/sinks/mod.rs`
   - sink trait 与各实现导出
-- `src/sinks/http/`
-  - webhook 类 sink 的共享 HTTP 逻辑
+- `src/sinks/webhook_transport.rs`
+  - webhook/API 类 sink 的共享 outbound transport 逻辑
 - `src/env.rs`
   - convenience helper，不是核心协议边界
 - `bots/`

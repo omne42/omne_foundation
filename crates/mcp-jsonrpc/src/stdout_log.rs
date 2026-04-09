@@ -524,6 +524,7 @@ mod tests {
         })
         .await?;
         state.write_line_bytes(b"abcdef").await?;
+        state.file.flush().await?;
         drop(state);
 
         let mut parts = list_rotating_log_parts(&base).await?;

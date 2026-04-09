@@ -763,7 +763,7 @@ async fn try_prepare_connected_client_rejects_different_cwd_context() {
         .try_prepare_connected_client("srv", Some(&connected_cwd))
         .unwrap()
         .expect("matching cwd should reuse connection");
-    assert_eq!(prepared.server_name, "srv");
+    assert_eq!(prepared.server_name.as_str(), "srv");
 }
 
 #[tokio::test]
@@ -805,7 +805,7 @@ async fn try_prepare_connected_client_reuses_same_cwd_identity() {
         .try_prepare_connected_client("srv", Some(&same_cwd_different_spelling))
         .unwrap()
         .expect("stable cwd identity should allow reuse");
-    assert_eq!(prepared.server_name, "srv");
+    assert_eq!(prepared.server_name.as_str(), "srv");
 }
 
 #[tokio::test]

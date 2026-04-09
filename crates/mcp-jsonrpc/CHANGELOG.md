@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：`write_line_bytes_rotates_large_line_without_extra_newline` 回归测试现在在读旋转后的 log 文件前显式 flush；断言不再依赖 Tokio 文件句柄 drop 时机，避免 Linux `mcp-cross-platform` CI 出现假阴性。
 - `mcp-jsonrpc`：`streamable_http` 的成功 JSON body 现在在 `request_timeout=None` 且响应未声明长度时，会在读到完整 JSON 文档后立即返回；keep-alive 但不关连接的服务端不再把成功请求无限挂住。
 - `mcp-jsonrpc` manifest 现在为内部 path 依赖补上显式 version 约束，并显式标记 `publish = false`；在 runtime primitives 形成独立发布链之前，crate 不再把 Git/monorepo 复用边界伪装成 crates.io 可直接发布。
 - `mcp-jsonrpc`：`IncomingRequest` 现在用显式 owner 计数而不是 `Arc::strong_count()` 判断“最后一个未响应 clone 被 drop”，并补上并发 drop 回归测试；handler clone 并发释放时不再因为竞态漏发自动 `internal error` 响应。

@@ -972,6 +972,25 @@ impl Manager {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn record_effective_connection_server_config(
+        &mut self,
+        server_name: &str,
+        server_config: &ServerConfig,
+        cwd: &Path,
+    ) -> anyhow::Result<()> {
+        let server_name = parse_server_name_anyhow(server_name)?;
+        let requested = effective_server_config_identity(
+            &self.connect_context_for_identity(),
+            server_name.as_str(),
+            server_config,
+            cwd,
+        )?;
+        self.connection_server_configs
+            .insert(server_name, requested);
+        Ok(())
+    }
+
     pub(crate) fn clear_connection_server_config(&mut self, server_name: &str) {
         self.connection_server_configs.remove(server_name);
     }

@@ -178,7 +178,7 @@ pub(crate) fn effective_server_config_identity(
             })
         }
         Transport::Unix => Ok(ConnectionServerConfigIdentity::Unix {
-            unix_path: server_cfg.unix_path_required().to_path_buf(),
+            unix_path: resolve_unix_socket_path(server_cfg.unix_path_required(), cwd)?,
         }),
         Transport::StreamableHttp => {
             let resolved_urls = resolve_streamable_http_urls(ctx, server_name, server_cfg, cwd)?;
@@ -203,7 +203,7 @@ pub(crate) async fn connect_transport(
 ) -> anyhow::Result<(mcp_jsonrpc::Client, Option<Child>)> {
     match server_cfg.transport() {
         Transport::Stdio => connect_stdio_transport(ctx, server_name, server_cfg, cwd).await,
-        Transport::Unix => connect_unix_transport(ctx, server_name, server_cfg).await,
+        Transport::Unix => connect_unix_transport(ctx, server_name, server_cfg, cwd).await,
         Transport::StreamableHttp => {
             connect_streamable_http_transport(ctx, server_name, server_cfg, cwd).await
         }
@@ -303,14 +303,15 @@ async fn connect_unix_transport(
     ctx: &ConnectContext,
     server_name: &str,
     server_cfg: &ServerConfig,
+    cwd: &Path,
 ) -> anyhow::Result<(mcp_jsonrpc::Client, Option<Child>)> {
     if ctx.trust_mode == TrustMode::Untrusted {
         config_bail!(
             "refusing to connect unix mcp server in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
         );
     }
-    let unix_path = server_cfg.unix_path_required();
-    let client = mcp_jsonrpc::Client::connect_unix(unix_path)
+    let unix_path = resolve_unix_socket_path(server_cfg.unix_path_required(), cwd)?;
+    let client = mcp_jsonrpc::Client::connect_unix(&unix_path)
         .await
         .with_context(|| format!("connect unix mcp server path={}", unix_path.display()))?;
     Ok((client, None))
@@ -541,6 +542,15 @@ pub(super) fn absolutize_with_base(path: &Path, base: &Path) -> PathBuf {
     base.join(path)
 }
 
+fn resolve_unix_socket_path(unix_path: &Path, cwd: &Path) -> anyhow::Result<PathBuf> {
+    if unix_path.is_absolute() {
+        return super::stable_path_identity(unix_path).map_err(Into::into);
+    }
+
+    let resolved_cwd = super::resolve_connection_cwd(cwd)?;
+    super::stable_path_identity(&absolutize_with_base(unix_path, &resolved_cwd)).map_err(Into::into)
+}
+
 pub(super) fn stdout_log_path_within_root(
     stdout_log_path: &Path,
     root: &Path,
@@ -688,6 +698,56 @@ mod tests {
             raw, effective,
             "config identity should capture resolved env-backed inputs instead of raw env var names"
         );
+    }
+
+    #[test]
+    fn effective_unix_identity_resolves_relative_socket_path_against_cwd() {
+        let ctx = trusted_connect_context();
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let cwd = tempdir.path().join("thread");
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+
+        let server_cfg = ServerConfig::unix(PathBuf::from("sock/mcp.sock")).expect("unix config");
+
+        let effective = effective_server_config_identity(&ctx, "srv", &server_cfg, &cwd)
+            .expect("resolve effective identity");
+
+        assert_eq!(
+            effective,
+            ConnectionServerConfigIdentity::Unix {
+                unix_path: super::super::stable_path_identity(&cwd.join("sock/mcp.sock"))
+                    .expect("stable path"),
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_transport_resolves_relative_unix_socket_path_against_cwd() {
+        let ctx = trusted_connect_context();
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let cwd = tempdir.path().join("thread");
+        let socket_dir = cwd.join("sock");
+        std::fs::create_dir_all(&socket_dir).expect("create socket dir");
+        let socket_path = socket_dir.join("mcp.sock");
+        let listener =
+            tokio::net::UnixListener::bind(&socket_path).expect("bind unix listener for test");
+
+        let accept_task = tokio::spawn(async move {
+            let (_stream, _addr) = listener.accept().await.expect("accept unix client");
+        });
+
+        let server_cfg = ServerConfig::unix(PathBuf::from("sock/mcp.sock")).expect("unix config");
+        let (client, child) = connect_transport(&ctx, "srv", &server_cfg, &cwd)
+            .await
+            .expect("connect relative unix socket");
+
+        assert!(
+            child.is_none(),
+            "unix transport should not return child process"
+        );
+        drop(client);
+        accept_task.await.expect("join accept task");
     }
 
     #[cfg(all(unix, target_os = "linux"))]

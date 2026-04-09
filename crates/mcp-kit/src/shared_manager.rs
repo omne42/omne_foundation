@@ -3433,7 +3433,11 @@ mod tests {
             )
             .expect("record cwd identity");
         manager
-            .record_connection_server_config("srv", config.server("srv").expect("config server"))
+            .record_effective_connection_server_config(
+                "srv",
+                config.server("srv").expect("config server"),
+                config.thread_root().unwrap_or_else(|| Path::new("/")),
+            )
             .expect("record config identity");
 
         let shared = manager.into_shared();

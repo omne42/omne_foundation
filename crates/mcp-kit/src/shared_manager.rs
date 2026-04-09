@@ -37,7 +37,7 @@ const REENTRANT_HANDLER_ERROR: &str = "SharedManager async operations cannot be 
 ///   with a replacement cold start
 pub struct SharedManager {
     inner: Arc<Mutex<Manager>>,
-    server_states: Arc<StdMutex<HashMap<String, Weak<ServerState>>>>,
+    server_states: Arc<StdMutex<HashMap<ServerName, Weak<ServerState>>>>,
     manager_id: u64,
     captured_handler_scope: Option<Weak<()>>,
 }
@@ -50,6 +50,10 @@ impl Manager {
 }
 
 impl SharedManager {
+    fn parse_server_name(server_name: &str) -> anyhow::Result<ServerName> {
+        Ok(ServerName::parse(server_name)?)
+    }
+
     pub fn new(manager: Manager) -> Self {
         let manager_id = manager.instance_id();
         Self {
@@ -100,19 +104,18 @@ impl SharedManager {
         })
     }
 
-    fn server_state_for(&self, server_name: &str) -> Arc<ServerState> {
-        let key = server_name.trim().to_string();
+    fn server_state_for(&self, server_name: &ServerName) -> Arc<ServerState> {
         let mut states = self
             .server_states
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         states.retain(|_, state| state.strong_count() > 0);
-        if let Some(existing) = states.get(&key).and_then(Weak::upgrade) {
+        if let Some(existing) = states.get(server_name).and_then(Weak::upgrade) {
             return existing;
         }
 
         let state = Arc::new(ServerState::default());
-        states.insert(key, Arc::downgrade(&state));
+        states.insert(server_name.clone(), Arc::downgrade(&state));
         state
     }
 
@@ -138,7 +141,7 @@ impl SharedManager {
     async fn lock_connect_gate_write(
         &self,
         operation: &'static str,
-        server_name: &str,
+        server_name: &ServerName,
     ) -> anyhow::Result<ServerLifecycleWriteGuard> {
         let state = self.server_state_for(server_name);
         let gate = Arc::clone(&state.lifecycle_gate);
@@ -159,7 +162,7 @@ impl SharedManager {
     async fn lock_connect_gate_read(
         &self,
         operation: &'static str,
-        server_name: &str,
+        server_name: &ServerName,
     ) -> anyhow::Result<ServerLifecycleReadGuard> {
         let state = self.server_state_for(server_name);
         let gate = Arc::clone(&state.lifecycle_gate);
@@ -207,22 +210,22 @@ impl SharedManager {
     async fn try_prepare_connected_client(
         &self,
         operation: &'static str,
-        server_name: &str,
+        server_name: &ServerName,
         cwd: Option<&Path>,
     ) -> anyhow::Result<Option<crate::manager::PreparedConnectedClient>> {
         self.lock_for_async_op(operation)
             .await?
-            .try_prepare_connected_client(server_name, cwd)
+            .try_prepare_connected_client(server_name.as_str(), cwd)
     }
 
     async fn try_prepare_reusable_connected_client(
         &self,
         operation: &'static str,
         config: &Config,
-        server_name: &str,
+        server_name: &ServerName,
         cwd: Option<&Path>,
     ) -> anyhow::Result<Option<crate::manager::PreparedConnectedClient>> {
-        let server_cfg = config.server(server_name).ok_or_else(|| {
+        let server_cfg = config.server_named(server_name).ok_or_else(|| {
             tagged_message(
                 ErrorKind::Config,
                 format!("unknown mcp server: {server_name}"),
@@ -230,14 +233,14 @@ impl SharedManager {
         })?;
         self.lock_for_async_op(operation)
             .await?
-            .try_prepare_reusable_connected_client(server_name, server_cfg, cwd)
+            .try_prepare_reusable_connected_client(server_name.as_str(), server_cfg, cwd)
     }
 
     async fn ensure_connected_while_gated(
         &self,
         operation: &'static str,
         config: &Config,
-        server_name: &str,
+        server_name: &ServerName,
         cwd: &Path,
     ) -> anyhow::Result<()> {
         let cwd = crate::manager::resolve_config_connection_cwd(config.thread_root(), cwd)?;
@@ -253,7 +256,7 @@ impl SharedManager {
         let lifecycle = {
             let mut manager = self.lock_for_async_op(operation).await?;
             manager
-                .prepare_transport_connect(config, server_name, &cwd)?
+                .prepare_transport_connect(config, server_name.as_str(), &cwd)?
                 .map(|prepared| manager.prepare_transport_lifecycle(prepared))
         };
         let Some(lifecycle) = lifecycle else {
@@ -269,7 +272,7 @@ impl SharedManager {
     async fn prepare_existing_connected_client_with_gate(
         &self,
         operation: &'static str,
-        server_name: &str,
+        server_name: &ServerName,
     ) -> anyhow::Result<PreparedSharedClient> {
         let state = self.server_state_for(server_name);
         let gate = self.lock_connect_gate_read(operation, server_name).await?;
@@ -279,7 +282,7 @@ impl SharedManager {
             .ok_or_else(|| {
                 tagged_message(
                     ErrorKind::ManagerState,
-                    format!("mcp server not connected: {}", server_name.trim()),
+                    format!("mcp server not connected: {server_name}"),
                 )
             })?;
         let in_flight_io = state.start_in_flight_io();
@@ -294,7 +297,7 @@ impl SharedManager {
         &self,
         operation: &'static str,
         config: &Config,
-        server_name: &str,
+        server_name: &ServerName,
         cwd: &Path,
     ) -> anyhow::Result<PreparedSharedClient> {
         let cwd = crate::manager::resolve_config_connection_cwd(config.thread_root(), cwd)?;
@@ -337,10 +340,7 @@ impl SharedManager {
             .ok_or_else(|| {
                 tagged_message(
                     ErrorKind::ManagerState,
-                    format!(
-                        "mcp server became unavailable before {operation}: {}",
-                        server_name.trim()
-                    ),
+                    format!("mcp server became unavailable before {operation}: {server_name}"),
                 )
             })?;
         let in_flight_io = state.start_in_flight_io();
@@ -351,7 +351,7 @@ impl SharedManager {
         })
     }
 
-    async fn cleanup_connection_after_error(&self, server_name: String, connection_id: u64) {
+    async fn cleanup_connection_after_error(&self, server_name: ServerName, connection_id: u64) {
         let state = self.server_state_for(&server_name);
         let _gate = match self
             .lock_connect_gate_write("cleanup_connection_after_error", &server_name)
@@ -375,7 +375,7 @@ impl SharedManager {
             match self.inner.try_lock() {
                 Ok(mut manager) => manager
                     .prepare_disconnect_for_wait_if_connection_with_cwd_cleanup(
-                        &server_name,
+                        server_name.as_str(),
                         connection_id,
                     ),
                 Err(_) => {
@@ -386,14 +386,14 @@ impl SharedManager {
         } else {
             let mut manager = self.inner.lock().await;
             manager.prepare_disconnect_for_wait_if_connection_with_cwd_cleanup(
-                &server_name,
+                server_name.as_str(),
                 connection_id,
             )
         };
         disconnect.wait_for_jsonrpc_error_cleanup().await;
     }
 
-    fn spawn_connection_cleanup(&self, server_name: String, connection_id: u64) {
+    fn spawn_connection_cleanup(&self, server_name: ServerName, connection_id: u64) {
         let shared = self.clone();
         tokio::spawn(async move {
             let state = shared.server_state_for(&server_name);
@@ -414,7 +414,7 @@ impl SharedManager {
             let disconnect = {
                 let mut manager = shared.inner.lock().await;
                 manager.prepare_disconnect_for_wait_if_connection_with_cwd_cleanup(
-                    &server_name,
+                    server_name.as_str(),
                     connection_id,
                 )
             };
@@ -467,8 +467,15 @@ impl SharedManager {
     }
 
     pub async fn is_connected(&self, server_name: &str) -> crate::Result<bool> {
+        self.is_connected_named(&Self::parse_server_name(server_name)?)
+            .await
+    }
+
+    pub async fn is_connected_named(&self, server_name: &ServerName) -> crate::Result<bool> {
         Ok(self
-            .with_manager_lock("is_connected", |manager| manager.is_connected(server_name))
+            .with_manager_lock("is_connected_named", |manager| {
+                manager.is_connected_named(server_name)
+            })
             .await?)
     }
 
@@ -481,14 +488,21 @@ impl SharedManager {
     }
 
     pub async fn disconnect(&self, server_name: &str) -> crate::Result<bool> {
+        self.disconnect_named(&Self::parse_server_name(server_name)?)
+            .await
+    }
+
+    pub async fn disconnect_named(&self, server_name: &ServerName) -> crate::Result<bool> {
         let state = self.server_state_for(server_name);
         let _gate = self
-            .lock_connect_gate_write("disconnect", server_name)
+            .lock_connect_gate_write("disconnect_named", server_name)
             .await?;
-        self.wait_for_server_io_to_finish("disconnect", state.as_ref())
+        self.wait_for_server_io_to_finish("disconnect_named", state.as_ref())
             .await?;
         Ok(self
-            .with_manager_lock("disconnect", |manager| manager.disconnect(server_name))
+            .with_manager_lock("disconnect_named", |manager| {
+                manager.disconnect_named(server_name)
+            })
             .await?)
     }
 
@@ -498,16 +512,26 @@ impl SharedManager {
         timeout: Duration,
         on_timeout: mcp_jsonrpc::WaitOnTimeout,
     ) -> crate::Result<Option<std::process::ExitStatus>> {
+        self.disconnect_and_wait_named(&Self::parse_server_name(server_name)?, timeout, on_timeout)
+            .await
+    }
+
+    pub async fn disconnect_and_wait_named(
+        &self,
+        server_name: &ServerName,
+        timeout: Duration,
+        on_timeout: mcp_jsonrpc::WaitOnTimeout,
+    ) -> crate::Result<Option<std::process::ExitStatus>> {
         let state = self.server_state_for(server_name);
         let _gate = self
-            .lock_connect_gate_write("disconnect_and_wait", server_name)
+            .lock_connect_gate_write("disconnect_and_wait_named", server_name)
             .await?;
-        self.wait_for_server_io_to_finish("disconnect_and_wait", state.as_ref())
+        self.wait_for_server_io_to_finish("disconnect_and_wait_named", state.as_ref())
             .await?;
         let disconnect = self
-            .lock_for_async_op("disconnect_and_wait")
+            .lock_for_async_op("disconnect_and_wait_named")
             .await?
-            .prepare_disconnect_for_wait_with_cwd_cleanup(server_name);
+            .prepare_disconnect_for_wait_with_cwd_cleanup(server_name.as_str());
         Ok(disconnect.wait_with_timeout(timeout, on_timeout).await?)
     }
 
@@ -519,8 +543,26 @@ impl SharedManager {
         params: Option<Value>,
         cwd: &Path,
     ) -> crate::Result<Value> {
+        self.request_named(
+            config,
+            &Self::parse_server_name(server_name)?,
+            method,
+            params,
+            cwd,
+        )
+        .await
+    }
+
+    pub async fn request_named(
+        &self,
+        config: &Config,
+        server_name: &ServerName,
+        method: &str,
+        params: Option<Value>,
+        cwd: &Path,
+    ) -> crate::Result<Value> {
         let prepared = self
-            .prepare_connected_client_with_gate("request", config, server_name, cwd)
+            .prepare_connected_client_with_gate("request_named", config, server_name, cwd)
             .await?;
         self.run_prepared_request(prepared, method, params).await
     }
@@ -531,8 +573,18 @@ impl SharedManager {
         method: &str,
         params: Option<Value>,
     ) -> crate::Result<Value> {
+        self.request_connected_named(&Self::parse_server_name(server_name)?, method, params)
+            .await
+    }
+
+    pub async fn request_connected_named(
+        &self,
+        server_name: &ServerName,
+        method: &str,
+        params: Option<Value>,
+    ) -> crate::Result<Value> {
         let prepared = self
-            .prepare_existing_connected_client_with_gate("request_connected", server_name)
+            .prepare_existing_connected_client_with_gate("request_connected_named", server_name)
             .await?;
         self.run_prepared_request(prepared, method, params).await
     }
@@ -544,11 +596,22 @@ impl SharedManager {
         params: Option<R::Params>,
         cwd: &Path,
     ) -> crate::Result<R::Result> {
-        let params = crate::mcp::serialize_request_params::<R>(server_name, params)?;
+        self.request_typed_named::<R>(config, &Self::parse_server_name(server_name)?, params, cwd)
+            .await
+    }
+
+    pub async fn request_typed_named<R: McpRequest>(
+        &self,
+        config: &Config,
+        server_name: &ServerName,
+        params: Option<R::Params>,
+        cwd: &Path,
+    ) -> crate::Result<R::Result> {
+        let params = crate::mcp::serialize_request_params::<R>(server_name.as_str(), params)?;
         let result = self
-            .request(config, server_name, R::METHOD, params, cwd)
+            .request_named(config, server_name, R::METHOD, params, cwd)
             .await?;
-        crate::mcp::deserialize_request_result::<R>(server_name, result)
+        crate::mcp::deserialize_request_result::<R>(server_name.as_str(), result)
     }
 
     pub async fn request_typed_connected<R: McpRequest>(
@@ -556,11 +619,20 @@ impl SharedManager {
         server_name: &str,
         params: Option<R::Params>,
     ) -> crate::Result<R::Result> {
-        let params = crate::mcp::serialize_request_params::<R>(server_name, params)?;
+        self.request_typed_connected_named::<R>(&Self::parse_server_name(server_name)?, params)
+            .await
+    }
+
+    pub async fn request_typed_connected_named<R: McpRequest>(
+        &self,
+        server_name: &ServerName,
+        params: Option<R::Params>,
+    ) -> crate::Result<R::Result> {
+        let params = crate::mcp::serialize_request_params::<R>(server_name.as_str(), params)?;
         let result = self
-            .request_connected(server_name, R::METHOD, params)
+            .request_connected_named(server_name, R::METHOD, params)
             .await?;
-        crate::mcp::deserialize_request_result::<R>(server_name, result)
+        crate::mcp::deserialize_request_result::<R>(server_name.as_str(), result)
     }
 
     pub async fn notify(
@@ -571,8 +643,26 @@ impl SharedManager {
         params: Option<Value>,
         cwd: &Path,
     ) -> crate::Result<()> {
+        self.notify_named(
+            config,
+            &Self::parse_server_name(server_name)?,
+            method,
+            params,
+            cwd,
+        )
+        .await
+    }
+
+    pub async fn notify_named(
+        &self,
+        config: &Config,
+        server_name: &ServerName,
+        method: &str,
+        params: Option<Value>,
+        cwd: &Path,
+    ) -> crate::Result<()> {
         let prepared = self
-            .prepare_connected_client_with_gate("notify", config, server_name, cwd)
+            .prepare_connected_client_with_gate("notify_named", config, server_name, cwd)
             .await?;
         self.run_prepared_notify(prepared, method, params).await
     }
@@ -583,8 +673,18 @@ impl SharedManager {
         method: &str,
         params: Option<Value>,
     ) -> crate::Result<()> {
+        self.notify_connected_named(&Self::parse_server_name(server_name)?, method, params)
+            .await
+    }
+
+    pub async fn notify_connected_named(
+        &self,
+        server_name: &ServerName,
+        method: &str,
+        params: Option<Value>,
+    ) -> crate::Result<()> {
         let prepared = self
-            .prepare_existing_connected_client_with_gate("notify_connected", server_name)
+            .prepare_existing_connected_client_with_gate("notify_connected_named", server_name)
             .await?;
         self.run_prepared_notify(prepared, method, params).await
     }
@@ -596,8 +696,19 @@ impl SharedManager {
         params: Option<N::Params>,
         cwd: &Path,
     ) -> crate::Result<()> {
-        let params = crate::mcp::serialize_notification_params::<N>(server_name, params)?;
-        self.notify(config, server_name, N::METHOD, params, cwd)
+        self.notify_typed_named::<N>(config, &Self::parse_server_name(server_name)?, params, cwd)
+            .await
+    }
+
+    pub async fn notify_typed_named<N: McpNotification>(
+        &self,
+        config: &Config,
+        server_name: &ServerName,
+        params: Option<N::Params>,
+        cwd: &Path,
+    ) -> crate::Result<()> {
+        let params = crate::mcp::serialize_notification_params::<N>(server_name.as_str(), params)?;
+        self.notify_named(config, server_name, N::METHOD, params, cwd)
             .await
     }
 
@@ -606,14 +717,32 @@ impl SharedManager {
         server_name: &str,
         params: Option<N::Params>,
     ) -> crate::Result<()> {
-        let params = crate::mcp::serialize_notification_params::<N>(server_name, params)?;
-        self.notify_connected(server_name, N::METHOD, params).await
+        self.notify_typed_connected_named::<N>(&Self::parse_server_name(server_name)?, params)
+            .await
+    }
+
+    pub async fn notify_typed_connected_named<N: McpNotification>(
+        &self,
+        server_name: &ServerName,
+        params: Option<N::Params>,
+    ) -> crate::Result<()> {
+        let params = crate::mcp::serialize_notification_params::<N>(server_name.as_str(), params)?;
+        self.notify_connected_named(server_name, N::METHOD, params)
+            .await
     }
 
     pub async fn server_handler_timeout_count(&self, server_name: &str) -> crate::Result<u64> {
+        self.server_handler_timeout_count_named(&Self::parse_server_name(server_name)?)
+            .await
+    }
+
+    pub async fn server_handler_timeout_count_named(
+        &self,
+        server_name: &ServerName,
+    ) -> crate::Result<u64> {
         Ok(self
-            .with_manager_lock("server_handler_timeout_count", |manager| {
-                manager.server_handler_timeout_count(server_name)
+            .with_manager_lock("server_handler_timeout_count_named", |manager| {
+                manager.server_handler_timeout_count(server_name.as_str())
             })
             .await?)
     }
@@ -802,14 +931,18 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     enum SharedRequestPath {
         ConfigDriven,
+        ConfigDrivenNamed,
         Connected,
+        ConnectedNamed,
     }
 
     impl SharedRequestPath {
         const fn label(self) -> &'static str {
             match self {
                 Self::ConfigDriven => "config-driven",
+                Self::ConfigDrivenNamed => "config-driven-named",
                 Self::Connected => "connected",
+                Self::ConnectedNamed => "connected-named",
             }
         }
     }
@@ -838,13 +971,24 @@ mod tests {
         config: Arc<Config>,
         cwd: PathBuf,
     ) -> crate::Result<Value> {
+        let server_name = ServerName::parse("srv").unwrap();
         match path {
             SharedRequestPath::ConfigDriven => {
                 shared
                     .request(config.as_ref(), "srv", "ping", None::<Value>, &cwd)
                     .await
             }
+            SharedRequestPath::ConfigDrivenNamed => {
+                shared
+                    .request_named(config.as_ref(), &server_name, "ping", None::<Value>, &cwd)
+                    .await
+            }
             SharedRequestPath::Connected => shared.request_connected("srv", "ping", None).await,
+            SharedRequestPath::ConnectedNamed => {
+                shared
+                    .request_connected_named(&server_name, "ping", None::<Value>)
+                    .await
+            }
         }
     }
 
@@ -1010,7 +1154,9 @@ mod tests {
     async fn shared_manager_request_paths_overlap_on_same_connected_server() {
         for path in [
             SharedRequestPath::ConfigDriven,
+            SharedRequestPath::ConfigDrivenNamed,
             SharedRequestPath::Connected,
+            SharedRequestPath::ConnectedNamed,
         ] {
             let (client_stream, server_stream) = tokio::io::duplex(1024);
             let (client_read, client_write) = tokio::io::split(client_stream);
@@ -1212,7 +1358,9 @@ mod tests {
     async fn shared_manager_disconnect_waits_for_in_flight_request_across_request_paths() {
         for path in [
             SharedRequestPath::ConfigDriven,
+            SharedRequestPath::ConfigDrivenNamed,
             SharedRequestPath::Connected,
+            SharedRequestPath::ConnectedNamed,
         ] {
             let (client_stream, server_stream) = tokio::io::duplex(1024);
             let (client_read, client_write) = tokio::io::split(client_stream);
@@ -1601,12 +1749,14 @@ mod tests {
         active_handler_scopes.fetch_add(1, Ordering::Relaxed);
 
         let shared = manager.into_shared();
+        let server_name = ServerName::parse("srv").unwrap();
         let (release_tx, release_rx) = oneshot::channel();
         let held_gate = tokio::spawn({
             let shared = shared.clone();
+            let server_name = server_name.clone();
             async move {
                 let guard = shared
-                    .lock_connect_gate_write("held_gate", "srv")
+                    .lock_connect_gate_write("held_gate", &server_name)
                     .await
                     .unwrap();
                 let _ = release_rx.await;
@@ -1618,7 +1768,12 @@ mod tests {
 
         let wait_for_gate = tokio::spawn({
             let shared = shared.clone();
-            async move { shared.lock_connect_gate_write("second_gate", "srv").await }
+            let server_name = server_name.clone();
+            async move {
+                shared
+                    .lock_connect_gate_write("second_gate", &server_name)
+                    .await
+            }
         });
 
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1790,9 +1945,10 @@ mod tests {
             .await
             .unwrap();
         let shared = manager.into_shared();
+        let server_name = ServerName::parse("srv").unwrap();
 
         let prepared = shared
-            .try_prepare_connected_client("stale_cleanup_prepare", "srv", None)
+            .try_prepare_connected_client("stale_cleanup_prepare", &server_name, None)
             .await
             .unwrap()
             .expect("prepared old connection");
@@ -1812,7 +1968,7 @@ mod tests {
         let disconnect = {
             let mut manager = shared.lock_for_async_op("stale_cleanup").await.unwrap();
             manager.prepare_disconnect_for_wait_if_connection(
-                &prepared.server_name,
+                prepared.server_name.as_str(),
                 prepared.connection_id,
             )
         };
@@ -2302,19 +2458,21 @@ mod tests {
     #[test]
     fn shared_manager_server_states_prune_stale_entries() {
         let shared = Manager::new("test-client", "0.0.0", Duration::from_secs(1)).into_shared();
+        let alpha = ServerName::parse(" alpha ").unwrap();
+        let beta = ServerName::parse("beta").unwrap();
 
-        let first = shared.server_state_for(" alpha ");
+        let first = shared.server_state_for(&alpha);
         {
             let states = shared
                 .server_states
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert_eq!(states.len(), 1);
-            assert_eq!(states.get("alpha").unwrap().strong_count(), 1);
+            assert_eq!(states.get(&alpha).unwrap().strong_count(), 1);
         }
         drop(first);
 
-        let second = shared.server_state_for("beta");
+        let second = shared.server_state_for(&beta);
         {
             let states = shared
                 .server_states
@@ -2322,7 +2480,7 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert_eq!(states.len(), 1);
             assert!(states.get("alpha").is_none());
-            assert_eq!(states.get("beta").unwrap().strong_count(), 1);
+            assert_eq!(states.get(&beta).unwrap().strong_count(), 1);
         }
         drop(second);
     }
@@ -3778,6 +3936,7 @@ mod tests {
         let shared = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
             .with_trust_mode(TrustMode::Trusted)
             .into_shared();
+        let server_name = ServerName::parse("srv").unwrap();
 
         let (prepared_ready_tx, prepared_ready_rx) = oneshot::channel();
         let (release_io_tx, release_io_rx) = oneshot::channel();
@@ -3789,7 +3948,7 @@ mod tests {
                 .prepare_connected_client_with_gate(
                     "test_prepare",
                     first_config.as_ref(),
-                    "srv",
+                    &server_name,
                     &connected_cwd,
                 )
                 .await

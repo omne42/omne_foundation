@@ -275,7 +275,7 @@ pub struct Connection {
 }
 
 pub(crate) struct PreparedConnectedClient {
-    pub server_name: String,
+    pub server_name: ServerName,
     pub connection_id: u64,
     pub timeout: Duration,
     pub client: mcp_jsonrpc::ClientHandle,
@@ -342,7 +342,7 @@ impl PreparedConnectedClient {
     ) -> anyhow::Result<Value> {
         Manager::request_raw_handle(
             self.timeout,
-            &self.server_name,
+            self.server_name.as_str(),
             &self.client,
             method,
             params,
@@ -353,7 +353,7 @@ impl PreparedConnectedClient {
     pub(crate) async fn notify(&self, method: &str, params: Option<Value>) -> anyhow::Result<()> {
         Manager::notify_raw_handle(
             self.timeout,
-            &self.server_name,
+            self.server_name.as_str(),
             &self.client,
             method,
             params,
@@ -1062,14 +1062,14 @@ impl Manager {
             self.ensure_connection_cwd_matches(server_name, cwd, None)?;
         }
 
-        let conn = self.conns.get(server_name).ok_or_else(|| {
+        let (server_name, conn) = self.conns.get_key_value(server_name).ok_or_else(|| {
             tagged_message(
                 ErrorKind::ManagerState,
                 format!("mcp server not connected: {server_name}"),
             )
         })?;
         Ok(Some(PreparedConnectedClient {
-            server_name: server_name.to_string(),
+            server_name: server_name.clone(),
             connection_id: conn.id(),
             timeout: self.request_timeout,
             client: conn.client.handle(),
@@ -1584,8 +1584,9 @@ impl Manager {
         let call = prepared.request_call(method, params).await;
 
         if call.cleanup().should_disconnect() {
-            self.disconnect_after_jsonrpc_error(&server_name).await;
-            self.clear_connection_cwd(&server_name);
+            self.disconnect_after_jsonrpc_error(server_name.as_str())
+                .await;
+            self.clear_connection_cwd(server_name.as_str());
         }
 
         Ok(call.into_result()?)
@@ -1615,8 +1616,9 @@ impl Manager {
         let call = prepared.notify_call(method, params).await;
 
         if call.cleanup().should_disconnect() {
-            self.disconnect_after_jsonrpc_error(&server_name).await;
-            self.clear_connection_cwd(&server_name);
+            self.disconnect_after_jsonrpc_error(server_name.as_str())
+                .await;
+            self.clear_connection_cwd(server_name.as_str());
         }
 
         Ok(call.into_result()?)

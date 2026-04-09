@@ -178,7 +178,7 @@ pub(crate) fn effective_server_config_identity(
             })
         }
         Transport::Unix => Ok(ConnectionServerConfigIdentity::Unix {
-            unix_path: server_cfg.unix_path_required().to_path_buf(),
+            unix_path: resolve_unix_socket_path(server_cfg.unix_path_required(), cwd)?,
         }),
         Transport::StreamableHttp => {
             let resolved_urls = resolve_streamable_http_urls(ctx, server_name, server_cfg, cwd)?;
@@ -203,7 +203,7 @@ pub(crate) async fn connect_transport(
 ) -> anyhow::Result<(mcp_jsonrpc::Client, Option<Child>)> {
     match server_cfg.transport() {
         Transport::Stdio => connect_stdio_transport(ctx, server_name, server_cfg, cwd).await,
-        Transport::Unix => connect_unix_transport(ctx, server_name, server_cfg).await,
+        Transport::Unix => connect_unix_transport(ctx, server_name, server_cfg, cwd).await,
         Transport::StreamableHttp => {
             connect_streamable_http_transport(ctx, server_name, server_cfg, cwd).await
         }
@@ -303,14 +303,15 @@ async fn connect_unix_transport(
     ctx: &ConnectContext,
     server_name: &str,
     server_cfg: &ServerConfig,
+    cwd: &Path,
 ) -> anyhow::Result<(mcp_jsonrpc::Client, Option<Child>)> {
     if ctx.trust_mode == TrustMode::Untrusted {
         config_bail!(
             "refusing to connect unix mcp server in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
         );
     }
-    let unix_path = server_cfg.unix_path_required();
-    let client = mcp_jsonrpc::Client::connect_unix(unix_path)
+    let unix_path = resolve_unix_socket_path(server_cfg.unix_path_required(), cwd)?;
+    let client = mcp_jsonrpc::Client::connect_unix(&unix_path)
         .await
         .with_context(|| format!("connect unix mcp server path={}", unix_path.display()))?;
     Ok((client, None))
@@ -534,6 +535,12 @@ fn is_reserved_streamable_http_env_header(header: &str) -> bool {
     is_reserved_streamable_http_header(header) || header.eq_ignore_ascii_case(AUTHORIZATION_HEADER)
 }
 
+fn resolve_unix_socket_path(unix_path: &Path, cwd: &Path) -> anyhow::Result<PathBuf> {
+    let cwd = super::resolve_connection_cwd(cwd)?;
+    super::path_identity::stable_path_identity(&absolutize_with_base(unix_path, &cwd))
+        .map_err(Into::into)
+}
+
 pub(super) fn absolutize_with_base(path: &Path, base: &Path) -> PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();
@@ -560,6 +567,8 @@ pub(super) fn stdout_log_path_within_root(
 mod tests {
     use super::*;
     use crate::MCP_PROTOCOL_VERSION;
+    #[cfg(unix)]
+    use std::path::PathBuf;
 
     fn trusted_connect_context() -> ConnectContext {
         ConnectContext {
@@ -569,6 +578,99 @@ mod tests {
             stdout_log_root: None,
             protocol_version: MCP_PROTOCOL_VERSION.to_string(),
             request_timeout: Duration::from_secs(5),
+        }
+    }
+
+    #[cfg(unix)]
+    fn unix_socket_temp_roots() -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+
+        if let Some(root) = std::env::var_os("OMNE_TEST_SHORT_TMPDIR") {
+            let root = PathBuf::from(root);
+            if !roots.iter().any(|candidate| candidate == &root) {
+                roots.push(root);
+            }
+        }
+
+        let temp_dir = std::env::temp_dir();
+        if !roots.iter().any(|candidate| candidate == &temp_dir) {
+            roots.push(temp_dir);
+        }
+
+        if std::env::var_os("TMPDIR").is_none()
+            && std::env::temp_dir() == std::path::Path::new("/tmp")
+        {
+            let root = PathBuf::from("/var/tmp");
+            if !roots.iter().any(|candidate| candidate == &root) {
+                roots.push(root);
+            }
+        }
+
+        roots
+    }
+
+    #[cfg(unix)]
+    fn unique_socket_path(test_name: &str, label: &str) -> Option<PathBuf> {
+        use std::os::unix::net::UnixListener;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let short_label: String = label
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .take(8)
+            .collect();
+
+        for root in unix_socket_temp_roots() {
+            if !root.exists() && std::fs::create_dir_all(&root).is_err() {
+                continue;
+            }
+            let Ok(metadata) = std::fs::symlink_metadata(&root) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+
+            let Ok(tempdir) = tempfile::Builder::new()
+                .prefix("of-ct-")
+                .rand_bytes(3)
+                .tempdir_in(&root)
+            else {
+                continue;
+            };
+
+            let path = tempdir.path().join(format!(
+                "{short_label}-{}-{}.sock",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time after epoch")
+                    .as_nanos()
+            ));
+            if let Ok(listener) = UnixListener::bind(&path) {
+                drop(listener);
+                let _ = std::fs::remove_file(&path);
+                return Some(path);
+            }
+        }
+
+        eprintln!(
+            "skipping {test_name}: unable to create a short writable temp dir for unix socket test"
+        );
+        None
+    }
+
+    #[cfg(unix)]
+    fn bind_unix_listener_or_skip(path: &std::path::Path) -> Option<tokio::net::UnixListener> {
+        match tokio::net::UnixListener::bind(path) {
+            Ok(listener) => Some(listener),
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "skipping connect unix transport test: unix listener bind not permitted in this environment: {err}"
+                );
+                None
+            }
+            Err(err) => panic!("failed to bind unix listener at {}: {err}", path.display()),
         }
     }
 
@@ -688,6 +790,60 @@ mod tests {
             raw, effective,
             "config identity should capture resolved env-backed inputs instead of raw env var names"
         );
+    }
+
+    #[test]
+    fn effective_unix_identity_resolves_relative_socket_path_against_connection_cwd() {
+        let ctx = trusted_connect_context();
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let cwd = tempdir.path().join("nested/run");
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+
+        let server_cfg = ServerConfig::unix(PathBuf::from("sock/service.sock")).expect("unix cfg");
+        let effective =
+            effective_server_config_identity(&ctx, "srv", &server_cfg, &cwd).expect("identity");
+
+        assert_eq!(
+            effective,
+            ConnectionServerConfigIdentity::Unix {
+                unix_path: cwd.join("sock/service.sock"),
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_unix_transport_resolves_relative_socket_path_against_connection_cwd() {
+        let ctx = trusted_connect_context();
+        let Some(socket_path) = unique_socket_path(
+            "connect_unix_transport_resolves_relative_socket_path_against_connection_cwd",
+            "connect",
+        ) else {
+            return;
+        };
+        let cwd = socket_path.parent().expect("socket parent").to_path_buf();
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
+            return;
+        };
+        let accept_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept unix stream");
+            drop(stream);
+        });
+
+        let socket_name = socket_path
+            .file_name()
+            .expect("socket file name")
+            .to_string_lossy()
+            .to_string();
+        let server_cfg = ServerConfig::unix(PathBuf::from(socket_name)).expect("unix cfg");
+        let (client, child) = connect_transport(&ctx, "srv", &server_cfg, &cwd)
+            .await
+            .expect("connect relative unix socket from connection cwd");
+
+        drop(client);
+        assert!(child.is_none(), "unix transport should not attach a child");
+        accept_task.await.expect("listener task");
     }
 
     #[cfg(all(unix, target_os = "linux"))]

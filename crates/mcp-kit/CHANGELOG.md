@@ -51,6 +51,9 @@
 - `mcp-kit`：connection cwd identity 不再先对整条路径做词法 `..` 折叠再 canonicalize；中间目录是 symlink 时，现在会按真实文件系统语义解析已有前缀，再对缺失后缀做词法收尾，避免把 `link/../x` 误算成宿主目录下的 sibling。
 - `mcp-kit`：`stable_connection_cwd_identity` 的缺失尾段回归测试现在比较稳定目录身份而不是原始路径字符串，避免 Windows 上的 verbatim 前缀与 8.3 短路径表示差异把等价路径误报成失败。
 - `mcp-kit`：strict 协议协商现在要求 `initialize.result.protocolVersion` 必须存在且是字符串；缺失该字段的服务端不再被误接入成功。
+- `mcp-kit`：稳定路径身份归一化在处理绝对路径中的 `..` 时不再越根丢失绝对前缀；`cwd` 身份与 `stdout_log.path` root containment 会继续按绝对路径语义判断。
+- `mcp-kit`：`stdio` transport 默认继承父进程 `stderr`，不再静默丢到 `/dev/null`；库调用方默认保留排障可见性。
+- `mcp-kit`：`streamable_http.http_headers` 现在允许合法的空字符串 value，保持和 HTTP 头语义一致；仍继续拒绝空 key、保留 transport-owned header 和非法 header value。
 
 ### Changed
 - `mcp-kit`：`streamable_http` 文档现在明确 `request_timeout` 只约束单次 POST 的 send 与非流式响应读取；POST 成功返回 `text/event-stream` 时，持续产出的 SSE 响应流本身不受总时长限制，避免文档继续和 `mcp-jsonrpc` 的既有行为/回归测试相冲突。

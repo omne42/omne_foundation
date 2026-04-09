@@ -100,6 +100,18 @@ fn stable_connection_cwd_identity_collapses_missing_parent_segments_lexically() 
 }
 
 #[test]
+fn stable_connection_cwd_identity_keeps_absolute_paths_absolute_after_parent_segments() {
+    let mut path = std::env::temp_dir();
+    path.push("..");
+    path.push("..");
+    path.push("mcp-kit-absolute-child");
+
+    let resolved = super::path_identity::stable_connection_cwd_identity(&path)
+        .expect("resolve absolute path with parent segments");
+    assert!(resolved.is_absolute(), "resolved path must stay absolute");
+}
+
+#[test]
 fn roots_capability_is_inserted() {
     let mut capabilities = serde_json::json!({});
     ensure_roots_capability(&mut capabilities);
@@ -589,7 +601,7 @@ fn from_config_panics_on_invalid_server_config() {
 
 #[cfg(all(unix, target_os = "linux"))]
 #[tokio::test]
-async fn connect_transport_stdio_null_routes_stderr_to_devnull() {
+async fn connect_transport_stdio_inherits_parent_stderr() {
     let server_cfg = ServerConfig::stdio(vec![
         "sh".to_string(),
         "-c".to_string(),
@@ -612,7 +624,8 @@ async fn connect_transport_stdio_null_routes_stderr_to_devnull() {
     let pid = child.id().expect("child pid");
 
     let stderr_path = std::fs::read_link(format!("/proc/{pid}/fd/2")).expect("read stderr fd");
-    assert_eq!(stderr_path, PathBuf::from("/dev/null"));
+    let parent_stderr_path = std::fs::read_link("/proc/self/fd/2").expect("read parent stderr");
+    assert_eq!(stderr_path, parent_stderr_path);
 
     drop(client);
     child.kill().await.expect("kill child");

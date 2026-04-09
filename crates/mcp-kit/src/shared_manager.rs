@@ -1099,7 +1099,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_manager_request_connected_holds_gate_until_io_finishes() {
+    async fn shared_manager_request_connected_tracks_in_flight_io_until_completion() {
         let (client_stream, server_stream) = tokio::io::duplex(1024);
         let (client_read, client_write) = tokio::io::split(client_stream);
         let (server_read, mut server_write) = tokio::io::split(server_stream);

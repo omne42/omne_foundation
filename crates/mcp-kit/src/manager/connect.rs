@@ -247,9 +247,9 @@ async fn connect_stdio_transport(
     cmd.current_dir(&cwd);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
-    // Library callers own stderr routing. Default to /dev/null instead of leaking server logs or
-    // secrets into the host process boundary.
-    cmd.stderr(Stdio::null());
+    // Preserve child stderr by default so library callers retain diagnostic visibility. Callers
+    // that need stricter routing can still redirect the parent process boundary explicitly.
+    cmd.stderr(Stdio::inherit());
     if !server_cfg.inherit_env() {
         cmd.env_clear();
         apply_stdio_baseline_env(&mut cmd);
@@ -703,12 +703,12 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let cwd = tempdir.path().join("workspace/subdir");
         std::fs::create_dir_all(&cwd).expect("create cwd");
-        let server_cfg = ServerConfig::unix(PathBuf::from("../mcp.sock")).expect("unix config");
+        let server_cfg = ServerConfig::unix(PathBuf::from("../m.sock")).expect("unix config");
 
         let identity = effective_server_config_identity(&ctx, "srv", &server_cfg, &cwd)
             .expect("resolve unix identity");
         let expected =
-            crate::manager::stable_path_identity(&tempdir.path().join("workspace/mcp.sock"))
+            crate::manager::stable_path_identity(&tempdir.path().join("workspace/m.sock"))
                 .expect("stable unix path identity");
 
         assert_eq!(
@@ -723,12 +723,19 @@ mod tests {
     #[tokio::test]
     async fn connect_transport_resolves_relative_unix_path_against_cwd() {
         let ctx = trusted_connect_context();
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let cwd = tempdir.path().join("workspace/subdir");
+        let temp_root = std::env::var_os("OMNE_TEST_SHORT_TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let tempdir = tempfile::Builder::new()
+            .prefix("mk-")
+            .rand_bytes(3)
+            .tempdir_in(&temp_root)
+            .expect("tempdir");
+        let cwd = tempdir.path().join("w/s");
         std::fs::create_dir_all(&cwd).expect("create cwd");
-        let socket_path = tempdir.path().join("workspace/mcp.sock");
+        let socket_path = tempdir.path().join("w/m.sock");
         let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind unix listener");
-        let server_cfg = ServerConfig::unix(PathBuf::from("../mcp.sock")).expect("unix config");
+        let server_cfg = ServerConfig::unix(PathBuf::from("../m.sock")).expect("unix config");
 
         let accept_task = tokio::spawn(async move {
             let _ = listener.accept().await.expect("accept unix connection");

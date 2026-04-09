@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
 from check_common.context import (
     CheckContext,
-    clear_directory_contents,
     command_exists,
     require_command,
     run_command,
@@ -21,26 +21,32 @@ def _run_llms_check(ctx: CheckContext, crate_root: Path) -> None:
 
 
 def _run_docs_test(ctx: CheckContext, crate_root: Path) -> None:
-    docs_target_dir = ctx.repo_root / "target" / "mdbook-test" / "notify-kit"
-    docs_target_dir.mkdir(parents=True, exist_ok=True)
-    clear_directory_contents(docs_target_dir)
-    # Some toolchains/runners assume the final deps tempdir ancestry already exists.
-    (docs_target_dir / "debug" / "deps").mkdir(parents=True, exist_ok=True)
+    docs_target_root = ctx.repo_root / "target" / "mdbook-test"
+    docs_target_root.mkdir(parents=True, exist_ok=True)
 
-    env = {"CARGO_TARGET_DIR": str(docs_target_dir)}
-    run_command(
-        ctx,
-        ["cargo", "build", "--manifest-path", crate_root / "Cargo.toml"],
-        cwd=ctx.repo_root,
-        env=env,
-        use_workaround=True,
-    )
-    run_command(
-        ctx,
-        ["mdbook", "test", "-L", docs_target_dir / "debug" / "deps", crate_root / "docs"],
-        cwd=ctx.repo_root,
-        use_workaround=True,
-    )
+    # Use a fresh target dir per run so repeated checks never race on shared `deps` cleanup.
+    with tempfile.TemporaryDirectory(
+        prefix="notify-kit-",
+        dir=docs_target_root,
+    ) as docs_target_dir_str:
+        docs_target_dir = Path(docs_target_dir_str)
+        # Some toolchains/runners assume the final deps tempdir ancestry already exists.
+        (docs_target_dir / "debug" / "deps").mkdir(parents=True, exist_ok=True)
+
+        env = {"CARGO_TARGET_DIR": str(docs_target_dir)}
+        run_command(
+            ctx,
+            ["cargo", "build", "--manifest-path", crate_root / "Cargo.toml"],
+            cwd=ctx.repo_root,
+            env=env,
+            use_workaround=True,
+        )
+        run_command(
+            ctx,
+            ["mdbook", "test", "-L", docs_target_dir / "debug" / "deps", crate_root / "docs"],
+            cwd=ctx.repo_root,
+            use_workaround=True,
+        )
 
 
 def _run_bot_syntax_checks(ctx: CheckContext, bots_root: Path) -> None:

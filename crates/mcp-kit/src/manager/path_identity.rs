@@ -58,7 +58,7 @@ pub(crate) fn stable_path_identity(path: &Path) -> io::Result<PathBuf> {
             Component::RootDir => normalized.push(component.as_os_str()),
             Component::CurDir => {}
             Component::ParentDir => {
-                normalized.pop();
+                pop_without_crossing_root(&mut normalized);
             }
             Component::Normal(part) => {
                 normalized.push(part);
@@ -80,4 +80,10 @@ pub(crate) fn stable_path_identity(path: &Path) -> io::Result<PathBuf> {
     }
 
     Ok(normalized)
+}
+
+fn pop_without_crossing_root(path: &mut PathBuf) {
+    if path.file_name().is_some() {
+        path.pop();
+    }
 }

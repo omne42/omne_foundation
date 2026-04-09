@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- export the shared allowlist host matcher so downstream crates can reuse the same subdomain/IP semantics instead of reimplementing divergent host checks
 - Fix `read_json_body_after_http_success_limited(...)` so non-2xx error summaries honor the caller-provided `max_bytes` limit instead of silently falling back to the crate default cap.
 - Return typed transport errors instead of panicking when DNS timeout paths run on a Tokio runtime without the time driver enabled, and keep regression coverage for both untrusted outbound validation and public-IP-pinned client selection.
 - Keep untrusted DNS post-validation rejecting always-disallowed targets such as multicast addresses even when `allow_private_ips=true`, so hostnames cannot widen past the hard IP denylist.

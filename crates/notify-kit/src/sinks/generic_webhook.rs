@@ -5,8 +5,8 @@ use crate::sinks::text::{TextLimits, format_event_text_limited};
 use crate::sinks::webhook_transport::WebhookTransport;
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
-    ensure_http_success, parse_and_validate_https_url_basic, redact_url, redact_url_str,
-    send_reqwest, validate_url_path_prefix,
+    ensure_http_success, host_matches_allowlist, parse_and_validate_https_url_basic, redact_url,
+    redact_url_str, send_reqwest, validate_url_path_prefix,
 };
 
 #[non_exhaustive]
@@ -320,7 +320,7 @@ fn validate_target_url(
         };
         let allowed = allowed_hosts
             .iter()
-            .any(|allowed_host| host.eq_ignore_ascii_case(allowed_host));
+            .any(|allowed_host| host_matches_allowlist(host, allowed_host));
         if !allowed {
             return Err(anyhow::anyhow!("url host is not allowed").into());
         }
@@ -456,6 +456,18 @@ mod tests {
         let sink = GenericWebhookSink::new_strict(cfg).expect("build strict sink");
         assert_eq!(sink.url.host_str().unwrap_or(""), "example.com");
         assert!(sink.url.path().starts_with("/hooks/"));
+    }
+
+    #[test]
+    fn strict_accepts_subdomain_hosts_like_http_kit_allowlists() {
+        let cfg = GenericWebhookConfig::new_strict(
+            "https://hooks.example.com/hooks/notify",
+            "/hooks/",
+            vec!["example.com".to_string()],
+        );
+        let sink = GenericWebhookSink::new_strict(cfg)
+            .expect("subdomain allowlist should follow http-kit semantics");
+        assert_eq!(sink.url.host_str().unwrap_or(""), "hooks.example.com");
     }
 
     #[test]

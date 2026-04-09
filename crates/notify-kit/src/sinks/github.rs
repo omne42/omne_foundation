@@ -391,6 +391,20 @@ mod tests {
     }
 
     #[test]
+    fn rejects_custom_api_base_with_query_even_if_host_is_trusted() {
+        let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok")
+            .with_api_base("https://github.example.com/api/v3?debug=true")
+            .with_trusted_bearer_token_host("github.example.com");
+        let err = GitHubCommentSink::new(cfg)
+            .expect_err("query-bearing custom api base should fail closed");
+        assert_eq!(err.kind(), crate::ErrorKind::Config);
+        assert!(
+            err.to_string().contains("without query parameters"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
     fn rejects_non_https_custom_api_base_even_if_host_is_trusted() {
         let cfg = GitHubCommentConfig::new("owner", "repo", 1, "tok")
             .with_api_base("http://github.example.com/api/v3/")

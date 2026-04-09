@@ -28,8 +28,8 @@ pub use http_probe::{
     probe_http_endpoint_detailed,
 };
 pub use outbound_policy::{
-    UntrustedOutboundError, UntrustedOutboundPolicy, validate_untrusted_outbound_url,
-    validate_untrusted_outbound_url_dns,
+    UntrustedOutboundError, UntrustedOutboundPolicy, host_matches_allowlist,
+    validate_untrusted_outbound_url, validate_untrusted_outbound_url_dns,
 };
 pub use url::{
     parse_and_validate_https_url, parse_and_validate_https_url_basic, redact_reqwest_error,

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- reject query-bearing or fragment-bearing custom bearer-token API bases so callers cannot smuggle extra URL state into authenticated GitHub requests
 - clarify the fail-closed bearer-token latest-release contract so the no-profile API explicitly points callers at the validated DNS/public-IP/http-kit transport path
 - add explicit internal dependency version constraints so `cargo package` no longer exports a manifest that drops `http-kit`'s semver edge
 - add regression coverage that keeps trusted custom bearer-token API bases fail-closed unless they stay on HTTPS and omit URL credentials

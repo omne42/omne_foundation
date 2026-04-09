@@ -181,6 +181,16 @@ pub fn validate_github_api_request_url(
             details: "bearer token requires a github api base without credentials".to_string(),
         });
     }
+    if url.query().is_some() {
+        return Err(GitHubApiError::InvalidApiBase {
+            details: "bearer token requires a github api base without query parameters".to_string(),
+        });
+    }
+    if url.fragment().is_some() {
+        return Err(GitHubApiError::InvalidApiBase {
+            details: "bearer token requires a github api base without fragments".to_string(),
+        });
+    }
 
     let host = url
         .host_str()
@@ -292,6 +302,41 @@ mod tests {
 
         let message = err.to_string();
         assert!(message.contains("without credentials"), "{message}");
+    }
+
+    #[test]
+    fn rejects_trusted_custom_host_with_query_parameters() {
+        let url =
+            reqwest::Url::parse("https://github.example.com/api/v3/repos/omne42/repo?debug=true")
+                .expect("url");
+
+        let err = validate_github_api_request_url(
+            &url,
+            GitHubApiRequestOptions::new()
+                .with_bearer_token(Some("secret-token"))
+                .with_trusted_bearer_token_hosts(&["github.example.com"]),
+        )
+        .expect_err("query-bearing bearer target should fail closed");
+
+        let message = err.to_string();
+        assert!(message.contains("without query parameters"), "{message}");
+    }
+
+    #[test]
+    fn rejects_trusted_custom_host_with_fragment() {
+        let url = reqwest::Url::parse("https://github.example.com/api/v3/repos/omne42/repo#frag")
+            .expect("url");
+
+        let err = validate_github_api_request_url(
+            &url,
+            GitHubApiRequestOptions::new()
+                .with_bearer_token(Some("secret-token"))
+                .with_trusted_bearer_token_hosts(&["github.example.com"]),
+        )
+        .expect_err("fragment-bearing bearer target should fail closed");
+
+        let message = err.to_string();
+        assert!(message.contains("without fragments"), "{message}");
     }
 
     #[test]

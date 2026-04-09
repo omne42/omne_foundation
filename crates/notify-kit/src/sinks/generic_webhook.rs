@@ -5,8 +5,8 @@ use crate::sinks::text::{TextLimits, format_event_text_limited};
 use crate::sinks::webhook_transport::WebhookTransport;
 use crate::sinks::{BoxFuture, Sink};
 use http_kit::{
-    ensure_http_success, parse_and_validate_https_url_basic, redact_url, redact_url_str,
-    send_reqwest, validate_url_path_prefix,
+    UntrustedOutboundPolicy, ensure_http_success, parse_and_validate_https_url_basic, redact_url,
+    redact_url_str, send_reqwest, validate_untrusted_outbound_url, validate_url_path_prefix,
 };
 
 #[non_exhaustive]
@@ -315,15 +315,14 @@ fn validate_target_url(
     }
 
     if !allowed_hosts.is_empty() {
-        let Some(host) = url.host_str() else {
-            return Err(anyhow::anyhow!("url must have a host").into());
-        };
-        let allowed = allowed_hosts
-            .iter()
-            .any(|allowed_host| host.eq_ignore_ascii_case(allowed_host));
-        if !allowed {
-            return Err(anyhow::anyhow!("url host is not allowed").into());
-        }
+        validate_untrusted_outbound_url(
+            &UntrustedOutboundPolicy {
+                allowed_hosts: allowed_hosts.to_vec(),
+                ..Default::default()
+            },
+            &url,
+        )
+        .map_err(anyhow::Error::new)?;
     }
 
     Ok(url)
@@ -459,6 +458,17 @@ mod tests {
     }
 
     #[test]
+    fn strict_accepts_subdomain_when_parent_host_is_allowlisted() {
+        let cfg = GenericWebhookConfig::new_strict(
+            "https://hooks.example.com/hooks/notify",
+            "/hooks/",
+            vec!["example.com".to_string()],
+        );
+        let sink = GenericWebhookSink::new_strict(cfg).expect("build strict sink");
+        assert_eq!(sink.url.host_str().unwrap_or(""), "hooks.example.com");
+    }
+
+    #[test]
     fn strict_rejects_unexpected_host() {
         let cfg = GenericWebhookConfig::new_strict(
             "https://evil.com/hooks/notify",
@@ -466,7 +476,7 @@ mod tests {
             vec!["example.com".to_string()],
         );
         let err = GenericWebhookSink::new_strict(cfg).expect_err("expected invalid host");
-        assert!(err.to_string().contains("host is not allowed"), "{err:#}");
+        assert!(err.to_string().contains("allowlist"), "{err:#}");
     }
 
     #[test]

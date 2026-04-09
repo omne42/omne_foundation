@@ -11,6 +11,7 @@
 
 ### Fixed
 - `mcp-kit`：`SharedManager` 现在把 `ServerName` typed boundary 补齐到公开 async API（`request/notify/disconnect/is_connected` 及其 connected/typed 变体的 `*_named` 入口），并把 same-server gate/state key 与 prepared connected client 的 server identity 一并收口到 `ServerName`；原有 `&str` 方法只保留为解析后转发的薄包装，不再把已经建立好的领域类型打回字符串边界。
+- `mcp-kit`：`SharedManager` Unix socket 测试 helper 现在会持久化选中的短路径临时目录，再返回 socket 路径；workspace `pre-commit` / `ci` 不再因为 helper 提前释放 `TempDir` 导致后续 bind 命中 `ENOENT`。
 - `mcp-kit`：相对 Unix socket 路径的回归测试现在使用更短且可覆盖的临时目录前缀；较长 worktree 路径下的 workspace `ci` / pre-commit 不再因为超过 `SUN_LEN` 而偶发失败。
 - `mcp-kit`：programmatic `ServerConfig::unix(...)` 的相对 `unix_path` 现在会和 `mcp.json` 加载路径一样，统一按连接 `cwd` / config root 解析成稳定绝对路径；连接身份比较、实际 `connect_unix`，以及覆盖这条边界的 shared-manager 测试 metadata 记录都不再偷偷依赖进程级 `current_dir()` 或 raw config identity，Windows 回归断言也改为比较稳定路径身份而不是绝对路径显示格式。
 - `mcp-kit`：所有会改动进程 `current_dir()` 的测试现在共享同一套 crate 级 `cwd` 锁与 restore helper，并统一收口到 `test_support`；`config`、`manager`、`shared_manager` 三组回归测试不再各自持有独立锁，避免 `cargo test --workspace` / `scripts/check-workspace.sh local` 下因全局工作目录竞争产生的偶发失败。

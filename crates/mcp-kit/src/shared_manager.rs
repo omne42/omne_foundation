@@ -3002,6 +3002,7 @@ mod tests {
             if let Ok(listener) = UnixListener::bind(&path) {
                 drop(listener);
                 let _ = std::fs::remove_file(&path);
+                let _persisted_root = tempdir.keep();
                 return Some(path);
             }
         }

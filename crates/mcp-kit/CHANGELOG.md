@@ -12,6 +12,7 @@
 ### Fixed
 - `mcp-kit`：programmatic `ServerConfig::unix(...)` 的相对 `unix_path` 现在会和 `mcp.json` 加载路径一样，统一按连接 `cwd` / config root 解析成稳定绝对路径；连接身份比较、实际 `connect_unix`，以及覆盖这条边界的 shared-manager 测试 metadata 记录都不再偷偷依赖进程级 `current_dir()` 或 raw config identity，Windows 回归断言也改为比较稳定路径身份而不是绝对路径显示格式。
 - `mcp-kit`：所有会改动进程 `current_dir()` 的测试现在共享同一套 crate 级 `cwd` 锁与 restore helper，并统一收口到 `test_support`；`config`、`manager`、`shared_manager` 三组回归测试不再各自持有独立锁，避免 `cargo test --workspace` / `scripts/check-workspace.sh local` 下因全局工作目录竞争产生的偶发失败。
+- `mcp-kit`：相对 Unix socket 回归测试现在使用更短的临时目录与 socket 路径，避免长 worktree 路径在 Linux 上撞到 `SUN_LEN` 限制，把 workspace `ci` 的失败收敛回真实回归。
 - `mcp-kit`：`streamable_http` URL 语法校验现在前移到 `ServerConfig` / `Config` 不变量边界；无效 `url`、`sse_url`、`http_url` 会在构造或加载阶段直接 fail-fast，而不再拖到首次连接时才暴露。`Config::load*()` 产出的 `Config.path` 也会像 `with_path(...)` 一样一次性绑定到绝对路径，避免后续 `cwd` 变化再偷偷影响 thread root / 相对 `cwd` 身份语义。
 - `mcp-kit`：config-driven 相对 `unix_path` 与相对 `cwd` 现在都会绑定并限制在 config thread root 之内；`..` 或 symlink 逃逸不再能把 Unix socket 连接或 child `cwd` 静默带出 `--root`，同时继续保留现有的非 `NotFound` 文件系统错误上抛语义。
 - `mcp-kit`：相对 `unix_path` / `cwd` 新边界的回归测试现在改为断言稳定路径身份而不是 Unix 风格词法拼法，避免 Windows runner 因 verbatim/canonical path 表示差异把同一安全语义误报成失败。

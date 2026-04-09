@@ -723,12 +723,19 @@ mod tests {
     #[tokio::test]
     async fn connect_transport_resolves_relative_unix_path_against_cwd() {
         let ctx = trusted_connect_context();
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let cwd = tempdir.path().join("workspace/subdir");
+        let temp_root = std::env::var_os("OMNE_TEST_SHORT_TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let tempdir = tempfile::Builder::new()
+            .prefix("mk-")
+            .rand_bytes(3)
+            .tempdir_in(&temp_root)
+            .expect("tempdir");
+        let cwd = tempdir.path().join("w/s");
         std::fs::create_dir_all(&cwd).expect("create cwd");
-        let socket_path = tempdir.path().join("workspace/mcp.sock");
+        let socket_path = tempdir.path().join("w/m.sock");
         let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind unix listener");
-        let server_cfg = ServerConfig::unix(PathBuf::from("../mcp.sock")).expect("unix config");
+        let server_cfg = ServerConfig::unix(PathBuf::from("../m.sock")).expect("unix config");
 
         let accept_task = tokio::spawn(async move {
             let _ = listener.accept().await.expect("accept unix connection");

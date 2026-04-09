@@ -7,7 +7,7 @@
 //! ## 核心概念
 //!
 //! - **`SecretSpec`**：秘密源规范，统一的 `secret://` 格式
-//! - **`SecretResolver`**：异步秘密解析 trait
+//! - **`SecretResolver`**：异步秘密解析 trait，typed `SecretSpec` 是公开扩展主路径，`&str` 入口只做 parse 转发
 //! - **`SecretString`**：默认返回类型，`Debug` 自动脱敏，并在最后一个共享句柄 drop 时清零底层缓冲区
 //! - **`SecretEnvironment`**：秘密上下文 trait，只负责提供 secret 值和缓存分区
 //! - **`SecretCommandRuntime`**：CLI-backed provider 的命令运行时策略
@@ -192,17 +192,39 @@ macro_rules! secret_json_error {
 }
 
 pub trait SecretResolver: Send + Sync {
+    fn resolve_secret_spec<'a>(
+        &'a self,
+        spec: &'a crate::spec::SecretSpec,
+        context: SecretResolutionContext<'a>,
+    ) -> SecretResolveFuture<'a> {
+        let spec = spec.to_string();
+        Box::pin(async move { self.resolve_secret(&spec, context).await })
+    }
+
     fn resolve_secret<'a>(
         &'a self,
         spec: &'a str,
         context: SecretResolutionContext<'a>,
-    ) -> SecretResolveFuture<'a>;
+    ) -> SecretResolveFuture<'a> {
+        Box::pin(async move {
+            let parsed = crate::spec::SecretSpec::parse(spec)?;
+            self.resolve_secret_spec(&parsed, context).await
+        })
+    }
 }
 
 impl<R> SecretResolver for Box<R>
 where
     R: SecretResolver + ?Sized,
 {
+    fn resolve_secret_spec<'a>(
+        &'a self,
+        spec: &'a crate::spec::SecretSpec,
+        context: SecretResolutionContext<'a>,
+    ) -> SecretResolveFuture<'a> {
+        self.as_ref().resolve_secret_spec(spec, context)
+    }
+
     fn resolve_secret<'a>(
         &'a self,
         spec: &'a str,
@@ -216,6 +238,14 @@ impl<R> SecretResolver for std::sync::Arc<R>
 where
     R: SecretResolver + ?Sized,
 {
+    fn resolve_secret_spec<'a>(
+        &'a self,
+        spec: &'a crate::spec::SecretSpec,
+        context: SecretResolutionContext<'a>,
+    ) -> SecretResolveFuture<'a> {
+        self.as_ref().resolve_secret_spec(spec, context)
+    }
+
     fn resolve_secret<'a>(
         &'a self,
         spec: &'a str,
@@ -302,6 +332,16 @@ pub trait CacheAwareSecretResolver: SecretResolver {
         Ok(None)
     }
 
+    /// Optionally provide a cache-scope hint for a parsed secret spec before preparing the
+    /// resolution.
+    fn lookup_secret_cache_scope_for_spec(
+        &self,
+        spec: &crate::spec::SecretSpec,
+        context: SecretResolutionContext<'_>,
+    ) -> Result<Option<String>> {
+        self.lookup_secret_cache_scope(&spec.to_string(), context)
+    }
+
     /// Declare how a cache-scope hint should be partitioned.
     ///
     /// Returning `None` disables the hint-only fast path and falls back to the prepared-resolution
@@ -315,11 +355,34 @@ pub trait CacheAwareSecretResolver: SecretResolver {
         None
     }
 
+    /// Declare how a parsed cache-scope hint should be partitioned.
+    fn lookup_secret_cache_partitioning_for_spec(
+        &self,
+        spec: &crate::spec::SecretSpec,
+        context: SecretResolutionContext<'_>,
+    ) -> Option<SecretCachePartitioning> {
+        self.lookup_secret_cache_partitioning(&spec.to_string(), context)
+    }
+
     fn prepare_secret_resolution(
         &self,
         spec: &str,
         context: SecretResolutionContext<'_>,
-    ) -> impl Future<Output = Result<PreparedSecretResolution<Self::Prepared>>> + Send;
+    ) -> impl Future<Output = Result<PreparedSecretResolution<Self::Prepared>>> + Send {
+        async move {
+            let parsed = crate::spec::SecretSpec::parse(spec)?;
+            self.prepare_secret_spec_resolution(&parsed, context).await
+        }
+    }
+
+    fn prepare_secret_spec_resolution(
+        &self,
+        spec: &crate::spec::SecretSpec,
+        context: SecretResolutionContext<'_>,
+    ) -> impl Future<Output = Result<PreparedSecretResolution<Self::Prepared>>> + Send {
+        let spec = spec.to_string();
+        async move { self.prepare_secret_resolution(&spec, context).await }
+    }
 
     fn resolve_prepared_secret(
         &self,
@@ -332,6 +395,14 @@ pub trait CacheAwareSecretResolver: SecretResolver {
 pub struct DefaultSecretResolver;
 
 impl SecretResolver for DefaultSecretResolver {
+    fn resolve_secret_spec<'a>(
+        &'a self,
+        spec: &'a crate::spec::SecretSpec,
+        context: SecretResolutionContext<'a>,
+    ) -> SecretResolveFuture<'a> {
+        Box::pin(async move { resolve_secret_spec_in_context(spec, context).await })
+    }
+
     fn resolve_secret<'a>(
         &'a self,
         spec: &'a str,
@@ -348,12 +419,14 @@ pub struct DefaultPreparedSecret {
 impl CacheAwareSecretResolver for DefaultSecretResolver {
     type Prepared = DefaultPreparedSecret;
 
-    async fn prepare_secret_resolution(
+    async fn prepare_secret_spec_resolution(
         &self,
-        spec: &str,
+        spec: &crate::spec::SecretSpec,
         _context: SecretResolutionContext<'_>,
     ) -> Result<PreparedSecretResolution<Self::Prepared>> {
-        prepare_default_secret_resolution(spec).await
+        Ok(crate::spec::prepare_default_secret_spec_resolution(
+            spec.clone(),
+        ))
     }
 
     async fn resolve_prepared_secret(
@@ -444,7 +517,7 @@ impl<R> CachingSecretResolver<R> {
 
     fn hinted_cache_key(
         &self,
-        spec: &str,
+        spec: &crate::spec::SecretSpec,
         context: SecretResolutionContext<'_>,
     ) -> Result<Option<SecretCacheKey>>
     where
@@ -452,10 +525,10 @@ impl<R> CachingSecretResolver<R> {
     {
         Ok(self
             .inner
-            .lookup_secret_cache_scope(spec, context)?
+            .lookup_secret_cache_scope_for_spec(spec, context)?
             .and_then(|scope| {
                 self.inner
-                    .lookup_secret_cache_partitioning(spec, context)
+                    .lookup_secret_cache_partitioning_for_spec(spec, context)
                     .and_then(|partitioning| {
                         SecretCacheKey::for_context(scope, partitioning, context)
                     })
@@ -508,9 +581,9 @@ impl<R> SecretResolver for CachingSecretResolver<R>
 where
     R: CacheAwareSecretResolver + Send + Sync,
 {
-    fn resolve_secret<'a>(
+    fn resolve_secret_spec<'a>(
         &'a self,
-        spec: &'a str,
+        spec: &'a crate::spec::SecretSpec,
         context: SecretResolutionContext<'a>,
     ) -> SecretResolveFuture<'a> {
         Box::pin(async move {
@@ -518,7 +591,10 @@ where
                 let hinted_key = self.hinted_cache_key(spec, context)?;
                 let hinted_value = hinted_key.as_ref().and_then(|key| self.cached_value(key));
 
-                let prepared = self.inner.prepare_secret_resolution(spec, context).await?;
+                let prepared = self
+                    .inner
+                    .prepare_secret_spec_resolution(spec, context)
+                    .await?;
                 let prepared_key = prepared.cache_key(context);
 
                 let Some(key) = prepared_key else {
@@ -663,11 +739,13 @@ pub mod spec;
 mod types;
 mod value;
 
-use spec::{
-    prepare_default_secret_resolution, resolve_prepared_default_secret, resolve_secret_in_context,
-};
+use spec::{resolve_secret_in_context, resolve_secret_spec_in_context};
 
-pub use spec::{SecretSpec, resolve_secret, resolve_secret_with_runtime};
+pub use spec::{
+    SecretSpec, prepare_default_secret_spec_resolution, resolve_prepared_default_secret,
+    resolve_secret, resolve_secret_spec, resolve_secret_spec_with_runtime,
+    resolve_secret_with_runtime,
+};
 
 impl SecretCacheKey {
     fn for_context(

@@ -1,35 +1,8 @@
 use super::*;
 use crate::ServerName;
+#[cfg(not(windows))]
+use crate::test_support::{CurrentDirRestoreGuard, cwd_test_guard};
 use std::path::PathBuf;
-#[cfg(not(windows))]
-use std::sync::{Mutex, MutexGuard, OnceLock};
-
-#[cfg(not(windows))]
-fn cwd_test_guard() -> MutexGuard<'static, ()> {
-    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-    GUARD.get_or_init(|| Mutex::new(())).lock().unwrap()
-}
-
-#[cfg(not(windows))]
-struct CurrentDirRestoreGuard {
-    original_cwd: PathBuf,
-}
-
-#[cfg(not(windows))]
-impl CurrentDirRestoreGuard {
-    fn capture() -> Self {
-        Self {
-            original_cwd: std::env::current_dir().expect("original cwd"),
-        }
-    }
-}
-
-#[cfg(not(windows))]
-impl Drop for CurrentDirRestoreGuard {
-    fn drop(&mut self) {
-        let _ = std::env::set_current_dir(&self.original_cwd);
-    }
-}
 
 #[tokio::test]
 async fn load_rejects_mcpservers_wrapper() {
@@ -244,7 +217,7 @@ fn with_path_binds_relative_config_path_to_current_dir_once() {
     assert_eq!(config.path(), Some(config_dir.join("mcp.json").as_path()));
     assert_eq!(config.thread_root(), Some(config_dir.as_path()));
 
-    std::env::set_current_dir(&cwd_restore.original_cwd).expect("restore original cwd early");
+    cwd_restore.restore_now();
 }
 
 #[cfg(not(windows))]
@@ -279,7 +252,7 @@ fn load_binds_relative_override_path_to_current_dir_once() {
     assert_eq!(cfg.path(), Some(config_dir.join("mcp.json").as_path()));
     assert_eq!(cfg.thread_root(), Some(config_dir.as_path()));
 
-    std::env::set_current_dir(&cwd_restore.original_cwd).expect("restore original cwd early");
+    cwd_restore.restore_now();
 }
 
 #[tokio::test]

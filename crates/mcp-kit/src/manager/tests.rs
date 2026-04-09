@@ -1,13 +1,13 @@
 use super::*;
 use crate::Transport;
+#[cfg(not(windows))]
+use crate::test_support::{CurrentDirRestoreGuard, cwd_test_guard};
 #[cfg(unix)]
 use std::ffi::OsString;
 #[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::Path;
 use std::path::PathBuf;
-#[cfg(not(windows))]
-use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -50,38 +50,6 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
         return (*message).to_string();
     }
     "<non-string panic payload>".to_string()
-}
-
-#[cfg(not(windows))]
-fn cwd_test_guard() -> std::sync::MutexGuard<'static, ()> {
-    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-    GUARD
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-#[cfg(not(windows))]
-struct CurrentDirRestoreGuard {
-    original_cwd: Option<PathBuf>,
-}
-
-#[cfg(not(windows))]
-impl CurrentDirRestoreGuard {
-    fn capture() -> Self {
-        Self {
-            original_cwd: Some(std::env::current_dir().expect("original cwd")),
-        }
-    }
-}
-
-#[cfg(not(windows))]
-impl Drop for CurrentDirRestoreGuard {
-    fn drop(&mut self) {
-        if let Some(path) = self.original_cwd.take() {
-            let _ = std::env::set_current_dir(path);
-        }
-    }
 }
 
 #[cfg(unix)]

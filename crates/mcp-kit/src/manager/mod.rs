@@ -978,6 +978,25 @@ impl Manager {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn record_connection_server_config_effective_with_base(
+        &mut self,
+        server_name: &str,
+        server_config: &ServerConfig,
+        cwd: &Path,
+        cwd_base: Option<&Path>,
+        stdout_log_root: Option<&Path>,
+    ) -> anyhow::Result<()> {
+        let server_name = parse_server_name_anyhow(server_name)?;
+        let cwd = resolve_connection_cwd_with_base(cwd_base, cwd)?;
+        let mut ctx = self.connect_context_for_identity();
+        ctx.stdout_log_root = stdout_log_root.map(Path::to_path_buf);
+        let identity =
+            effective_server_config_identity(&ctx, server_name.as_str(), server_config, &cwd)?;
+        self.connection_server_configs.insert(server_name, identity);
+        Ok(())
+    }
+
     pub(crate) fn clear_connection_server_config(&mut self, server_name: &str) {
         self.connection_server_configs.remove(server_name);
     }

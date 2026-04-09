@@ -847,7 +847,13 @@ mod tests {
     ) {
         manager.record_connection_cwd(server_name, cwd).unwrap();
         manager
-            .record_connection_server_config(server_name, config.server(server_name).unwrap())
+            .record_connection_server_config_effective_with_base(
+                server_name,
+                config.server(server_name).unwrap(),
+                cwd,
+                None,
+                Some(cwd),
+            )
             .unwrap();
     }
 
@@ -3433,7 +3439,13 @@ mod tests {
             )
             .expect("record cwd identity");
         manager
-            .record_connection_server_config("srv", config.server("srv").expect("config server"))
+            .record_connection_server_config_effective_with_base(
+                "srv",
+                config.server("srv").expect("config server"),
+                Path::new("workspace/demo"),
+                config.thread_root(),
+                config.thread_root(),
+            )
             .expect("record config identity");
 
         let shared = manager.into_shared();

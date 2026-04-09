@@ -181,6 +181,13 @@ pub fn validate_github_api_request_url(
             details: "bearer token requires a github api base without credentials".to_string(),
         });
     }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(GitHubApiError::InvalidApiBase {
+            details:
+                "bearer token requires a github api base without query parameters or fragments"
+                    .to_string(),
+        });
+    }
 
     let host = url
         .host_str()
@@ -309,6 +316,81 @@ mod tests {
 
         let message = err.to_string();
         assert!(message.contains("requires an https"), "{message}");
+    }
+
+    #[test]
+    fn rejects_canonical_host_with_query() {
+        let url = reqwest::Url::parse("https://api.github.com/repos/omne42/repo?x=1").expect("url");
+
+        let err = validate_github_api_request_url(
+            &url,
+            GitHubApiRequestOptions::new().with_bearer_token(Some("secret-token")),
+        )
+        .expect_err("query-bearing bearer target should fail closed");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("without query parameters or fragments"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_canonical_host_with_fragment() {
+        let url =
+            reqwest::Url::parse("https://api.github.com/repos/omne42/repo#frag").expect("url");
+
+        let err = validate_github_api_request_url(
+            &url,
+            GitHubApiRequestOptions::new().with_bearer_token(Some("secret-token")),
+        )
+        .expect_err("fragment-bearing bearer target should fail closed");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("without query parameters or fragments"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_trusted_custom_host_with_query() {
+        let url = reqwest::Url::parse("https://github.example.com/api/v3/repos/omne42/repo?x=1")
+            .expect("url");
+
+        let err = validate_github_api_request_url(
+            &url,
+            GitHubApiRequestOptions::new()
+                .with_bearer_token(Some("secret-token"))
+                .with_trusted_bearer_token_hosts(&["github.example.com"]),
+        )
+        .expect_err("query-bearing trusted custom bearer target should fail closed");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("without query parameters or fragments"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_trusted_custom_host_with_fragment() {
+        let url = reqwest::Url::parse("https://github.example.com/api/v3/repos/omne42/repo#frag")
+            .expect("url");
+
+        let err = validate_github_api_request_url(
+            &url,
+            GitHubApiRequestOptions::new()
+                .with_bearer_token(Some("secret-token"))
+                .with_trusted_bearer_token_hosts(&["github.example.com"]),
+        )
+        .expect_err("fragment-bearing trusted custom bearer target should fail closed");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("without query parameters or fragments"),
+            "{message}"
+        );
     }
 
     #[test]

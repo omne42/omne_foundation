@@ -178,7 +178,7 @@ pub(crate) fn effective_server_config_identity(
             })
         }
         Transport::Unix => Ok(ConnectionServerConfigIdentity::Unix {
-            unix_path: server_cfg.unix_path_required().to_path_buf(),
+            unix_path: resolve_unix_transport_path(server_cfg, cwd)?,
         }),
         Transport::StreamableHttp => {
             let resolved_urls = resolve_streamable_http_urls(ctx, server_name, server_cfg, cwd)?;
@@ -203,7 +203,7 @@ pub(crate) async fn connect_transport(
 ) -> anyhow::Result<(mcp_jsonrpc::Client, Option<Child>)> {
     match server_cfg.transport() {
         Transport::Stdio => connect_stdio_transport(ctx, server_name, server_cfg, cwd).await,
-        Transport::Unix => connect_unix_transport(ctx, server_name, server_cfg).await,
+        Transport::Unix => connect_unix_transport(ctx, server_name, server_cfg, cwd).await,
         Transport::StreamableHttp => {
             connect_streamable_http_transport(ctx, server_name, server_cfg, cwd).await
         }
@@ -303,17 +303,32 @@ async fn connect_unix_transport(
     ctx: &ConnectContext,
     server_name: &str,
     server_cfg: &ServerConfig,
+    cwd: &Path,
 ) -> anyhow::Result<(mcp_jsonrpc::Client, Option<Child>)> {
     if ctx.trust_mode == TrustMode::Untrusted {
         config_bail!(
             "refusing to connect unix mcp server in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
         );
     }
-    let unix_path = server_cfg.unix_path_required();
-    let client = mcp_jsonrpc::Client::connect_unix(unix_path)
+    let unix_path = resolve_unix_transport_path(server_cfg, cwd)?;
+    let client = mcp_jsonrpc::Client::connect_unix(&unix_path)
         .await
         .with_context(|| format!("connect unix mcp server path={}", unix_path.display()))?;
     Ok((client, None))
+}
+
+fn resolve_unix_transport_path(server_cfg: &ServerConfig, cwd: &Path) -> anyhow::Result<PathBuf> {
+    let unix_path = server_cfg.unix_path_required();
+    if unix_path.is_absolute() {
+        return super::path_identity::stable_path_identity(unix_path).map_err(Into::into);
+    }
+
+    let cwd = super::resolve_connection_cwd(cwd)?;
+    super::path_identity::resolve_relative_path_within_base(
+        &cwd,
+        unix_path,
+        "relative MCP unix_path",
+    )
 }
 
 async fn connect_streamable_http_transport(
@@ -560,6 +575,7 @@ pub(super) fn stdout_log_path_within_root(
 mod tests {
     use super::*;
     use crate::MCP_PROTOCOL_VERSION;
+    use crate::manager::path_identity;
 
     fn trusted_connect_context() -> ConnectContext {
         ConnectContext {
@@ -687,6 +703,44 @@ mod tests {
         assert_ne!(
             raw, effective,
             "config identity should capture resolved env-backed inputs instead of raw env var names"
+        );
+    }
+
+    #[test]
+    fn effective_unix_identity_resolves_relative_path_against_connect_cwd() {
+        let ctx = trusted_connect_context();
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let cwd = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let server_cfg = ServerConfig::unix(PathBuf::from("sock/mcp.sock")).expect("unix config");
+
+        let effective = effective_server_config_identity(&ctx, "srv", &server_cfg, &cwd)
+            .expect("resolve effective identity");
+
+        let ConnectionServerConfigIdentity::Unix { unix_path } = effective else {
+            panic!("expected unix config identity");
+        };
+        let expected = path_identity::stable_path_identity(&cwd.join("sock/mcp.sock"))
+            .expect("stable unix path identity");
+        assert_eq!(unix_path, expected);
+    }
+
+    #[test]
+    fn effective_unix_identity_rejects_relative_escape_outside_connect_cwd() {
+        let ctx = trusted_connect_context();
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let cwd = tempdir.path().join("workspace/subdir");
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let server_cfg =
+            ServerConfig::unix(PathBuf::from("../sock/mcp.sock")).expect("unix config");
+
+        let err = effective_server_config_identity(&ctx, "srv", &server_cfg, &cwd)
+            .expect_err("relative unix path escape should fail");
+
+        assert!(
+            err.to_string()
+                .contains("relative MCP unix_path must stay within root"),
+            "{err:#}"
         );
     }
 

@@ -118,6 +118,15 @@ fn classify_jsonrpc_error(err: &mcp_jsonrpc::Error) -> ErrorKind {
     match err {
         mcp_jsonrpc::Error::Io(_) => ErrorKind::Connection,
         _ if err.is_wait_timeout() => ErrorKind::Timeout,
+        mcp_jsonrpc::Error::Protocol(protocol)
+            if matches!(
+                protocol.kind,
+                mcp_jsonrpc::ProtocolErrorKind::Closed
+                    | mcp_jsonrpc::ProtocolErrorKind::StreamableHttp
+            ) =>
+        {
+            ErrorKind::Connection
+        }
         mcp_jsonrpc::Error::Json(_)
         | mcp_jsonrpc::Error::Rpc { .. }
         | mcp_jsonrpc::Error::Protocol(_) => ErrorKind::Protocol,
@@ -239,6 +248,24 @@ mod tests {
     }
 
     #[test]
+    fn classifies_jsonrpc_closed_errors_as_connection_errors() {
+        let err = Error::from(mcp_jsonrpc::Error::protocol(
+            mcp_jsonrpc::ProtocolErrorKind::Closed,
+            "transport closed",
+        ));
+        assert_eq!(err.kind(), ErrorKind::Connection);
+    }
+
+    #[test]
+    fn classifies_streamable_http_errors_as_connection_errors() {
+        let err = Error::from(mcp_jsonrpc::Error::protocol(
+            mcp_jsonrpc::ProtocolErrorKind::StreamableHttp,
+            "http bridge failed",
+        ));
+        assert_eq!(err.kind(), ErrorKind::Connection);
+    }
+
+    #[test]
     fn classifies_timeout_errors() {
         let err = Error::from(mcp_jsonrpc::Error::protocol(
             mcp_jsonrpc::ProtocolErrorKind::WaitTimeout,
@@ -263,6 +290,29 @@ mod tests {
             anyhow::anyhow!("invalid mcp server config"),
         ));
         assert_eq!(err.kind(), ErrorKind::Config);
+    }
+
+    #[test]
+    fn preserves_wrapped_kind_through_anyhow_context_before_conversion() {
+        let err = super::wrap_kind(
+            ErrorKind::ManagerState,
+            anyhow::anyhow!("server already connected"),
+        )
+        .context("outer anyhow context")
+        .context("second anyhow context");
+
+        assert_eq!(Error::from(err).kind(), ErrorKind::ManagerState);
+    }
+
+    #[test]
+    fn classifies_typed_jsonrpc_errors_through_anyhow_context_layers() {
+        let err = anyhow::Error::new(mcp_jsonrpc::Error::protocol(
+            mcp_jsonrpc::ProtocolErrorKind::WaitTimeout,
+            "timed out",
+        ))
+        .context("close session");
+
+        assert_eq!(Error::from(err).kind(), ErrorKind::Timeout);
     }
 
     #[test]

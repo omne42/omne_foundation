@@ -425,9 +425,8 @@ fn take_injected_remove_file_error() -> Option<std::io::Error> {
     let mut slot = injected_remove_file_error_slot()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    slot.take().map(|kind| {
-        std::io::Error::new(kind, "injected stdout_log remove_file failure")
-    })
+    slot.take()
+        .map(|kind| std::io::Error::new(kind, "injected stdout_log remove_file failure"))
 }
 
 #[cfg(test)]
@@ -435,7 +434,11 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn prune_rotating_log_parts_keeps_latest_n() {
+        let _guard = prune_test_mutex()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("server.stdout.log");
 

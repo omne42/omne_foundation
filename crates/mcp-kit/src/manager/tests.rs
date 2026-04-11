@@ -42,16 +42,6 @@ fn test_workspace_path(name: &str) -> PathBuf {
     absolute_test_cwd().join("workspace").join(name)
 }
 
-fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(message) = payload.downcast_ref::<String>() {
-        return message.clone();
-    }
-    if let Some(message) = payload.downcast_ref::<&'static str>() {
-        return (*message).to_string();
-    }
-    "<non-string panic payload>".to_string()
-}
-
 #[cfg(unix)]
 #[test]
 fn stable_connection_cwd_identity_preserves_symlink_parent_semantics() {
@@ -555,7 +545,7 @@ fn try_from_config_rejects_invalid_client_config() {
 }
 
 #[test]
-fn from_config_panics_on_invalid_client_config() {
+fn from_config_ignores_invalid_client_config_and_keeps_defaults() {
     let config = Config::new(
         crate::ClientConfig {
             capabilities: Some(serde_json::json!(1)),
@@ -563,16 +553,11 @@ fn from_config_panics_on_invalid_client_config() {
         },
         std::collections::BTreeMap::new(),
     );
-    let panic = std::panic::catch_unwind(|| {
-        let _ = Manager::from_config(&config, "test-client", "0.0.0", Duration::from_secs(1));
-    })
-    .expect_err("invalid client config should panic");
-    let message = panic_message(&panic);
-    assert!(
-        message.contains("validated Config"),
-        "panic should explain the contract: {message}"
-    );
-    assert!(message.contains("capabilities"), "panic={message}");
+    let manager = Manager::from_config(&config, "test-client", "0.0.0", Duration::from_secs(1));
+
+    assert_eq!(manager.protocol_version, MCP_PROTOCOL_VERSION);
+    assert_eq!(manager.capabilities, serde_json::json!({}));
+    assert!(manager.roots.is_none());
 }
 
 #[test]
@@ -599,7 +584,7 @@ fn try_from_config_rejects_invalid_server_config() {
 }
 
 #[test]
-fn from_config_panics_on_invalid_server_config() {
+fn from_config_ignores_invalid_server_config_and_still_builds_manager() {
     let mut server = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
     server
         .env_http_headers_mut()
@@ -610,17 +595,51 @@ fn from_config_panics_on_invalid_server_config() {
     servers.insert(ServerName::parse("srv").unwrap(), server);
     let config = Config::new(crate::ClientConfig::default(), servers);
 
-    let panic = std::panic::catch_unwind(|| {
-        let _ = Manager::from_config(&config, "test-client", "0.0.0", Duration::from_secs(1));
-    })
-    .expect_err("invalid server config should panic");
-    let message = panic_message(&panic);
-    assert!(
-        message.contains("validated Config"),
-        "panic should explain the contract: {message}"
+    let manager = Manager::from_config(&config, "test-client", "0.0.0", Duration::from_secs(1));
+
+    assert_eq!(manager.protocol_version, MCP_PROTOCOL_VERSION);
+    assert_eq!(manager.capabilities, serde_json::json!({}));
+    assert!(manager.roots.is_none());
+}
+
+#[test]
+fn from_config_applies_valid_client_defaults_even_when_other_config_is_invalid() {
+    let mut server = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+    server
+        .env_http_headers_mut()
+        .unwrap()
+        .insert("MCP-Protocol-Version".to_string(), "MCP_TOKEN".to_string());
+
+    let mut servers = std::collections::BTreeMap::new();
+    servers.insert(ServerName::parse("srv").unwrap(), server);
+    let config = Config::new(
+        crate::ClientConfig {
+            protocol_version: Some("2025-01-01".to_string()),
+            capabilities: Some(serde_json::json!({ "sampling": {} })),
+            roots: Some(vec![Root {
+                uri: "file:///tmp".to_string(),
+                name: Some("tmp".to_string()),
+            }]),
+        },
+        servers,
     );
-    assert!(message.contains("server=srv"), "panic={message}");
-    assert!(message.contains("reserved by transport"), "panic={message}");
+
+    let manager = Manager::from_config(&config, "test-client", "0.0.0", Duration::from_secs(1));
+
+    assert_eq!(manager.protocol_version, "2025-01-01");
+    assert_eq!(
+        manager.capabilities,
+        serde_json::json!({ "sampling": {}, "roots": {} })
+    );
+    let roots = manager.roots.as_deref().expect("roots should be preserved");
+    assert_eq!(roots.len(), 1);
+    assert_eq!(
+        roots[0],
+        Root {
+            uri: "file:///tmp".to_string(),
+            name: Some("tmp".to_string()),
+        }
+    );
 }
 
 #[cfg(all(unix, target_os = "linux"))]

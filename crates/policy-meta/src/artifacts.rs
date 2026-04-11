@@ -233,6 +233,7 @@ fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
     use std::path::PathBuf;
 
     use serde_json::{Value, json};
@@ -343,6 +344,26 @@ mod tests {
             ArtifactGenerationError::Panic { ref context, ref details }
             if context == "panic test" && details == "boom"
         ));
+    }
+
+    #[test]
+    fn artifact_generation_error_serialize_variant_exposes_display_and_source() {
+        let source = serde_json::from_str::<serde_json::Value>("{")
+            .expect_err("invalid json should produce a serde_json::Error");
+        let expected_source_text = source.to_string();
+        let err = ArtifactGenerationError::Serialize {
+            context: "test schema document",
+            source,
+        };
+
+        assert_eq!(
+            err.to_string(),
+            format!("failed to serialize generated test schema document: {expected_source_text}")
+        );
+        assert_eq!(
+            err.source().map(std::string::ToString::to_string),
+            Some(expected_source_text)
+        );
     }
 
     fn checked_in_schema(file_name: &str) -> Value {

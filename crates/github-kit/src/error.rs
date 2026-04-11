@@ -6,6 +6,11 @@ pub enum GitHubApiError {
     InvalidRepository { repo: String },
     #[error("invalid github api base: {details}")]
     InvalidApiBase { details: String },
+    #[error("invalid github api header `{header}`: {details}")]
+    InvalidHeaderValue {
+        header: &'static str,
+        details: String,
+    },
     #[error("no usable github api base configured")]
     NoApiBaseConfigured,
     #[error("failed to fetch latest release metadata for {repo}: {details}")]

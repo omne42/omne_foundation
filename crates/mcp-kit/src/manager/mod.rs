@@ -693,7 +693,7 @@ impl Manager {
         timeout: Duration,
     ) -> crate::Result<Self> {
         config.validate()?;
-        Ok(Self::from_config(
+        Ok(Self::build_from_config_lossy(
             config,
             client_name,
             client_version,
@@ -703,32 +703,41 @@ impl Manager {
 
     /// Build a `Manager` using client defaults from `config`.
     ///
-    /// Note: this constructor still fail-fast validates the full config and will panic if
-    /// `config` is invalid. Use `Manager::try_from_config` if you want a typed validation error.
+    /// This compatibility constructor is intentionally non-fallible: it applies any valid client
+    /// defaults from `config` and leaves invalid pieces at `Manager::new(...)` defaults instead of
+    /// panicking.
+    ///
+    /// Use `Manager::try_from_config` when invalid client or server config should be rejected with
+    /// a typed error before constructing the manager.
     pub fn from_config(
         config: &Config,
         client_name: impl Into<String>,
         client_version: impl Into<String>,
         timeout: Duration,
     ) -> Self {
-        if let Err(err) = config.validate() {
-            panic!(
-                "Manager::from_config requires a validated Config (use try_from_config): {err:#}"
-            );
-        }
+        Self::build_from_config_lossy(config, client_name, client_version, timeout)
+    }
+
+    fn build_from_config_lossy(
+        config: &Config,
+        client_name: impl Into<String>,
+        client_version: impl Into<String>,
+        timeout: Duration,
+    ) -> Self {
         let mut manager = Self::new(client_name, client_version, timeout);
         if let Some(protocol_version) = config.client().protocol_version.clone() {
-            manager = manager
-                .with_protocol_version(protocol_version)
-                .expect("validated Config should always carry a non-empty protocol version");
+            if let Ok(validated) = validate_protocol_version(protocol_version) {
+                manager.protocol_version = validated;
+            }
         }
         if let Some(capabilities) = config.client().capabilities.clone() {
-            manager = manager
-                .with_capabilities(capabilities)
-                .expect("validated Config should always carry object-shaped client capabilities");
+            if let Ok(validated) = validate_capabilities(capabilities) {
+                manager.capabilities = validated;
+            }
         }
         if let Some(roots) = config.client().roots.clone() {
-            manager = manager.with_roots(roots);
+            manager.roots = Some(Arc::new(roots));
+            ensure_roots_capability(&mut manager.capabilities);
         }
         manager
     }

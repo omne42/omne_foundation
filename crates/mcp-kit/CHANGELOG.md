@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit`：`Manager::from_config(...)` 不再因无效 `Config` panic；它现在只 best-effort 应用可接受的 client 默认值，并把无效 client/server 配置留给 `Manager::try_from_config(...)` 的严格 typed error 路径处理。
 - `mcp-kit`：补充 `resolve_connection_cwd_with_base(...)` 的 fail-closed 回归测试，锁住“relative `cwd` 必须显式绑定 absolute base”的边界，避免 `path_identity` 相关重构再次把连接身份回退到隐式环境状态。
 - `mcp-kit`：`SharedManager` 现在把 `ServerName` typed boundary 补齐到公开 async API（`request/notify/disconnect/is_connected` 及其 connected/typed 变体的 `*_named` 入口），并把 same-server gate/state key 与 prepared connected client 的 server identity 一并收口到 `ServerName`；原有 `&str` 方法只保留为解析后转发的薄包装，不再把已经建立好的领域类型打回字符串边界。
 - `mcp-kit`：`SharedManager` Unix socket 测试 helper 现在会持久化选中的短路径临时目录，再返回 socket 路径；workspace `pre-commit` / `ci` 不再因为 helper 提前释放 `TempDir` 导致后续 bind 命中 `ENOENT`。
@@ -64,7 +65,7 @@
 - `mcp-kit`：relative unix socket 连接回归测试现在改用更短的临时目录和 socket 文件名，并支持 `OMNE_TEST_SHORT_TMPDIR` 覆盖；workspace `ci` 在较长 worktree 路径下不再因为 `SUN_LEN` 限制偶发失败。
 - `mcp-kit`：`streamable_http` 文档现在明确 `request_timeout` 只约束单次 POST 的 send 与非流式响应读取；POST 成功返回 `text/event-stream` 时，持续产出的 SSE 响应流本身不受总时长限制，避免文档继续和 `mcp-jsonrpc` 的既有行为/回归测试相冲突。
 - `mcp-kit`：`Manager` 的高层 convenience wrapper 现在拆到独立的 `manager/convenience.rs`，并与 `Session` 一起统一复用 `mcp.rs` 中已有的 typed MCP method metadata/params 序列化 helper，减少 `manager/mod.rs` 神对象继续膨胀，也避免同一批 method string 与 JSON payload 在两条入口上漂移。
-- `Manager::from_config` 的契约现在显式收紧为“只接受已校验 `Config`”：仍保留原返回类型，但会在构造期 panic 并提示改用 `try_from_config` 获取 typed 错误。
+- `Manager::from_config` 的契约现在显式收口为兼容性的 best-effort 构造入口；需要完整 `Config` 校验和 typed error 的调用方应使用 `Manager::try_from_config(...)`。
 - `mcp-kit`：新补的“非 `NotFound` 文件系统错误上抛”回归测试改为 Unix 专属，避免把 Windows 路径解析差异误报成实现回归；产品行为不变。
 - `mcp-kit`：连接阶段解析相对 `cwd` 时现在必须拿到显式绝对 base（例如已加载 `mcp.json` 的 thread root）；`Manager` / `SharedManager` 不再在运行时偷偷回退到进程级 `current_dir()`，避免连接身份与复用语义继续依赖 ambient process state。
 - `mcp-kit`：底层 `resolve_connection_cwd*` helper 也改为对“relative cwd + missing base”直接 fail-closed，并把相对 thread root/base 视为稳定配置错误，避免后续入口重新引入 ambient `current_dir()` fallback。

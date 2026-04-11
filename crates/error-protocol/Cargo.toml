@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-error-kit = { version = "0.1.0", path = "../error-kit" }
-structured-text-kit = { version = "0.1.0", path = "../structured-text-kit" }
-structured-text-protocol = { version = "0.1.0", path = "../structured-text-protocol" }
+error-kit = { path = "../error-kit" }
+structured-text-kit = { path = "../structured-text-kit" }
+structured-text-protocol = { path = "../structured-text-protocol" }
 schemars = "0.8"
 serde.workspace = true
 thiserror.workspace = true

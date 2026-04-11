@@ -13,8 +13,7 @@
 /.omne_data/repos/
 /.github-agent-data/
 /.codex/
-/.tmp/*
-!/.tmp/.gitkeep
+/.tmp/
 /tmp/
 /node_modules/
 **/node_modules/

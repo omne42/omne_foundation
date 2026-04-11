@@ -1,14 +1,8 @@
-#[path = "shared/artifacts.rs"]
-mod artifacts;
-#[path = "shared/cli.rs"]
-mod cli;
+use std::{error::Error, path::PathBuf};
 
-use std::path::PathBuf;
+use policy_meta::{check_schema_dir, write_schema_dir};
 
-use artifacts::{check_schema_dir, write_schema_dir};
-use cli::{CliError, next_path_arg};
-
-fn main() -> Result<(), CliError> {
+fn main() -> Result<(), Box<dyn Error>> {
     let mut check = false;
     let mut output_dir = default_output_dir();
 
@@ -17,12 +11,13 @@ fn main() -> Result<(), CliError> {
         match arg.as_str() {
             "--check" => check = true,
             "--output-dir" => {
-                output_dir = next_path_arg("--output-dir", args.next())?;
+                let Some(path) = args.next() else {
+                    return Err("missing path after --output-dir".into());
+                };
+                output_dir = PathBuf::from(path);
             }
             other => {
-                return Err(CliError::UnknownArgument {
-                    arg: other.to_string(),
-                });
+                return Err(format!("unknown argument: {other}").into());
             }
         }
     }

@@ -73,11 +73,6 @@ A -> B   表示 A 依赖 B
 - prompt 文本目录如何 bootstrap 并以惰性句柄对外提供
 - secret 如何通过统一 `secret://` 规范解析
 
-这层里的部分 crate 会直接依赖 `omne-runtime` 提供的更低层 runtime primitives：
-
-- `config-kit` / `text-assets-kit` 依赖 `omne-fs-primitives`
-- `secret-kit` 依赖 `omne-fs-primitives` 与 `omne-process-primitives`
-
 这里有一个当前需要明确的边界：
 
 - `prompt-kit` 目前只承接 prompt 目录 bootstrap / lazy access 这一窄适配层。
@@ -134,7 +129,7 @@ secret-kit            -> error-kit
 secret-kit            -> structured-text-kit
 
 config-kit            -> (no internal foundation deps)
-text-assets-kit       -> (no internal foundation deps)
+text-assets-kit      -> (no internal foundation deps)
 i18n-runtime-kit     -> structured-text-kit
 i18n-runtime-kit     -> text-assets-kit
 i18n-runtime-kit     -> i18n-kit
@@ -161,17 +156,16 @@ notify-kit           -> structured-text-kit
 
 - `policy-meta` 当前不依赖其他 foundation crate，主要为 `omne-agent`、`omne-runtime` 等外部 workspace 提供共享 contract。
 - `error-kit` / `error-protocol` 承接稳定错误语义与跨边界表示；它们属于文本/语义侧基建，不是 transport 或应用编排层。
-- `omne-fs-primitives` 与 `omne-process-primitives` 的 canonical owner 是 `omne-runtime`；`omne_foundation` 里的 `config-kit`、`text-assets-kit`、`secret-kit` 直接依赖这些跨仓 runtime primitives，但它们不再是本 workspace 的内部成员。
 - `config-kit` 只承接通用配置边界：格式识别、有界读取、路径 canonicalize、strict allowed-format typed parse、layer merge；不拥有产品级 config schema。
 - `http-kit` 是通用 HTTP foundation，不承载 GitHub API schema、镜像 / 网关候选策略或其他上层产品语义。
 - `github-kit` 建立在 `http-kit` 之上，只负责纯 GitHub API client 能力；它不拥有来源优先级、资产选择或安装编排。
-- `text-assets-kit` 刻意不依赖 `i18n-kit`，并只通过 `omne-runtime` 提供的 `omne-fs-primitives` 复用底层文件系统原语，保持通用文本资源/runtime fs adapter 边界。
+- `text-assets-kit` 刻意不依赖 `i18n-kit`，保持通用文本资源/runtime fs adapter 边界。
 - `i18n-runtime-kit` 建立在 `text-assets-kit`、`i18n-kit` 和 `structured-text-kit` 之上，承接目录型 i18n adapter 与 lazy/global handle。
 - `prompt-kit` 建立在 `text-assets-kit` 之上，当前只承接 prompt 目录 bootstrap 与惰性访问这一窄适配层，不是 prompt 模板、版本和缓存的统一抽象。
 - `mcp-jsonrpc` 与 `mcp-kit` 共享 `http-kit`，并依赖 `error-kit` / `structured-text-kit` 提供稳定错误与文本语义，而不是各自重复实现这些基础表示。
 - `notify-kit` 依赖 `http-kit`、`github-kit`、`log-kit`、`secret-kit` 和 `structured-text-kit`，但通知域语义仍独立于 MCP 和 i18n。
 - `mcp-jsonrpc` 是 transport 层，`mcp-kit` 在其上增加 MCP 语义和配置管理。
-- `i18n-kit` 依赖的是结构化文本原语；`secret-kit` 额外复用 `error-kit` 以暴露稳定错误语义，并通过 `omne-runtime` 提供的 process/fs primitives 复用主机侧 building blocks。
+- `i18n-kit` 依赖的是结构化文本原语；`secret-kit` 额外复用 `error-kit` 以暴露稳定错误语义。
 - 这张 workspace 内部依赖图现在由 `scripts/check-workspace.sh dependency-direction` 做机械检查；`local` / `ci` 也会先跑它，避免边界只留在文档里。
 
 ## 边界原则

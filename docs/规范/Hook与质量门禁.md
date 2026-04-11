@@ -84,7 +84,7 @@
 - 文档系统入口检查
 - workspace 内部 crate 依赖方向检查
 - workspace 发布契约回归检查
-- `cargo fmt --all -- --check`
+- workspace package 级 Rust 格式检查（`cargo fmt` + package 列表 + `--check`）
 - `cargo check --workspace --all-targets --all-features`
 - `cargo test --workspace --all-features`
 
@@ -115,15 +115,16 @@ scripts/check-workspace.sh dependency-direction
 
 `scripts/workspace_check/` 现在也会机械检查“改动中的 crate 是否还维持一致的发布契约”。
 
-当前规则是：
+当前规则分两类：
 
-- 这条 gate 会扫描整个 workspace 的 `crates/*/Cargo.toml`
+- repo-wide 检查（扫描整个 workspace）：
 - workspace 包不能通过 `path = "../..."` 之类的仓库外路径依赖逃出当前 repo root；像 `omne-runtime` 这样的跨仓 foundation/runtime crate 必须改用 canonical git source pin
+- 如果某个 crate 已经声明 `publish = false`，它自己的 `README.md` 也不能再把 crates.io 安装写成当前可直接使用的主契约
+- changed-manifest 检查（只针对本次改动里的 `crates/*/Cargo.toml`）：
 - workspace 包如果声明了 path 依赖或 git-sourced foundation/runtime 依赖，manifest 里也必须同时写显式 `version`，避免 `cargo package` 导出时把 semver 边降成 `*`
 - 如果某个 crate 的普通依赖或 build-dependencies（含 target-specific 表）引用了 workspace 内已经声明 `publish = false` 的 crate，它自己也必须显式 `publish = false`
 - 如果某个 crate 仍直接依赖 git-sourced foundation/runtime crate，它自己不能继续保留“默认可走 crates.io 发布”的隐式契约，必须显式 `publish = false` 或移除这条 git 依赖
-- 如果某个 crate 已经声明 `publish = false`，它自己的 `README.md` 也不能再把 crates.io 安装写成当前可直接使用的主契约
-- 否则 gate 会直接失败，避免 manifest 继续暗示“当前可单独走 crates.io 发布”或“当前仍与 sibling workspace 隐式绑死”，直到 `cargo package` / `cargo metadata` / 实际跨仓复用时才暴露真实边界
+- 任一规则不满足都会让 gate 直接失败，避免 manifest 继续暗示“当前可单独走 crates.io 发布”或“当前仍与 sibling workspace 隐式绑死”，直到 `cargo package` / `cargo metadata` / 实际跨仓复用时才暴露真实边界
 
 可以单独执行：
 

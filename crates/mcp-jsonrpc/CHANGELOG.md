@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：补充 crate-local 回归测试，固定 `Error` / `ProtocolError*` 的公开 surface 与 `ErrorRecord` 映射链路，避免后续重构再次出现 `error` 模块漂移却只在编译阶段晚发现。
 - `mcp-jsonrpc`：`StdoutLog.max_parts` 的 prune 现在会对初始化、轮转和旧分片删除失败都直接报错；保留上限不再静默退化成 best-effort。
 - `mcp-jsonrpc`：graceful SSE EOF 重连回归测试现在先通过一条真实 notification 证明初始 SSE body 已被消费，并移除了对重连 GET 套接字读取顺序的脆弱假设；慢速/macOS CI 不再因为时序抖动把真通过误判成失败。
 - `mcp-jsonrpc`：`write_line_bytes_rotates_large_line_without_extra_newline` 回归测试现在在读旋转后的 log 文件前显式 flush；断言不再依赖 Tokio 文件句柄 drop 时机，避免 Linux `mcp-cross-platform` CI 出现假阴性。

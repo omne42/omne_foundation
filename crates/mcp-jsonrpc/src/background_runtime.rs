@@ -128,6 +128,15 @@ impl DetachedSpawner {
                                     .expect("last_error should be set for lost worker"),
                             });
                         }
+                        // The worker accepted the envelope but exited before confirming task start.
+                        // Fall back immediately to a dedicated runtime so the task does not depend on
+                        // another shared-worker retry cycle that could race with caller teardown.
+                        return Err(DetachedSpawnError {
+                            task: pending_task,
+                            source: last_error
+                                .take()
+                                .expect("last_error should be set for disconnected worker"),
+                        });
                     }
                 },
                 Err(err) => {

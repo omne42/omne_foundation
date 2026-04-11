@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：当 shared detached worker 在“已接收任务但未启动”阶段提前退出时，调度路径现在会直接回退到 dedicated fallback runtime，而不再重试 shared worker；避免 `spawn_detached_falls_back_when_shared_worker_drops_task_before_start` 场景下任务被竞态丢失。
 - `mcp-jsonrpc`：补充 crate-local 回归测试，固定 `Error` / `ProtocolError*` 的公开 surface 与 `ErrorRecord` 映射链路，避免后续重构再次出现 `error` 模块漂移却只在编译阶段晚发现。
 - `mcp-jsonrpc`：`StdoutLog.max_parts` 的 prune 现在会对初始化、轮转和旧分片删除失败都直接报错；保留上限不再静默退化成 best-effort。
 - `mcp-jsonrpc`：graceful SSE EOF 重连回归测试现在先通过一条真实 notification 证明初始 SSE body 已被消费，并移除了对重连 GET 套接字读取顺序的脆弱假设；慢速/macOS CI 不再因为时序抖动把真通过误判成失败。

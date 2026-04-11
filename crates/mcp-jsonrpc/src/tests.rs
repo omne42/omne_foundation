@@ -2358,4 +2358,24 @@ mod error_record_tests {
             "permission denied"
         );
     }
+
+    #[test]
+    fn public_protocol_error_types_still_map_into_error_record() {
+        let err = Error::Protocol(ProtocolError::new(
+            ProtocolErrorKind::InvalidInput,
+            "headers contain reserved mcp-session-id",
+        ));
+
+        let record = error_kit::ErrorRecord::from(err);
+
+        assert_eq!(record.code().as_str(), "mcp_jsonrpc.protocol.invalid_input");
+        assert_eq!(record.category(), ErrorCategory::InvalidInput);
+        assert_eq!(record.retry_advice(), ErrorRetryAdvice::DoNotRetry);
+        assert_eq!(
+            record
+                .diagnostic_text()
+                .and_then(StructuredText::freeform_text),
+            Some("headers contain reserved mcp-session-id")
+        );
+    }
 }

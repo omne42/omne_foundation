@@ -8,6 +8,10 @@ use tracing::span::{Attributes, Id, Record};
 use tracing::subscriber::Interest;
 use tracing::{Event, Metadata, Subscriber};
 
+use crate::record::{
+    OVERFLOW_FIELDS_FIELD, OVERFLOW_TARGET_FIELD, OVERFLOW_TRACING_TARGET,
+    dynamic_callsite_cache_len, max_dynamic_callsites,
+};
 use crate::{LogCode, LogLevel, LogRecord};
 
 #[test]
@@ -108,6 +112,68 @@ fn emit_tracing_uses_real_target_and_flat_fields() {
     assert!(
         !event.fields.contains_key("log_target"),
         "target should live in tracing metadata, not a synthetic field"
+    );
+}
+
+#[test]
+fn dynamic_callsite_cache_stops_growing_at_capacity() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = CapturingSubscriber {
+        events: Arc::clone(&events),
+    };
+    let dispatch = tracing::Dispatch::new(subscriber);
+
+    let initial = dynamic_callsite_cache_len();
+    let remaining = max_dynamic_callsites().saturating_sub(initial);
+
+    tracing::dispatcher::with_default(&dispatch, || {
+        for index in 0..=remaining {
+            let mut record = LogRecord::new(
+                LogLevel::Info,
+                LogCode::try_new("notify.hub.dropped").expect("literal code should validate"),
+            )
+            .with_target(format!("notify-kit.cache-{index}"))
+            .with_text(structured_text!("notify.hub.dropped", "reason" => "overloaded"));
+            record
+                .try_with_field(format!("field_{index}"), index as u64)
+                .expect("field name should validate");
+            record.emit_tracing();
+        }
+    });
+
+    let final_len = dynamic_callsite_cache_len();
+    assert_eq!(final_len, max_dynamic_callsites());
+
+    let events = events
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let overflow_event = events.last().expect("expected captured overflow event");
+    assert_eq!(overflow_event.target, OVERFLOW_TRACING_TARGET);
+    assert_eq!(
+        overflow_event.fields.get("log_code"),
+        Some(&CapturedValue::Str("notify.hub.dropped".to_string()))
+    );
+    assert_eq!(
+        overflow_event.fields.get("text"),
+        Some(&CapturedValue::Str(
+            r#"notify.hub.dropped {reason="overloaded"}"#.to_string()
+        ))
+    );
+    assert_eq!(
+        overflow_event.fields.get(OVERFLOW_TARGET_FIELD),
+        Some(&CapturedValue::Str(format!("notify-kit.cache-{remaining}")))
+    );
+    assert_eq!(
+        overflow_event.fields.get(OVERFLOW_FIELDS_FIELD),
+        Some(&CapturedValue::Str(format!(
+            r#"field_{remaining}={remaining}"#
+        )))
+    );
+    assert!(
+        !overflow_event
+            .fields
+            .contains_key(&format!("field_{remaining}")),
+        "overflow fallback should stop introducing new dynamic field metadata"
     );
 }
 

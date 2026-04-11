@@ -16,6 +16,13 @@ const INTEREST_UNSET: u8 = 0xFF;
 const INTEREST_NEVER: u8 = 0;
 const INTEREST_SOMETIMES: u8 = 1;
 const INTEREST_ALWAYS: u8 = 2;
+const MAX_DYNAMIC_CALLSITES: usize = 256;
+pub(crate) const OVERFLOW_TRACING_TARGET: &str = "log_kit.dynamic_overflow";
+pub(crate) const OVERFLOW_TARGET_FIELD: &str = "log_target";
+pub(crate) const OVERFLOW_FIELDS_FIELD: &str = "fields";
+static DYNAMIC_CALLSITE_CACHE: OnceLock<
+    Mutex<std::collections::HashMap<CallsiteKey, &'static DynamicCallsite>>,
+> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -137,27 +144,47 @@ fn emit_tracing_event(record: &LogRecord, rendered_text: Option<&str>) {
 
     let metadata = callsite.metadata();
     let field_set = metadata.fields();
-    let mut values = Vec::with_capacity(2 + record.fields.len());
-    let mut event_values = Vec::with_capacity(2 + record.fields.len());
-    event_values.push(EventValue::Str(record.code.as_str()));
-    if let Some(text) = rendered_text {
-        event_values.push(EventValue::Str(text));
-    }
-    for value in record.fields.values() {
-        event_values.push(EventValue::from_log_value(value));
-    }
-
+    let event_values = tracing_event_values(callsite.kind(), record, rendered_text);
+    let mut values = Vec::with_capacity(event_values.len());
     values.extend(event_values.iter().map(|value| Some(value.as_value())));
     let value_set = field_set.value_set_all(&values);
     let event = tracing::Event::new(metadata, &value_set);
     tracing::dispatcher::get_default(|dispatch| dispatch.event(&event));
 }
 
-fn tracing_callsite(record: &LogRecord, include_text: bool) -> &'static DynamicCallsite {
-    static CACHE: OnceLock<
-        Mutex<std::collections::HashMap<CallsiteKey, &'static DynamicCallsite>>,
-    > = OnceLock::new();
+fn tracing_event_values<'a>(
+    kind: DynamicCallsiteKind,
+    record: &'a LogRecord,
+    rendered_text: Option<&'a str>,
+) -> Vec<EventValue<'a>> {
+    match kind {
+        DynamicCallsiteKind::Cached => {
+            let mut event_values = Vec::with_capacity(2 + record.fields.len());
+            event_values.push(EventValue::Str(record.code.as_str()));
+            if let Some(text) = rendered_text {
+                event_values.push(EventValue::Str(text));
+            }
+            for value in record.fields.values() {
+                event_values.push(EventValue::from_log_value(value));
+            }
+            event_values
+        }
+        DynamicCallsiteKind::Overflow => {
+            let mut event_values = Vec::with_capacity(if rendered_text.is_some() { 4 } else { 3 });
+            event_values.push(EventValue::Str(record.code.as_str()));
+            if let Some(text) = rendered_text {
+                event_values.push(EventValue::Str(text));
+            }
+            event_values.push(EventValue::Str(
+                record.target.as_deref().unwrap_or(DEFAULT_TRACING_TARGET),
+            ));
+            event_values.push(EventValue::OwnedString(render_overflow_fields(record)));
+            event_values
+        }
+    }
+}
 
+fn tracing_callsite(record: &LogRecord, include_text: bool) -> &'static DynamicCallsite {
     let key = CallsiteKey {
         level: record.level.as_tracing_level(),
         target: record
@@ -167,15 +194,19 @@ fn tracing_callsite(record: &LogRecord, include_text: bool) -> &'static DynamicC
             .to_string(),
         field_names: tracing_field_names(record, include_text),
     };
-    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let cache = DYNAMIC_CALLSITE_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
     let mut cache = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(callsite) = cache.get(&key) {
         return callsite;
     }
+    if cache.len() >= MAX_DYNAMIC_CALLSITES {
+        return overflow_callsite(key.level, include_text);
+    }
 
     let callsite = DynamicCallsite::new(
+        DynamicCallsiteKind::Cached,
         key.level,
         leak_string(key.target.clone()),
         leak_field_names(key.field_names.clone()),
@@ -194,6 +225,136 @@ fn tracing_field_names(record: &LogRecord, include_text: bool) -> Vec<String> {
     names
 }
 
+fn overflow_callsite(level: tracing::Level, include_text: bool) -> &'static DynamicCallsite {
+    static WITH_TEXT: OnceLock<[&'static DynamicCallsite; 5]> = OnceLock::new();
+    static WITHOUT_TEXT: OnceLock<[&'static DynamicCallsite; 5]> = OnceLock::new();
+
+    let callsites = if include_text {
+        WITH_TEXT.get_or_init(|| {
+            [
+                DynamicCallsite::new(
+                    DynamicCallsiteKind::Overflow,
+                    tracing::Level::TRACE,
+                    OVERFLOW_TRACING_TARGET,
+                    &[
+                        "log_code",
+                        "text",
+                        OVERFLOW_TARGET_FIELD,
+                        OVERFLOW_FIELDS_FIELD,
+                    ],
+                ),
+                DynamicCallsite::new(
+                    DynamicCallsiteKind::Overflow,
+                    tracing::Level::DEBUG,
+                    OVERFLOW_TRACING_TARGET,
+                    &[
+                        "log_code",
+                        "text",
+                        OVERFLOW_TARGET_FIELD,
+                        OVERFLOW_FIELDS_FIELD,
+                    ],
+                ),
+                DynamicCallsite::new(
+                    DynamicCallsiteKind::Overflow,
+                    tracing::Level::INFO,
+                    OVERFLOW_TRACING_TARGET,
+                    &[
+                        "log_code",
+                        "text",
+                        OVERFLOW_TARGET_FIELD,
+                        OVERFLOW_FIELDS_FIELD,
+                    ],
+                ),
+                DynamicCallsite::new(
+                    DynamicCallsiteKind::Overflow,
+                    tracing::Level::WARN,
+                    OVERFLOW_TRACING_TARGET,
+                    &[
+                        "log_code",
+                        "text",
+                        OVERFLOW_TARGET_FIELD,
+                        OVERFLOW_FIELDS_FIELD,
+                    ],
+                ),
+                DynamicCallsite::new(
+                    DynamicCallsiteKind::Overflow,
+                    tracing::Level::ERROR,
+                    OVERFLOW_TRACING_TARGET,
+                    &[
+                        "log_code",
+                        "text",
+                        OVERFLOW_TARGET_FIELD,
+                        OVERFLOW_FIELDS_FIELD,
+                    ],
+                ),
+            ]
+        })
+    } else {
+        WITHOUT_TEXT.get_or_init(|| {
+            [
+                DynamicCallsite::new(
+                    DynamicCallsiteKind::Overflow,
+                    tracing::Level::TRACE,
+                    OVERFLOW_TRACING_TARGET,
+                    &["log_code", OVERFLOW_TARGET_FIELD, OVERFLOW_FIELDS_FIELD],
+                ),
+                DynamicCallsite::new(
+                    DynamicCallsiteKind::Overflow,
+                    tracing::Level::DEBUG,
+                    OVERFLOW_TRACING_TARGET,
+                    &["log_code", OVERFLOW_TARGET_FIELD, OVERFLOW_FIELDS_FIELD],
+                ),
+                DynamicCallsite::new(
+                    DynamicCallsiteKind::Overflow,
+                    tracing::Level::INFO,
+                    OVERFLOW_TRACING_TARGET,
+                    &["log_code", OVERFLOW_TARGET_FIELD, OVERFLOW_FIELDS_FIELD],
+                ),
+                DynamicCallsite::new(
+                    DynamicCallsiteKind::Overflow,
+                    tracing::Level::WARN,
+                    OVERFLOW_TRACING_TARGET,
+                    &["log_code", OVERFLOW_TARGET_FIELD, OVERFLOW_FIELDS_FIELD],
+                ),
+                DynamicCallsite::new(
+                    DynamicCallsiteKind::Overflow,
+                    tracing::Level::ERROR,
+                    OVERFLOW_TRACING_TARGET,
+                    &["log_code", OVERFLOW_TARGET_FIELD, OVERFLOW_FIELDS_FIELD],
+                ),
+            ]
+        })
+    };
+    callsites[level_index(level)]
+}
+
+fn render_overflow_fields(record: &LogRecord) -> String {
+    if record.fields.is_empty() {
+        return String::new();
+    }
+
+    let mut rendered = String::new();
+    for (index, (name, value)) in record.fields.iter().enumerate() {
+        if index > 0 {
+            rendered.push_str(", ");
+        }
+        rendered.push_str(name);
+        rendered.push('=');
+        rendered.push_str(&value.to_string());
+    }
+    rendered
+}
+
+fn level_index(level: tracing::Level) -> usize {
+    match level {
+        tracing::Level::TRACE => 0,
+        tracing::Level::DEBUG => 1,
+        tracing::Level::INFO => 2,
+        tracing::Level::WARN => 3,
+        tracing::Level::ERROR => 4,
+    }
+}
+
 fn leak_string(value: String) -> &'static str {
     Box::leak(value.into_boxed_str())
 }
@@ -210,7 +371,14 @@ struct CallsiteKey {
     field_names: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DynamicCallsiteKind {
+    Cached,
+    Overflow,
+}
+
 struct DynamicCallsite {
+    kind: DynamicCallsiteKind,
     interest: AtomicU8,
     registered: AtomicBool,
     metadata: OnceLock<tracing::Metadata<'static>>,
@@ -218,11 +386,13 @@ struct DynamicCallsite {
 
 impl DynamicCallsite {
     fn new(
+        kind: DynamicCallsiteKind,
         level: tracing::Level,
         target: &'static str,
         field_names: &'static [&'static str],
     ) -> &'static Self {
         let callsite = Box::leak(Box::new(Self {
+            kind,
             interest: AtomicU8::new(INTEREST_UNSET),
             registered: AtomicBool::new(false),
             metadata: OnceLock::new(),
@@ -240,6 +410,10 @@ impl DynamicCallsite {
         let _ = callsite.metadata.set(metadata);
         callsite.ensure_registered();
         callsite
+    }
+
+    fn kind(&self) -> DynamicCallsiteKind {
+        self.kind
     }
 
     fn ensure_registered(&'static self) {
@@ -275,6 +449,20 @@ impl Callsite for DynamicCallsite {
             .get()
             .expect("dynamic log callsite metadata should be initialized")
     }
+}
+
+#[cfg(test)]
+pub(crate) fn dynamic_callsite_cache_len() -> usize {
+    DYNAMIC_CALLSITE_CACHE
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .len()
+}
+
+#[cfg(test)]
+pub(crate) const fn max_dynamic_callsites() -> usize {
+    MAX_DYNAMIC_CALLSITES
 }
 
 enum EventValue<'a> {

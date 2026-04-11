@@ -3,7 +3,7 @@ use http_kit::{
 };
 use reqwest::Request;
 use reqwest::RequestBuilder;
-use reqwest::header::{ACCEPT, USER_AGENT};
+use reqwest::header::{ACCEPT, HeaderValue, USER_AGENT};
 
 use crate::error::{GitHubApiError, Result};
 
@@ -95,32 +95,36 @@ impl<'a> GitHubApiRequestOptions<'a> {
 fn apply_github_api_headers_unchecked(
     mut request: Request,
     options: GitHubApiRequestOptions<'_>,
-) -> Request {
+) -> Result<Request> {
     request.headers_mut().insert(
         ACCEPT,
         reqwest::header::HeaderValue::from_static(GITHUB_API_ACCEPT),
     );
     request.headers_mut().insert(
         USER_AGENT,
-        reqwest::header::HeaderValue::from_str(options.user_agent)
-            .expect("user agent should already be a valid header value"),
+        header_value_from_str(USER_AGENT.as_str(), options.user_agent)?,
     );
     request.headers_mut().insert(
         reqwest::header::HeaderName::from_static("x-github-api-version"),
-        reqwest::header::HeaderValue::from_str(options.api_version)
-            .expect("api version should already be a valid header value"),
+        header_value_from_str("x-github-api-version", options.api_version)?,
     );
 
     if let Some(token) = options.bearer_token {
         let bearer = format!("Bearer {token}");
         request.headers_mut().insert(
             reqwest::header::AUTHORIZATION,
-            reqwest::header::HeaderValue::from_str(&bearer)
-                .expect("bearer token should already be a valid header value"),
+            header_value_from_str(reqwest::header::AUTHORIZATION.as_str(), &bearer)?,
         );
     }
 
-    request
+    Ok(request)
+}
+
+fn header_value_from_str(header: &'static str, value: &str) -> Result<HeaderValue> {
+    HeaderValue::from_str(value).map_err(|err| GitHubApiError::InvalidHeaderValue {
+        header,
+        details: err.to_string(),
+    })
 }
 
 pub fn apply_github_api_headers(
@@ -134,7 +138,7 @@ pub fn apply_github_api_headers(
     validate_github_api_request_url(request.url(), options)?;
     Ok(RequestBuilder::from_parts(
         client,
-        apply_github_api_headers_unchecked(request, options),
+        apply_github_api_headers_unchecked(request, options)?,
     ))
 }
 
@@ -423,5 +427,71 @@ mod tests {
             request.headers().get(AUTHORIZATION),
             Some(&HeaderValue::from_static("Bearer secret-token"))
         );
+    }
+
+    #[test]
+    fn apply_headers_rejects_invalid_user_agent_header_value() {
+        let client = reqwest::Client::new();
+
+        let err = apply_github_api_headers(
+            client.get("https://api.github.com/repos/omne42/repo"),
+            GitHubApiRequestOptions::new().with_user_agent("github-kit\nbroken"),
+        )
+        .expect_err("invalid user-agent should return a typed error");
+
+        match err {
+            GitHubApiError::InvalidHeaderValue { header, details } => {
+                assert_eq!(header, "user-agent");
+                assert!(
+                    !details.is_empty(),
+                    "header error should include parser details"
+                );
+            }
+            other => panic!("expected InvalidHeaderValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_headers_rejects_invalid_api_version_header_value() {
+        let client = reqwest::Client::new();
+
+        let err = apply_github_api_headers(
+            client.get("https://api.github.com/repos/omne42/repo"),
+            GitHubApiRequestOptions::new().with_api_version("2022-11-28\r\nbroken"),
+        )
+        .expect_err("invalid api version should return a typed error");
+
+        match err {
+            GitHubApiError::InvalidHeaderValue { header, details } => {
+                assert_eq!(header, "x-github-api-version");
+                assert!(
+                    !details.is_empty(),
+                    "header error should include parser details"
+                );
+            }
+            other => panic!("expected InvalidHeaderValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_headers_rejects_invalid_authorization_header_value() {
+        let client = reqwest::Client::new();
+
+        let err = apply_github_api_headers(
+            client.get("https://api.github.com/repos/omne42/repo"),
+            GitHubApiRequestOptions::new().with_bearer_token(Some("secret\nbroken")),
+        )
+        .expect_err("invalid bearer token should return a typed error");
+
+        match err {
+            GitHubApiError::InvalidHeaderValue { header, details } => {
+                assert_eq!(header, "authorization");
+                assert!(
+                    !details.is_empty(),
+                    "header error should include parser details"
+                );
+            }
+            other => panic!("expected InvalidHeaderValue, got {other:?}"),
+        }
     }
 }

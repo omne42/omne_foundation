@@ -112,6 +112,30 @@ fn stable_connection_cwd_identity_keeps_absolute_paths_absolute_after_parent_seg
 }
 
 #[test]
+fn resolve_connection_cwd_with_base_rejects_missing_or_relative_base_for_relative_cwd() {
+    let relative_cwd = Path::new("nested/worktree");
+
+    let missing_base_err = super::resolve_connection_cwd_with_base(None, relative_cwd)
+        .expect_err("relative cwd without base must fail");
+    assert!(
+        missing_base_err
+            .to_string()
+            .contains("relative MCP cwd requires an explicit absolute base"),
+        "unexpected error: {missing_base_err}",
+    );
+
+    let relative_base_err =
+        super::resolve_connection_cwd_with_base(Some(Path::new("relative/base")), relative_cwd)
+            .expect_err("relative cwd with relative base must fail");
+    assert!(
+        relative_base_err
+            .to_string()
+            .contains("relative MCP cwd base must be absolute"),
+        "unexpected error: {relative_base_err}",
+    );
+}
+
+#[test]
 fn roots_capability_is_inserted() {
     let mut capabilities = serde_json::json!({});
     ensure_roots_capability(&mut capabilities);

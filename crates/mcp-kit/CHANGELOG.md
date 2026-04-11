@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit`：补充 `resolve_connection_cwd_with_base(...)` 的 fail-closed 回归测试，锁住“relative `cwd` 必须显式绑定 absolute base”的边界，避免 `path_identity` 相关重构再次把连接身份回退到隐式环境状态。
 - `mcp-kit`：`SharedManager` 现在把 `ServerName` typed boundary 补齐到公开 async API（`request/notify/disconnect/is_connected` 及其 connected/typed 变体的 `*_named` 入口），并把 same-server gate/state key 与 prepared connected client 的 server identity 一并收口到 `ServerName`；原有 `&str` 方法只保留为解析后转发的薄包装，不再把已经建立好的领域类型打回字符串边界。
 - `mcp-kit`：`SharedManager` Unix socket 测试 helper 现在会持久化选中的短路径临时目录，再返回 socket 路径；workspace `pre-commit` / `ci` 不再因为 helper 提前释放 `TempDir` 导致后续 bind 命中 `ENOENT`。
 - `mcp-kit`：相对 Unix socket 路径的回归测试现在使用更短且可覆盖的临时目录前缀；较长 worktree 路径下的 workspace `ci` / pre-commit 不再因为超过 `SUN_LEN` 而偶发失败。

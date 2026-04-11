@@ -1,6 +1,6 @@
 use std::{error::Error, path::PathBuf};
 
-use policy_meta::{check_typescript_bindings, write_typescript_bindings};
+use policy_meta::artifacts::{check_typescript_bindings, write_typescript_bindings};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut check = false;
@@ -38,9 +38,9 @@ fn default_output_dir() -> PathBuf {
 }
 
 fn write_bindings_dir(output_dir: &std::path::Path) -> Result<(), Box<dyn Error>> {
-    write_typescript_bindings(output_dir)
+    Ok(write_typescript_bindings(output_dir)?)
 }
 
 fn check_bindings_dir(output_dir: &std::path::Path) -> Result<(), Box<dyn Error>> {
-    check_typescript_bindings(output_dir)
+    Ok(check_typescript_bindings(output_dir)?)
 }

@@ -1,4 +1,9 @@
-use std::panic::{self, UnwindSafe};
+use std::{
+    collections::BTreeSet,
+    fmt, fs, io,
+    panic::{self, UnwindSafe},
+    path::{Path, PathBuf},
+};
 
 use schemars::{JsonSchema, r#gen::SchemaSettings};
 use ts_rs::TS;
@@ -29,6 +34,69 @@ pub enum ArtifactGenerationError {
     RootNotObject { context: &'static str },
     #[error("failed to generate {context}: {details}")]
     Panic { context: String, details: String },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ArtifactKind {
+    Schema,
+    TypescriptBinding,
+    Profile,
+}
+
+impl ArtifactKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Schema => "schema",
+            Self::TypescriptBinding => "typescript binding",
+            Self::Profile => "profile",
+        }
+    }
+}
+
+impl fmt::Display for ArtifactKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ArtifactError {
+    #[error("failed to create artifact dir {path}: {source}")]
+    CreateDir { path: PathBuf, source: io::Error },
+    #[error("failed to read artifact dir {path}: {source}")]
+    ReadDir { path: PathBuf, source: io::Error },
+    #[error("failed to inspect artifact dir {path}: {source}")]
+    InspectDir { path: PathBuf, source: io::Error },
+    #[error("failed to read {path}: {source}")]
+    ReadFile { path: PathBuf, source: io::Error },
+    #[error("failed to write {path}: {source}")]
+    WriteFile { path: PathBuf, source: io::Error },
+    #[error("failed to remove stale generated artifact {path}: {source}")]
+    RemoveArtifact { path: PathBuf, source: io::Error },
+    #[error("failed to parse {path}: {source}")]
+    ParseJson {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    #[error("failed to render schema: {source}")]
+    RenderSchema { source: serde_json::Error },
+    #[error("failed to render profile: {source}")]
+    RenderProfile { source: serde_yaml::Error },
+    #[error("failed to generate {kind} artifact content: {source}")]
+    GenerateArtifact {
+        kind: ArtifactKind,
+        source: ArtifactGenerationError,
+    },
+    #[error("unexpected {kind} artifacts present: {}. Run `cargo run -p policy-meta --bin export-artifacts` to regenerate the canonical artifact set.", files.join(", "))]
+    UnexpectedArtifacts {
+        kind: ArtifactKind,
+        files: Vec<String>,
+    },
+    #[error("{kind} artifacts out of sync: {}. Run `cargo run -p policy-meta --bin export-artifacts`.", files.join(", "))]
+    Drift {
+        kind: ArtifactKind,
+        files: Vec<String>,
+    },
 }
 
 pub fn policy_meta_schema_document() -> Result<serde_json::Value, ArtifactGenerationError> {
@@ -139,6 +207,155 @@ pub fn policy_meta_typescript_bindings() -> Result<String, ArtifactGenerationErr
     Ok(output)
 }
 
+pub fn write_schema_dir(output_dir: &Path) -> Result<(), ArtifactError> {
+    let documents = schema_documents().map_err(|source| ArtifactError::GenerateArtifact {
+        kind: ArtifactKind::Schema,
+        source,
+    })?;
+    fs::create_dir_all(output_dir).map_err(|source| ArtifactError::CreateDir {
+        path: output_dir.to_path_buf(),
+        source,
+    })?;
+    prune_unexpected_artifacts(
+        output_dir,
+        documents.iter().map(|(file_name, _)| *file_name),
+    )?;
+    for (file_name, schema) in documents {
+        let path = output_dir.join(file_name);
+        fs::write(&path, render_schema(&schema)?)
+            .map_err(|source| ArtifactError::WriteFile { path, source })?;
+    }
+    Ok(())
+}
+
+pub fn check_schema_dir(output_dir: &Path) -> Result<(), ArtifactError> {
+    let documents = schema_documents().map_err(|source| ArtifactError::GenerateArtifact {
+        kind: ArtifactKind::Schema,
+        source,
+    })?;
+    check_no_unexpected_artifacts(
+        output_dir,
+        documents.iter().map(|(file_name, _)| *file_name),
+        ArtifactKind::Schema,
+    )?;
+    let mut drift = Vec::<String>::new();
+
+    for (file_name, expected) in documents {
+        let path = output_dir.join(file_name);
+        let contents = fs::read_to_string(&path).map_err(|source| ArtifactError::ReadFile {
+            path: path.clone(),
+            source,
+        })?;
+        let actual: serde_json::Value =
+            serde_json::from_str(&contents).map_err(|source| ArtifactError::ParseJson {
+                path: path.clone(),
+                source,
+            })?;
+
+        if actual != expected {
+            drift.push(file_name.to_string());
+        }
+    }
+
+    if drift.is_empty() {
+        Ok(())
+    } else {
+        Err(ArtifactError::Drift {
+            kind: ArtifactKind::Schema,
+            files: drift,
+        })
+    }
+}
+
+pub fn write_typescript_bindings(output_dir: &Path) -> Result<(), ArtifactError> {
+    let bindings =
+        policy_meta_typescript_bindings().map_err(|source| ArtifactError::GenerateArtifact {
+            kind: ArtifactKind::TypescriptBinding,
+            source,
+        })?;
+    fs::create_dir_all(output_dir).map_err(|source| ArtifactError::CreateDir {
+        path: output_dir.to_path_buf(),
+        source,
+    })?;
+    prune_unexpected_artifacts(output_dir, [POLICY_META_TYPES_FILE])?;
+    let path = output_dir.join(POLICY_META_TYPES_FILE);
+    fs::write(&path, bindings).map_err(|source| ArtifactError::WriteFile { path, source })?;
+    Ok(())
+}
+
+pub fn check_typescript_bindings(output_dir: &Path) -> Result<(), ArtifactError> {
+    let expected =
+        policy_meta_typescript_bindings().map_err(|source| ArtifactError::GenerateArtifact {
+            kind: ArtifactKind::TypescriptBinding,
+            source,
+        })?;
+    check_no_unexpected_artifacts(
+        output_dir,
+        [POLICY_META_TYPES_FILE],
+        ArtifactKind::TypescriptBinding,
+    )?;
+    let path = output_dir.join(POLICY_META_TYPES_FILE);
+    let actual = fs::read_to_string(&path).map_err(|source| ArtifactError::ReadFile {
+        path: path.clone(),
+        source,
+    })?;
+
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(ArtifactError::Drift {
+            kind: ArtifactKind::TypescriptBinding,
+            files: vec![POLICY_META_TYPES_FILE.to_string()],
+        })
+    }
+}
+
+pub fn write_profiles_dir(output_dir: &Path) -> Result<(), ArtifactError> {
+    fs::create_dir_all(output_dir).map_err(|source| ArtifactError::CreateDir {
+        path: output_dir.to_path_buf(),
+        source,
+    })?;
+    prune_unexpected_artifacts(
+        output_dir,
+        profile_documents().iter().map(|(file_name, _)| *file_name),
+    )?;
+    for (file_name, profile) in profile_documents() {
+        let path = output_dir.join(file_name);
+        fs::write(&path, render_profile(&profile)?)
+            .map_err(|source| ArtifactError::WriteFile { path, source })?;
+    }
+    Ok(())
+}
+
+pub fn check_profiles_dir(output_dir: &Path) -> Result<(), ArtifactError> {
+    check_no_unexpected_artifacts(
+        output_dir,
+        profile_documents().iter().map(|(file_name, _)| *file_name),
+        ArtifactKind::Profile,
+    )?;
+    let mut drift = Vec::<String>::new();
+
+    for (file_name, expected) in profile_documents() {
+        let path = output_dir.join(file_name);
+        let actual = fs::read_to_string(&path).map_err(|source| ArtifactError::ReadFile {
+            path: path.clone(),
+            source,
+        })?;
+        if actual != render_profile(&expected)? {
+            drift.push(file_name.to_string());
+        }
+    }
+
+    if drift.is_empty() {
+        Ok(())
+    } else {
+        Err(ArtifactError::Drift {
+            kind: ArtifactKind::Profile,
+            files: drift,
+        })
+    }
+}
+
 fn export_schema_document<T: JsonSchema>(
     schema_id: &'static str,
     description: &'static str,
@@ -229,6 +446,95 @@ fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
             Err(_) => "non-string panic payload".to_string(),
         },
     }
+}
+
+fn render_schema(schema: &serde_json::Value) -> Result<String, ArtifactError> {
+    let mut rendered = serde_json::to_string_pretty(schema)
+        .map_err(|source| ArtifactError::RenderSchema { source })?;
+    rendered.push('\n');
+    Ok(rendered)
+}
+
+fn render_profile(profile: &PolicyProfileV1) -> Result<String, ArtifactError> {
+    let rendered =
+        serde_yaml::to_string(profile).map_err(|source| ArtifactError::RenderProfile { source })?;
+    Ok(rendered
+        .strip_prefix("---\n")
+        .unwrap_or(rendered.as_str())
+        .to_string())
+}
+
+fn prune_unexpected_artifacts<'a>(
+    output_dir: &Path,
+    expected_files: impl IntoIterator<Item = &'a str>,
+) -> Result<(), ArtifactError> {
+    let expected = expected_artifact_names(expected_files);
+    for entry in fs::read_dir(output_dir).map_err(|source| ArtifactError::ReadDir {
+        path: output_dir.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| ArtifactError::InspectDir {
+            path: output_dir.to_path_buf(),
+            source,
+        })?;
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if expected.contains(file_name.as_ref()) {
+            continue;
+        }
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|source| ArtifactError::InspectDir {
+                path: path.clone(),
+                source,
+            })?;
+        if file_type.is_dir() {
+            fs::remove_dir_all(&path)
+                .map_err(|source| ArtifactError::RemoveArtifact { path, source })?;
+        } else {
+            fs::remove_file(&path)
+                .map_err(|source| ArtifactError::RemoveArtifact { path, source })?;
+        }
+    }
+    Ok(())
+}
+
+fn check_no_unexpected_artifacts<'a>(
+    output_dir: &Path,
+    expected_files: impl IntoIterator<Item = &'a str>,
+    artifact_kind: ArtifactKind,
+) -> Result<(), ArtifactError> {
+    let expected = expected_artifact_names(expected_files);
+    let mut unexpected = Vec::new();
+    for entry in fs::read_dir(output_dir).map_err(|source| ArtifactError::ReadDir {
+        path: output_dir.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| ArtifactError::InspectDir {
+            path: output_dir.to_path_buf(),
+            source,
+        })?;
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if !expected.contains(file_name.as_ref()) {
+            unexpected.push(file_name.into_owned());
+        }
+    }
+    unexpected.sort();
+    if unexpected.is_empty() {
+        return Ok(());
+    }
+    Err(ArtifactError::UnexpectedArtifacts {
+        kind: artifact_kind,
+        files: unexpected,
+    })
+}
+
+fn expected_artifact_names<'a>(
+    expected_files: impl IntoIterator<Item = &'a str>,
+) -> BTreeSet<&'a str> {
+    expected_files.into_iter().collect()
 }
 
 #[cfg(test)]

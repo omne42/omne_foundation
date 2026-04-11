@@ -39,6 +39,6 @@
 - `scripts/workspace_check/` 是 workspace 质量检查的共享核心，供 `pre-commit`、手动命令和 CI 共用
 - `scripts/check-version-policy.py` 与 `scripts/check-workspace.sh` 现在只是薄入口
 - `scripts/pre_commit_check/` 作为共享检查引擎保留可迁移性，支持 `root` / `crate` 两种仓库形态
-- `omne_foundation` 当前仓库通过 hook wrapper 把它固定在 `crate` 形态
+- `omne_foundation` 当前仓库按仓库内容自动识别为 `crate-package directory` 形态；如果根 package 与 crate package 并存，hook 会拒绝提交
 
 规范目录不是这些脚本的替代品，而是对它们的解释层。

@@ -2,14 +2,15 @@
 name = "i18n-runtime-kit"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [lints]
 workspace = true
 
 [dependencies]
-i18n-kit = { path = "../i18n-kit" }
-structured-text-kit = { path = "../structured-text-kit" }
-text-assets-kit = { path = "../text-assets-kit" }
+i18n-kit = { version = "0.1.0", path = "../i18n-kit" }
+structured-text-kit = { version = "0.1.0", path = "../structured-text-kit" }
+text-assets-kit = { version = "0.1.0", path = "../text-assets-kit" }
 
 [dev-dependencies]
 tempfile = "3"

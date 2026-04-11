@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -10,7 +8,8 @@ use text_assets_kit::{
     bootstrap_text_resources_then_load_with_base,
 };
 
-use crate::lazy_compat::{BlockingLazyInitError, BlockingLazyValue};
+#[allow(deprecated)]
+use text_assets_kit::{LazyInitError as BlockingLazyInitError, LazyValue as BlockingLazyValue};
 
 #[derive(Debug)]
 pub struct PromptBootstrapCleanupError {

@@ -1,4 +1,3 @@
-mod lazy_compat;
 mod prompts;
 
 #[deprecated(

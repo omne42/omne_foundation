@@ -376,13 +376,11 @@ pub async fn select_http_client_from_profile(
 }
 
 pub async fn select_http_client_with_options(
-    base_client: &reqwest::Client,
     options: &HttpClientOptions,
     url: &reqwest::Url,
     enforce_public_ip: bool,
 ) -> crate::Result<reqwest::Client> {
     if !enforce_public_ip {
-        let _ = base_client;
         // `reqwest::Client` keeps its builder state opaque, so the only way to preserve the
         // documented options contract on the unpinned path is to rebuild from `options`.
         return build_http_client_with_options(options);
@@ -584,7 +582,6 @@ mod tests {
             .build()
             .expect("build tokio runtime");
         rt.block_on(async {
-            let base_client = build_http_client(Duration::from_secs(1)).expect("build base client");
             let mut default_headers = reqwest::header::HeaderMap::new();
             default_headers.insert(
                 "x-test-header",
@@ -598,7 +595,7 @@ mod tests {
             let url = reqwest::Url::parse(&format!("http://127.0.0.1:{}/hook", addr.port()))
                 .expect("parse url");
 
-            let response = select_http_client_with_options(&base_client, &options, &url, false)
+            let response = select_http_client_with_options(&options, &url, false)
                 .await
                 .expect("select unpinned client from options")
                 .get(url)

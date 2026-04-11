@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use std::error::Error as StdError;
 use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
@@ -7,8 +5,9 @@ use std::sync::Arc;
 use i18n_kit::{Catalog, Locale, TemplateArg};
 
 use crate::catalog_error::{CatalogInitError, CatalogLocaleError};
-use crate::lazy_compat::{BlockingLazyInitError, BlockingLazyValue};
 use crate::{resolve_locale_from_argv, resolve_locale_from_cli_args};
+#[allow(deprecated)]
+use text_assets_kit::{LazyInitError as BlockingLazyInitError, LazyValue as BlockingLazyValue};
 
 /// Legacy blocking catalog shim.
 ///

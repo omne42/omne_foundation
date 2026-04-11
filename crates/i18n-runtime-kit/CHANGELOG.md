@@ -11,10 +11,10 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ### Changed
 - `LazyCatalog` 的 blocking-shim 契约继续保持“其他线程上的并发访问等待既有初始化结果”；直接递归初始化、同线程 in-flight 初始化冲突和可检测的线程级跨线程环路都继续显式报错，避免把这类可诊断冲突退化成阻塞。
-- `LazyCatalog` 现在改为复用 `i18n-runtime-kit` 自己的私有 blocking compat shim；`text-assets-kit` 不再向外暴露通用 `LazyValue` / `LazyInitError` surface，runtime i18n 兼容层也不再把这条跨域 public API 当作 foundation 复用面。
+- `LazyCatalog` 现在改为复用 `text-assets-kit` 提供的 hidden deprecated blocking compat shim，避免 `i18n-runtime-kit` 继续维护一份近乎同构的本地实现。
 - `i18n-runtime-kit::lazy_catalog` 不再作为 public implementation module 暴露；crate root 继续提供稳定的 runtime adapter 入口，并移除实现模块路径这条可误用的兼容面。
 - `i18n-runtime-kit` 现在显式标记 `publish = false`，因为它当前直接依赖 workspace-only 的 `text-assets-kit`，发布契约收口为 Git / monorepo 复用而不是暗示可独立 crates.io 发布。
-- Reused `text-assets-kit` bootstrap+rollback primitives while keeping `LazyCatalog` 的阻塞 compat shim 收口在 i18n 域本地，而不是继续依赖跨 crate 的通用 lazy-init public surface.
+- Reused `text-assets-kit` bootstrap+rollback primitives and its hidden deprecated lazy-init compat shim, while keeping the runtime-facing recommendation anchored on `GlobalCatalog`.
 - Clarified that the shared bootstrap/rollback primitives used here provide best-effort cleanup for the current attempt, not crash-safe transactions.
 - Clarified `GlobalCatalog` as the runtime-facing canonical handle and downgraded the root `LazyCatalog` export to a deprecated blocking compatibility path.
 - `LazyCatalog` 本体现在也带 `#[deprecated]` 标记，和 README / crate root 的兼容层定位保持一致，避免 runtime-facing 调用方继续把它误当成推荐入口。

@@ -1,14 +1,8 @@
-#[path = "shared/artifacts.rs"]
-mod artifacts;
-#[path = "shared/cli.rs"]
-mod cli;
+use std::{error::Error, path::PathBuf};
 
-use std::path::PathBuf;
+use policy_meta::artifacts::{check_typescript_bindings, write_typescript_bindings};
 
-use artifacts::{check_typescript_bindings, write_typescript_bindings};
-use cli::{CliError, next_path_arg};
-
-fn main() -> Result<(), CliError> {
+fn main() -> Result<(), Box<dyn Error>> {
     let mut check = false;
     let mut output_dir = default_output_dir();
 
@@ -17,21 +11,22 @@ fn main() -> Result<(), CliError> {
         match arg.as_str() {
             "--check" => check = true,
             "--output-dir" => {
-                output_dir = next_path_arg("--output-dir", args.next())?;
+                let Some(path) = args.next() else {
+                    return Err("missing path after --output-dir".into());
+                };
+                output_dir = PathBuf::from(path);
             }
             other => {
-                return Err(CliError::UnknownArgument {
-                    arg: other.to_string(),
-                });
+                return Err(format!("unknown argument: {other}").into());
             }
         }
     }
 
     if check {
-        check_typescript_bindings(&output_dir)?;
+        check_bindings_dir(&output_dir)?;
         println!("typescript bindings are in sync");
     } else {
-        write_typescript_bindings(&output_dir)?;
+        write_bindings_dir(&output_dir)?;
         println!("wrote typescript bindings to {}", output_dir.display());
     }
 
@@ -40,4 +35,12 @@ fn main() -> Result<(), CliError> {
 
 fn default_output_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bindings")
+}
+
+fn write_bindings_dir(output_dir: &std::path::Path) -> Result<(), Box<dyn Error>> {
+    Ok(write_typescript_bindings(output_dir)?)
+}
+
+fn check_bindings_dir(output_dir: &std::path::Path) -> Result<(), Box<dyn Error>> {
+    Ok(check_typescript_bindings(output_dir)?)
 }

@@ -86,7 +86,6 @@ fn emit_tracing_uses_real_target_and_flat_fields() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(events.len(), 1, "expected exactly one tracing event");
     let event = &events[0];
-    assert_eq!(event.target, "notify-kit.hub");
     assert_eq!(
         event.fields.get("log_code"),
         Some(&CapturedValue::Str("notify.hub.dropped".to_string()))
@@ -97,22 +96,40 @@ fn emit_tracing_uses_real_target_and_flat_fields() {
             r#"notify.hub.dropped {reason="overloaded"}"#.to_string()
         ))
     );
-    assert_eq!(
-        event.fields.get("sink"),
-        Some(&CapturedValue::Str("hub".to_string()))
-    );
-    assert_eq!(
-        event.fields.get("retryable"),
-        Some(&CapturedValue::Bool(false))
-    );
-    assert!(
-        !event.fields.contains_key("fields"),
-        "flattened tracing event must not expose a synthetic fields blob"
-    );
-    assert!(
-        !event.fields.contains_key("log_target"),
-        "target should live in tracing metadata, not a synthetic field"
-    );
+    if event.target == OVERFLOW_TRACING_TARGET {
+        assert_eq!(
+            event.fields.get(OVERFLOW_TARGET_FIELD),
+            Some(&CapturedValue::Str("notify-kit.hub".to_string()))
+        );
+        assert_eq!(
+            event.fields.get(OVERFLOW_FIELDS_FIELD),
+            Some(&CapturedValue::Str(
+                r#"retryable=false, sink="hub""#.to_string()
+            ))
+        );
+        assert!(
+            !event.fields.contains_key("sink") && !event.fields.contains_key("retryable"),
+            "overflow fallback should collapse dynamic fields into a single summary field"
+        );
+    } else {
+        assert_eq!(event.target, "notify-kit.hub");
+        assert_eq!(
+            event.fields.get("sink"),
+            Some(&CapturedValue::Str("hub".to_string()))
+        );
+        assert_eq!(
+            event.fields.get("retryable"),
+            Some(&CapturedValue::Bool(false))
+        );
+        assert!(
+            !event.fields.contains_key("fields"),
+            "flattened tracing event must not expose a synthetic fields blob"
+        );
+        assert!(
+            !event.fields.contains_key("log_target"),
+            "target should live in tracing metadata, not a synthetic field"
+        );
+    }
 }
 
 #[test]

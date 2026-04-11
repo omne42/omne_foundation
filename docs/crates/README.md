@@ -4,8 +4,6 @@
 
 当前活跃 crate 的说明已经迁到各自的 `README.md`。
 
-`omne-fs-primitives` 与 `omne-process-primitives` 的 canonical owner 已收口到 `omne-runtime`，因此这里不再把它们列为 `omne_foundation` workspace 成员。
-
 ## 索引
 
 - [`structured-text-kit`](../../crates/structured-text-kit/README.md)

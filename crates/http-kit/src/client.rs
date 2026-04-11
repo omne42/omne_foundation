@@ -381,8 +381,8 @@ pub async fn select_http_client_with_options(
     enforce_public_ip: bool,
 ) -> crate::Result<reqwest::Client> {
     if !enforce_public_ip {
-        // `reqwest::Client` keeps its builder state opaque, so callers must pass the reusable
-        // configuration explicitly instead of relying on an unrelated base client.
+        // `reqwest::Client` keeps its builder state opaque, so the only way to preserve the
+        // documented options contract on the unpinned path is to rebuild from `options`.
         return build_http_client_with_options(options);
     }
 

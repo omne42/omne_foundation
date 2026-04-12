@@ -841,8 +841,10 @@ impl ServerState {
     }
 
     async fn wait_for_in_flight_io_with_hook(&self, mut after_waiter_registration: impl FnMut()) {
-        while self.in_flight_io_count() != 0 {
+        loop {
             let notified = self.in_flight_idle.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             after_waiter_registration();
             if self.in_flight_io_count() == 0 {
                 return;

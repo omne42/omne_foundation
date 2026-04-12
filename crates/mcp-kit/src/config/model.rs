@@ -192,6 +192,17 @@ fn validate_streamable_http_url_syntax(url_field: &str, url: &str) -> anyhow::Re
     })
 }
 
+fn transport_mismatch_error(field: &str, expected: Transport, actual: Transport) -> anyhow::Error {
+    tagged_message(
+        ErrorKind::Config,
+        format!(
+            "mcp server transport mismatch: {field} requires transport={}, got transport={}",
+            transport_tag(expected),
+            transport_tag(actual)
+        ),
+    )
+}
+
 impl ServerConfig {
     pub fn stdio(argv: Vec<String>) -> crate::Result<Self> {
         validate_argv(Transport::Stdio, &argv)?;
@@ -400,6 +411,36 @@ impl ServerConfig {
         }
     }
 
+    pub fn require_stdio(&self) -> crate::Result<StdioServerConfigRef<'_>> {
+        match self {
+            Self::Stdio(cfg) => Ok(StdioServerConfigRef { inner: cfg }),
+            _ => Err(
+                transport_mismatch_error("stdio config", Transport::Stdio, self.transport()).into(),
+            ),
+        }
+    }
+
+    pub fn require_unix(&self) -> crate::Result<UnixServerConfigRef<'_>> {
+        match self {
+            Self::Unix(cfg) => Ok(UnixServerConfigRef { inner: cfg }),
+            _ => Err(
+                transport_mismatch_error("unix config", Transport::Unix, self.transport()).into(),
+            ),
+        }
+    }
+
+    pub fn require_streamable_http(&self) -> crate::Result<StreamableHttpServerConfigRef<'_>> {
+        match self {
+            Self::StreamableHttp(cfg) => Ok(StreamableHttpServerConfigRef { inner: cfg }),
+            _ => Err(transport_mismatch_error(
+                "streamable_http config",
+                Transport::StreamableHttp,
+                self.transport(),
+            )
+            .into()),
+        }
+    }
+
     pub fn argv(&self) -> &[String] {
         self.as_stdio().map_or(&[], StdioServerConfigRef::argv)
     }
@@ -413,11 +454,8 @@ impl ServerConfig {
         self.as_unix().map(UnixServerConfigRef::unix_path)
     }
 
-    pub(crate) fn unix_path_required(&self) -> &Path {
-        match self {
-            Self::Unix(cfg) => cfg.unix_path.as_path(),
-            _ => unreachable!("unix_path_required called for non-unix transport"),
-        }
+    pub(crate) fn unix_path_required(&self) -> crate::Result<&Path> {
+        self.require_unix().map(UnixServerConfigRef::unix_path)
     }
 
     pub fn url(&self) -> Option<&str> {

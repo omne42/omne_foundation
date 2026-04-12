@@ -73,51 +73,52 @@ pub(crate) fn raw_server_config_identity(
     server_cfg: &ServerConfig,
 ) -> ConnectionServerConfigIdentity {
     match server_cfg {
-        ServerConfig::Stdio(_) => ConnectionServerConfigIdentity::Stdio {
-            argv: server_cfg
-                .argv()
-                .iter()
-                .cloned()
-                .map(OsString::from)
-                .collect(),
-            inherit_env: server_cfg.inherit_env(),
-            env: server_cfg
-                .env()
-                .iter()
-                .map(|(key, value)| (key.clone(), OsString::from(value)))
-                .collect(),
-            stdout_log: server_cfg.stdout_log().map(|log| ResolvedStdoutLogConfig {
-                path: log.path.clone(),
-                max_bytes_per_part: log.max_bytes_per_part,
-                max_parts: log.max_parts,
-            }),
-        },
+        ServerConfig::Stdio(_) => {
+            let cfg = server_cfg
+                .require_stdio()
+                .expect("matched transport must expose stdio config");
+            ConnectionServerConfigIdentity::Stdio {
+                argv: cfg.argv().iter().cloned().map(OsString::from).collect(),
+                inherit_env: cfg.inherit_env(),
+                env: cfg
+                    .env()
+                    .iter()
+                    .map(|(key, value)| (key.clone(), OsString::from(value)))
+                    .collect(),
+                stdout_log: cfg.stdout_log().map(|log| ResolvedStdoutLogConfig {
+                    path: log.path.clone(),
+                    max_bytes_per_part: log.max_bytes_per_part,
+                    max_parts: log.max_parts,
+                }),
+            }
+        }
         ServerConfig::Unix(_) => ConnectionServerConfigIdentity::Unix {
-            unix_path: server_cfg.unix_path_required().to_path_buf(),
+            unix_path: server_cfg
+                .unix_path_required()
+                .expect("matched transport must expose unix path")
+                .to_path_buf(),
         },
         ServerConfig::StreamableHttp(_) => {
+            let cfg = server_cfg
+                .require_streamable_http()
+                .expect("matched transport must expose streamable_http config");
             let mut headers = BTreeMap::new();
             headers.extend(
-                server_cfg
-                    .http_headers()
+                cfg.http_headers()
                     .iter()
                     .map(|(key, value)| (key.clone(), value.clone())),
             );
-            if let Some(env_var) = server_cfg.bearer_token_env_var() {
+            if let Some(env_var) = cfg.bearer_token_env_var() {
                 headers.insert(
                     AUTHORIZATION_HEADER.to_string(),
                     format!("$ENVVAR:{env_var}"),
                 );
             }
-            for (header, env_var) in server_cfg.env_http_headers() {
+            for (header, env_var) in cfg.env_http_headers() {
                 headers.insert(header.clone(), format!("$ENVVAR:{env_var}"));
             }
 
-            let (sse_url, post_url) = match (
-                server_cfg.url(),
-                server_cfg.sse_url(),
-                server_cfg.http_url(),
-            ) {
+            let (sse_url, post_url) = match (cfg.url(), cfg.sse_url(), cfg.http_url()) {
                 (Some(url), None, None) => (url.to_string(), url.to_string()),
                 (None, Some(sse_url), Some(http_url)) => {
                     (sse_url.to_string(), http_url.to_string())
@@ -147,8 +148,9 @@ pub(crate) fn effective_server_config_identity(
 ) -> anyhow::Result<ConnectionServerConfigIdentity> {
     match server_cfg.transport() {
         Transport::Stdio => {
+            let cfg = server_cfg.require_stdio()?;
             let cwd = super::resolve_connection_cwd(cwd)?;
-            let argv = server_cfg
+            let argv = cfg
                 .argv()
                 .iter()
                 .enumerate()
@@ -161,7 +163,7 @@ pub(crate) fn effective_server_config_identity(
                 })
                 .collect::<anyhow::Result<Vec<_>>>()
                 .map_err(|err| wrap_kind(ErrorKind::Config, err))?;
-            let env = server_cfg
+            let env = cfg
                 .env()
                 .iter()
                 .map(|(key, value)| {
@@ -171,20 +173,20 @@ pub(crate) fn effective_server_config_identity(
                         .map_err(|err| wrap_kind(ErrorKind::Config, err))
                 })
                 .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
-            let stdout_log = server_cfg.stdout_log().map(|log| ResolvedStdoutLogConfig {
+            let stdout_log = cfg.stdout_log().map(|log| ResolvedStdoutLogConfig {
                 path: absolutize_with_base(&log.path, &cwd),
                 max_bytes_per_part: log.max_bytes_per_part,
                 max_parts: log.max_parts,
             });
             Ok(ConnectionServerConfigIdentity::Stdio {
                 argv,
-                inherit_env: server_cfg.inherit_env(),
+                inherit_env: cfg.inherit_env(),
                 env,
                 stdout_log,
             })
         }
         Transport::Unix => Ok(ConnectionServerConfigIdentity::Unix {
-            unix_path: resolve_unix_path_for_connection(server_cfg.unix_path_required(), cwd)?,
+            unix_path: resolve_unix_path_for_connection(server_cfg.unix_path_required()?, cwd)?,
         }),
         Transport::StreamableHttp => {
             let resolved_urls = resolve_streamable_http_urls(ctx, server_name, server_cfg, cwd)?;
@@ -223,6 +225,7 @@ async fn connect_stdio_transport(
     cwd: &Path,
 ) -> anyhow::Result<(mcp_jsonrpc::Client, Option<Child>)> {
     let cwd = super::resolve_connection_cwd(cwd)?;
+    let cfg = server_cfg.require_stdio()?;
 
     if ctx.trust_mode == TrustMode::Untrusted {
         config_bail!(
@@ -230,7 +233,7 @@ async fn connect_stdio_transport(
         );
     }
 
-    let expanded_argv = server_cfg
+    let expanded_argv = cfg
         .argv()
         .iter()
         .enumerate()
@@ -250,11 +253,11 @@ async fn connect_stdio_transport(
     // Preserve child stderr by default so library callers retain diagnostic visibility. Callers
     // that need stricter routing can still redirect the parent process boundary explicitly.
     cmd.stderr(Stdio::inherit());
-    if !server_cfg.inherit_env() {
+    if !cfg.inherit_env() {
         cmd.env_clear();
         apply_stdio_baseline_env(&mut cmd);
     }
-    for (key, value) in server_cfg.env().iter() {
+    for (key, value) in cfg.env().iter() {
         let value = expand_placeholders_trusted_os(value, &cwd)
             .with_context(|| format!("expand env placeholder: {key}"))
             .map_err(|err| wrap_kind(ErrorKind::Config, err))?;
@@ -262,7 +265,7 @@ async fn connect_stdio_transport(
     }
     cmd.kill_on_drop(true);
 
-    let stdout_log = server_cfg.stdout_log().map(|log| {
+    let stdout_log = cfg.stdout_log().map(|log| {
         let resolved_log_path = absolutize_with_base(&log.path, &cwd);
         let stdout_log_root = ctx.stdout_log_root.as_deref().unwrap_or(cwd.as_path());
         let within_root = stdout_log_path_within_root(&resolved_log_path, stdout_log_root)
@@ -298,7 +301,7 @@ async fn connect_stdio_transport(
     .with_context(|| {
         format!(
             "spawn mcp server (server={server_name}) argv redacted (argc={})",
-            server_cfg.argv().len()
+            cfg.argv().len()
         )
     })?;
     let child = client.take_child();
@@ -316,7 +319,7 @@ async fn connect_unix_transport(
             "refusing to connect unix mcp server in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
         );
     }
-    let unix_path = resolve_unix_path_for_connection(server_cfg.unix_path_required(), cwd)?;
+    let unix_path = resolve_unix_path_for_connection(server_cfg.unix_path_required()?, cwd)?;
     let client = mcp_jsonrpc::Client::connect_unix(&unix_path)
         .await
         .with_context(|| format!("connect unix mcp server path={}", unix_path.display()))?;
@@ -330,6 +333,7 @@ async fn connect_streamable_http_transport(
     cwd: &Path,
 ) -> anyhow::Result<(mcp_jsonrpc::Client, Option<Child>)> {
     let resolved_urls = resolve_streamable_http_urls(ctx, server_name, server_cfg, cwd)?;
+    let cfg = server_cfg.require_streamable_http()?;
 
     validate_streamable_http_config(
         ctx.trust_mode,
@@ -351,12 +355,12 @@ async fn connect_streamable_http_transport(
     }
 
     if ctx.trust_mode != TrustMode::Trusted {
-        if server_cfg.bearer_token_env_var().is_some() {
+        if cfg.bearer_token_env_var().is_some() {
             config_bail!(
                 "refusing to read bearer token env var in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
             );
         }
-        if !server_cfg.env_http_headers().is_empty() {
+        if !cfg.env_http_headers().is_empty() {
             config_bail!(
                 "refusing to read http header env vars in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
             );
@@ -424,11 +428,8 @@ fn resolve_streamable_http_urls(
     server_cfg: &ServerConfig,
     cwd: &Path,
 ) -> anyhow::Result<ResolvedStreamableHttpUrls> {
-    let (sse_url_raw, post_url_raw) = match (
-        server_cfg.url(),
-        server_cfg.sse_url(),
-        server_cfg.http_url(),
-    ) {
+    let cfg = server_cfg.require_streamable_http()?;
+    let (sse_url_raw, post_url_raw) = match (cfg.url(), cfg.sse_url(), cfg.http_url()) {
         (Some(url), None, None) => (url, url),
         (None, Some(sse_url), Some(http_url)) => (sse_url, http_url),
         _ => config_bail!(
@@ -436,7 +437,7 @@ fn resolve_streamable_http_urls(
         ),
     };
 
-    let (sse_url_field, post_url_field) = if server_cfg.url().is_some() {
+    let (sse_url_field, post_url_field) = if cfg.url().is_some() {
         ("url", "url")
     } else {
         ("sse_url", "http_url")
@@ -477,15 +478,16 @@ fn build_streamable_http_headers(
     server_cfg: &ServerConfig,
     cwd: &Path,
 ) -> anyhow::Result<HashMap<String, String>> {
-    let capacity = server_cfg
+    let cfg = server_cfg.require_streamable_http()?;
+    let capacity = cfg
         .http_headers()
         .len()
         .saturating_add(1)
-        .saturating_add(usize::from(server_cfg.bearer_token_env_var().is_some()))
-        .saturating_add(server_cfg.env_http_headers().len());
+        .saturating_add(usize::from(cfg.bearer_token_env_var().is_some()))
+        .saturating_add(cfg.env_http_headers().len());
     let mut headers = HashMap::with_capacity(capacity);
 
-    for (key, value) in server_cfg.http_headers() {
+    for (key, value) in cfg.http_headers() {
         if is_reserved_streamable_http_header(key) {
             config_bail!("mcp server {server_name}: http header is reserved by transport: {key}");
         }
@@ -505,7 +507,7 @@ fn build_streamable_http_headers(
         ctx.protocol_version.clone(),
     );
 
-    if let Some(env_var) = server_cfg.bearer_token_env_var() {
+    if let Some(env_var) = cfg.bearer_token_env_var() {
         debug_assert_eq!(ctx.trust_mode, TrustMode::Trusted);
         let token = std::env::var(env_var)
             .with_context(|| format!("read bearer token env var: {env_var}"))
@@ -513,9 +515,9 @@ fn build_streamable_http_headers(
         headers.insert(AUTHORIZATION_HEADER.to_string(), format!("Bearer {token}"));
     }
 
-    if !server_cfg.env_http_headers().is_empty() {
+    if !cfg.env_http_headers().is_empty() {
         debug_assert_eq!(ctx.trust_mode, TrustMode::Trusted);
-        for (header, env_var) in server_cfg.env_http_headers().iter() {
+        for (header, env_var) in cfg.env_http_headers().iter() {
             if is_reserved_streamable_http_env_header(header) {
                 config_bail!(
                     "mcp server {server_name}: http header env var targets a reserved transport header: {header}"
@@ -676,6 +678,24 @@ mod tests {
     }
 
     #[test]
+    fn build_streamable_http_headers_rejects_transport_mismatch() {
+        let ctx = trusted_connect_context();
+        let server_cfg = ServerConfig::stdio(vec!["mcp-a".to_string()]).unwrap();
+
+        let err = build_streamable_http_headers(&ctx, "srv", &server_cfg, Path::new("."))
+            .expect_err(
+                "stdio config must not silently fall back to empty streamable_http headers",
+            );
+        assert!(
+            err.to_string().contains("transport mismatch")
+                && err
+                    .to_string()
+                    .contains("requires transport=streamable_http, got transport=stdio"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
     fn effective_streamable_http_identity_resolves_env_backed_headers() {
         let ctx = trusted_connect_context();
         let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
@@ -694,6 +714,25 @@ mod tests {
         assert_ne!(
             raw, effective,
             "config identity should capture resolved env-backed inputs instead of raw env var names"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_stdio_transport_rejects_transport_mismatch() {
+        let ctx = trusted_connect_context();
+        let server_cfg = ServerConfig::unix(PathBuf::from("/tmp/mcp.sock")).unwrap();
+        let tempdir = tempfile::tempdir().expect("tempdir");
+
+        let err = match connect_stdio_transport(&ctx, "srv", &server_cfg, tempdir.path()).await {
+            Ok(_) => panic!("unix config must not silently fall back to empty stdio argv"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("transport mismatch")
+                && err
+                    .to_string()
+                    .contains("requires transport=stdio, got transport=unix"),
+            "{err:#}"
         );
     }
 

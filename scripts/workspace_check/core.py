@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 from pathlib import Path
 
-from check_common.context import CheckContext, run_command
+from check_common.context import CheckContext, capture_command, run_command
 from .dependency_direction import run_dependency_direction_checks
 from .docs_system import run_docs_system_checks
 from .mcp_kit_assets import run_mcp_kit_asset_checks
@@ -19,10 +18,11 @@ def has_cargo_workspace(ctx: CheckContext) -> bool:
 
 
 def workspace_member_packages(ctx: CheckContext) -> list[str]:
-    metadata = subprocess.check_output(
+    metadata = capture_command(
+        ctx,
         ["cargo", "metadata", "--no-deps", "--format-version", "1"],
         cwd=ctx.repo_root,
-        text=True,
+        purpose="cargo metadata for workspace member discovery",
     )
     data = json.loads(metadata)
     return [package["name"] for package in data["packages"]]
@@ -40,18 +40,21 @@ def run_local_checks(ctx: CheckContext) -> None:
         ctx,
         fmt_command,
         cwd=ctx.repo_root,
+        purpose="cargo fmt workspace gate",
     )
     run_command(
         ctx,
         ["cargo", "check", "--workspace", "--all-targets", "--all-features"],
         cwd=ctx.repo_root,
         use_workaround=True,
+        purpose="cargo check workspace gate",
     )
     run_command(
         ctx,
         ["cargo", "test", "--workspace", "--all-features"],
         cwd=ctx.repo_root,
         use_workaround=True,
+        purpose="cargo test workspace gate",
     )
 
 
@@ -62,6 +65,7 @@ def run_ci_checks(ctx: CheckContext) -> None:
         ["cargo", "clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"],
         cwd=ctx.repo_root,
         use_workaround=True,
+        purpose="cargo clippy workspace gate",
     )
     run_asset_checks(ctx, "all")
 
@@ -81,6 +85,7 @@ def run_review_root_checks(ctx: CheckContext) -> None:
             command,
             cwd=ctx.repo_root,
             use_workaround=True,
+            purpose=f"{command[0]} {' '.join(command[1:])} review-root gate",
         )
 
 
@@ -112,6 +117,7 @@ def run_secret_kit_target_check(ctx: CheckContext, target: str | None) -> None:
         ["cargo", "check", "-p", "secret-kit", "--target", target],
         cwd=ctx.repo_root,
         use_workaround=True,
+        purpose=f"cargo check secret-kit target gate ({target})",
     )
 
 

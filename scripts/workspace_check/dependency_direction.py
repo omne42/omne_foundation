@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import json
-import subprocess
 
-from check_common.context import CheckContext
+from check_common.context import CheckContext, capture_command
 
 
 ALLOWED_INTERNAL_DEPS: dict[str, set[str]] = {
@@ -40,10 +39,11 @@ ALLOWED_INTERNAL_DEPS: dict[str, set[str]] = {
 
 
 def _workspace_internal_deps(ctx: CheckContext) -> dict[str, set[str]]:
-    metadata = subprocess.check_output(
+    metadata = capture_command(
+        ctx,
         ["cargo", "metadata", "--no-deps", "--format-version", "1"],
         cwd=ctx.repo_root,
-        text=True,
+        purpose="cargo metadata for dependency-direction gate",
     )
     data = json.loads(metadata)
     workspace_prefix = f"{ctx.repo_root / 'crates'}"

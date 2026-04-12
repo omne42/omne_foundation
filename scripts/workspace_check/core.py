@@ -73,6 +73,7 @@ def run_review_root_checks(ctx: CheckContext) -> None:
         ["cargo", "check", "-p", "policy-meta"],
         ["cargo", "check", "-p", "mcp-kit"],
         ["cargo", "test", "-p", "http-kit"],
+        ["cargo", "test", "-p", "github-kit"],
     )
     for command in review_commands:
         run_command(

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from check_common.context import CheckContext, git_output
+from check_common.context import CheckContext, capture_command, git_output
 
 
 @dataclass(frozen=True)
@@ -27,10 +26,11 @@ class WorkspacePackage:
 
 
 def _cargo_metadata(ctx: CheckContext) -> dict:
-    metadata = subprocess.check_output(
+    metadata = capture_command(
+        ctx,
         ["cargo", "metadata", "--no-deps", "--format-version", "1"],
         cwd=ctx.repo_root,
-        text=True,
+        purpose="cargo metadata for publish-contract gate",
     )
     return json.loads(metadata)
 

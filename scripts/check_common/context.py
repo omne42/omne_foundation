@@ -32,6 +32,34 @@ def require_command(command: str, purpose: str) -> None:
     )
 
 
+def resolve_cargo_command(ctx: CheckContext, purpose: str) -> str:
+    cargo = shutil.which("cargo")
+    if cargo:
+        return cargo
+
+    cargo_home = Path.home() / ".cargo" / "bin" / "cargo"
+    if cargo_home.is_file() and os.access(cargo_home, os.X_OK):
+        return str(cargo_home)
+
+    raise SystemExit(
+        "check-workspace: missing required command for "
+        f"{purpose}: cargo (searched PATH and {cargo_home})"
+    )
+
+
+def with_cargo_command(
+    ctx: CheckContext,
+    args: Sequence[str | Path],
+    *,
+    purpose: str,
+) -> list[str | Path]:
+    if not args:
+        return []
+    if str(args[0]) != "cargo":
+        return list(args)
+    return [resolve_cargo_command(ctx, purpose), *args[1:]]
+
+
 def _stringify_command(args: Sequence[str | Path]) -> list[str]:
     return [str(arg) for arg in args]
 
@@ -59,8 +87,14 @@ def run_command(
     cwd: Path | None = None,
     env: Mapping[str, str] | None = None,
     use_workaround: bool = False,
+    purpose: str | None = None,
 ) -> None:
-    command = _with_exdev_workaround(ctx, args, use_workaround)
+    command = with_cargo_command(
+        ctx,
+        args,
+        purpose=purpose or "workspace check",
+    )
+    command = _with_exdev_workaround(ctx, command, use_workaround)
     merged_env = os.environ.copy()
     if env is not None:
         merged_env.update(env)
@@ -81,9 +115,15 @@ def capture_command(
     *,
     cwd: Path | None = None,
     allow_failure: bool = False,
+    purpose: str | None = None,
 ) -> str:
+    command = with_cargo_command(
+        ctx,
+        args,
+        purpose=purpose or "workspace check",
+    )
     result = subprocess.run(
-        _stringify_command(args),
+        _stringify_command(command),
         cwd=str(cwd) if cwd is not None else None,
         check=False,
         capture_output=True,

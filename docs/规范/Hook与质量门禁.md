@@ -92,6 +92,8 @@
 
 `scripts/workspace_check/` 是这里的共享实现；`scripts/check-workspace.sh` 只是保留给手动执行和 CI 复用的薄入口。
 
+如果当前环境缺少 `cargo`，这些需要 Rust 工具链的 gate 会在入口阶段直接报出清晰错误，说明缺少的命令和对应检查用途；同时会优先使用 `PATH` 里的 `cargo`，必要时回退到 `~/.cargo/bin/cargo`，避免把环境问题退化成 `traceback` 或裸 `cargo: not found`。
+
 ### `review-root` gate
 
 针对 root review 已收口的问题，workspace check 还保留一个更窄的回归入口：

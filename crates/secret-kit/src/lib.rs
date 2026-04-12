@@ -131,11 +131,13 @@
 //! - ❌ 不要假设秘密源总是可用（总是处理错误）
 //! - ❌ 不要混合多个秘密源（使用统一的 `secret://` 格式）
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsStr;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Mutex, MutexGuard};
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
@@ -148,6 +150,11 @@ pub use value::SecretString;
 use value::{SecretBytes, read_limited, secret_string_from_bytes};
 
 pub type SecretResolveFuture<'a> = Pin<Box<dyn Future<Output = Result<SecretString>> + Send + 'a>>;
+
+thread_local! {
+    static SECRET_RESOLVER_DEFAULT_GUARD: Cell<u8> = const { Cell::new(0) };
+    static CACHE_PREPARE_DEFAULT_GUARD: Cell<u8> = const { Cell::new(0) };
+}
 
 macro_rules! invalid_response {
     ($code:literal $(,)?) => {
@@ -198,7 +205,10 @@ pub trait SecretResolver: Send + Sync {
         context: SecretResolutionContext<'a>,
     ) -> SecretResolveFuture<'a> {
         let spec = spec.to_string();
-        Box::pin(async move { self.resolve_secret(&spec, context).await })
+        Box::pin(guard_default_recursion_future(
+            &SECRET_RESOLVER_DEFAULT_GUARD,
+            async move { self.resolve_secret(&spec, context).await },
+        ))
     }
 
     fn resolve_secret<'a>(
@@ -206,10 +216,13 @@ pub trait SecretResolver: Send + Sync {
         spec: &'a str,
         context: SecretResolutionContext<'a>,
     ) -> SecretResolveFuture<'a> {
-        Box::pin(async move {
-            let parsed = crate::spec::SecretSpec::parse(spec)?;
-            self.resolve_secret_spec(&parsed, context).await
-        })
+        Box::pin(guard_default_recursion_future(
+            &SECRET_RESOLVER_DEFAULT_GUARD,
+            async move {
+                let parsed = crate::spec::SecretSpec::parse(spec)?;
+                self.resolve_secret_spec(&parsed, context).await
+            },
+        ))
     }
 }
 
@@ -369,10 +382,10 @@ pub trait CacheAwareSecretResolver: SecretResolver {
         spec: &str,
         context: SecretResolutionContext<'_>,
     ) -> impl Future<Output = Result<PreparedSecretResolution<Self::Prepared>>> + Send {
-        async move {
+        guard_default_recursion_future(&CACHE_PREPARE_DEFAULT_GUARD, async move {
             let parsed = crate::spec::SecretSpec::parse(spec)?;
-            self.prepare_secret_spec_resolution(&parsed, context).await
-        }
+            Box::pin(self.prepare_secret_spec_resolution(&parsed, context)).await
+        })
     }
 
     fn prepare_secret_spec_resolution(
@@ -381,7 +394,9 @@ pub trait CacheAwareSecretResolver: SecretResolver {
         context: SecretResolutionContext<'_>,
     ) -> impl Future<Output = Result<PreparedSecretResolution<Self::Prepared>>> + Send {
         let spec = spec.to_string();
-        async move { self.prepare_secret_resolution(&spec, context).await }
+        guard_default_recursion_future(&CACHE_PREPARE_DEFAULT_GUARD, async move {
+            Box::pin(self.prepare_secret_resolution(&spec, context)).await
+        })
     }
 
     fn resolve_prepared_secret(
@@ -778,6 +793,79 @@ impl SecretCacheKey {
 
 fn normalize_secret_cache_component(value: String) -> Option<String> {
     (!value.is_empty()).then_some(value)
+}
+
+struct DefaultRecursionGuard {
+    slot: &'static std::thread::LocalKey<Cell<u8>>,
+}
+
+impl Drop for DefaultRecursionGuard {
+    fn drop(&mut self) {
+        self.slot
+            .with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+impl DefaultRecursionGuard {
+    fn enter(slot: &'static std::thread::LocalKey<Cell<u8>>) -> Result<Self> {
+        slot.with(|depth| {
+            if depth.get() != 0 {
+                return Err(invalid_response!("error_detail.secret.not_resolvable"));
+            }
+            depth.set(1);
+            Ok(Self { slot })
+        })
+    }
+}
+
+struct GuardedDefaultRecursionFuture<F> {
+    slot: &'static std::thread::LocalKey<Cell<u8>>,
+    future: Pin<Box<F>>,
+}
+
+impl<F, T> Future for GuardedDefaultRecursionFuture<F>
+where
+    F: Future<Output = Result<T>> + Send,
+{
+    type Output = Result<T>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        let guard = match DefaultRecursionGuard::enter(self.slot) {
+            Ok(guard) => guard,
+            Err(err) => return Poll::Ready(Err(err)),
+        };
+        let poll = self.future.as_mut().poll(cx);
+        drop(guard);
+        poll
+    }
+}
+
+fn guard_default_recursion_future<T, F>(
+    slot: &'static std::thread::LocalKey<Cell<u8>>,
+    future: F,
+) -> GuardedDefaultRecursionFuture<F>
+where
+    F: Future<Output = Result<T>> + Send,
+{
+    GuardedDefaultRecursionFuture {
+        slot,
+        future: Box::pin(future),
+    }
+}
+
+#[cfg(test)]
+fn default_recursion_guard_depth_for_test(slot: &'static std::thread::LocalKey<Cell<u8>>) -> u8 {
+    slot.with(|depth| depth.get())
+}
+
+#[cfg(test)]
+pub(crate) fn secret_resolver_default_guard_depth_for_test() -> u8 {
+    default_recursion_guard_depth_for_test(&SECRET_RESOLVER_DEFAULT_GUARD)
+}
+
+#[cfg(test)]
+pub(crate) fn cache_prepare_default_guard_depth_for_test() -> u8 {
+    default_recursion_guard_depth_for_test(&CACHE_PREPARE_DEFAULT_GUARD)
 }
 
 #[cfg(windows)]

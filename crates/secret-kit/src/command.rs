@@ -1228,6 +1228,32 @@ fn trusted_builtin_search_directory(directory: &Path) -> bool {
         && TRUSTED_DIRS
             .iter()
             .any(|candidate| directory == Path::new(candidate))
+        && trusted_builtin_search_directory_metadata(directory)
+}
+
+#[cfg(unix)]
+fn trusted_builtin_search_directory_metadata(directory: &Path) -> bool {
+    std::fs::metadata(directory)
+        .ok()
+        .is_some_and(|metadata| trusted_builtin_search_directory_metadata_inner(&metadata))
+}
+
+#[cfg(unix)]
+fn trusted_builtin_search_directory_metadata_inner(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    if !metadata.is_dir() {
+        return false;
+    }
+
+    let mode = metadata.permissions().mode();
+    let world_writable = mode & 0o002 != 0;
+    if !world_writable {
+        return true;
+    }
+
+    let sticky = mode & 0o1000 != 0;
+    sticky && metadata.uid() == 0
 }
 
 #[cfg(windows)]
@@ -1358,6 +1384,11 @@ pub(crate) fn resolve_program_on_path_for_test(program: &str, path: &OsStr) -> O
 #[cfg(test)]
 pub(crate) fn sanitize_ambient_command_search_path_for_test(path: &OsStr) -> Option<OsString> {
     sanitize_ambient_command_search_path(path)
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn trusted_builtin_search_directory_metadata_for_test(path: &Path) -> bool {
+    trusted_builtin_search_directory_metadata(path)
 }
 
 #[cfg(all(test, windows))]

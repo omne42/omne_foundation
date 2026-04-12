@@ -132,6 +132,7 @@
 //! - ❌ 不要混合多个秘密源（使用统一的 `secret://` 格式）
 
 use std::collections::{BTreeMap, VecDeque};
+use std::cell::Cell;
 use std::ffi::OsStr;
 use std::future::Future;
 use std::pin::Pin;
@@ -148,6 +149,11 @@ pub use value::SecretString;
 use value::{SecretBytes, read_limited, secret_string_from_bytes};
 
 pub type SecretResolveFuture<'a> = Pin<Box<dyn Future<Output = Result<SecretString>> + Send + 'a>>;
+
+thread_local! {
+    static SECRET_RESOLVER_DEFAULT_GUARD: Cell<u8> = const { Cell::new(0) };
+    static CACHE_PREPARE_DEFAULT_GUARD: Cell<u8> = const { Cell::new(0) };
+}
 
 macro_rules! invalid_response {
     ($code:literal $(,)?) => {
@@ -198,7 +204,11 @@ pub trait SecretResolver: Send + Sync {
         context: SecretResolutionContext<'a>,
     ) -> SecretResolveFuture<'a> {
         let spec = spec.to_string();
-        Box::pin(async move { self.resolve_secret(&spec, context).await })
+        let guard = enter_secret_resolver_default_guard();
+        Box::pin(async move {
+            let _guard = guard?;
+            self.resolve_secret(&spec, context).await
+        })
     }
 
     fn resolve_secret<'a>(
@@ -206,7 +216,9 @@ pub trait SecretResolver: Send + Sync {
         spec: &'a str,
         context: SecretResolutionContext<'a>,
     ) -> SecretResolveFuture<'a> {
+        let guard = enter_secret_resolver_default_guard();
         Box::pin(async move {
+            let _guard = guard?;
             let parsed = crate::spec::SecretSpec::parse(spec)?;
             self.resolve_secret_spec(&parsed, context).await
         })
@@ -369,7 +381,9 @@ pub trait CacheAwareSecretResolver: SecretResolver {
         spec: &str,
         context: SecretResolutionContext<'_>,
     ) -> impl Future<Output = Result<PreparedSecretResolution<Self::Prepared>>> + Send {
+        let guard = enter_cache_prepare_default_guard();
         async move {
+            let _guard = guard?;
             let parsed = crate::spec::SecretSpec::parse(spec)?;
             self.prepare_secret_spec_resolution(&parsed, context).await
         }
@@ -381,7 +395,11 @@ pub trait CacheAwareSecretResolver: SecretResolver {
         context: SecretResolutionContext<'_>,
     ) -> impl Future<Output = Result<PreparedSecretResolution<Self::Prepared>>> + Send {
         let spec = spec.to_string();
-        async move { self.prepare_secret_resolution(&spec, context).await }
+        let guard = enter_cache_prepare_default_guard();
+        async move {
+            let _guard = guard?;
+            self.prepare_secret_resolution(&spec, context).await
+        }
     }
 
     fn resolve_prepared_secret(
@@ -778,6 +796,52 @@ impl SecretCacheKey {
 
 fn normalize_secret_cache_component(value: String) -> Option<String> {
     (!value.is_empty()).then_some(value)
+}
+
+struct DefaultRecursionGuard {
+    exit: fn(),
+}
+
+impl Drop for DefaultRecursionGuard {
+    fn drop(&mut self) {
+        (self.exit)();
+    }
+}
+
+fn enter_secret_resolver_default_guard() -> Result<DefaultRecursionGuard> {
+    enter_default_recursion_guard(
+        &SECRET_RESOLVER_DEFAULT_GUARD,
+        leave_secret_resolver_default_guard,
+    )
+}
+
+fn leave_secret_resolver_default_guard() {
+    SECRET_RESOLVER_DEFAULT_GUARD.with(|guard| {
+        guard.set(guard.get().saturating_sub(1));
+    });
+}
+
+fn enter_cache_prepare_default_guard() -> Result<DefaultRecursionGuard> {
+    enter_default_recursion_guard(&CACHE_PREPARE_DEFAULT_GUARD, leave_cache_prepare_default_guard)
+}
+
+fn leave_cache_prepare_default_guard() {
+    CACHE_PREPARE_DEFAULT_GUARD.with(|guard| {
+        guard.set(guard.get().saturating_sub(1));
+    });
+}
+
+fn enter_default_recursion_guard(
+    slot: &'static std::thread::LocalKey<Cell<u8>>,
+    exit: fn(),
+) -> Result<DefaultRecursionGuard> {
+    slot.with(|guard| {
+        if guard.get() != 0 {
+            return Err(invalid_response!("error_detail.secret.not_resolvable"));
+        }
+        guard.set(1);
+        Ok(DefaultRecursionGuard { exit })
+    })
 }
 
 #[cfg(windows)]

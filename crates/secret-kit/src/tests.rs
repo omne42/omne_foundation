@@ -11,6 +11,8 @@ use crate::command::{
     build_command_env, resolve_program_on_path_for_test, run_secret_command,
     sanitize_ambient_command_search_path_for_test, secret_command_timeout_from_env,
 };
+#[cfg(unix)]
+use crate::command::trusted_builtin_search_directory_metadata_for_test;
 use crate::json::extract_json_key;
 use crate::spec::{
     SecretCommand, build_secret_command, prepare_default_secret_spec_resolution,
@@ -189,6 +191,26 @@ impl SecretResolver for LegacyStringResolver {
     }
 }
 
+struct DefaultOnlyResolver;
+
+impl SecretResolver for DefaultOnlyResolver {}
+
+struct DefaultOnlyCacheAwareResolver;
+
+impl SecretResolver for DefaultOnlyCacheAwareResolver {}
+
+impl CacheAwareSecretResolver for DefaultOnlyCacheAwareResolver {
+    type Prepared = ();
+
+    async fn resolve_prepared_secret(
+        &self,
+        _prepared: Self::Prepared,
+        _context: SecretResolutionContext<'_>,
+    ) -> Result<SecretString> {
+        Ok(SecretString::from("unused"))
+    }
+}
+
 #[tokio::test]
 async fn secret_resolver_trait_object_resolves_secret() -> Result<()> {
     let mut env = TestEnv::default();
@@ -240,6 +262,34 @@ async fn legacy_secret_resolver_still_resolves_parsed_secret() -> Result<()> {
         .await?;
 
     assert_eq!(value, "test-secret");
+    Ok(())
+}
+
+#[tokio::test]
+async fn default_only_secret_resolver_fails_closed_instead_of_recursing() -> Result<()> {
+    let env = TestEnv::default();
+    let spec = SecretSpec::parse("secret://env/OPENAI_API_KEY")?;
+
+    let err = DefaultOnlyResolver
+        .resolve_secret_spec_text(&spec, &env)
+        .await
+        .expect_err("default-only resolver should fail closed");
+
+    assert_secret_error_code(&err, "error_detail.secret.not_resolvable");
+    Ok(())
+}
+
+#[tokio::test]
+async fn default_only_cache_prepare_fails_closed_instead_of_recursing() -> Result<()> {
+    let env = TestEnv::default();
+    let spec = SecretSpec::parse("secret://env/OPENAI_API_KEY")?;
+
+    let err = DefaultOnlyCacheAwareResolver
+        .prepare_secret_spec_resolution(&spec, SecretResolutionContext::ambient(&env))
+        .await
+        .expect_err("default-only cache-aware resolver should fail closed");
+
+    assert_secret_error_code(&err, "error_detail.secret.not_resolvable");
     Ok(())
 }
 
@@ -1786,6 +1836,75 @@ fn sanitize_ambient_command_search_path_drops_untrusted_entries() {
         sanitized.is_none(),
         "tempdir should not be trusted for builtin PATH search"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn trusted_builtin_search_directory_metadata_rejects_missing_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("missing");
+
+    assert!(
+        !trusted_builtin_search_directory_metadata_for_test(&missing),
+        "missing path should not be trusted"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn trusted_builtin_search_directory_metadata_rejects_non_directory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("vault");
+    std::fs::write(&file, "not a directory").expect("write file");
+
+    assert!(
+        !trusted_builtin_search_directory_metadata_for_test(&file),
+        "regular files should not be trusted as PATH directories"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn trusted_builtin_search_directory_metadata_rejects_world_writable_directory_without_sticky_bit() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut permissions = std::fs::metadata(dir.path())
+        .expect("metadata")
+        .permissions();
+    permissions.set_mode(0o777);
+    std::fs::set_permissions(dir.path(), permissions).expect("set permissions");
+
+    assert!(
+        !trusted_builtin_search_directory_metadata_for_test(dir.path()),
+        "world-writable directory without sticky bit should not be trusted"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn trusted_builtin_search_directory_metadata_accepts_sticky_root_owned_world_writable_directory() {
+    use std::os::unix::fs::MetadataExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut permissions = std::fs::metadata(dir.path())
+        .expect("metadata")
+        .permissions();
+    permissions.set_mode(0o1777);
+    std::fs::set_permissions(dir.path(), permissions).expect("set permissions");
+
+    if std::fs::metadata(dir.path()).expect("metadata").uid() == 0 {
+        assert!(
+            trusted_builtin_search_directory_metadata_for_test(dir.path()),
+            "sticky root-owned world-writable directory should remain trusted"
+        );
+    } else {
+        assert!(
+            !trusted_builtin_search_directory_metadata_for_test(dir.path()),
+            "sticky directory owned by a non-root user should not be trusted"
+        );
+    }
 }
 
 #[cfg(unix)]

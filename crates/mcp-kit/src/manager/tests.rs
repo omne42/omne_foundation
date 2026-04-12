@@ -3918,8 +3918,7 @@ async fn untrusted_manager_refuses_streamable_http_url_credentials() {
 }
 
 #[tokio::test]
-async fn untrusted_manager_refuses_streamable_http_hostname_resolving_to_non_global_ip_by_default()
-{
+async fn untrusted_manager_allow_localhost_bypasses_non_global_dns_policy_rejection() {
     let policy = UntrustedStreamableHttpPolicy {
         outbound: http_kit::UntrustedOutboundPolicy {
             allow_localhost: true,
@@ -3938,8 +3937,8 @@ async fn untrusted_manager_refuses_streamable_http_hostname_resolving_to_non_glo
         .await
         .unwrap_err();
     assert!(
-        err.to_string().contains("resolves to non-global ip"),
-        "unexpected error: {err}"
+        !err.to_string().contains("resolves to non-global ip"),
+        "allow_localhost should bypass non-global localhost dns rejection: {err}"
     );
 }
 
@@ -4071,7 +4070,7 @@ fn untrusted_policy_allow_localhost_does_not_allow_local_domains_or_single_label
 }
 
 #[tokio::test]
-async fn untrusted_policy_dns_check_blocks_localhost_without_allow_private_ip() {
+async fn untrusted_policy_dns_check_allows_localhost_without_allow_private_ip() {
     let policy = UntrustedStreamableHttpPolicy {
         outbound: http_kit::UntrustedOutboundPolicy {
             allow_localhost: true,
@@ -4082,11 +4081,9 @@ async fn untrusted_policy_dns_check_blocks_localhost_without_allow_private_ip() 
     };
 
     validate_streamable_http_url_untrusted(&policy, "srv", "url", "https://localhost/mcp").unwrap();
-    let err =
-        validate_streamable_http_url_untrusted_dns(&policy, "srv", "url", "https://localhost/mcp")
-            .await
-            .unwrap_err();
-    assert!(err.to_string().contains("resolves to non-global ip"));
+    validate_streamable_http_url_untrusted_dns(&policy, "srv", "url", "https://localhost/mcp")
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

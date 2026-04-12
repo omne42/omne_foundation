@@ -8,7 +8,10 @@ use text_assets_kit::{
     bootstrap_text_resources_then_load_with_base,
 };
 
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "LazyPromptDirectory intentionally reuses the deprecated blocking compat shim from text-assets-kit instead of forking another local implementation"
+)]
 use text_assets_kit::{LazyInitError as BlockingLazyInitError, LazyValue as BlockingLazyValue};
 
 #[derive(Debug)]
@@ -164,7 +167,10 @@ impl Default for PromptDirectoryHandle {
     since = "0.1.0",
     note = "LazyPromptDirectory is a blocking compatibility shim; prefer PromptDirectoryHandle plus eager load/bootstrap for runtime-facing prompt access"
 )]
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "LazyPromptDirectory remains a deprecated compatibility wrapper around the shared blocking lazy shim"
+)]
 pub struct LazyPromptDirectory {
     inner: BlockingLazyValue<TextDirectory, io::Error>,
     initializer: Box<dyn Fn() -> Result<TextDirectory, io::Error> + Send + Sync>,
@@ -197,9 +203,11 @@ impl std::error::Error for PromptDirectoryError {
     }
 }
 
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "LazyPromptDirectory methods intentionally delegate through the deprecated blocking compat shim while preserving the compatibility surface"
+)]
 impl LazyPromptDirectory {
-    #[allow(deprecated)]
     pub fn new<I>(initializer: I) -> Self
     where
         I: Fn() -> Result<TextDirectory, io::Error> + Send + Sync + 'static,
@@ -210,7 +218,6 @@ impl LazyPromptDirectory {
         }
     }
 
-    #[allow(deprecated)]
     pub fn get(&self, key: &str) -> Result<Option<Arc<str>>, PromptDirectoryError> {
         let directory = self
             .inner
@@ -220,7 +227,10 @@ impl LazyPromptDirectory {
     }
 }
 
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "the error mapping stays coupled to the shared deprecated blocking compat shim so compatibility callers keep the same error translation"
+)]
 fn shared_prompt_error_detail(error: BlockingLazyInitError<io::Error>) -> Arc<io::Error> {
     match error {
         BlockingLazyInitError::Inner(error) => error,
@@ -236,13 +246,19 @@ fn shared_prompt_error_detail(error: BlockingLazyInitError<io::Error>) -> Arc<io
     }
 }
 
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "the prompt compatibility error wrapper intentionally consumes the deprecated blocking shim error type"
+)]
 fn shared_prompt_error(error: BlockingLazyInitError<io::Error>) -> PromptDirectoryError {
     PromptDirectoryError::new(shared_prompt_error_detail(error))
 }
 
 #[cfg(test)]
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "the compatibility regression tests intentionally exercise the deprecated LazyPromptDirectory surface directly"
+)]
 mod tests {
     use super::*;
     use std::error::Error as _;

@@ -6,7 +6,10 @@ use i18n_kit::{Catalog, Locale, TemplateArg};
 
 use crate::catalog_error::{CatalogInitError, CatalogLocaleError};
 use crate::{resolve_locale_from_argv, resolve_locale_from_cli_args};
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "LazyCatalog intentionally reuses the deprecated blocking compat shim from text-assets-kit instead of forking another local implementation"
+)]
 use text_assets_kit::{LazyInitError as BlockingLazyInitError, LazyValue as BlockingLazyValue};
 
 /// Legacy blocking catalog shim.
@@ -22,15 +25,20 @@ use text_assets_kit::{LazyInitError as BlockingLazyInitError, LazyValue as Block
     since = "0.1.0",
     note = "LazyCatalog is a blocking compatibility shim; prefer GlobalCatalog plus eager load/bootstrap for runtime-facing catalog access"
 )]
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "LazyCatalog remains a deprecated compatibility wrapper around the shared blocking lazy shim"
+)]
 pub struct LazyCatalog {
     inner: BlockingLazyValue<dyn Catalog, CatalogInitError>,
     initializer: Box<dyn Fn() -> Result<Arc<dyn Catalog>, CatalogInitError> + Send + Sync>,
 }
 
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "LazyCatalog methods intentionally delegate through the deprecated blocking compat shim while preserving the compatibility surface"
+)]
 impl LazyCatalog {
-    #[allow(deprecated)]
     pub fn new<I>(initializer: I) -> Self
     where
         I: Fn() -> Result<Arc<dyn Catalog>, CatalogInitError> + Send + Sync + 'static,
@@ -53,14 +61,12 @@ impl LazyCatalog {
         self.inner.set(Arc::new(catalog));
     }
 
-    #[allow(deprecated)]
     pub fn resolve_locale(&self, requested: Option<&str>) -> Result<Locale, CatalogLocaleError> {
         self.with_catalog(|catalog| catalog.try_resolve_locale(requested))
             .map_err(CatalogLocaleError::Initialization)?
             .map_err(CatalogLocaleError::Resolve)
     }
 
-    #[allow(deprecated)]
     pub fn resolve_locale_from_cli_args(
         &self,
         args: Vec<String>,
@@ -71,7 +77,6 @@ impl LazyCatalog {
             .map_err(CatalogLocaleError::Cli)
     }
 
-    #[allow(deprecated)]
     pub fn resolve_locale_from_argv(
         &self,
         argv: Vec<String>,
@@ -82,12 +87,10 @@ impl LazyCatalog {
             .map_err(CatalogLocaleError::Cli)
     }
 
-    #[allow(deprecated)]
     pub fn initialize(&self) -> Result<(), CatalogInitError> {
         self.with_catalog(|_| ())
     }
 
-    #[allow(deprecated)]
     pub fn try_render(
         &self,
         locale: Locale,
@@ -97,7 +100,6 @@ impl LazyCatalog {
         self.with_catalog(|catalog| catalog.render_text(locale, key, args))
     }
 
-    #[allow(deprecated)]
     pub fn with_catalog<T>(
         &self,
         f: impl FnOnce(&dyn Catalog) -> T,
@@ -110,7 +112,10 @@ impl LazyCatalog {
     }
 }
 
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "the error mapping stays coupled to the shared deprecated blocking compat shim so compatibility callers keep the same error translation"
+)]
 fn shared_lazy_catalog_error(error: BlockingLazyInitError<CatalogInitError>) -> CatalogInitError {
     match error {
         BlockingLazyInitError::Inner(error) => error.as_ref().clone(),
@@ -162,7 +167,10 @@ impl Display for CrossThreadCatalogInitialization {
 impl StdError for CrossThreadCatalogInitialization {}
 
 #[cfg(test)]
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "the compatibility regression tests intentionally exercise the deprecated LazyCatalog surface directly"
+)]
 mod tests {
     use super::*;
     use i18n_kit::{ResolveLocaleError, TranslationCatalog, TranslationResolution};

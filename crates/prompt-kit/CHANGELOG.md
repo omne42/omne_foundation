@@ -6,6 +6,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ## [Unreleased]
 
+- `prompt-kit`：`LazyPromptDirectory` 兼容导出、shared lazy shim 接线和对应回归测试现在改用带理由的局部 lint expectation，替代宽泛的 `allow(deprecated)`，兼容语义保持不变。
+
 - `prompt-kit`：当 prompt directory load 失败且后续 best-effort rollback 也失败时，返回的 `io::Error` 现在保留原始 load `ErrorKind`，并通过 `PromptBootstrapCleanupError` 同时暴露 rollback 失败；主错误语义不再被 rollback 覆盖。
 
 ### Fixed

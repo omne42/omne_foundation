@@ -6,6 +6,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ## [Unreleased]
 
+- `i18n-runtime-kit`：`LazyCatalog` 兼容导出、shared lazy shim 接线和对应回归测试现在改用带理由的局部 lint expectation，替代宽泛的 `allow(deprecated)`，兼容语义保持不变。
+
 - `i18n-runtime-kit`：当 manifest bootstrap 之后的 catalog load 失败且 best-effort rollback 也失败时，错误现在显式归类为 `ResourceCatalogError::LoadRollback(...)`，保留原始 load/rollback 双错误，而不再把这类双失败误重分类成 bootstrap 主错误。
 - `i18n-runtime-kit`：`ResourceCatalogError::LoadRollback(...)` 现在对 cleanup payload 做 `Box` 封装，保持双错误语义不变，同时继续满足 workspace 的 `clippy::result_large_err` 质量门禁。
 

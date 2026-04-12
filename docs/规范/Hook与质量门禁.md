@@ -195,6 +195,7 @@ scripts/check-workspace.sh publish-contract
 - `docs-system`
 - `dependency-direction`
 - `publish-contract`
+- `review-root`
 - `asset-checks [all|policy-meta|mcp-kit|notify-kit]`
 - `secret-kit-target <target-triple>`
 
@@ -204,7 +205,36 @@ scripts/check-workspace.sh publish-contract
 - `docs-system` 只运行文档系统入口与链接约束检查
 - `dependency-direction` 只运行 workspace 内部 crate 依赖方向 gate
 - `publish-contract` 只运行 workspace 发布契约 gate
+- `review-root` 用于把 root review 里已经归并过的高价值结论，在最新 `main` 基线上做一次快速机械复核
 - `secret-kit-target` 用于检查 `secret-kit` 的特定 target 编译
+
+## review 快速复核
+
+当 root review 产出多个审查文件，或者结论来自较早的工作树快照时，不应直接把这些结果当成当前 `main` 的事实。
+
+推荐顺序是：
+
+1. 先合并重复项，把同一类编译断链、依赖缺失、测试回归收敛成一份问题清单。
+2. 再切到最新 `main` 基线复核，避免把已经修复的问题重复计入当前结论。
+3. 最后再决定是否需要拆分修复分支、补测试或升级 gate。
+
+针对本仓库 root review 的常见高风险项，`workspace_check` 提供了一个收敛入口：
+
+```bash
+scripts/check-workspace.sh review-root
+```
+
+这个模式的用途是：
+
+- 快速验证 review 中最容易阻断 workspace 的编译与测试项是否仍然存在
+- 给 review 去重后的结论提供最新基线上的机械证据
+- 在进入更重的 `local` / `ci` 全量门禁前，先做一次低成本收口
+
+它的边界也需要明确：
+
+- 它不是 `local` 或 `ci` 的替代品
+- 它只覆盖预设的 root review 关键路径，不负责发现新的广义回归
+- 如果 `review-root` 已经通过，仍然要继续跑正常门禁，才能作为可合并结论
 
 ## `commit-msg` 当前做什么
 

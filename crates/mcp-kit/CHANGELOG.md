@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit`：将 `shared_manager` 的内嵌测试模块拆分到 `src/shared_manager/tests.rs`，仅保留模块声明与既有测试语义，降低主实现文件的多职责维护风险。
 - `mcp-kit`：`connect_transport_resolves_relative_unix_path_against_cwd` 现在会先探测可绑定 Unix socket 的短临时目录（支持 `OMNE_TEST_SHORT_TMPDIR`、`temp_dir`、`/var/tmp`、`/tmp` 回退），避免长 `TMPDIR`/长 worktree 路径下命中 `SUN_LEN` 导致本地 gate 假失败。
 - `mcp-kit`：`ServerConfig` 新增显式的 transport-specific 严格访问器，`manager::connect` 关键路径改为先校验 transport 再读取具体字段；错误 transport 不再通过空集合/`None` 静默兜底，而会返回明确的 `Config` mismatch 错误，并补充回归测试锁住这条边界。
 - `mcp-kit`：`SharedManager::prepare_connected_client_with_gate` 在 cold-start config-driven request/notify 路径上不再于同一调用栈里重复申请 same-server 写 gate；补充最小回归测试，锁住此前可能自锁挂起的路径。

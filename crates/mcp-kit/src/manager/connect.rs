@@ -570,6 +570,57 @@ mod tests {
     use super::*;
     use crate::MCP_PROTOCOL_VERSION;
 
+    #[cfg(unix)]
+    fn unix_socket_temp_roots() -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+
+        if let Some(root) = std::env::var_os("OMNE_TEST_SHORT_TMPDIR") {
+            roots.push(PathBuf::from(root));
+        }
+
+        roots.push(std::env::temp_dir());
+        roots.push(PathBuf::from("/var/tmp"));
+        roots.push(PathBuf::from("/tmp"));
+
+        roots.dedup();
+        roots
+    }
+
+    #[cfg(unix)]
+    fn short_unix_socket_tempdir_for_test(test_name: &str) -> Option<tempfile::TempDir> {
+        use std::os::unix::net::UnixListener;
+
+        for root in unix_socket_temp_roots() {
+            if !root.exists() && std::fs::create_dir_all(&root).is_err() {
+                continue;
+            }
+            let Ok(tempdir) = tempfile::Builder::new()
+                .prefix("mk-")
+                .rand_bytes(3)
+                .tempdir_in(&root)
+            else {
+                continue;
+            };
+            let probe_socket = tempdir.path().join("w/m.sock");
+            let Some(parent) = probe_socket.parent() else {
+                continue;
+            };
+            if std::fs::create_dir_all(parent).is_err() {
+                continue;
+            }
+            if let Ok(listener) = UnixListener::bind(&probe_socket) {
+                drop(listener);
+                let _ = std::fs::remove_file(&probe_socket);
+                return Some(tempdir);
+            }
+        }
+
+        eprintln!(
+            "skipping {test_name}: unable to create a short writable temp dir for unix socket test"
+        );
+        None
+    }
+
     fn trusted_connect_context() -> ConnectContext {
         ConnectContext {
             trust_mode: TrustMode::Trusted,
@@ -762,14 +813,11 @@ mod tests {
     #[tokio::test]
     async fn connect_transport_resolves_relative_unix_path_against_cwd() {
         let ctx = trusted_connect_context();
-        let temp_root = std::env::var_os("OMNE_TEST_SHORT_TMPDIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let tempdir = tempfile::Builder::new()
-            .prefix("mk-")
-            .rand_bytes(3)
-            .tempdir_in(&temp_root)
-            .expect("tempdir");
+        let Some(tempdir) = short_unix_socket_tempdir_for_test(
+            "connect_transport_resolves_relative_unix_path_against_cwd",
+        ) else {
+            return;
+        };
         let cwd = tempdir.path().join("w/s");
         std::fs::create_dir_all(&cwd).expect("create cwd");
         let socket_path = tempdir.path().join("w/m.sock");

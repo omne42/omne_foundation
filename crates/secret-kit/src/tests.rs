@@ -7,12 +7,12 @@ use std::sync::{
 };
 
 use super::*;
+#[cfg(unix)]
+use crate::command::trusted_builtin_search_directory_metadata_for_test;
 use crate::command::{
     build_command_env, resolve_program_on_path_for_test, run_secret_command,
     sanitize_ambient_command_search_path_for_test, secret_command_timeout_from_env,
 };
-#[cfg(unix)]
-use crate::command::trusted_builtin_search_directory_metadata_for_test;
 use crate::json::extract_json_key;
 use crate::spec::{
     SecretCommand, build_secret_command, prepare_default_secret_spec_resolution,

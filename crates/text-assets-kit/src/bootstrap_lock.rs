@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -7,6 +9,8 @@ use omne_fs_primitives::{
 use std::collections::BTreeSet;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::sync::{Condvar, LazyLock, Mutex, MutexGuard};
@@ -318,7 +322,7 @@ fn normalized_bootstrap_root_key(path: &Path, case_sensitive: bool) -> Bootstrap
 
     #[cfg(windows)]
     {
-        path.to_string_lossy().to_lowercase()
+        path.to_string_lossy().to_ascii_lowercase()
     }
 
     #[cfg(all(not(unix), not(windows)))]
@@ -339,10 +343,9 @@ fn bootstrap_root_case_sensitive(_existing: &Path) -> bool {
 
 #[cfg(unix)]
 fn normalize_case_insensitive_unix_root_key(path: &Path) -> PathBuf {
-    match path.to_str() {
-        Some(path) => PathBuf::from(path.to_lowercase()),
-        None => path.to_path_buf(),
-    }
+    let mut bytes = path.as_os_str().as_bytes().to_vec();
+    bytes.make_ascii_lowercase();
+    PathBuf::from(OsString::from_vec(bytes))
 }
 
 #[cfg(unix)]
@@ -834,10 +837,19 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn normalize_case_insensitive_unix_root_key_folds_utf8_case() {
+    fn normalize_case_insensitive_unix_root_key_folds_ascii_case() {
         assert_eq!(
             normalize_case_insensitive_unix_root_key(Path::new("/tmp/Catalog/SubDir")),
             PathBuf::from("/tmp/catalog/subdir")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalize_case_insensitive_unix_root_key_keeps_non_ascii_distinct() {
+        assert_ne!(
+            normalize_case_insensitive_unix_root_key(Path::new("/tmp/\u{0130}")),
+            normalize_case_insensitive_unix_root_key(Path::new("/tmp/i\u{0307}"))
         );
     }
 

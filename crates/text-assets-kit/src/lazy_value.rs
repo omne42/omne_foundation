@@ -1,4 +1,7 @@
-#![allow(deprecated)]
+#![expect(
+    deprecated,
+    reason = "this module implements the deprecated blocking lazy compatibility shim in place, so internal references intentionally stay local to the shim implementation"
+)]
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};

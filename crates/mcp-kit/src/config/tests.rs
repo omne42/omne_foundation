@@ -143,6 +143,31 @@ fn server_config_transport_specific_views_are_variant_scoped() {
     assert!(unix.as_streamable_http().is_none());
 }
 
+#[test]
+fn server_config_strict_transport_views_return_explicit_errors() {
+    let stdio = ServerConfig::stdio(vec!["mcp-a".to_string()]).unwrap();
+    let err = stdio.require_streamable_http().unwrap_err();
+    assert_eq!(err.kind(), crate::ErrorKind::Config);
+    assert!(
+        err.to_string().contains("transport mismatch")
+            && err
+                .to_string()
+                .contains("requires transport=streamable_http, got transport=stdio"),
+        "err={err:#}"
+    );
+
+    let unix = ServerConfig::unix(PathBuf::from("/tmp/mcp.sock")).unwrap();
+    let err = unix.require_stdio().unwrap_err();
+    assert_eq!(err.kind(), crate::ErrorKind::Config);
+    assert!(
+        err.to_string().contains("transport mismatch")
+            && err
+                .to_string()
+                .contains("requires transport=stdio, got transport=unix"),
+        "err={err:#}"
+    );
+}
+
 #[tokio::test]
 async fn load_fails_closed_when_config_is_too_large() {
     let dir = tempfile::tempdir().unwrap();

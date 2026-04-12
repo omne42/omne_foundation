@@ -16,7 +16,10 @@ pub use i18n::{
     since = "0.1.0",
     note = "LazyCatalog blocks threads during first initialization; prefer load/bootstrap helpers plus GlobalCatalog for runtime-facing handles."
 )]
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "crate root intentionally keeps re-exporting LazyCatalog as a deprecated compatibility entrypoint"
+)]
 pub use lazy_catalog::LazyCatalog;
 pub use locale_selection::{resolve_locale_from_argv, resolve_locale_from_cli_args};
 

@@ -172,7 +172,7 @@ fn is_ip_disallowed_for_host(policy: &UntrustedOutboundPolicy, host: &str, ip: I
             return true;
         }
         if host_is_loopback_hostname {
-            return !(policy.allow_localhost && policy.allow_private_ips);
+            return !policy.allow_localhost;
         }
         return true;
     }
@@ -182,7 +182,7 @@ fn is_ip_disallowed_for_host(policy: &UntrustedOutboundPolicy, host: &str, ip: I
             return !policy.allow_private_ips;
         }
         if host_is_loopback_hostname {
-            return !(policy.allow_localhost && policy.allow_private_ips);
+            return !policy.allow_localhost;
         }
         return true;
     }
@@ -367,20 +367,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dns_check_blocks_localhost_without_private_ip_override() {
+    async fn dns_check_allows_localhost_without_private_ip_override() {
         let policy = UntrustedOutboundPolicy {
             allow_localhost: true,
             dns_check: true,
             ..Default::default()
         };
         let url = reqwest::Url::parse("https://localhost/mcp").expect("parse url");
-        let err = validate_untrusted_outbound_url_dns(&policy, &url)
+        validate_untrusted_outbound_url_dns(&policy, &url)
             .await
-            .expect_err("expected dns rejection");
-        assert!(matches!(
-            err,
-            UntrustedOutboundError::ResolvedToNonGlobalIp { .. }
-        ));
+            .expect("allow_localhost should accept localhost dns answers");
     }
 
     #[tokio::test]
@@ -419,24 +415,18 @@ mod tests {
     }
 
     #[test]
-    fn dns_results_reject_loopback_even_for_localhost_hosts() {
+    fn dns_results_allow_loopback_for_localhost_hosts() {
         let policy = UntrustedOutboundPolicy {
             allow_localhost: true,
             ..Default::default()
         };
 
-        let err = validate_resolved_addrs(
+        validate_resolved_addrs(
             &policy,
             "localhost",
             [std::net::SocketAddr::from(([127, 0, 0, 1], 443))],
         )
-        .expect_err("dns validation must still reject loopback answers");
-
-        assert!(matches!(
-            err,
-            UntrustedOutboundError::ResolvedToNonGlobalIp { ip, .. }
-                if ip == IpAddr::from([127, 0, 0, 1])
-        ));
+        .expect("allow_localhost should accept localhost loopback answers");
     }
 
     #[test]
@@ -456,10 +446,9 @@ mod tests {
     }
 
     #[test]
-    fn dns_results_allow_host_local_resolution_for_localhost_with_private_ip_override() {
+    fn dns_results_allow_host_local_resolution_for_localhost_hosts() {
         let policy = UntrustedOutboundPolicy {
             allow_localhost: true,
-            allow_private_ips: true,
             ..Default::default()
         };
 
@@ -468,7 +457,7 @@ mod tests {
             "localhost",
             [std::net::SocketAddr::from(([0, 0, 0, 1], 443))],
         )
-        .expect("private-ip override should allow localhost host-local DNS results");
+        .expect("allow_localhost should accept localhost host-local DNS results");
     }
 
     #[test]
@@ -566,6 +555,23 @@ mod tests {
         let url = reqwest::Url::parse("https://127.0.0.1/mcp").expect("parse url");
         validate_untrusted_outbound_url(&policy, &url)
             .expect("private-ip override should allow loopback ip literals");
+    }
+
+    #[test]
+    fn allow_localhost_does_not_allow_loopback_ip_literals() {
+        let policy = UntrustedOutboundPolicy {
+            allow_localhost: true,
+            ..Default::default()
+        };
+        let url = reqwest::Url::parse("https://127.0.0.1/mcp").expect("parse url");
+        let err = validate_untrusted_outbound_url(&policy, &url)
+            .expect_err("allow_localhost must not widen ip literal rules");
+
+        assert!(matches!(
+            err,
+            UntrustedOutboundError::NonGlobalIpNotAllowed { host }
+                if host == "127.0.0.1"
+        ));
     }
 
     #[test]

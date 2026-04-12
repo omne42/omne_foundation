@@ -66,6 +66,23 @@ def run_ci_checks(ctx: CheckContext) -> None:
     run_asset_checks(ctx, "all")
 
 
+def run_review_root_checks(ctx: CheckContext) -> None:
+    review_commands = (
+        ["cargo", "check", "-p", "mcp-jsonrpc"],
+        ["cargo", "check", "-p", "notify-kit"],
+        ["cargo", "check", "-p", "policy-meta"],
+        ["cargo", "check", "-p", "mcp-kit"],
+        ["cargo", "test", "-p", "http-kit"],
+    )
+    for command in review_commands:
+        run_command(
+            ctx,
+            command,
+            cwd=ctx.repo_root,
+            use_workaround=True,
+        )
+
+
 def run_asset_checks(ctx: CheckContext, scope: str = "all") -> None:
     if scope == "all":
         run_policy_meta_asset_checks(ctx)
@@ -113,6 +130,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "dependency-direction",
             "publish-contract",
             "asset-checks",
+            "review-root",
             "secret-kit-target",
         ),
     )
@@ -148,6 +166,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.mode == "asset-checks":
         run_asset_checks(ctx, args.extra or "all")
+        return 0
+    if args.mode == "review-root":
+        run_review_root_checks(ctx)
         return 0
     if args.mode == "secret-kit-target":
         run_secret_kit_target_check(ctx, args.extra)

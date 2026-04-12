@@ -27,6 +27,22 @@ enum SseWakeReason {
     SessionChanged,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SseReconnectReason {
+    GracefulEof,
+    SessionChanged,
+}
+
+const GRACEFUL_SSE_EOF_BACKOFF_BASE: Duration = Duration::from_millis(100);
+const GRACEFUL_SSE_EOF_BACKOFF_MAX: Duration = Duration::from_secs(3);
+
+fn graceful_sse_eof_backoff(attempt: u32) -> Duration {
+    let shift = attempt.min(5);
+    GRACEFUL_SSE_EOF_BACKOFF_BASE
+        .saturating_mul(1_u32 << shift)
+        .min(GRACEFUL_SSE_EOF_BACKOFF_MAX)
+}
+
 fn streamable_http_no_proxy(proxy_mode: StreamableHttpProxyMode) -> bool {
     matches!(proxy_mode, StreamableHttpProxyMode::IgnoreSystem)
 }
@@ -368,6 +384,7 @@ impl Client {
         let sse_task = tokio::spawn(async move {
             let mut wake_rx = sse_wake_rx;
             let mut current_resp = sse_resp;
+            let mut graceful_eof_reconnect_attempt = 0_u32;
 
             loop {
                 let resp = match current_resp.take() {
@@ -414,7 +431,7 @@ impl Client {
                     }
                 };
 
-                let reconnect = {
+                let reconnect_reason = {
                     let writer = writer_sse.clone();
                     let mut pump_fut =
                         std::pin::pin!(pump_sse_response(resp, writer, max_message_bytes));
@@ -425,7 +442,7 @@ impl Client {
                                 Ok(()) => {
                                     // Treat graceful SSE EOF as a recoverable read-side event:
                                     // reconnect instead of tearing down the whole transport.
-                                    break true;
+                                    break Some(SseReconnectReason::GracefulEof);
                                 }
                                 Err(err) => {
                                     close_post_bridge(
@@ -442,7 +459,7 @@ impl Client {
                                     Some(SseWakeReason::SessionChanged) => {
                                         // Exiting this scope drops the stale SSE pump before the
                                         // reconnect path selects a new socket.
-                                        break true;
+                                        break Some(SseReconnectReason::SessionChanged);
                                     }
                                     Some(SseWakeReason::Connect) => {}
                                     None => {
@@ -472,8 +489,36 @@ impl Client {
                     }
                 };
 
-                if !reconnect {
+                let Some(reconnect_reason) = reconnect_reason else {
                     continue;
+                };
+
+                match reconnect_reason {
+                    SseReconnectReason::GracefulEof => {
+                        let backoff = graceful_sse_eof_backoff(graceful_eof_reconnect_attempt);
+                        graceful_eof_reconnect_attempt =
+                            graceful_eof_reconnect_attempt.saturating_add(1);
+                        let sleep = tokio::time::sleep(backoff);
+                        tokio::pin!(sleep);
+                        loop {
+                            tokio::select! {
+                                _ = &mut sleep => break,
+                                wake = wake_rx.recv() => match wake {
+                                    Some(SseWakeReason::SessionChanged) => {
+                                        // Session rollover should reconnect immediately instead of
+                                        // waiting for graceful EOF backoff to elapse.
+                                        graceful_eof_reconnect_attempt = 0;
+                                        break;
+                                    }
+                                    Some(SseWakeReason::Connect) => {}
+                                    None => return,
+                                }
+                            }
+                        }
+                    }
+                    SseReconnectReason::SessionChanged => {
+                        graceful_eof_reconnect_attempt = 0;
+                    }
                 }
 
                 let sse_client = match http_client_profile_sse
@@ -536,6 +581,17 @@ mod proxy_mode_tests {
         assert!(streamable_http_no_proxy(
             StreamableHttpProxyMode::IgnoreSystem
         ));
+    }
+
+    #[test]
+    fn graceful_sse_eof_backoff_grows_exponentially_until_cap() {
+        assert_eq!(graceful_sse_eof_backoff(0), Duration::from_millis(100));
+        assert_eq!(graceful_sse_eof_backoff(1), Duration::from_millis(200));
+        assert_eq!(graceful_sse_eof_backoff(2), Duration::from_millis(400));
+        assert_eq!(graceful_sse_eof_backoff(3), Duration::from_millis(800));
+        assert_eq!(graceful_sse_eof_backoff(4), Duration::from_millis(1600));
+        assert_eq!(graceful_sse_eof_backoff(5), Duration::from_secs(3));
+        assert_eq!(graceful_sse_eof_backoff(99), Duration::from_secs(3));
     }
 }
 
@@ -1705,6 +1761,7 @@ mod tests {
 
     #[tokio::test]
     async fn streamable_http_reconnects_after_graceful_sse_eof() {
+        const NO_BACKOFF_WINDOW: Duration = Duration::from_millis(50);
         const TEST_STAGE_TIMEOUT: Duration = Duration::from_secs(10);
 
         let listener = TcpListener::bind(("127.0.0.1", 0))
@@ -1790,6 +1847,12 @@ mod tests {
         assert_eq!(
             initial_notification.params,
             Some(serde_json::json!({ "phase": "initial" }))
+        );
+        assert!(
+            tokio::time::timeout(NO_BACKOFF_WINDOW, stage_rx.recv())
+                .await
+                .is_err(),
+            "graceful EOF reconnect should back off before opening the next SSE stream"
         );
         let stage = tokio::time::timeout(TEST_STAGE_TIMEOUT, stage_rx.recv())
             .await

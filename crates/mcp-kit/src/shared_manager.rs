@@ -236,7 +236,7 @@ impl SharedManager {
             .try_prepare_reusable_connected_client(server_name.as_str(), server_cfg, cwd)
     }
 
-    async fn ensure_connected_while_gated(
+    async fn ensure_connected_with_write_gate(
         &self,
         operation: &'static str,
         config: &Config,
@@ -331,7 +331,7 @@ impl SharedManager {
             });
         }
 
-        self.ensure_connected_while_gated(operation, config, server_name, &cwd)
+        self.ensure_connected_with_write_gate(operation, config, server_name, &cwd)
             .await?;
 
         let prepared = self
@@ -1086,6 +1086,89 @@ mod tests {
         );
 
         assert_eq!(state.in_flight_io_count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shared_manager_config_driven_request_does_not_reacquire_write_gate() {
+        let Some(socket_path) = unique_socket_path(
+            "shared_manager_config_driven_request_does_not_reacquire_write_gate",
+            "shared-gate-regression",
+        ) else {
+            return;
+        };
+        let _ = std::fs::remove_file(&socket_path);
+        let Some(listener) = bind_unix_listener_or_skip(&socket_path) else {
+            return;
+        };
+
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (server_read, mut server_write) = tokio::io::split(stream);
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            assert_eq!(init_value["method"], "initialize");
+            let init_id = init_value["id"].clone();
+
+            let init_response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": init_id,
+                "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+            });
+            let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+            init_response_line.push('\n');
+            server_write
+                .write_all(init_response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let initialized_line = lines.next_line().await.unwrap().unwrap();
+            let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+            assert_eq!(initialized_value["method"], "notifications/initialized");
+
+            let request_line = lines.next_line().await.unwrap().unwrap();
+            let request_value: Value = serde_json::from_str(&request_line).unwrap();
+            assert_eq!(request_value["method"], "ping");
+            let request_id = request_value["id"].clone();
+
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": { "ok": true },
+            });
+            let mut response_line = serde_json::to_string(&response).unwrap();
+            response_line.push('\n');
+            server_write
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+        });
+
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            ServerName::parse("srv").unwrap(),
+            ServerConfig::unix(socket_path.clone()).unwrap(),
+        );
+        let config = Config::new(ClientConfig::default(), servers);
+        let shared = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted)
+            .into_shared();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            shared.request(&config, "srv", "ping", None::<Value>, Path::new("/")),
+        )
+        .await
+        .expect("config-driven request should not hang while preparing the connection")
+        .unwrap();
+        assert_eq!(result, serde_json::json!({ "ok": true }));
+
+        server_task.await.unwrap();
+        let _ = std::fs::remove_file(socket_path);
     }
 
     #[cfg(unix)]

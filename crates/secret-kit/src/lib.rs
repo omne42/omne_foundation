@@ -131,12 +131,11 @@
 //! - ❌ 不要假设秘密源总是可用（总是处理错误）
 //! - ❌ 不要混合多个秘密源（使用统一的 `secret://` 格式）
 
-use std::collections::{BTreeMap, VecDeque};
-use std::cell::Cell;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
@@ -149,11 +148,6 @@ pub use value::SecretString;
 use value::{SecretBytes, read_limited, secret_string_from_bytes};
 
 pub type SecretResolveFuture<'a> = Pin<Box<dyn Future<Output = Result<SecretString>> + Send + 'a>>;
-
-thread_local! {
-    static SECRET_RESOLVER_DEFAULT_GUARD: Cell<u8> = const { Cell::new(0) };
-    static CACHE_PREPARE_DEFAULT_GUARD: Cell<u8> = const { Cell::new(0) };
-}
 
 macro_rules! invalid_response {
     ($code:literal $(,)?) => {
@@ -385,7 +379,7 @@ pub trait CacheAwareSecretResolver: SecretResolver {
         async move {
             let _guard = guard?;
             let parsed = crate::spec::SecretSpec::parse(spec)?;
-            self.prepare_secret_spec_resolution(&parsed, context).await
+            Box::pin(self.prepare_secret_spec_resolution(&parsed, context)).await
         }
     }
 
@@ -398,7 +392,7 @@ pub trait CacheAwareSecretResolver: SecretResolver {
         let guard = enter_cache_prepare_default_guard();
         async move {
             let _guard = guard?;
-            self.prepare_secret_resolution(&spec, context).await
+            Box::pin(self.prepare_secret_resolution(&spec, context)).await
         }
     }
 
@@ -799,49 +793,82 @@ fn normalize_secret_cache_component(value: String) -> Option<String> {
 }
 
 struct DefaultRecursionGuard {
-    exit: fn(),
+    state: &'static Mutex<HashMap<DefaultRecursionScope, u8>>,
+    scope: DefaultRecursionScope,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+enum DefaultRecursionScope {
+    Task(tokio::task::Id),
+    Thread(std::thread::ThreadId),
 }
 
 impl Drop for DefaultRecursionGuard {
     fn drop(&mut self) {
-        (self.exit)();
+        let mut active = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
+        if let Some(depth) = active.get_mut(&self.scope) {
+            *depth = depth.saturating_sub(1);
+            if *depth == 0 {
+                active.remove(&self.scope);
+            }
+        }
     }
 }
 
-fn enter_secret_resolver_default_guard() -> Result<DefaultRecursionGuard> {
-    enter_default_recursion_guard(
-        &SECRET_RESOLVER_DEFAULT_GUARD,
-        leave_secret_resolver_default_guard,
-    )
-}
+static SECRET_RESOLVER_DEFAULT_GUARD_STATE: LazyLock<Mutex<HashMap<DefaultRecursionScope, u8>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static CACHE_PREPARE_DEFAULT_GUARD_STATE: LazyLock<Mutex<HashMap<DefaultRecursionScope, u8>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn leave_secret_resolver_default_guard() {
-    SECRET_RESOLVER_DEFAULT_GUARD.with(|guard| {
-        guard.set(guard.get().saturating_sub(1));
-    });
+fn enter_secret_resolver_default_guard() -> Result<DefaultRecursionGuard> {
+    enter_default_recursion_guard(&SECRET_RESOLVER_DEFAULT_GUARD_STATE)
 }
 
 fn enter_cache_prepare_default_guard() -> Result<DefaultRecursionGuard> {
-    enter_default_recursion_guard(&CACHE_PREPARE_DEFAULT_GUARD, leave_cache_prepare_default_guard)
-}
-
-fn leave_cache_prepare_default_guard() {
-    CACHE_PREPARE_DEFAULT_GUARD.with(|guard| {
-        guard.set(guard.get().saturating_sub(1));
-    });
+    enter_default_recursion_guard(&CACHE_PREPARE_DEFAULT_GUARD_STATE)
 }
 
 fn enter_default_recursion_guard(
-    slot: &'static std::thread::LocalKey<Cell<u8>>,
-    exit: fn(),
+    state: &'static Mutex<HashMap<DefaultRecursionScope, u8>>,
 ) -> Result<DefaultRecursionGuard> {
-    slot.with(|guard| {
-        if guard.get() != 0 {
-            return Err(invalid_response!("error_detail.secret.not_resolvable"));
-        }
-        guard.set(1);
-        Ok(DefaultRecursionGuard { exit })
-    })
+    let scope = tokio::task::try_id()
+        .map(DefaultRecursionScope::Task)
+        .unwrap_or_else(|| DefaultRecursionScope::Thread(std::thread::current().id()));
+    let mut active = state.lock().unwrap_or_else(|poison| poison.into_inner());
+    let depth = active.entry(scope).or_insert(0);
+    if *depth != 0 {
+        return Err(invalid_response!("error_detail.secret.not_resolvable"));
+    }
+    *depth = depth.saturating_add(1);
+    Ok(DefaultRecursionGuard { state, scope })
+}
+
+#[cfg(test)]
+fn default_recursion_guard_scope_for_test() -> DefaultRecursionScope {
+    tokio::task::try_id()
+        .map(DefaultRecursionScope::Task)
+        .unwrap_or_else(|| DefaultRecursionScope::Thread(std::thread::current().id()))
+}
+
+#[cfg(test)]
+fn default_recursion_guard_depth_for_test(
+    state: &'static Mutex<HashMap<DefaultRecursionScope, u8>>,
+) -> u8 {
+    let active = state.lock().unwrap_or_else(|poison| poison.into_inner());
+    active
+        .get(&default_recursion_guard_scope_for_test())
+        .copied()
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+pub(crate) fn secret_resolver_default_guard_depth_for_test() -> u8 {
+    default_recursion_guard_depth_for_test(&SECRET_RESOLVER_DEFAULT_GUARD_STATE)
+}
+
+#[cfg(test)]
+pub(crate) fn cache_prepare_default_guard_depth_for_test() -> u8 {
+    default_recursion_guard_depth_for_test(&CACHE_PREPARE_DEFAULT_GUARD_STATE)
 }
 
 #[cfg(windows)]

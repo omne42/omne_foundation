@@ -269,13 +269,19 @@ async fn legacy_secret_resolver_still_resolves_parsed_secret() -> Result<()> {
 async fn default_only_secret_resolver_fails_closed_instead_of_recursing() -> Result<()> {
     let env = TestEnv::default();
     let spec = SecretSpec::parse("secret://env/OPENAI_API_KEY")?;
+    assert_eq!(secret_resolver_default_guard_depth_for_test(), 0);
 
-    let err = DefaultOnlyResolver
+    let err = match DefaultOnlyResolver
         .resolve_secret_spec_text(&spec, &env)
         .await
-        .expect_err("default-only resolver should fail closed");
+    {
+        Ok(_) => panic!("default-only resolver should fail closed"),
+        Err(err) => err,
+    };
 
-    assert_secret_error_code(&err, "error_detail.secret.not_resolvable");
+    assert_secret_error_code(&err, "secret.invalid_spec");
+    assert_catalog_code(err.structured_text(), "error_detail.secret.not_resolvable");
+    assert_eq!(secret_resolver_default_guard_depth_for_test(), 0);
     Ok(())
 }
 
@@ -283,13 +289,19 @@ async fn default_only_secret_resolver_fails_closed_instead_of_recursing() -> Res
 async fn default_only_cache_prepare_fails_closed_instead_of_recursing() -> Result<()> {
     let env = TestEnv::default();
     let spec = SecretSpec::parse("secret://env/OPENAI_API_KEY")?;
+    assert_eq!(cache_prepare_default_guard_depth_for_test(), 0);
 
-    let err = DefaultOnlyCacheAwareResolver
+    let err = match DefaultOnlyCacheAwareResolver
         .prepare_secret_spec_resolution(&spec, SecretResolutionContext::ambient(&env))
         .await
-        .expect_err("default-only cache-aware resolver should fail closed");
+    {
+        Ok(_) => panic!("default-only cache-aware resolver should fail closed"),
+        Err(err) => err,
+    };
 
-    assert_secret_error_code(&err, "error_detail.secret.not_resolvable");
+    assert_secret_error_code(&err, "secret.invalid_spec");
+    assert_catalog_code(err.structured_text(), "error_detail.secret.not_resolvable");
+    assert_eq!(cache_prepare_default_guard_depth_for_test(), 0);
     Ok(())
 }
 

@@ -1876,11 +1876,12 @@ mod background_close_tests {
     }
 
     #[test]
-    fn schedule_close_once_without_runtime_waits_for_busy_writer_lock() {
+    fn schedule_close_once_without_runtime_times_out_on_busy_writer_lock() {
         let _guard = detached_runtime_test_guard()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::background_runtime::reset_detached_runtime_test_state();
+        crate::background_runtime::force_detached_runtime_spawn_failures(0, 1);
 
         let shutdown_called = Arc::new(AtomicBool::new(false));
         let handle = ClientHandle {
@@ -1908,23 +1909,30 @@ mod background_close_tests {
         let write_guard = runtime.block_on(handle.write.lock());
         drop(runtime);
 
+        let start = std::time::Instant::now();
         handle.schedule_close_once("close without runtime".to_string());
-        std::thread::sleep(Duration::from_millis(50));
+        let elapsed = start.elapsed();
+
+        assert!(handle.is_closed());
+        assert_eq!(
+            handle.close_reason().as_deref(),
+            Some("close without runtime")
+        );
         assert!(
             !shutdown_called.load(Ordering::SeqCst),
-            "close should wait for the in-flight writer instead of silently giving up"
+            "fallback close should give up after bounded wait while writer lock is held"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "fallback close should stop waiting after a bounded interval, got {elapsed:?}"
         );
 
         drop(write_guard);
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while !shutdown_called.load(Ordering::SeqCst) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "close should finish after lock release"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            !shutdown_called.load(Ordering::SeqCst),
+            "timed-out close should not retry once the lock is released"
+        );
 
         crate::background_runtime::reset_detached_runtime_test_state();
     }

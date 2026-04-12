@@ -479,6 +479,18 @@ fn build_streamable_http_headers(
     cwd: &Path,
 ) -> anyhow::Result<HashMap<String, String>> {
     let cfg = server_cfg.require_streamable_http()?;
+    if ctx.trust_mode != TrustMode::Trusted {
+        if cfg.bearer_token_env_var().is_some() {
+            config_bail!(
+                "refusing to read bearer token env var in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
+            );
+        }
+        if !cfg.env_http_headers().is_empty() {
+            config_bail!(
+                "refusing to read http header env vars in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
+            );
+        }
+    }
     let capacity = cfg
         .http_headers()
         .len()
@@ -632,6 +644,13 @@ mod tests {
         }
     }
 
+    fn untrusted_connect_context() -> ConnectContext {
+        ConnectContext {
+            trust_mode: TrustMode::Untrusted,
+            ..trusted_connect_context()
+        }
+    }
+
     #[test]
     fn env_http_headers_cannot_override_authorization() {
         let ctx = trusted_connect_context();
@@ -744,6 +763,35 @@ mod tests {
                     .contains("requires transport=streamable_http, got transport=stdio"),
             "{err:#}"
         );
+    }
+
+    #[test]
+    fn build_streamable_http_headers_refuses_bearer_token_env_var_in_untrusted_mode() {
+        let ctx = untrusted_connect_context();
+        let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+        server_cfg
+            .set_bearer_token_env_var(Some("PATH".to_string()))
+            .unwrap();
+
+        let err = build_streamable_http_headers(&ctx, "srv", &server_cfg, Path::new("."))
+            .expect_err("untrusted header construction must fail closed before reading env");
+        assert!(err.to_string().contains("bearer token env var"), "{err:#}");
+        assert!(err.to_string().contains("untrusted mode"), "{err:#}");
+    }
+
+    #[test]
+    fn build_streamable_http_headers_refuses_env_headers_in_untrusted_mode() {
+        let ctx = untrusted_connect_context();
+        let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+        server_cfg
+            .env_http_headers_mut()
+            .unwrap()
+            .insert("x-api-key".to_string(), "PATH".to_string());
+
+        let err = build_streamable_http_headers(&ctx, "srv", &server_cfg, Path::new("."))
+            .expect_err("untrusted header construction must fail closed before reading env");
+        assert!(err.to_string().contains("http header env vars"), "{err:#}");
+        assert!(err.to_string().contains("untrusted mode"), "{err:#}");
     }
 
     #[test]

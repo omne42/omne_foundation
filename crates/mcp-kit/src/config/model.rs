@@ -9,6 +9,8 @@ use crate::ServerName;
 use crate::error::{ErrorKind, tagged_message, wrap_kind};
 use crate::protocol::{AUTHORIZATION_HEADER, MCP_PROTOCOL_VERSION_HEADER};
 
+const STREAMABLE_HTTP_SESSION_ID_HEADER: &str = "mcp-session-id";
+
 macro_rules! public_bail {
     ($($arg:tt)*) => {
         return Err(tagged_message(ErrorKind::Config, format!($($arg)*)).into())
@@ -175,6 +177,9 @@ fn is_reserved_streamable_http_header(header: &HeaderName) -> bool {
         .as_str()
         .eq_ignore_ascii_case(MCP_PROTOCOL_VERSION_HEADER)
         || header.as_str().eq_ignore_ascii_case(AUTHORIZATION_HEADER)
+        || header
+            .as_str()
+            .eq_ignore_ascii_case(STREAMABLE_HTTP_SESSION_ID_HEADER)
 }
 
 fn is_reserved_streamable_http_env_header(header: &HeaderName) -> bool {
@@ -842,5 +847,41 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("invalid http_url"), "{message}");
         assert!(!message.contains("not a url"), "url should stay redacted");
+    }
+
+    #[test]
+    fn streamable_http_validate_rejects_session_id_http_header() {
+        let mut config = ServerConfig::streamable_http("https://example.invalid/mcp").unwrap();
+        config
+            .http_headers_mut()
+            .unwrap()
+            .insert("mcp-session-id".to_string(), "forged".to_string());
+
+        let err = config
+            .validate()
+            .expect_err("mcp-session-id must be rejected during config validation");
+        assert!(
+            err.to_string()
+                .contains("http_headers key is reserved by transport"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn streamable_http_validate_rejects_session_id_env_header() {
+        let mut config = ServerConfig::streamable_http("https://example.invalid/mcp").unwrap();
+        config
+            .env_http_headers_mut()
+            .unwrap()
+            .insert("mcp-session-id".to_string(), "MCP_SESSION_ID".to_string());
+
+        let err = config
+            .validate()
+            .expect_err("mcp-session-id env header must be rejected during config validation");
+        assert!(
+            err.to_string()
+                .contains("env_http_headers key is reserved by transport"),
+            "{err:#}"
+        );
     }
 }

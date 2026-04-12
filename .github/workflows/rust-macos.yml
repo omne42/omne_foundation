@@ -1,0 +1,40 @@
+name: Rust macOS
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  mcp-cross-platform:
+    name: mcp-cross-platform (macos-latest)
+    runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: omne_foundation
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: omne_foundation
+
+      - name: Prepare workspace temp dir
+        run: mkdir -p .tmp
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            omne_foundation -> omne_foundation/target
+
+      - name: Test mcp crates
+        run: cargo test -p mcp-jsonrpc -p mcp-kit --all-features
+
+      - name: Clippy mcp crates
+        run: scripts/with-rust-exdev-workaround.sh cargo clippy -p mcp-jsonrpc -p mcp-kit --all-targets --all-features -- -D warnings

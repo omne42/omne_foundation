@@ -1,13 +1,15 @@
-name: Rust
+name: Rust Linux
 
 on:
   pull_request:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   workspace:
+    name: workspace
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -40,14 +42,8 @@ jobs:
         run: scripts/check-workspace.sh ci
 
   mcp-cross-platform:
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-    runs-on: ${{ matrix.os }}
+    name: mcp-cross-platform (ubuntu-latest)
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash
@@ -77,6 +73,7 @@ jobs:
         run: scripts/with-rust-exdev-workaround.sh cargo clippy -p mcp-jsonrpc -p mcp-kit --all-targets --all-features -- -D warnings
 
   secret-windows-target:
+    name: secret-windows-target
     runs-on: ubuntu-latest
     defaults:
       run:

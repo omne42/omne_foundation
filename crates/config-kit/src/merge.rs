@@ -133,7 +133,7 @@ fn merge_value(base: &mut Value, overlay: Value, path: String, changed_paths: &m
         (base_slot, overlay_value) => {
             if *base_slot != overlay_value {
                 *base_slot = overlay_value;
-                changed_paths.push(path);
+                changed_paths.push(json_pointer_path(path));
             }
         }
     }
@@ -163,6 +163,14 @@ fn push_path(parent_path: &str, key: &str) -> String {
         format!("/{escaped}")
     } else {
         format!("{parent_path}/{escaped}")
+    }
+}
+
+fn json_pointer_path(path: String) -> String {
+    if path.is_empty() {
+        "/".to_string()
+    } else {
+        path
     }
 }
 
@@ -201,6 +209,13 @@ mod tests {
             merge_config_values(json!({"http": true}), json!({"http": {"timeout": 30}}));
         assert_eq!(merged, json!({"http": {"timeout": 30}}));
         assert_eq!(changed_paths, vec!["/http"]);
+    }
+
+    #[test]
+    fn merge_replacing_root_uses_json_pointer_root_path() {
+        let (merged, changed_paths) = merge_config_values(json!({"http": true}), json!(false));
+        assert_eq!(merged, json!(false));
+        assert_eq!(changed_paths, vec!["/"]);
     }
 
     #[test]

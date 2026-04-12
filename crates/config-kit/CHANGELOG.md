@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `merge_config_values*` 在整棵根节点被 overlay 替换时，`changed_paths` 现在稳定记录 JSON Pointer 根路径 `"/"`，不再输出空字符串。
 - `config-kit`：根路径打开失败映射 `SymlinkPath` 前，`root_path_contains_symlink(...)` 现在只在真实命中 symlink 时返回 `true`；`InvalidInput` 但无 symlink 的错误会保持 `Error::Io`，不再误判为 symlink 路径问题。
 - `config-kit` 通过 workspace 继承的 `omne-fs-primitives` 依赖现在补上显式 `version` 约束；manifest 导出时不再把这条跨仓 runtime 边降成无版本约束的隐式依赖。
 

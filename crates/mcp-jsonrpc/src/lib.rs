@@ -370,6 +370,7 @@ const DEFAULT_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 const REUSABLE_LINE_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 const READ_LINE_INITIAL_CAP_BYTES: usize = 4 * 1024;
 const REQUEST_DISPATCH_ERROR_TIMEOUT: Duration = Duration::from_secs(1);
+const CLOSE_LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(100);
 pub const STREAMABLE_HTTP_SESSION_ID_HEADER: &str = "mcp-session-id";
 const TOKIO_TIME_DRIVER_ERROR: &str =
     "tokio runtime time driver is not enabled; build the runtime with enable_time()";
@@ -868,7 +869,17 @@ impl BatchResponseWriter {
             return;
         }
 
-        self.state.responses.blocking_lock().push(response);
+        let Some(mut responses) =
+            try_lock_without_runtime(&self.state.responses, CLOSE_LOCK_ACQUIRE_TIMEOUT)
+        else {
+            self.complete_reserved_slot();
+            self.state.handle.schedule_close_once(format!(
+                "batch response fallback could not acquire buffer within {CLOSE_LOCK_ACQUIRE_TIMEOUT:?}"
+            ));
+            return;
+        };
+        responses.push(response);
+        drop(responses);
         let previous = self.complete_reserved_slot();
         if previous & Self::PENDING_MASK == 1 && previous & Self::FINISHED_BIT != 0 {
             self.flush_if_ready_without_runtime();
@@ -1152,12 +1163,29 @@ impl ClientHandle {
         first_close
     }
 
-    async fn finish_close_write(&self) {
-        let mut write = self.write.lock().await;
-        let _ = write.shutdown().await;
-        // Many `AsyncWrite` impls (e.g. `tokio::process::ChildStdin`) only fully close on drop.
-        // Replacing the writer guarantees the underlying write end is closed.
-        let _ = std::mem::replace(&mut *write, Box::new(tokio::io::sink()));
+    async fn finish_close_write(&self) -> bool {
+        let Some(mut write) =
+            try_lock_async_with_yield(&self.write, CLOSE_LOCK_ACQUIRE_TIMEOUT).await
+        else {
+            return false;
+        };
+        replace_write_with_sink(&mut write);
+        true
+    }
+
+    fn finish_close_write_without_runtime(&self) -> bool {
+        let Some(mut write) = try_lock_without_runtime(&self.write, CLOSE_LOCK_ACQUIRE_TIMEOUT)
+        else {
+            return false;
+        };
+        replace_write_with_sink(&mut write);
+        true
+    }
+
+    fn close_write_if_uncontended(&self) {
+        if let Ok(mut write) = self.write.try_lock() {
+            replace_write_with_sink(&mut write);
+        }
     }
 
     fn schedule_close_once(&self, reason: String) {
@@ -1171,16 +1199,15 @@ impl ClientHandle {
             .spawn_detached_task(
                 "client close",
                 Box::pin(async move {
-                    close_handle.finish_close_write().await;
                     close_handle.abort_background_tasks();
+                    let _ = close_handle.finish_close_write().await;
                 }),
             )
             .is_err()
         {
             // Last-ditch fallback when even detached worker/thread startup is unavailable.
-            let mut write = self.write.blocking_lock();
-            drop(std::mem::replace(&mut *write, Box::new(tokio::io::sink())));
             self.abort_background_tasks();
+            let _ = self.finish_close_write_without_runtime();
         }
     }
 
@@ -1206,9 +1233,12 @@ impl ClientHandle {
     pub(crate) async fn close_with_error(&self, reason: impl Into<String>, err: Error) {
         let reason = reason.into();
         let first_close = self.begin_close_with_error(reason, &err);
-        self.finish_close_write().await;
+        let closed_write = self.finish_close_write().await;
         if first_close {
             self.abort_background_tasks();
+            if !closed_write {
+                self.close_write_if_uncontended();
+            }
         }
     }
 
@@ -2506,6 +2536,47 @@ fn maybe_shrink_line_buffer(buf: &mut Vec<u8>, max_bytes: usize) {
     if buf.capacity() > retain && buf.len() <= retain {
         buf.shrink_to(retain);
     }
+}
+
+async fn try_lock_async_with_yield<'a, T>(
+    mutex: &'a tokio::sync::Mutex<T>,
+    timeout: Duration,
+) -> Option<tokio::sync::MutexGuard<'a, T>> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Ok(guard) = mutex.try_lock() {
+            return Some(guard);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+fn try_lock_without_runtime<'a, T>(
+    mutex: &'a tokio::sync::Mutex<T>,
+    timeout: Duration,
+) -> Option<tokio::sync::MutexGuard<'a, T>> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Ok(guard) = mutex.try_lock() {
+            return Some(guard);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::yield_now();
+    }
+}
+
+fn replace_write_with_sink(
+    write: &mut tokio::sync::MutexGuard<'_, Box<dyn AsyncWrite + Send + Unpin>>,
+) {
+    let _ = futures_util::FutureExt::now_or_never(write.shutdown());
+    // Many `AsyncWrite` impls (e.g. `tokio::process::ChildStdin`) only fully close on drop.
+    // Replacing the writer guarantees the underlying write end is closed.
+    let _ = std::mem::replace(&mut **write, Box::new(tokio::io::sink()));
 }
 
 fn truncate_string(mut s: String, max_bytes: usize) -> String {

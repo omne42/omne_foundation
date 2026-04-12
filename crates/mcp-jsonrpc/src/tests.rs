@@ -319,6 +319,42 @@ async fn schedule_close_once_aborts_reader_and_transport_tasks() {
     .expect("timeout close should abort reader and transport tasks");
 }
 
+#[test]
+fn schedule_close_once_fallback_does_not_block_forever_on_locked_writer() {
+    let _guard = detached_runtime_test_guard()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    crate::background_runtime::reset_detached_runtime_test_state();
+    crate::background_runtime::force_detached_runtime_spawn_failures(0, 1);
+
+    let handle = test_client_handle(tokio::io::sink());
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let barrier_for_thread = Arc::clone(&barrier);
+    let write = Arc::clone(&handle.write);
+    let lock_thread = std::thread::spawn(move || {
+        let _write_guard = write.blocking_lock();
+        barrier_for_thread.wait();
+        std::thread::sleep(CLOSE_LOCK_ACQUIRE_TIMEOUT + Duration::from_millis(50));
+    });
+
+    barrier.wait();
+    let start = std::time::Instant::now();
+    handle.schedule_close_once("forced fallback close".to_string());
+    let elapsed = start.elapsed();
+
+    assert!(
+        handle.is_closed(),
+        "close should still mark the handle closed"
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "fallback close should stop waiting after a bounded interval, got {elapsed:?}"
+    );
+
+    lock_thread.join().expect("join lock thread");
+    crate::background_runtime::reset_detached_runtime_test_state();
+}
+
 mod line_limit_tests {
     use super::*;
 
@@ -1840,11 +1876,12 @@ mod background_close_tests {
     }
 
     #[test]
-    fn schedule_close_once_without_runtime_waits_for_busy_writer_lock() {
+    fn schedule_close_once_without_runtime_times_out_on_busy_writer_lock() {
         let _guard = detached_runtime_test_guard()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::background_runtime::reset_detached_runtime_test_state();
+        crate::background_runtime::force_detached_runtime_spawn_failures(0, 1);
 
         let shutdown_called = Arc::new(AtomicBool::new(false));
         let handle = ClientHandle {
@@ -1872,23 +1909,30 @@ mod background_close_tests {
         let write_guard = runtime.block_on(handle.write.lock());
         drop(runtime);
 
+        let start = std::time::Instant::now();
         handle.schedule_close_once("close without runtime".to_string());
-        std::thread::sleep(Duration::from_millis(50));
+        let elapsed = start.elapsed();
+
+        assert!(handle.is_closed());
+        assert_eq!(
+            handle.close_reason().as_deref(),
+            Some("close without runtime")
+        );
         assert!(
             !shutdown_called.load(Ordering::SeqCst),
-            "close should wait for the in-flight writer instead of silently giving up"
+            "fallback close should give up after bounded wait while writer lock is held"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "fallback close should stop waiting after a bounded interval, got {elapsed:?}"
         );
 
         drop(write_guard);
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while !shutdown_called.load(Ordering::SeqCst) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "close should finish after lock release"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            !shutdown_called.load(Ordering::SeqCst),
+            "timed-out close should not retry once the lock is released"
+        );
 
         crate::background_runtime::reset_detached_runtime_test_state();
     }

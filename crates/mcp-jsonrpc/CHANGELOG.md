@@ -7,6 +7,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：`schedule_close_once_without_runtime_times_out_on_busy_writer_lock` 回归测试改为显式注入 detached runtime 启动失败并验证“有界等待后超时退出”的稳定语义，避免 macOS 上对后台线程启动时序的脆弱依赖。
+- `mcp-jsonrpc`：无 runtime 兜底路径不再使用无限 `blocking_lock()`；batch flush 与 close 收尾改为有界锁获取并在必要时 fail-closed，避免 writer 锁被占用时把关闭流程永久阻塞。
 - `mcp-jsonrpc`：当 shared detached worker 在“已接收任务但未启动”阶段提前退出时，调度路径现在会直接回退到 dedicated fallback runtime，而不再重试 shared worker；避免 `spawn_detached_falls_back_when_shared_worker_drops_task_before_start` 场景下任务被竞态丢失。
 - `mcp-jsonrpc`：补充 crate-local 回归测试，固定 `Error` / `ProtocolError*` 的公开 surface 与 `ErrorRecord` 映射链路，避免后续重构再次出现 `error` 模块漂移却只在编译阶段晚发现。
 - `mcp-jsonrpc`：`StdoutLog.max_parts` 的 prune 现在会对初始化、轮转和旧分片删除失败都直接报错；保留上限不再静默退化成 best-effort。

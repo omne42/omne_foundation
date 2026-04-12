@@ -257,7 +257,7 @@ pub(crate) fn validate_relative_resource_component(
 }
 
 fn portable_resource_component_key(component: &str) -> String {
-    component.to_lowercase()
+    component.to_ascii_lowercase()
 }
 
 fn windows_reserved_component_name(component: &str) -> bool {
@@ -393,6 +393,14 @@ mod tests {
         assert_eq!(
             resource_identity_key("nested/Prompt.md", false).expect("identity"),
             resource_identity_key("NESTED/prompt.md", false).expect("identity")
+        );
+    }
+
+    #[test]
+    fn resource_identity_key_keeps_non_ascii_distinct() {
+        assert_ne!(
+            resource_identity_key("nested/\u{0130}.md", false).expect("identity"),
+            resource_identity_key("nested/i\u{0307}.md", false).expect("identity")
         );
     }
 

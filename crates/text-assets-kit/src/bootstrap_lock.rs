@@ -1,6 +1,6 @@
-use std::io;
 #[cfg(unix)]
 use std::ffi::OsString;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use omne_fs_primitives::{

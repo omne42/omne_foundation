@@ -837,8 +837,17 @@ impl ServerState {
     }
 
     async fn wait_for_in_flight_io(&self) {
+        self.wait_for_in_flight_io_with_hook(|| {}).await;
+    }
+
+    async fn wait_for_in_flight_io_with_hook(&self, mut after_waiter_registration: impl FnMut()) {
         while self.in_flight_io_count() != 0 {
-            self.in_flight_idle.notified().await;
+            let notified = self.in_flight_idle.notified();
+            after_waiter_registration();
+            if self.in_flight_io_count() == 0 {
+                return;
+            }
+            notified.await;
         }
     }
 }
@@ -872,6 +881,7 @@ impl Drop for ServerLifecycleWriteGuard {
 
 #[cfg(test)]
 mod tests {
+    use super::ServerState;
     use std::collections::BTreeMap;
     use std::path::Path;
     use std::path::PathBuf;
@@ -1055,6 +1065,25 @@ mod tests {
         assert_eq!(result, serde_json::json!({ "ok": true }));
 
         server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_state_wait_for_in_flight_io_does_not_miss_final_drop_notification() {
+        let state = Arc::new(ServerState::default());
+        let guard = StdMutex::new(Some(state.start_in_flight_io()));
+
+        let wait_result = tokio::time::timeout(
+            Duration::from_secs(1),
+            state.wait_for_in_flight_io_with_hook(|| {
+                drop(guard.lock().unwrap().take());
+            }),
+        )
+        .await;
+        wait_result.expect(
+            "wait_for_in_flight_io should not hang when the final in-flight guard drops after waiter registration",
+        );
+
+        assert_eq!(state.in_flight_io_count(), 0);
     }
 
     #[cfg(unix)]

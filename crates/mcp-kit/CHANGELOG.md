@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit`：`SharedManager` 等待 same-server in-flight I/O 清空时，`ServerState` 现在会先注册 idle waiter 再二次检查计数；最后一个 request/notify guard 若恰好在等待窗口内释放，不会再因为丢通知把 `disconnect_and_wait` 等 teardown 路径永久挂住。
 - `mcp-kit`：当 untrusted outbound policy 开启 `allow_localhost=true` 时，`streamable_http` 的 DNS 校验现在与 CLI 语义一致，不再额外要求 `allow_private_ips=true`；`localhost`/`*.localhost` 可通过 DNS 校验，但 loopback IP 字面量仍需显式 `allow_private_ips`。
 - `mcp-kit`：`Manager::from_config(...)` 不再因无效 `Config` panic；它现在只 best-effort 应用可接受的 client 默认值，并把无效 client/server 配置留给 `Manager::try_from_config(...)` 的严格 typed error 路径处理。
 - `mcp-kit`：补充 `resolve_connection_cwd_with_base(...)` 的 fail-closed 回归测试，锁住“relative `cwd` 必须显式绑定 absolute base”的边界，避免 `path_identity` 相关重构再次把连接身份回退到隐式环境状态。

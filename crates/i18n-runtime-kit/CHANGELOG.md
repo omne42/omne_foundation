@@ -6,6 +6,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ## [Unreleased]
 
+- `i18n-runtime-kit`：crate root 对 `LazyCatalog` 的 deprecated 兼容导出现在改为带理由的 `#[expect(deprecated)]`，保留兼容入口的同时把 lint 豁免收口到可审计的单点声明。
+
 - `i18n-runtime-kit`：`LazyCatalog` 兼容导出、shared lazy shim 接线和对应回归测试现在改用带理由的局部 lint expectation，替代宽泛的 `allow(deprecated)`，兼容语义保持不变。
 
 - `i18n-runtime-kit`：当 manifest bootstrap 之后的 catalog load 失败且 best-effort rollback 也失败时，错误现在显式归类为 `ResourceCatalogError::LoadRollback(...)`，保留原始 load/rollback 双错误，而不再把这类双失败误重分类成 bootstrap 主错误。

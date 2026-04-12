@@ -238,7 +238,7 @@ async fn main() -> anyhow::Result<()> {
 
     let timeout = Duration::from_millis(cli.timeout_ms);
     let mut manager =
-        mcp_kit::Manager::from_config(&config, "mcpctl", env!("CARGO_PKG_VERSION"), timeout);
+        mcp_kit::Manager::try_from_config(&config, "mcpctl", env!("CARGO_PKG_VERSION"), timeout)?;
 
     if cli.allow_stdout_log_outside_root {
         manager = manager.with_allow_stdout_log_outside_root(true);

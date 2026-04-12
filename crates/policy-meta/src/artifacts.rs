@@ -672,6 +672,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn artifact_generation_error_root_not_object_variant_has_stable_display() {
+        let err = ArtifactGenerationError::RootNotObject {
+            context: "policy profile schema document",
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "generated policy profile schema document must be a json object"
+        );
+        assert!(err.source().is_none());
+    }
+
     fn checked_in_schema(file_name: &str) -> Value {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("schema")

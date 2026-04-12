@@ -48,6 +48,16 @@ pub mod core {
             let _ = Event::new("kind", Severity::Info, "title");
             let _: Result<()> = Ok(());
         }
+
+        #[test]
+        fn core_module_matches_root_re_exports() {
+            let core_event = Event::new("kind", Severity::Info, "title");
+            let root_event = crate::Event::new("kind", crate::Severity::Info, "title");
+
+            assert_eq!(core_event.kind, root_event.kind);
+            assert_eq!(core_event.severity, root_event.severity);
+            assert!(matches!(crate::HubConfig::default(), HubConfig { .. }));
+        }
     }
 }
 

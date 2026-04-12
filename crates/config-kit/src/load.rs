@@ -440,7 +440,6 @@ fn root_open_error_is_symlink(root: &Path, error: &io::Error) -> bool {
 
 fn root_path_contains_symlink(root: &Path) -> bool {
     let mut current = PathBuf::new();
-    let mut saw_component = false;
 
     for component in root.components() {
         current.push(component.as_os_str());
@@ -449,7 +448,6 @@ fn root_path_contains_symlink(root: &Path) -> bool {
             continue;
         }
 
-        saw_component = true;
         match std::fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => return true,
             Ok(_) => {}
@@ -458,7 +456,7 @@ fn root_path_contains_symlink(root: &Path) -> bool {
         }
     }
 
-    saw_component
+    false
 }
 
 fn map_candidate_component_open_error(
@@ -740,5 +738,14 @@ mod tests {
         let err = find_config_document(&root_link, ["config.toml"], ConfigLoadOptions::new())
             .expect_err("symlink root must fail");
         assert!(matches!(err, Error::SymlinkPath { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn invalid_input_without_symlink_root_stays_io_error() {
+        let root = tempfile::tempdir().expect("root");
+        let error = io::Error::new(io::ErrorKind::InvalidInput, "simulated invalid root open");
+
+        assert!(!root_open_error_is_symlink(root.path(), &error));
+        assert!(!root_path_contains_symlink(root.path()));
     }
 }

@@ -40,6 +40,7 @@
 - `mcp-kit`：untrusted `streamable_http` 文档与回归测试现在明确区分 `allow_private_ips` 和 `allow_localhost` 的职责；开启 `allow_private_ips` 后，普通私网解析结果可以放开，但公网 hostname 解析到 loopback/host-local 这类本机地址仍会继续拒绝，避免把 DNS rebinding 风险误解释成“私网放行”。
 - `mcp-kit`：`Config::server(&str)` 与 config-driven `Manager`/`SharedManager` 入口现在会按 `ServerName::parse(...)` 的 `trim()` 契约做查找；带前后空白的合法 server 名不再被误判成 unknown server。
 - `mcp-kit`：untrusted `streamable_http` 连接现在会在 `allow_private_ips=true` 时关闭底层 public-IP pinning，与配置层的 outbound override 保持一致；默认策略仍继续对未放宽的连接启用 public-IP pinning。
+- `mcp-kit`：安全文档与 `llms.txt` 聚合文档现在同步到当前实现语义；`allow_private_ips` 会同时放松连接前 DNS 非公网校验和运行期 public-IP pinning，不再误写成“只放开普通私网、仍保留 loopback/host-local pinning”。
 - `mcp-kit`：`SharedManager` 现在会把 handler 重入上下文传播到在 handler 内部 `clone()` 后再 `tokio::spawn(...)` 的子任务；这类跨 task 回调不再退化成普通等锁，而会像同 task 重入一样 fail-fast 返回 `ManagerState`，同时保留“其他外部调用正常等待”的语义。
 - `mcp-kit`：`Session::notify()` 超时后的 best-effort close 现在会跟随 `mcp-jsonrpc` 一起中止底层 reader/transport 后台任务，不再只把会话标成 closed 却留下半开的连接循环。
 - `mcp-kit::ErrorKind` 现在会把 `mcp_jsonrpc::Error::Io` 稳定归到 `Connection`，不再先被泛化成 `Protocol`；并补上 JSON-RPC IO / timeout / protocol 的分类回归测试。

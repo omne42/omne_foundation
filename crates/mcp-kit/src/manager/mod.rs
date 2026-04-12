@@ -1119,7 +1119,9 @@ impl Manager {
 
         Err(tagged_message(
             ErrorKind::ManagerState,
-            "mcp server {server_name} is already connected with a different effective config and cannot be reused (disconnect first)",
+            format!(
+                "mcp server {server_name} is already connected with a different effective config and cannot be reused (disconnect first)"
+            ),
         ))
     }
 

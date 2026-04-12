@@ -985,6 +985,7 @@ async fn prepare_transport_connect_rejects_different_effective_config() {
         err.to_string().contains("different effective config"),
         "{err:#}"
     );
+    assert!(err.to_string().contains("srv"), "{err:#}");
 }
 
 #[cfg(not(windows))]

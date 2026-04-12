@@ -6,7 +6,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ## [Unreleased]
 
-- `text-assets-kit`：deprecated compat 入口和 `lazy_value` shim 实现现在改用带理由的 lint expectation，替代无说明的宽泛 `allow(deprecated)`，兼容面不变但治理点更可审计。
+- `text-assets-kit`：crate root 剩余的 deprecated compat 重导出入口现在改为带理由的 item 级 lint 注解，替代无说明的宽泛 `allow(deprecated)`，兼容行为不变但治理点更可审计。
 
 - `text-assets-kit`：低层 `bootstrap_lock` 实现模块不再公开暴露；crate root 对 `BootstrapTransactionGuard` / `lock_bootstrap_transaction(...)` 只保留 hidden deprecated compat 入口，文档继续收口到高层 bootstrap helpers。
 

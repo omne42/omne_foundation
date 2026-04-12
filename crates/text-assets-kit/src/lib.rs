@@ -11,7 +11,10 @@ mod text_resource;
 mod text_tree_scan;
 
 #[doc(hidden)]
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    reason = "crate-root compat re-export intentionally keeps the deprecated bootstrap_lock surface available for downstream callers"
+)]
 #[deprecated(
     since = "0.1.0",
     note = "BootstrapTransactionGuard and lock_bootstrap_transaction are low-level coordination primitives. Prefer bootstrap_text_resources_then_load(...) or bootstrap_text_resources_with_report(...) at crate boundaries."
@@ -22,7 +25,10 @@ pub use data_root::{
     resolve_data_root, resolve_data_root_with_base,
 };
 #[doc(hidden)]
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    reason = "crate-root compat re-export intentionally keeps the deprecated lazy_value shim available for downstream callers"
+)]
 #[deprecated(
     since = "0.1.0",
     note = "LazyValue and related error types are blocking compatibility shims. Prefer eager snapshots or runtime-owned handles at crate boundaries."

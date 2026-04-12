@@ -92,6 +92,25 @@
 
 `scripts/workspace_check/` 是这里的共享实现；`scripts/check-workspace.sh` 只是保留给手动执行和 CI 复用的薄入口。
 
+### `review-root` gate
+
+针对 root review 已收口的问题，workspace check 还保留一个更窄的回归入口：
+
+- `cargo check -p mcp-jsonrpc`
+- `cargo check -p notify-kit`
+- `cargo check -p policy-meta`
+- `cargo check -p mcp-kit`
+- `cargo test -p http-kit`
+- `cargo test -p github-kit`
+
+可以单独执行：
+
+```bash
+scripts/check-workspace.sh review-root
+```
+
+这个入口的目的不是替代 `local` / `ci`，而是把已经在 review 中暴露过、且需要持续防回归的问题集中成一组更快的定向检查。
+
 ### dependency direction gate
 
 `scripts/workspace_check/` 现在还会机械检查 workspace 内部 crate 依赖方向。
@@ -195,8 +214,8 @@ scripts/check-workspace.sh publish-contract
 - `docs-system`
 - `dependency-direction`
 - `publish-contract`
-- `review-root`
 - `asset-checks [all|policy-meta|mcp-kit|notify-kit]`
+- `review-root`
 - `secret-kit-target <target-triple>`
 
 其中：

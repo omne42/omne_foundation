@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- include `github-kit` in `scripts/check-workspace.sh review-root` so the typed invalid-header regression tests stay in the targeted post-review gate
 - return typed `InvalidHeaderValue` errors when GitHub API header construction fails, so invalid user-agent, API version, or bearer-token inputs no longer panic inside `apply_github_api_headers(...)`
 - reject query-bearing and fragment-bearing bearer-token GitHub API bases so custom or canonical trusted hosts stay fail-closed before credentials are attached
 - clarify the fail-closed bearer-token latest-release contract so the no-profile API explicitly points callers at the validated DNS/public-IP/http-kit transport path

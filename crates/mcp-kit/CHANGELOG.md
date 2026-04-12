@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit`：`SharedManager::prepare_connected_client_with_gate` 在 cold-start config-driven request/notify 路径上不再于同一调用栈里重复申请 same-server 写 gate；补充最小回归测试，锁住此前可能自锁挂起的路径。
 - `mcp-kit`：`SharedManager` 等待 same-server in-flight I/O 清空时，`ServerState` 现在会先启用 `Notify` waiter 再二次检查计数；最后一个 request/notify guard 若恰好在等待窗口内释放，不会再因为丢通知把 `disconnect_and_wait` 等 teardown 路径永久挂住。
 - `mcpctl` 现在改用 `Manager::try_from_config(...)` 的严格配置构造路径；无效 `mcp.json` 会直接按 typed config error 失败，而不再静默退回 lossy 默认值并继续运行。
 - `mcp-kit`：当 untrusted outbound policy 开启 `allow_localhost=true` 时，`streamable_http` 的 DNS 校验现在与 CLI 语义一致，不再额外要求 `allow_private_ips=true`；`localhost`/`*.localhost` 可通过 DNS 校验，但 loopback IP 字面量仍需显式 `allow_private_ips`。

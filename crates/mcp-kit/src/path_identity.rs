@@ -90,6 +90,8 @@ fn pop_without_crossing_root(path: &mut PathBuf) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::path::Path;
     use std::path::PathBuf;
 
     use super::{resolve_relative_path_within_base, stable_path_identity};
@@ -127,6 +129,4 @@ mod tests {
             "err={err:#}"
         );
     }
-
-    use std::path::Path;
 }

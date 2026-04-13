@@ -12,6 +12,7 @@
 ### Fixed
 - `mcp-kit`：共享的稳定路径身份与“relative path within rooted base”逻辑现在下沉到 crate 级 `path_identity` 边界，`config` 加载不再反向依赖 `manager` 内部实现；相对 `unix_path` 仍继续 fail-closed 到 config thread root 内，并补充共享路径边界回归测试。
 - `mcpctl`：模拟“current_dir() 不可用”的 helper 子进程测试现在使用 `--exact --quiet --test-threads=1` 并捕获子进程输出，仅在失败时回显细节，减少正常测试通过时的 harness 噪声并提升隔离性。
+- `mcp-kit`：`path_identity` 的 Unix 专用测试导入现在按平台条件编译，避免 Windows `-D warnings` 下的未使用导入失败。
 - `mcp-kit`：`SharedManager` 现在把“该 clone 源自 manager handler 作用域”的事实持久记录为独立标记，而不再只依赖可失效的 `Weak` token 存活性；handler 内派生并转交到异步分叉任务的 clone 不再能在 token 失效后绕过 reentrant fail-fast。
 - `mcp-kit`：将 `shared_manager` 的内嵌测试模块拆分到 `src/shared_manager/tests.rs`，仅保留模块声明与既有测试语义，降低主实现文件的多职责维护风险。
 - `mcp-kit`：统一 `streamable_http` 保留头边界，`Config::validate()` 现在与连接执行侧一致拒绝 `mcp-session-id`，避免出现“配置校验通过但 connect 失败”的契约漂移。

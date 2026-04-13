@@ -6,6 +6,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ## [Unreleased]
 
+- `i18n-runtime-kit`：crate root 继续保留 `LazyCatalog` 兼容符号，但现在对该 re-export 增加 `#[doc(hidden)]` 和更明确的 deprecated note，避免新的调用方继续把 blocking lazy shim 当成推荐公共入口。
+
 - `i18n-runtime-kit`：crate root 对 `LazyCatalog` 的 deprecated 兼容导出现在改为带理由的 `#[expect(deprecated)]`，保留兼容入口的同时把 lint 豁免收口到可审计的单点声明。
 
 - `i18n-runtime-kit`：`LazyCatalog` 兼容导出、shared lazy shim 接线和对应回归测试现在改用带理由的局部 lint expectation，替代宽泛的 `allow(deprecated)`，兼容语义保持不变。

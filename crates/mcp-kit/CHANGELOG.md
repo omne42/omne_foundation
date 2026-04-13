@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
 ### Fixed
+- `mcp-kit`：`SharedManager` 现在把“该 clone 源自 manager handler 作用域”的事实持久记录为独立标记，而不再只依赖可失效的 `Weak` token 存活性；handler 内派生并转交到异步分叉任务的 clone 不再能在 token 失效后绕过 reentrant fail-fast。
 - `mcp-kit`：将 `shared_manager` 的内嵌测试模块拆分到 `src/shared_manager/tests.rs`，仅保留模块声明与既有测试语义，降低主实现文件的多职责维护风险。
 - `mcp-kit`：统一 `streamable_http` 保留头边界，`Config::validate()` 现在与连接执行侧一致拒绝 `mcp-session-id`，避免出现“配置校验通过但 connect 失败”的契约漂移。
 - `mcp-kit`：`build_streamable_http_headers(...)` 内部新增 fail-closed trust 检查；即使未来调用路径绕过上游守卫，untrusted 模式下也不会读取 bearer token / env header secrets。

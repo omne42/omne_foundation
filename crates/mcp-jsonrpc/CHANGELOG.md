@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：`schedule_close_once(...)` 在 detached 调度失败后会优先把 bounded close fallback 交给独立线程执行，而不是在当前 async 调用栈里内联收尾；关闭兜底不再把潜在的阻塞/二次 panic 风险带回 Tokio 上下文。
 - `mcp-jsonrpc`：`streamable_http` 的 graceful SSE EOF 重连现在使用有界指数退避，而 `mcp-session-id` 变更触发的会话切换重连仍保持立即执行，避免 idle-close 服务端把读侧恢复路径放大成无退避重连风暴。
 - `mcp-jsonrpc`：`schedule_close_once_without_runtime_times_out_on_busy_writer_lock` 回归测试改为显式注入 detached runtime 启动失败并验证“有界等待后超时退出”的稳定语义，避免 macOS 上对后台线程启动时序的脆弱依赖。
 - `mcp-jsonrpc`：无 runtime 兜底路径不再使用无限 `blocking_lock()`；batch flush 与 close 收尾改为有界锁获取并在必要时 fail-closed，避免 writer 锁被占用时把关闭流程永久阻塞。

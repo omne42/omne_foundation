@@ -40,6 +40,7 @@ pub struct SharedManager {
     server_states: Arc<StdMutex<HashMap<ServerName, Weak<ServerState>>>>,
     manager_id: u64,
     captured_handler_scope: Option<Weak<()>>,
+    captured_handler_scope_active: bool,
 }
 
 impl Manager {
@@ -61,6 +62,7 @@ impl SharedManager {
             server_states: Arc::new(StdMutex::new(HashMap::new())),
             manager_id,
             captured_handler_scope: None,
+            captured_handler_scope_active: false,
         }
     }
 
@@ -72,12 +74,14 @@ impl SharedManager {
                 server_states: self.server_states,
                 manager_id: self.manager_id,
                 captured_handler_scope: self.captured_handler_scope,
+                captured_handler_scope_active: self.captured_handler_scope_active,
             }),
         }
     }
 
     fn is_reentrant_handler_call(&self) -> bool {
         crate::manager::is_in_manager_handler_scope(self.manager_id)
+            || self.captured_handler_scope_active
             || self
                 .captured_handler_scope
                 .as_ref()
@@ -790,6 +794,7 @@ impl SharedManager {
 
 impl Clone for SharedManager {
     fn clone(&self) -> Self {
+        let current_scope = crate::manager::is_in_manager_handler_scope(self.manager_id);
         Self {
             inner: Arc::clone(&self.inner),
             server_states: Arc::clone(&self.server_states),
@@ -800,6 +805,9 @@ impl Clone for SharedManager {
                 .filter(|scope| scope.upgrade().is_some())
                 .cloned()
                 .or_else(|| crate::manager::current_manager_handler_scope_token(self.manager_id)),
+            captured_handler_scope_active: self.captured_handler_scope_active
+                || self.captured_handler_scope.is_some()
+                || current_scope,
         }
     }
 }

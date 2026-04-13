@@ -32,7 +32,9 @@
 覆盖：
 
 - `reqwest::Client` 的共享构建入口
+- 字符串 header pairs 到 `HeaderMap` 的通用解析
 - bounded body read 与 body preview
+- 基于 `Content-Length` 预检的 response body bytes 有界读取（严格失败 / 截断预览）
 - HTTPS URL 基础校验与错误脱敏
 - untrusted 模式下的 host allowlist、localhost/private IP/DNS 校验
 - HTTP probe 与公共 IP 相关判断

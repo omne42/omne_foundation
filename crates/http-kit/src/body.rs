@@ -11,7 +11,7 @@ pub async fn read_json_body_limited(
     resp: reqwest::Response,
     max_bytes: usize,
 ) -> crate::Result<serde_json::Value> {
-    let buf = read_body_bytes_limited(resp, max_bytes).await?;
+    let buf = read_response_body_bytes_limited(resp, max_bytes).await?;
     serde_json::from_slice(&buf)
         .map_err(|err| error::tagged_source(ErrorKind::ResponseDecode, "decode json failed", err))
 }
@@ -20,8 +20,22 @@ pub async fn read_text_body_limited(
     resp: reqwest::Response,
     max_bytes: usize,
 ) -> crate::Result<String> {
-    let (buf, truncated) = read_body_bytes_truncated(resp, max_bytes).await?;
+    let (buf, truncated) = read_response_body_bytes_truncated(resp, max_bytes).await?;
     Ok(decode_text_body_lossy(buf, truncated))
+}
+
+pub async fn read_response_body_bytes_limited(
+    resp: reqwest::Response,
+    max_bytes: usize,
+) -> crate::Result<Vec<u8>> {
+    read_body_bytes_limited(resp, max_bytes).await
+}
+
+pub async fn read_response_body_bytes_truncated(
+    resp: reqwest::Response,
+    max_bytes: usize,
+) -> crate::Result<(Vec<u8>, bool)> {
+    read_body_bytes_truncated(resp, max_bytes).await
 }
 
 pub async fn write_response_body_limited<W>(
@@ -568,5 +582,102 @@ mod tests {
         });
 
         server.join().expect("server thread");
+    }
+
+    #[tokio::test]
+    async fn read_response_body_bytes_limited_rejects_oversized_content_length() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf).await.expect("read request");
+            let response =
+                b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nabc";
+            stream.write_all(response).await.expect("write response");
+        });
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect("send request");
+        let err = read_response_body_bytes_limited(resp, 8)
+            .await
+            .expect_err("expected oversized error");
+        assert_eq!(err.kind(), ErrorKind::ResponseBody);
+        assert!(
+            err.to_string().contains("response body too large"),
+            "unexpected error: {err:#}"
+        );
+
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn read_response_body_bytes_limited_returns_full_payload_within_limit() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf).await.expect("read request");
+            let body = "hello";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect("send request");
+        let bytes = read_response_body_bytes_limited(resp, 8)
+            .await
+            .expect("read bounded bytes");
+        assert_eq!(bytes, b"hello");
+
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn read_response_body_bytes_truncated_marks_truncated() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf).await.expect("read request");
+            let body = "abcdef";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect("send request");
+        let (bytes, truncated) = read_response_body_bytes_truncated(resp, 4)
+            .await
+            .expect("read bounded bytes");
+        assert_eq!(bytes, b"abcd");
+        assert!(truncated);
+
+        server.await.expect("server task");
     }
 }

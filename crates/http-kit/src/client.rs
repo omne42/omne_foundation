@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use tokio::sync::Semaphore;
 
 use crate::error::{self, ErrorKind};
@@ -197,6 +198,39 @@ pub fn build_http_client(timeout: Duration) -> crate::Result<reqwest::Client> {
         timeout: Some(timeout),
         ..Default::default()
     })
+}
+
+pub fn parse_header_map_from_str_pairs<I, K, V>(pairs: I) -> crate::Result<HeaderMap>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<str>,
+    V: AsRef<str>,
+{
+    let mut out = HeaderMap::new();
+    for (name, value) in pairs {
+        let name = name.as_ref().trim();
+        if name.is_empty() {
+            continue;
+        }
+
+        let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|err| {
+            error::tagged_source(
+                ErrorKind::InvalidInput,
+                format!("invalid http header name `{name}`"),
+                err,
+            )
+        })?;
+        let header_value = HeaderValue::from_str(value.as_ref()).map_err(|err| {
+            error::tagged_source(
+                ErrorKind::InvalidInput,
+                format!("invalid http header value for `{name}`"),
+                err,
+            )
+        })?;
+        out.insert(header_name, header_value);
+    }
+
+    Ok(out)
 }
 
 pub fn build_http_client_with_options(
@@ -395,6 +429,7 @@ pub async fn select_http_client_with_options(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
@@ -406,6 +441,62 @@ mod tests {
             timeout: Some(timeout),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn parse_header_map_from_str_pairs_accepts_valid_and_skips_empty_names() {
+        let map = parse_header_map_from_str_pairs([
+            (" x-test ", "value"),
+            ("", "ignored"),
+            ("   ", "ignored"),
+            ("x-other", "123"),
+        ])
+        .expect("parse headers");
+        assert_eq!(map.len(), 2);
+        assert_eq!(
+            map.get("x-test")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default(),
+            "value"
+        );
+    }
+
+    #[test]
+    fn parse_header_map_from_str_pairs_accepts_borrowed_string_map() {
+        let headers = BTreeMap::from([
+            ("x-test".to_string(), "value".to_string()),
+            ("x-other".to_string(), "123".to_string()),
+        ]);
+        let map = parse_header_map_from_str_pairs(headers.iter()).expect("parse headers");
+        assert_eq!(map.len(), 2);
+        assert_eq!(
+            map.get("x-other")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default(),
+            "123"
+        );
+    }
+
+    #[test]
+    fn parse_header_map_from_str_pairs_rejects_invalid_header_name() {
+        let err = parse_header_map_from_str_pairs([("bad header", "value")])
+            .expect_err("invalid header name should fail");
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(
+            err.to_string().contains("invalid http header name"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_header_map_from_str_pairs_rejects_invalid_header_value() {
+        let err = parse_header_map_from_str_pairs([("x-test", "bad\nvalue")])
+            .expect_err("invalid header value should fail");
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(
+            err.to_string().contains("invalid http header value"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]

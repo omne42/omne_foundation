@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add canonical `parse_header_map_from_str_pairs(...)`, `read_response_body_bytes_limited(...)`, and `read_response_body_bytes_truncated(...)` APIs so product crates can directly reuse generic HTTP header parsing and bounded response-byte primitives (including `Content-Length` preflight) without local compatibility helpers.
 - Fix `read_json_body_after_http_success_limited(...)` so non-2xx error summaries honor the caller-provided `max_bytes` limit instead of silently falling back to the crate default cap.
 - Return typed transport errors instead of panicking when DNS timeout paths run on a Tokio runtime without the time driver enabled, and keep regression coverage for both untrusted outbound validation and public-IP-pinned client selection.
 - Keep untrusted DNS post-validation rejecting always-disallowed targets such as multicast addresses even when `allow_private_ips=true`, so hostnames cannot widen past the hard IP denylist.

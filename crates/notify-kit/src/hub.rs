@@ -359,10 +359,20 @@ impl HubInner {
                 return if sink.report_identity_panic_once() {
                     (idx, identity, Err(anyhow::anyhow!("sink panicked").into()))
                 } else {
-                    (idx, identity, Ok(()))
+                    (
+                        idx,
+                        identity,
+                        Err(anyhow::anyhow!("sink is poisoned from a previous panic").into()),
+                    )
                 };
             }
-            HubSinkState::Poisoned => return (idx, identity, Ok(())),
+            HubSinkState::Poisoned => {
+                return (
+                    idx,
+                    identity,
+                    Err(anyhow::anyhow!("sink is poisoned from a previous panic").into()),
+                );
+            }
         }
 
         let result = AssertUnwindSafe(async move {
@@ -783,6 +793,49 @@ mod tests {
     }
 
     #[test]
+    fn send_keeps_reporting_poisoned_sink_instead_of_silent_success() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let sinks: Vec<Arc<dyn Sink>> = vec![Arc::new(TestSink {
+                name: "panic",
+                behavior: TestSinkBehavior::Panic,
+                sends: Arc::new(AtomicUsize::new(0)),
+            })];
+
+            let hub = Hub::new(
+                HubConfig {
+                    enabled_kinds: None,
+                    per_sink_timeout: Duration::from_secs(1),
+                },
+                sinks,
+            );
+            let event = Event::new("kind", Severity::Info, "title");
+
+            let first_err = hub
+                .send(event.clone())
+                .await
+                .expect_err("first panic should fail");
+            assert_eq!(first_err.kind(), crate::ErrorKind::SinkFailures);
+
+            let second_err = hub
+                .send(event)
+                .await
+                .expect_err("poisoned sink should keep failing");
+            assert_eq!(second_err.kind(), crate::ErrorKind::SinkFailures);
+            assert!(
+                second_err
+                    .to_string()
+                    .contains("poisoned from a previous panic"),
+                "{second_err}"
+            );
+        });
+    }
+
+    #[test]
     fn send_reports_failures_in_sink_order() {
         #[derive(Debug)]
         struct DelayedFailSink {
@@ -1175,9 +1228,21 @@ mod tests {
             assert_eq!(failures.len(), 1);
             assert_eq!(failures[0].sink_name(), "panic");
 
-            hub.send(Event::new("kind", Severity::Info, "second"))
+            let second_err = hub
+                .send(Event::new("kind", Severity::Info, "second"))
                 .await
-                .expect("poisoned sink should be skipped");
+                .expect_err("poisoned sink should keep failing");
+            let second_failures = second_err
+                .sink_failures()
+                .expect("structured poisoned sink failure");
+            assert_eq!(second_failures.len(), 1);
+            assert_eq!(second_failures[0].sink_name(), "panic");
+            assert!(
+                second_err
+                    .to_string()
+                    .contains("poisoned from a previous panic"),
+                "{second_err}"
+            );
 
             assert_eq!(panic_sends.load(Ordering::SeqCst), 1);
             assert_eq!(healthy_sends.load(Ordering::SeqCst), 2);
@@ -1222,9 +1287,21 @@ mod tests {
             assert_eq!(failures.len(), 1);
             assert_eq!(failures[0].sink_name(), "<unknown>");
 
-            hub.send(Event::new("kind", Severity::Info, "second"))
+            let second_err = hub
+                .send(Event::new("kind", Severity::Info, "second"))
                 .await
-                .expect("poisoned sink should be skipped");
+                .expect_err("poisoned sink should keep failing");
+            let second_failures = second_err
+                .sink_failures()
+                .expect("structured poisoned sink failure");
+            assert_eq!(second_failures.len(), 1);
+            assert_eq!(second_failures[0].sink_name(), "<unknown>");
+            assert!(
+                second_err
+                    .to_string()
+                    .contains("poisoned from a previous panic"),
+                "{second_err}"
+            );
 
             assert_eq!(sends.load(Ordering::SeqCst), 0);
         });

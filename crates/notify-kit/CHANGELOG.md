@@ -15,6 +15,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `notify-kit` 的 webhook/API sinks 现在共享一个内部 outbound transport helper，统一 `HttpClientProfile` 创建、公网 IP 选择和 strict eager 校验入口，后续新增 transport 级约束时不再需要在每个 sink 里散弹式重复接线。
 
 ### Fixed
+- `Hub::send` 在 sink 进入 poisoned 状态后不再静默跳过并返回成功；后续发送会继续返回结构化 sink failure，避免“假成功”掩盖已失效的通知通道。
 - tests: add a crate-level regression check that `notify_kit::core` continues to match the root compatibility re-exports, so the review-root `core`-module regression stays mechanically covered.
 - `notify_kit::core` 现在补上一段最小 rustdoc 编译示例，显式锁住 `core` 入口与 crate root 兼容 re-export 会同时保持可用，避免 review 命中过的“`core` 模块被删但入口未同步”回归再次悄悄漂进门禁前。
 - `notify-kit::Sink` 现在补上兼容的实例 `identity()` 边界（默认继续复用 `label()`/`name()`）；`Hub` 会为重复 identity 分配稳定且无碰撞的 `#n` 后缀，聚合 `SinkFailure`/错误展示也同步暴露显式 `sink_id()`，多个同类 sink 实例并存时不再被压成同一个静态名字。

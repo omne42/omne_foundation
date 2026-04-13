@@ -1182,6 +1182,17 @@ impl ClientHandle {
         true
     }
 
+    fn spawn_close_fallback_thread(&self) -> std::io::Result<()> {
+        let handle = self.clone();
+        std::thread::Builder::new()
+            .name("mcp-jsonrpc-close-fallback".into())
+            .spawn(move || {
+                handle.abort_background_tasks();
+                let _ = handle.finish_close_write_without_runtime();
+            })
+            .map(|_| ())
+    }
+
     fn close_write_if_uncontended(&self) {
         if let Ok(mut write) = self.write.try_lock() {
             replace_write_with_sink(&mut write);
@@ -1205,9 +1216,18 @@ impl ClientHandle {
             )
             .is_err()
         {
-            // Last-ditch fallback when even detached worker/thread startup is unavailable.
-            self.abort_background_tasks();
-            let _ = self.finish_close_write_without_runtime();
+            // Detached cleanup startup can fail even when this close originates from an async
+            // Tokio call stack. In that case, hand the bounded sync fallback to a fresh OS
+            // thread first so we do not re-enter a blocking close path inline on the runtime
+            // thread.
+            let should_spawn_thread = tokio::runtime::Handle::try_current().is_ok();
+            if should_spawn_thread && self.spawn_close_fallback_thread().is_err() {
+                self.abort_background_tasks();
+                let _ = self.finish_close_write_without_runtime();
+            } else if !should_spawn_thread {
+                self.abort_background_tasks();
+                let _ = self.finish_close_write_without_runtime();
+            }
         }
     }
 

@@ -6,6 +6,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ## [Unreleased]
 
+- `prompt-kit`：crate root 不再默认重导出 deprecated `LazyPromptDirectory`；兼容调用方需要显式迁移到 `prompt_kit::compat::LazyPromptDirectory`，推荐路径仍然是 bootstrap helpers 配合 `PromptDirectoryHandle`。
+
 - `prompt-kit`：crate root 继续保留 `LazyPromptDirectory` 兼容符号，但现在对该 re-export 增加 `#[doc(hidden)]` 和更明确的 deprecated note，避免新的调用方继续把 blocking lazy shim 当成推荐公共入口。
 
 - `prompt-kit`：crate root 对 `LazyPromptDirectory` 的 deprecated 兼容导出现在改为带理由的 `#[expect(deprecated)]`，保留兼容入口的同时把 lint 豁免收口到可审计的单点声明。

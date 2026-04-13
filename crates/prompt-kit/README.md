@@ -17,7 +17,7 @@
 - prompt 目录 bootstrap
 - prompt 目录快照加载
 - `PromptDirectoryHandle`
-- 兼容层 `LazyPromptDirectory`
+- 显式兼容入口 `prompt_kit::compat::LazyPromptDirectory`
 - prompt 初始化错误与回滚错误包装
 
 不负责：
@@ -53,11 +53,13 @@
   - 由 [`text-assets-kit`](../text-assets-kit/README.md) 提供通用文本资源原语
 - `src/lazy_compat.rs`
   - `LazyPromptDirectory` 专用的私有阻塞 compat shim，不再把通用 blocking lazy primitive 暴露回 foundation crate 边界
+- crate root 不再直接暴露 `LazyPromptDirectory`；兼容调用方需要显式从 `prompt_kit::compat` 引入这个 deprecated shim
 
 ## 当前定位
 
 - 代码上它本质是建立在 [`text-assets-kit`](../text-assets-kit/README.md) 之上的薄封装。
 - `PromptDirectoryHandle` 是当前推荐的 runtime-facing 共享句柄；`LazyPromptDirectory` 仅保留为已废弃的阻塞式兼容层。
+- `LazyPromptDirectory` 的显式迁移路径是 `prompt_kit::compat::LazyPromptDirectory`；crate root 默认 API 只保留 runtime-facing 入口。
 - `LazyPromptDirectory` 对同线程递归初始化、同线程初始化冲突以及可检测的线程级跨线程初始化环路都会返回显式错误，但它仍然是阻塞式兼容层，不应继续扩张成 runtime-facing canonical API。
 - 这个阻塞 compat shim 现在收口在 `prompt-kit` 私有模块里；`text-assets-kit` 继续只暴露文本资源 runtime adapter 能力，不再承担通用 blocking lazy public surface。
 - 当前跨仓库已证明的 prompt 复用面，并不主要是“prompt 目录加载”。
@@ -71,3 +73,4 @@
 - manifest、目录快照和文本资源类型由 [`text-assets-kit`](../text-assets-kit/README.md) 直接提供，不再从 `prompt-kit` 根导出
 - 当调用方已经持有稳定 workspace/root 事实时，应优先使用 `bootstrap_prompt_directory_with_base(...)`，而不是继续让相对目录依赖 ambient `current_dir()`
 - 不把 prompt 业务语义回塞到 `text-assets-kit`
+- 推荐的 runtime-facing 入口仍然是 `bootstrap_prompt_directory(...)` / `bootstrap_prompt_directory_with_base(...)` 加 `PromptDirectoryHandle`；`compat::LazyPromptDirectory` 只保留给历史阻塞调用方

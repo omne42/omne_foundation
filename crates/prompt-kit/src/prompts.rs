@@ -10,9 +10,11 @@ use text_assets_kit::{
 
 #[expect(
     deprecated,
-    reason = "LazyPromptDirectory intentionally reuses the deprecated blocking compat shim from text-assets-kit instead of forking another local implementation"
+    reason = "LazyPromptDirectory intentionally reuses the deprecated blocking compat shim from text-assets-kit::compat instead of forking another local implementation"
 )]
-use text_assets_kit::{LazyInitError as BlockingLazyInitError, LazyValue as BlockingLazyValue};
+use text_assets_kit::compat::{
+    LazyInitError as BlockingLazyInitError, LazyValue as BlockingLazyValue,
+};
 
 #[derive(Debug)]
 pub struct PromptBootstrapCleanupError {

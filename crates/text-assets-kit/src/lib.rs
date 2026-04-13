@@ -10,30 +10,10 @@ mod text_directory;
 mod text_resource;
 mod text_tree_scan;
 
-#[doc(hidden)]
-#[allow(
-    deprecated,
-    reason = "crate-root compat re-export intentionally keeps the deprecated bootstrap_lock surface available for downstream callers"
-)]
-#[deprecated(
-    since = "0.1.0",
-    note = "BootstrapTransactionGuard and lock_bootstrap_transaction are low-level coordination primitives. Prefer bootstrap_text_resources_then_load(...) or bootstrap_text_resources_with_report(...) at crate boundaries."
-)]
-pub use bootstrap_lock::{BootstrapTransactionGuard, lock_bootstrap_transaction};
 pub use data_root::{
     DataRootOptions, DataRootScope, ensure_data_root, ensure_data_root_with_base,
     resolve_data_root, resolve_data_root_with_base,
 };
-#[doc(hidden)]
-#[allow(
-    deprecated,
-    reason = "crate-root compat re-export intentionally keeps the deprecated lazy_value shim available for downstream callers"
-)]
-#[deprecated(
-    since = "0.1.0",
-    note = "LazyValue and related error types are blocking compatibility shims. Prefer eager snapshots or runtime-owned handles at crate boundaries."
-)]
-pub use lazy_value::{LazyInitConflictKind, LazyInitError, LazyValue};
 pub use managed_bootstrap::{
     BootstrapLoadError, bootstrap_text_resources_then_load,
     bootstrap_text_resources_then_load_with_base,
@@ -51,3 +31,17 @@ pub use secure_fs::{
 };
 pub use text_directory::TextDirectory;
 pub use text_resource::{ResourceManifest, TextResource};
+
+#[doc(hidden)]
+pub mod compat {
+    #[allow(
+        deprecated,
+        reason = "compat exposes the deprecated blocking/bootstrap shims behind an explicit namespace instead of polluting the crate root"
+    )]
+    pub use crate::bootstrap_lock::{BootstrapTransactionGuard, lock_bootstrap_transaction};
+    #[allow(
+        deprecated,
+        reason = "compat exposes the deprecated blocking lazy shim behind an explicit namespace instead of polluting the crate root"
+    )]
+    pub use crate::lazy_value::{LazyInitConflictKind, LazyInitError, LazyValue};
+}

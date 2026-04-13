@@ -8,9 +8,11 @@ use crate::catalog_error::{CatalogInitError, CatalogLocaleError};
 use crate::{resolve_locale_from_argv, resolve_locale_from_cli_args};
 #[expect(
     deprecated,
-    reason = "LazyCatalog intentionally reuses the deprecated blocking compat shim from text-assets-kit instead of forking another local implementation"
+    reason = "LazyCatalog intentionally reuses the deprecated blocking compat shim from text-assets-kit::compat instead of forking another local implementation"
 )]
-use text_assets_kit::{LazyInitError as BlockingLazyInitError, LazyValue as BlockingLazyValue};
+use text_assets_kit::compat::{
+    LazyInitError as BlockingLazyInitError, LazyValue as BlockingLazyValue,
+};
 
 /// Legacy blocking catalog shim.
 ///

@@ -42,6 +42,7 @@
 - 已加载文本目录快照与树扫描
 - 共享 runtime handle 原语（`SharedRuntimeHandle<T>`），供更高层 runtime adapter 复用“热切换 snapshot 句柄”而不重复实现同一套 `RwLock<Option<Arc<_>>>`
 - `scan_text_directory(...)`
+- 显式兼容入口 `text_assets_kit::compat::{LazyValue, LazyInitError, LazyInitConflictKind, BootstrapTransactionGuard, lock_bootstrap_transaction(...)}`
 
 不覆盖：
 
@@ -73,6 +74,7 @@
 - 如果同一次 bootstrap 尝试里后续步骤失败，它会按创建报告对本次新建的文件/目录做 best-effort rollback。
 - 这不是 crash-safe 或断电恢复事务：如果进程在 bootstrap 写入后异常退出，已创建的文件可能仍然留在磁盘上。
 - crate root 的 canonical 入口仍然是 `bootstrap_text_resources_then_load(...)` / `bootstrap_text_resources_with_report(...)`；当调用方已经持有稳定 workspace/root 事实时，应优先切到对应的 `*_with_base(...)` 版本。`bootstrap_lock` 模块只保留给确实需要低层协调的兼容调用方，默认不建议直接依赖。
+- crate root 不再直接重导出 blocking/bootstrap compat shim；兼容调用方需要显式从 `text_assets_kit::compat` 引入这些 deprecated 符号。
 
 ## 与其他 crate 的关系
 
@@ -81,4 +83,5 @@
 - 由它统一承载通用文本资源 root 规范化与目录扫描，不再让上层 runtime adapter 直接下钻 `omne-fs-primitives`
 - `prompt-kit` 这类上层 crate 如果仍需要阻塞式兼容 shim，应把那类 compat 逻辑私有地保留在自己的领域边界里，而不是继续从 `text-assets-kit` 暴露成通用 public surface
 - 当调用方已经持有 workspace/root 事实时，应优先使用 `*_with_base(...)` 入口；`materialize_resource_root(...)`、`resolve_data_root(...)`、`ensure_data_root(...)` 现在只作为 compatibility shim 保留，不再视为 canonical foundation 边界
+- 如果历史调用方仍依赖 deprecated blocking/bootstrap shim，请迁移到显式 `compat` 命名空间；推荐路径仍然是高层 bootstrap helper 或 runtime-owned handle。
 - 刻意不反向承载 i18n 或 prompt 语义，避免把通用文本资源边界重新做宽

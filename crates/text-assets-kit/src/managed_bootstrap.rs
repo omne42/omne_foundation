@@ -2,13 +2,13 @@ use std::fmt::{self, Display, Formatter};
 use std::io;
 use std::path::Path;
 
+use crate::bootstrap_lock::lock_bootstrap_transaction;
 use crate::resource_path::{
     materialize_resource_root_from_current_dir, materialize_resource_root_with_base,
 };
 use crate::{
     BootstrapReport, ResourceManifest, bootstrap_text_resources_with_report,
-    bootstrap_text_resources_with_report_with_base, lock_bootstrap_transaction,
-    rollback_created_resources,
+    bootstrap_text_resources_with_report_with_base, rollback_created_resources,
 };
 
 #[derive(Debug)]

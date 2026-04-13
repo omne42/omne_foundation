@@ -36,6 +36,7 @@
 - `resolve_locale_from_cli_args(...)`
 - `resolve_locale_from_argv(...)`
 - `LazyCatalog`
+- 显式兼容入口 `i18n_runtime_kit::compat::LazyCatalog`
 - `GlobalCatalog`
 - `CatalogInitError`
 - `CliLocaleError`
@@ -62,6 +63,7 @@
   - `LazyCatalog` 专用的私有阻塞 compat shim，不再把通用 blocking lazy primitive 暴露回 foundation crate 边界
 - best-effort bootstrap/rollback 流程
   - 由 [`text-assets-kit`](../text-assets-kit/README.md) 提供通用文本资源原语，`i18n-runtime-kit` 只保留 i18n 域加载与错误映射
+- crate root 不再直接暴露 `LazyCatalog`；兼容调用方需要显式从 `i18n_runtime_kit::compat` 引入这个 deprecated shim
 
 ## 与其他 crate 的关系
 
@@ -69,3 +71,4 @@
 - 依赖 [`text-assets-kit`](../text-assets-kit/README.md) 提供文本资源、目录扫描、bootstrap 与 secure fs 边界
 - manifest 与文本资源类型由 [`text-assets-kit`](../text-assets-kit/README.md) 直接提供，不再从 `i18n-runtime-kit` 根导出
 - 刻意不把这些 runtime adapter 回塞到 `i18n-kit`，避免纯语义层重新沾上 CLI/runtime I/O
+- 推荐的 runtime-facing 入口仍然是 load/bootstrap helpers 加 `GlobalCatalog`；`compat::LazyCatalog` 只保留给历史阻塞调用方

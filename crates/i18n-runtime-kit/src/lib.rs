@@ -12,17 +12,16 @@ pub use i18n::{
     load_i18n_catalog_from_directory_with_base, reload_i18n_catalog_from_directory,
     reload_i18n_catalog_from_directory_with_base,
 };
-#[doc(hidden)]
-#[allow(
-    deprecated,
-    reason = "crate root intentionally keeps the deprecated LazyCatalog compatibility surface available for downstream callers"
-)]
-#[deprecated(
-    since = "0.1.0",
-    note = "LazyCatalog is a blocking compatibility shim. Prefer load/bootstrap helpers plus GlobalCatalog for runtime-facing handles."
-)]
-pub use lazy_catalog::LazyCatalog;
 pub use locale_selection::{resolve_locale_from_argv, resolve_locale_from_cli_args};
+
+#[doc(hidden)]
+pub mod compat {
+    #[allow(
+        deprecated,
+        reason = "compat exposes the deprecated LazyCatalog shim behind an explicit namespace instead of the default crate root API"
+    )]
+    pub use crate::lazy_catalog::LazyCatalog;
+}
 
 #[cfg(test)]
 pub(crate) mod test_support {

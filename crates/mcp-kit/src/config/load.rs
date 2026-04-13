@@ -9,6 +9,7 @@ use super::file_format::{ConfigFile, StdoutLogConfigFile};
 use super::{ClientConfig, Config, ServerConfig, StdoutLogConfig, Transport};
 use crate::ServerName;
 use crate::error::{ErrorKind, tagged_message, wrap_kind};
+use crate::path_identity::resolve_relative_path_within_base;
 
 const MCP_CONFIG_VERSION: u32 = 1;
 const DEFAULT_CONFIG_CANDIDATES: [&str; 2] = [".mcp.json", "mcp.json"];
@@ -106,31 +107,14 @@ fn resolve_relative_unix_path(
     server_name: &str,
     unix_path: PathBuf,
 ) -> anyhow::Result<PathBuf> {
-    let resolved_root = crate::manager::stable_path_identity(config_root).map_err(|err| {
-        wrap_kind(
-            ErrorKind::Config,
-            anyhow::Error::new(err).context(format!(
-                "mcp server {server_name}: resolve config thread root boundary"
-            )),
-        )
-    })?;
-    let resolved_unix_path = crate::manager::stable_path_identity(&config_root.join(&unix_path))
-        .map_err(|err| {
-            wrap_kind(
-                ErrorKind::Config,
-                anyhow::Error::new(err).context(format!(
-                    "mcp server {server_name}: resolve relative unix_path boundary"
-                )),
-            )
-        })?;
-    if !resolved_unix_path.starts_with(&resolved_root) {
-        config_bail!(
-            "mcp server {server_name}: relative unix_path must stay within config thread root {}: {}",
-            config_root.display(),
-            unix_path.display()
-        );
-    }
-    Ok(resolved_unix_path)
+    resolve_relative_path_within_base(
+        config_root,
+        &unix_path,
+        &format!(
+            "mcp server {server_name}: relative unix_path must stay within config thread root"
+        ),
+    )
+    .map_err(|err| wrap_kind(ErrorKind::Config, err))
 }
 
 async fn load_initial_path_and_value(

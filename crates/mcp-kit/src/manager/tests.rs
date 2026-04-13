@@ -56,7 +56,7 @@ fn stable_connection_cwd_identity_preserves_symlink_parent_semantics() {
     std::os::unix::fs::symlink(&child, base.join("link")).expect("create symlink");
 
     let resolved =
-        super::path_identity::stable_connection_cwd_identity(&base.join("link/../sibling"))
+        crate::path_identity::stable_connection_cwd_identity(&base.join("link/../sibling"))
             .expect("resolve symlink parent semantics");
     assert_eq!(resolved, sibling);
 }
@@ -73,7 +73,7 @@ fn stable_connection_cwd_identity_keeps_symlink_target_for_missing_suffix() {
     std::os::unix::fs::symlink(&child, base.join("link")).expect("create symlink");
 
     let resolved =
-        super::path_identity::stable_connection_cwd_identity(&base.join("link/../missing/nested"))
+        crate::path_identity::stable_connection_cwd_identity(&base.join("link/../missing/nested"))
             .expect("resolve missing suffix through symlink target");
     assert_eq!(resolved, real.join("missing/nested"));
 }
@@ -82,9 +82,9 @@ fn stable_connection_cwd_identity_keeps_symlink_target_for_missing_suffix() {
 fn stable_connection_cwd_identity_collapses_missing_parent_segments_lexically() {
     let root = std::env::temp_dir().join("mcp-kit-missing-parent");
     let resolved =
-        super::path_identity::stable_connection_cwd_identity(&root.join("missing/../child"))
+        crate::path_identity::stable_connection_cwd_identity(&root.join("missing/../child"))
             .expect("resolve missing parent lexically");
-    let expected = super::path_identity::stable_connection_cwd_identity(&root.join("child"))
+    let expected = crate::path_identity::stable_connection_cwd_identity(&root.join("child"))
         .expect("resolve expected child");
     assert_eq!(resolved, expected);
 }
@@ -96,7 +96,7 @@ fn stable_connection_cwd_identity_keeps_absolute_paths_absolute_after_parent_seg
     path.push("..");
     path.push("mcp-kit-absolute-child");
 
-    let resolved = super::path_identity::stable_connection_cwd_identity(&path)
+    let resolved = crate::path_identity::stable_connection_cwd_identity(&path)
         .expect("resolve absolute path with parent segments");
     assert!(resolved.is_absolute(), "resolved path must stay absolute");
 }

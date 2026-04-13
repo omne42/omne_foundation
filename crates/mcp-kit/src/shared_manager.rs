@@ -796,7 +796,9 @@ impl Clone for SharedManager {
             manager_id: self.manager_id,
             captured_handler_scope: self
                 .captured_handler_scope
-                .clone()
+                .as_ref()
+                .filter(|scope| scope.upgrade().is_some())
+                .cloned()
                 .or_else(|| crate::manager::current_manager_handler_scope_token(self.manager_id)),
         }
     }

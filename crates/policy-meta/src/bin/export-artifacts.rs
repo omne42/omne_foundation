@@ -1,6 +1,6 @@
 use std::{error::Error, path::PathBuf};
 
-use policy_meta::artifacts::{
+use policy_meta::{
     check_profiles_dir, check_schema_dir, check_typescript_bindings, write_profiles_dir,
     write_schema_dir, write_typescript_bindings,
 };

@@ -1,6 +1,6 @@
 use std::{error::Error, path::PathBuf};
 
-use policy_meta::artifacts::{check_typescript_bindings, write_typescript_bindings};
+use policy_meta::{check_typescript_bindings, write_typescript_bindings};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut check = false;

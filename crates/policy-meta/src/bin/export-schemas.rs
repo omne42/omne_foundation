@@ -1,6 +1,6 @@
 use std::{error::Error, path::PathBuf};
 
-use policy_meta::artifacts::{check_schema_dir, write_schema_dir};
+use policy_meta::{check_schema_dir, write_schema_dir};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut check = false;

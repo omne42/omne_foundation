@@ -6,6 +6,9 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ## [Unreleased]
 
+### Fixed
+- `ResolveLocaleError` structured-text construction no longer panics when schema validation fails; it now degrades to freeform fallback text so locale resolution errors remain renderable.
+
 ### Changed
 - Established crate-local changelog ownership now that `omne_foundation` tracks release notes per crate instead of at the repository root.
 - Narrowed `i18n-kit` around translation/catalog responsibilities and continued the move away from the old generic structured-error boundary.

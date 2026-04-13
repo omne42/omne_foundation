@@ -181,11 +181,17 @@ fn normalize_config(
 
     let url = parse_and_validate_https_url_basic(&url)?;
     let payload_field = normalize_payload_field(payload_field)?;
+    let explicit_allowed_hosts = normalize_nonempty_trimmed_vec(allowed_hosts.clone());
+    let explicit_path_prefix = path_prefix
+        .as_ref()
+        .and_then(|prefix| normalize_optional_trimmed(prefix.clone()));
     let (allowed_hosts, path_prefix) =
         normalize_security_scope(&url, allowed_hosts, path_prefix, mode)?;
 
     validate_security_requirements(
         enforce_public_ip,
+        &explicit_allowed_hosts,
+        explicit_path_prefix.as_deref(),
         &allowed_hosts,
         path_prefix.as_deref(),
         mode,
@@ -267,6 +273,8 @@ fn normalize_allowed_hosts(
 
 fn validate_security_requirements(
     enforce_public_ip: bool,
+    explicit_allowed_hosts: &[String],
+    explicit_path_prefix: Option<&str>,
     allowed_hosts: &[String],
     path_prefix: Option<&str>,
     mode: GenericWebhookValidationMode,
@@ -277,15 +285,15 @@ fn validate_security_requirements(
                 anyhow::anyhow!("generic webhook strict mode requires public ip check").into(),
             );
         }
-        if mode == GenericWebhookValidationMode::StrictByDefault {
+        if explicit_allowed_hosts.is_empty() {
             return Err(anyhow::anyhow!(
-                "generic webhook default constructor requires public ip check"
+                "generic webhook disabling public ip check requires explicit allowed_hosts"
             )
             .into());
         }
-        if allowed_hosts.is_empty() {
+        if explicit_path_prefix.is_none() && path_prefix.is_none() {
             return Err(anyhow::anyhow!(
-                "generic webhook disabling public ip check requires allowed_hosts"
+                "generic webhook disabling public ip check requires path_prefix"
             )
             .into());
         }
@@ -409,7 +417,32 @@ mod tests {
         let cfg =
             GenericWebhookConfig::new("https://example.com/webhook").with_public_ip_check(false);
         let err = GenericWebhookSink::new(cfg).expect_err("expected invalid config");
-        assert!(err.to_string().contains("public ip"), "{err:#}");
+        assert!(
+            err.to_string().contains("explicit allowed_hosts"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn disabling_public_ip_check_accepts_explicit_allowlist() {
+        let cfg = GenericWebhookConfig::new("https://example.com/hooks/notify")
+            .with_public_ip_check(false)
+            .with_allowed_hosts(vec!["example.com".to_string()]);
+        let sink = GenericWebhookSink::new(cfg).expect("build sink");
+        assert_eq!(sink.url.host_str().unwrap_or(""), "example.com");
+        assert!(sink.url.path().starts_with("/hooks/"));
+    }
+
+    #[test]
+    fn disabling_public_ip_check_rejects_derived_allowlist_only() {
+        let cfg = GenericWebhookConfig::new("https://example.com/hooks/notify")
+            .with_public_ip_check(false)
+            .with_allowed_hosts(vec!["   ".to_string()]);
+        let err = GenericWebhookSink::new(cfg).expect_err("expected invalid config");
+        assert!(
+            err.to_string().contains("explicit allowed_hosts"),
+            "{err:#}"
+        );
     }
 
     #[test]

@@ -33,6 +33,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
 
 mod background_runtime;
+mod close_lock;
 mod error {
     use error_kit::{ErrorCategory, ErrorCode, ErrorRecord, ErrorRetryAdvice};
     use serde_json::Value;
@@ -361,6 +362,7 @@ mod streamable_http;
 mod tests;
 
 use background_runtime::{DetachedSpawner, DetachedTask, spawn_fallback_detached};
+use close_lock::{lock_with_timeout, lock_with_timeout_without_runtime, replace_write_with_sink};
 pub use error::{Error, ProtocolError, ProtocolErrorKind};
 use stdout_log::LogState;
 
@@ -870,7 +872,7 @@ impl BatchResponseWriter {
         }
 
         let Some(mut responses) =
-            try_lock_without_runtime(&self.state.responses, CLOSE_LOCK_ACQUIRE_TIMEOUT)
+            lock_with_timeout_without_runtime(&self.state.responses, CLOSE_LOCK_ACQUIRE_TIMEOUT)
         else {
             self.complete_reserved_slot();
             self.state.handle.schedule_close_once(format!(
@@ -1164,8 +1166,7 @@ impl ClientHandle {
     }
 
     async fn finish_close_write(&self) -> bool {
-        let Some(mut write) =
-            try_lock_async_with_yield(&self.write, CLOSE_LOCK_ACQUIRE_TIMEOUT).await
+        let Some(mut write) = lock_with_timeout(&self.write, CLOSE_LOCK_ACQUIRE_TIMEOUT).await
         else {
             return false;
         };
@@ -1174,7 +1175,8 @@ impl ClientHandle {
     }
 
     fn finish_close_write_without_runtime(&self) -> bool {
-        let Some(mut write) = try_lock_without_runtime(&self.write, CLOSE_LOCK_ACQUIRE_TIMEOUT)
+        let Some(mut write) =
+            lock_with_timeout_without_runtime(&self.write, CLOSE_LOCK_ACQUIRE_TIMEOUT)
         else {
             return false;
         };
@@ -2553,47 +2555,6 @@ fn maybe_shrink_line_buffer(buf: &mut Vec<u8>, max_bytes: usize) {
     if buf.capacity() > retain && buf.len() <= retain {
         buf.shrink_to(retain);
     }
-}
-
-async fn try_lock_async_with_yield<'a, T>(
-    mutex: &'a tokio::sync::Mutex<T>,
-    timeout: Duration,
-) -> Option<tokio::sync::MutexGuard<'a, T>> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        if let Ok(guard) = mutex.try_lock() {
-            return Some(guard);
-        }
-        if std::time::Instant::now() >= deadline {
-            return None;
-        }
-        tokio::task::yield_now().await;
-    }
-}
-
-fn try_lock_without_runtime<'a, T>(
-    mutex: &'a tokio::sync::Mutex<T>,
-    timeout: Duration,
-) -> Option<tokio::sync::MutexGuard<'a, T>> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        if let Ok(guard) = mutex.try_lock() {
-            return Some(guard);
-        }
-        if std::time::Instant::now() >= deadline {
-            return None;
-        }
-        std::thread::yield_now();
-    }
-}
-
-fn replace_write_with_sink(
-    write: &mut tokio::sync::MutexGuard<'_, Box<dyn AsyncWrite + Send + Unpin>>,
-) {
-    let _ = futures_util::FutureExt::now_or_never(write.shutdown());
-    // Many `AsyncWrite` impls (e.g. `tokio::process::ChildStdin`) only fully close on drop.
-    // Replacing the writer guarantees the underlying write end is closed.
-    let _ = std::mem::replace(&mut **write, Box::new(tokio::io::sink()));
 }
 
 fn truncate_string(mut s: String, max_bytes: usize) -> String {

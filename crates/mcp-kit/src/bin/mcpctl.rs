@@ -441,12 +441,19 @@ mod tests {
         }
 
         let current_exe = std::env::current_exe()?;
-        let status = Command::new(current_exe)
+        let output = Command::new(current_exe)
+            .arg("--exact")
             .arg(CWD_UNAVAILABLE_TEST_FILTER)
+            .arg("--quiet")
             .env(CWD_UNAVAILABLE_HELPER_ENV, "1")
-            .env("RUST_TEST_THREADS", "1")
-            .status()?;
-        assert!(status.success(), "helper process should exit cleanly");
+            .arg("--test-threads=1")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "helper process should exit cleanly\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         Ok(())
     }
 }

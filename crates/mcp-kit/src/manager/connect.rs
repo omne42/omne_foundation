@@ -136,8 +136,7 @@ pub(crate) fn raw_server_config_identity(
 
 fn resolve_unix_path_for_connection(unix_path: &Path, cwd: &Path) -> anyhow::Result<PathBuf> {
     let cwd = super::resolve_connection_cwd(cwd)?;
-    super::path_identity::stable_path_identity(&absolutize_with_base(unix_path, &cwd))
-        .map_err(Into::into)
+    super::stable_path_identity(&absolutize_with_base(unix_path, &cwd)).map_err(Into::into)
 }
 
 pub(crate) fn effective_server_config_identity(
@@ -571,9 +570,8 @@ pub(super) fn stdout_log_path_within_root(
     }
 
     let resolved_stdout_log_path = absolutize_with_base(stdout_log_path, root);
-    let resolved_root = super::path_identity::stable_path_identity(root)?;
-    let resolved_stdout_log_path =
-        super::path_identity::stable_path_identity(&resolved_stdout_log_path)?;
+    let resolved_root = super::stable_path_identity(root)?;
+    let resolved_stdout_log_path = super::stable_path_identity(&resolved_stdout_log_path)?;
     Ok(resolved_stdout_log_path.starts_with(&resolved_root))
 }
 
@@ -846,7 +844,7 @@ mod tests {
         let identity = effective_server_config_identity(&ctx, "srv", &server_cfg, &cwd)
             .expect("resolve unix identity");
         let expected =
-            crate::manager::stable_path_identity(&tempdir.path().join("workspace/m.sock"))
+            crate::path_identity::stable_path_identity(&tempdir.path().join("workspace/m.sock"))
                 .expect("stable unix path identity");
 
         assert_eq!(

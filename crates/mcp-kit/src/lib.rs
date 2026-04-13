@@ -49,6 +49,7 @@ mod config;
 mod error;
 mod manager;
 pub mod mcp;
+mod path_identity;
 mod protocol;
 mod security;
 mod server_name;

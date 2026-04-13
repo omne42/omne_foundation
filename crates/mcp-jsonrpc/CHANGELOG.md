@@ -7,6 +7,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：`Client::wait_with_timeout` 的文档现在明确 close-stage writer 收敛也计入整体超时；即使没有 child process，close-stage 超时时也会返回 `ProtocolErrorKind::WaitTimeout`，避免 API 契约继续和实现脱节。
+- `mcp-jsonrpc`：`streamable_http` 在未知长度 JSON 成功响应上不再“读到首个完整文档就立刻成功”；现在会在短暂尾字节观察窗内拒绝后续非空尾字节，同时仍避免 `request_timeout = None` 时被 keep-alive 连接无限挂住，并补上对应集成回归测试。
 - `mcp-jsonrpc`：close/batch fallback 的 writer lock 等待从 `try_lock + yield` 忙等改成真正的有界等待；保持 `CLOSE_LOCK_ACQUIRE_TIMEOUT` 超时语义不变，同时降低 close 路径在锁竞争下的 CPU 放大风险。
 - `mcp-jsonrpc`：将 close 相关的锁等待与写端替换 helper 从 `src/lib.rs` 拆到独立 `src/close_lock.rs`，并补充 crate-local 回归测试覆盖 async/no-runtime 的有界超时语义。
 - `mcp-jsonrpc`：`schedule_close_once(...)` 在 detached 调度失败后会优先把 bounded close fallback 交给独立线程执行，而不是在当前 async 调用栈里内联收尾；关闭兜底不再把潜在的阻塞/二次 panic 风险带回 Tokio 上下文。

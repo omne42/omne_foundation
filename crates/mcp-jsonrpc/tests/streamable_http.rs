@@ -391,6 +391,93 @@ async fn streamable_http_propagates_mcp_session_id_and_updates() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streamable_http_unknown_length_json_rejects_non_empty_trailing_bytes() {
+    let Some(listener) = bind_loopback_listener_or_skip().await else {
+        return;
+    };
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => return,
+            };
+            tokio::spawn(async move {
+                let Some((req, body)) = read_http_request(&mut socket).await else {
+                    return;
+                };
+
+                match (req.method.as_str(), req.path.as_str()) {
+                    ("GET", "/mcp") => {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                    }
+                    ("POST", "/mcp") => {
+                        let parsed: serde_json::Value = match serde_json::from_slice(&body) {
+                            Ok(v) => v,
+                            Err(_) => return,
+                        };
+                        let id = parsed.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                        let response = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": { "ok": true },
+                        });
+                        let response = serde_json::to_vec(&response).unwrap();
+                        let headers = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: keep-alive\r\n\r\n";
+                        if socket.write_all(headers).await.is_err() {
+                            return;
+                        }
+                        if socket.write_all(&response).await.is_err() {
+                            return;
+                        }
+                        let _ = socket.flush().await;
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        let _ = socket.write_all(b"x").await;
+                        let _ = socket.flush().await;
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    _ => {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                    }
+                }
+            });
+        }
+    });
+
+    let url = format!("http://{addr}/mcp");
+    let client = mcp_jsonrpc::Client::connect_streamable_http(&url)
+        .await
+        .expect("connect streamable http");
+
+    let err = client
+        .request("ping", serde_json::json!({}))
+        .await
+        .expect_err("non-empty trailing bytes must fail");
+    match err {
+        mcp_jsonrpc::Error::Rpc { code, message, .. } => {
+            assert_eq!(code, -32000);
+            assert!(
+                message.contains("http response is not valid json"),
+                "unexpected rpc error message: {message}"
+            );
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    drop(client);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn streamable_http_retries_sse_when_session_id_changes_without_202() {
     #[derive(Default)]
     struct State {

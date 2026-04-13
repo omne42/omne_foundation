@@ -156,6 +156,7 @@ fn jsonrpc_request_id_from_line(line: &[u8]) -> Result<Option<crate::Id>, serde_
 const SSE_EVENT_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 const HTTP_RESPONSE_INITIAL_CAP_BYTES: usize = 64 * 1024;
 const HTTP_RESPONSE_UNKNOWN_LENGTH_INITIAL_CAP_BYTES: usize = 4 * 1024;
+const HTTP_RESPONSE_UNKNOWN_LENGTH_TRAILING_GRACE: Duration = Duration::from_millis(50);
 
 fn is_transport_owned_streamable_http_header(header: &str) -> bool {
     header.eq_ignore_ascii_case(crate::STREAMABLE_HTTP_SESSION_ID_HEADER)
@@ -1169,7 +1170,21 @@ async fn read_json_response_body_limited(
         .min(HTTP_RESPONSE_INITIAL_CAP_BYTES);
     let mut out = Vec::with_capacity(initial_capacity);
     let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    let mut saw_complete_document = false;
+    loop {
+        let next_chunk = if saw_complete_document {
+            match tokio::time::timeout(HTTP_RESPONSE_UNKNOWN_LENGTH_TRAILING_GRACE, stream.next())
+                .await
+            {
+                Ok(next_chunk) => next_chunk,
+                Err(_) => return Ok(out),
+            }
+        } else {
+            stream.next().await
+        };
+        let Some(chunk) = next_chunk else {
+            return Ok(out);
+        };
         let chunk = chunk.map_err(ReadBodyError::Http)?;
         let next_len = out.len().saturating_add(chunk.len());
         if next_len > max_message_bytes {
@@ -1180,18 +1195,14 @@ async fn read_json_response_body_limited(
         out.extend_from_slice(&chunk);
 
         // Keep-alive HTTP/1.1 responses without an explicit length can legally defer EOF
-        // indefinitely. For JSON success bodies we can stop as soon as one complete document
-        // has arrived instead of waiting for the socket to close.
+        // indefinitely. Once one complete JSON document has arrived, wait only a short grace
+        // window for any trailing bytes before treating the body as complete.
         match complete_json_document_len(&out) {
-            Ok(Some(document_len)) => {
-                out.truncate(document_len);
-                return Ok(out);
-            }
-            Ok(None) => {}
+            Ok(Some(_)) => saw_complete_document = true,
+            Ok(None) => saw_complete_document = false,
             Err(_) => return Ok(out),
         }
     }
-    Ok(out)
 }
 
 fn complete_json_document_len(body: &[u8]) -> Result<Option<usize>, serde_json::Error> {

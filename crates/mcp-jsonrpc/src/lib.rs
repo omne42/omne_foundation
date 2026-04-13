@@ -1750,8 +1750,13 @@ impl Client {
 
     /// Closes the client and waits for the underlying child process to exit, up to `timeout`.
     ///
+    /// This method still performs the close-stage writer convergence before checking whether a
+    /// child process exists. If that close stage exhausts `timeout`, it can return
+    /// `ProtocolErrorKind::WaitTimeout` even for clients without a child process.
+    ///
     /// If this client has no child process (e.g. created via `connect_io`, `connect_unix`, or
-    /// `connect_streamable_http*`), this returns `Ok(None)` without waiting.
+    /// `connect_streamable_http*`) and the close stage finishes before `timeout`, this returns
+    /// `Ok(None)`.
     ///
     /// On timeout:
     /// - `WaitOnTimeout::ReturnError` returns an `Error::Protocol` with kind

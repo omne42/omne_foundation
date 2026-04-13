@@ -1221,10 +1221,7 @@ impl ClientHandle {
             // thread first so we do not re-enter a blocking close path inline on the runtime
             // thread.
             let should_spawn_thread = tokio::runtime::Handle::try_current().is_ok();
-            if should_spawn_thread && self.spawn_close_fallback_thread().is_err() {
-                self.abort_background_tasks();
-                let _ = self.finish_close_write_without_runtime();
-            } else if !should_spawn_thread {
+            if !should_spawn_thread || self.spawn_close_fallback_thread().is_err() {
                 self.abort_background_tasks();
                 let _ = self.finish_close_write_without_runtime();
             }

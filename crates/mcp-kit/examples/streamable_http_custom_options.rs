@@ -79,10 +79,10 @@ fn print_help() {
     eprintln!("  - This example requires a real MCP server (transport=streamable_http).");
     eprintln!("  - If http_url is omitted, it defaults to sse_url.");
     eprintln!(
-        "  - This demonstrates custom mcp-jsonrpc StreamableHttpOptions + Manager::connect_jsonrpc."
+        "  - This demonstrates Manager::connect_streamable_http_split with custom StreamableHttpOptions."
     );
     eprintln!(
-        "  - Safety: this example explicitly uses TrustMode::Trusted because building the HTTP client yourself bypasses Manager's Untrusted streamable_http policy checks."
+        "  - Safety: this example explicitly uses TrustMode::Trusted to allow optional unsafe flags such as --follow-redirects."
     );
 }
 
@@ -110,28 +110,22 @@ async fn main() -> Result<()> {
         http_options.follow_redirects = true;
     }
 
-    let client = mcp_jsonrpc::Client::connect_streamable_http_split_with_options(
-        &sse_url,
-        &http_url,
-        http_options,
-        mcp_jsonrpc::SpawnOptions::default(),
-    )
-    .await
-    .with_context(|| {
-        if sse_url == http_url {
-            format!("connect streamable_http url={sse_url}")
-        } else {
-            format!("connect streamable_http sse_url={sse_url} http_url={http_url}")
-        }
-    })?;
-
     let mut manager = Manager::new(
         "streamable-http-custom-options",
         env!("CARGO_PKG_VERSION"),
         Duration::from_secs(30),
     )
     .with_trust_mode(mcp_kit::TrustMode::Trusted);
-    manager.connect_jsonrpc("remote", client).await?;
+    manager
+        .connect_streamable_http_split("remote", &sse_url, &http_url, http_options)
+        .await
+        .with_context(|| {
+            if sse_url == http_url {
+                format!("connect streamable_http url={sse_url}")
+            } else {
+                format!("connect streamable_http sse_url={sse_url} http_url={http_url}")
+            }
+        })?;
 
     let tools = manager
         .request_typed_connected::<mcp::ListToolsRequest>("remote", None)

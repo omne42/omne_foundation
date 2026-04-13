@@ -446,6 +446,10 @@ pub struct StreamableHttpOptions {
     ///
     /// Transport-owned headers such as `mcp-session-id` are rejected.
     pub headers: HashMap<String, String>,
+    /// Query pairs appended to both SSE and POST streamable_http URLs.
+    ///
+    /// Existing query pairs already present in the URLs are preserved.
+    pub query: HashMap<String, String>,
     /// Whether untrusted transports must pin the validated public IP set into the actual socket.
     pub enforce_public_ip: bool,
     /// Proxy environment loading policy for the unpinned HTTP client path.
@@ -470,6 +474,7 @@ impl Default for StreamableHttpOptions {
     fn default() -> Self {
         Self {
             headers: HashMap::new(),
+            query: HashMap::new(),
             enforce_public_ip: false,
             proxy_mode: StreamableHttpProxyMode::default(),
             connect_timeout: Some(Duration::from_secs(10)),

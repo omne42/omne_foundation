@@ -191,4 +191,10 @@ manager = manager.with_untrusted_streamable_http_policy(UntrustedStreamableHttpP
 - `Manager::connect_io_unchecked(...)`
 - `Manager::connect_jsonrpc_unchecked(...)`
 
-如果你需要调整 `mcp-jsonrpc` 的 `Limits` 或 streamable_http 的网络选项（例如 connect_timeout / redirects），推荐先用 `mcp-jsonrpc` 构建 `Client`，再用 `connect_jsonrpc` 接入；细节见 [`调优与限制`](tuning.md)。
+如果你只是想直连远程 `streamable_http` 并自定义 headers/query/timeout 等网络参数，优先使用：
+
+- `Manager::connect_streamable_http(...)`
+- `Manager::connect_streamable_http_split(...)`
+- 对应的 `*_session` 变体
+
+这些入口会保留 `Manager` 的 trust-mode 安全校验。只有在你确实需要自定义 `SpawnOptions` / `Limits` 时，再考虑先构建 `mcp-jsonrpc::Client` 并通过 `connect_jsonrpc` 接入；细节见 [`调优与限制`](tuning.md)。

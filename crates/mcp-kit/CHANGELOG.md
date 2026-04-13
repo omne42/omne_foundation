@@ -9,6 +9,9 @@
 
 > 计划下一个版本：`0.1.0`（包含若干 breaking changes；见下文标注）。
 
+### Changed
+- `mcp-kit`：`Manager` 新增 direct `streamable_http` connect/session helpers，可在不加载 `mcp.json` 的前提下直接建立远端 MCP 会话，同时保留 trust-mode、URL 校验和 transport-owned header 边界。
+
 ### Fixed
 - `mcp-kit`：将 `shared_manager` 的内嵌测试模块拆分到 `src/shared_manager/tests.rs`，仅保留模块声明与既有测试语义，降低主实现文件的多职责维护风险。
 - `mcp-kit`：统一 `streamable_http` 保留头边界，`Config::validate()` 现在与连接执行侧一致拒绝 `mcp-session-id`，避免出现“配置校验通过但 connect 失败”的契约漂移。
@@ -72,6 +75,7 @@
 - `mcp-kit`：`streamable_http.http_headers` 现在允许合法的空字符串 value，保持和 HTTP 头语义一致；仍继续拒绝空 key、保留 transport-owned header 和非法 header value。
 
 ### Changed
+- `mcp-kit`：新增 canonical remote `streamable_http` 直连 API（`Manager::connect_streamable_http*` 与 `*_session` 变体），支持直接传入 headers/query/timeout 等通用构造参数，并继续保留 trust-mode 安全边界而无需先手工拼接 `mcp_jsonrpc::Client`。
 - `mcp-kit`：`ErrorKind` 现在把 `mcp_jsonrpc::ProtocolErrorKind::{Closed,StreamableHttp}` 稳定归类为 `Connection`，并补上 `anyhow::Context` 包裹后的回归测试，避免可重试的 transport/streamable-http 故障被误判成协议错误。
 - `mcp-kit`：relative unix socket 连接回归测试现在改用更短的临时目录和 socket 文件名，并支持 `OMNE_TEST_SHORT_TMPDIR` 覆盖；workspace `ci` 在较长 worktree 路径下不再因为 `SUN_LEN` 限制偶发失败。
 - `mcp-kit`：`streamable_http` 文档现在明确 `request_timeout` 只约束单次 POST 的 send 与非流式响应读取；POST 成功返回 `text/event-stream` 时，持续产出的 SSE 响应流本身不受总时长限制，避免文档继续和 `mcp-jsonrpc` 的既有行为/回归测试相冲突。

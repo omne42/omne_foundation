@@ -77,7 +77,12 @@ server→client requests（需要 respond）同样进入有界队列：
 
 `mcp-kit` 默认使用 `mcp_jsonrpc::SpawnOptions::default()`（即默认 Limits）。
 
-如果你需要自定义 Limits（或 streamable_http 的 connect_timeout / follow_redirects 等），推荐路径是：
+如果你需要自定义 streamable_http 的网络参数（如 headers/query/connect_timeout/request_timeout/follow_redirects），优先使用：
+
+1. `Manager::connect_streamable_http(...)` 或 `connect_streamable_http_split(...)`
+2. 在需要高风险参数时显式切到 `TrustMode::Trusted`
+
+如果你还需要自定义 `SpawnOptions` / `Limits`，再使用下面这条高级路径：
 
 1. 直接用 `mcp-jsonrpc` 构建 client（带 options）
 2. 显式切换到 `TrustMode::Trusted` 后，用 `Manager::connect_jsonrpc(...)` 或 `connect_jsonrpc_session(...)` 接入

@@ -161,6 +161,24 @@ fn is_transport_owned_streamable_http_header(header: &str) -> bool {
     header.eq_ignore_ascii_case(crate::STREAMABLE_HTTP_SESSION_ID_HEADER)
 }
 
+fn append_query_pairs(
+    mut url: reqwest::Url,
+    query: &std::collections::HashMap<String, String>,
+) -> reqwest::Url {
+    if query.is_empty() {
+        return url;
+    }
+
+    {
+        let mut pairs = url.query_pairs_mut();
+        for (key, value) in query {
+            pairs.append_pair(key, value);
+        }
+    }
+
+    url
+}
+
 impl Client {
     pub async fn connect_streamable_http(url: &str) -> Result<Self, Error> {
         Self::connect_streamable_http_with_options(
@@ -272,6 +290,7 @@ impl Client {
         let error_body_preview_bytes = http_options.error_body_preview_bytes;
         let enforce_public_ip = http_options.enforce_public_ip;
         let proxy_mode = http_options.proxy_mode;
+        let query = http_options.query;
         if connect_timeout.is_some() || request_timeout.is_some() {
             crate::ensure_tokio_time_driver("Client::connect_streamable_http*_with_options")?;
         }
@@ -325,6 +344,8 @@ impl Client {
                 format!("invalid post url: {err}"),
             )
         })?;
+        let sse_url = append_query_pairs(sse_url, &query);
+        let post_url = append_query_pairs(post_url, &query);
 
         let (client_stream, bridge_stream) = tokio::io::duplex(1024 * 64);
         let (client_read, client_write) = tokio::io::split(client_stream);
@@ -1430,6 +1451,23 @@ mod tests {
     }
 
     #[test]
+    fn append_query_pairs_keeps_existing_pairs_and_adds_new_entries() {
+        let url = reqwest::Url::parse("https://example.invalid/mcp?existing=yes").unwrap();
+        let query = HashMap::from([
+            ("client".to_string(), "mcp-kit".to_string()),
+            ("mode".to_string(), "test".to_string()),
+        ]);
+        let with_query = append_query_pairs(url, &query);
+        let pairs = with_query
+            .query_pairs()
+            .into_owned()
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(pairs.get("existing"), Some(&"yes".to_string()));
+        assert_eq!(pairs.get("client"), Some(&"mcp-kit".to_string()));
+        assert_eq!(pairs.get("mode"), Some(&"test".to_string()));
+    }
+
+    #[test]
     fn body_preview_text_is_bounded_by_max_bytes() {
         let body = b"abcdefghijklmnopqrstuvwxyz";
         let preview = http_kit::body_preview_text(body, 8).expect("preview available");
@@ -1879,6 +1917,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streamable_http_connect_appends_query_to_sse_and_post_urls() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let base_url = format!("http://{addr}");
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut sse_stream, _) =
+                tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                    .await
+                    .expect("accept SSE timed out")
+                    .expect("accept SSE");
+            let sse_request = read_http_request(&mut sse_stream)
+                .await
+                .expect("read SSE request");
+            assert_eq!(sse_request.method, "GET");
+            assert_eq!(request_path_only(&sse_request.path), "/sse");
+            assert_eq!(
+                request_query_pairs(&sse_request.path),
+                BTreeMap::from([
+                    ("client".to_string(), "mcp-kit".to_string()),
+                    ("mode".to_string(), "test".to_string()),
+                ])
+            );
+            write_chunked_response_headers(
+                &mut sse_stream,
+                "200 OK",
+                &[("content-type", "text/event-stream")],
+            )
+            .await
+            .expect("write SSE headers");
+
+            let (mut post_stream, _) =
+                tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                    .await
+                    .expect("accept POST timed out")
+                    .expect("accept POST");
+            let post_request = read_http_request(&mut post_stream)
+                .await
+                .expect("read POST request");
+            assert_eq!(post_request.method, "POST");
+            assert_eq!(request_path_only(&post_request.path), "/post");
+            assert_eq!(
+                request_query_pairs(&post_request.path),
+                BTreeMap::from([
+                    ("client".to_string(), "mcp-kit".to_string()),
+                    ("mode".to_string(), "test".to_string()),
+                ])
+            );
+            let payload: Value = serde_json::from_slice(&post_request.body).expect("parse post");
+            let response = serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": payload["id"],
+                "result": { "ok": true }
+            }))
+            .expect("serialize response");
+            write_fixed_response(
+                &mut post_stream,
+                "200 OK",
+                &[("content-type", "application/json")],
+                &response,
+            )
+            .await
+            .expect("write POST response");
+            drop(post_stream);
+            let _ = close_rx.await;
+            drop(sse_stream);
+        });
+
+        let client = Client::connect_streamable_http_split_with_options(
+            &format!("{base_url}/sse"),
+            &format!("{base_url}/post"),
+            StreamableHttpOptions {
+                query: HashMap::from([
+                    ("client".to_string(), "mcp-kit".to_string()),
+                    ("mode".to_string(), "test".to_string()),
+                ]),
+                ..Default::default()
+            },
+            SpawnOptions::default(),
+        )
+        .await
+        .expect("connect streamable http");
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.request("demo/trigger", serde_json::json!({ "source": "test" })),
+        )
+        .await
+        .expect("request timed out")
+        .expect("request should succeed");
+        assert_eq!(response["ok"], serde_json::json!(true));
+
+        let _ = close_tx.send(());
+        client.close("test complete").await;
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("server task join timed out")
+            .expect("server task should join");
+    }
+
+    #[tokio::test]
     async fn streamable_http_rejects_transport_owned_session_header_override() {
         let err = Client::connect_streamable_http_split_with_options(
             "http://127.0.0.1:1/sse",
@@ -1972,6 +2113,19 @@ mod tests {
 
     fn header(request: &HttpRequest, name: &str) -> Option<String> {
         request.headers.get(&name.to_ascii_lowercase()).cloned()
+    }
+
+    fn request_path_only(path: &str) -> &str {
+        path.split_once('?').map_or(path, |(prefix, _)| prefix)
+    }
+
+    fn request_query_pairs(path: &str) -> BTreeMap<String, String> {
+        let query = path.split_once('?').map_or("", |(_, query)| query);
+        reqwest::Url::parse(&format!("http://example.invalid/?{query}"))
+            .expect("query URL should parse")
+            .query_pairs()
+            .into_owned()
+            .collect()
     }
 
     async fn write_fixed_response(

@@ -75,6 +75,72 @@ impl Manager {
         })?)
     }
 
+    pub async fn connect_streamable_http_session(
+        &mut self,
+        server_name: &str,
+        url: &str,
+        http_options: mcp_jsonrpc::StreamableHttpOptions,
+    ) -> crate::Result<Session> {
+        self.connect_streamable_http(server_name, url, http_options)
+            .await?;
+        Ok(self.take_session(server_name).ok_or_else(|| {
+            tagged_message(
+                ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?)
+    }
+
+    pub async fn connect_streamable_http_session_named(
+        &mut self,
+        server_name: &ServerName,
+        url: &str,
+        http_options: mcp_jsonrpc::StreamableHttpOptions,
+    ) -> crate::Result<Session> {
+        self.connect_streamable_http_named(server_name, url, http_options)
+            .await?;
+        Ok(self.take_session_named(server_name).ok_or_else(|| {
+            tagged_message(
+                ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?)
+    }
+
+    pub async fn connect_streamable_http_split_session(
+        &mut self,
+        server_name: &str,
+        sse_url: &str,
+        post_url: &str,
+        http_options: mcp_jsonrpc::StreamableHttpOptions,
+    ) -> crate::Result<Session> {
+        self.connect_streamable_http_split(server_name, sse_url, post_url, http_options)
+            .await?;
+        Ok(self.take_session(server_name).ok_or_else(|| {
+            tagged_message(
+                ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?)
+    }
+
+    pub async fn connect_streamable_http_split_session_named(
+        &mut self,
+        server_name: &ServerName,
+        sse_url: &str,
+        post_url: &str,
+        http_options: mcp_jsonrpc::StreamableHttpOptions,
+    ) -> crate::Result<Session> {
+        self.connect_streamable_http_split_named(server_name, sse_url, post_url, http_options)
+            .await?;
+        Ok(self.take_session_named(server_name).ok_or_else(|| {
+            tagged_message(
+                ErrorKind::ManagerState,
+                format!("mcp server not connected: {server_name}"),
+            )
+        })?)
+    }
+
     pub async fn connect_io_session<R, W>(
         &mut self,
         server_name: &str,

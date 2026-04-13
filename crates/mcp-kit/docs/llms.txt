@@ -827,7 +827,13 @@ manager = manager.with_untrusted_streamable_http_policy(UntrustedStreamableHttpP
 - `Manager::connect_io_unchecked(...)`
 - `Manager::connect_jsonrpc_unchecked(...)`
 
-如果你需要调整 `mcp-jsonrpc` 的 `Limits` 或 streamable_http 的网络选项（例如 connect_timeout / redirects），推荐先用 `mcp-jsonrpc` 构建 `Client`，再用 `connect_jsonrpc` 接入；细节见 [`调优与限制`](tuning.md)。
+如果你只是想直连远程 `streamable_http` 并自定义 headers/query/timeout 等网络参数，优先使用：
+
+- `Manager::connect_streamable_http(...)`
+- `Manager::connect_streamable_http_split(...)`
+- 对应的 `*_session` 变体
+
+这些入口会保留 `Manager` 的 trust-mode 安全校验。只有在你确实需要自定义 `SpawnOptions` / `Limits` 时，再考虑先构建 `mcp-jsonrpc::Client` 并通过 `connect_jsonrpc` 接入；细节见 [`调优与限制`](tuning.md)。
 
 ---
 
@@ -1418,7 +1424,12 @@ server→client requests（需要 respond）同样进入有界队列：
 
 `mcp-kit` 默认使用 `mcp_jsonrpc::SpawnOptions::default()`（即默认 Limits）。
 
-如果你需要自定义 Limits（或 streamable_http 的 connect_timeout / follow_redirects 等），推荐路径是：
+如果你需要自定义 streamable_http 的网络参数（如 headers/query/connect_timeout/request_timeout/follow_redirects），优先使用：
+
+1. `Manager::connect_streamable_http(...)` 或 `connect_streamable_http_split(...)`
+2. 在需要高风险参数时显式切到 `TrustMode::Trusted`
+
+如果你还需要自定义 `SpawnOptions` / `Limits`，再使用下面这条高级路径：
 
 1. 直接用 `mcp-jsonrpc` 构建 client（带 options）
 2. 显式切换到 `TrustMode::Trusted` 后，用 `Manager::connect_jsonrpc(...)` 或 `connect_jsonrpc_session(...)` 接入
@@ -1820,10 +1831,10 @@ MCP/JSON-RPC 允许 server 主动发消息给 client：
 - `streamable_http_split`（需要真实 server；演示拆分 `sse_url/http_url`）：
   - 源码：`examples/streamable_http_split.rs`
   - 运行：`cargo run -p mcp-kit --example streamable_http_split -- <sse_url> <http_url>`
-- `streamable_http_custom_options`（需要真实 server；演示自定义 `StreamableHttpOptions` 的网络参数，并通过 `connect_jsonrpc` 接入）：
+- `streamable_http_custom_options`（需要真实 server；演示自定义 `StreamableHttpOptions` 的网络参数，并通过 `connect_streamable_http_split` 直连）：
   - 源码：`examples/streamable_http_custom_options.rs`
   - 运行：`cargo run -p mcp-kit --example streamable_http_custom_options -- [flags] <sse_url> [http_url]`
-  - 注意：该路径会绕过 `Manager` 的 Untrusted `streamable_http` 出站策略校验；请仅在你**完全信任** URL/headers 的场景使用
+  - 注意：默认仍走 `Manager` 的安全边界；当开启 `--follow-redirects` 等高风险参数时，请显式在 Trusted 场景使用
 
 ## 1）最小远程配置（streamable_http）
 

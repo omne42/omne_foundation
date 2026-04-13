@@ -3651,6 +3651,87 @@ async fn untrusted_manager_refuses_streamable_http_auth_like_static_headers() {
 }
 
 #[tokio::test]
+async fn untrusted_manager_connect_streamable_http_refuses_non_https_url() {
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
+    assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
+
+    let err = manager
+        .connect_streamable_http(
+            "srv",
+            "http://example.com/mcp",
+            mcp_jsonrpc::StreamableHttpOptions::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("non-https"));
+}
+
+#[tokio::test]
+async fn untrusted_manager_connect_streamable_http_refuses_sensitive_headers() {
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
+    assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
+
+    let err = manager
+        .connect_streamable_http(
+            "srv",
+            "https://example.com/mcp",
+            mcp_jsonrpc::StreamableHttpOptions {
+                headers: std::collections::HashMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer test".to_string(),
+                )]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("sensitive http header"));
+}
+
+#[tokio::test]
+async fn connect_streamable_http_refuses_transport_owned_headers() {
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted);
+
+    for reserved in ["mcp-session-id", "mcp-protocol-version"] {
+        let err = manager
+            .connect_streamable_http(
+                "srv",
+                "https://example.com/mcp",
+                mcp_jsonrpc::StreamableHttpOptions {
+                    headers: std::collections::HashMap::from([(
+                        reserved.to_string(),
+                        "override".to_string(),
+                    )]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("reserved by transport"), "{err}");
+    }
+}
+
+#[tokio::test]
+async fn untrusted_manager_connect_streamable_http_refuses_follow_redirects() {
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
+    assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
+
+    let err = manager
+        .connect_streamable_http(
+            "srv",
+            "https://example.com/mcp",
+            mcp_jsonrpc::StreamableHttpOptions {
+                follow_redirects: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("follow streamable http redirects"));
+}
+
+#[tokio::test]
 async fn session_notify_timeout_does_not_close_client() {
     use std::pin::Pin;
     use std::sync::Arc;

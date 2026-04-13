@@ -12,6 +12,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::Child;
 
 use crate::error::{ErrorKind, tagged_message, wrap_kind};
+use crate::protocol::MCP_PROTOCOL_VERSION_HEADER;
 use crate::{
     Config, MCP_PROTOCOL_VERSION, Root, ServerConfig, ServerName, Session, TrustMode,
     UntrustedStreamableHttpPolicy,
@@ -196,6 +197,51 @@ fn reject_duplicate_custom_jsonrpc_client(
         lifecycle::reap_stale_child_best_effort(child);
     }
     duplicate_live_connection_error(server_name, "custom JSON-RPC client")
+}
+
+const STREAMABLE_HTTP_SESSION_ID_HEADER: &str = "mcp-session-id";
+
+#[derive(Debug, Clone)]
+enum DirectStreamableHttpTarget {
+    Single { url: String },
+    Split { sse_url: String, post_url: String },
+}
+
+fn is_transport_owned_direct_streamable_http_header(header: &str) -> bool {
+    header.eq_ignore_ascii_case(STREAMABLE_HTTP_SESSION_ID_HEADER)
+        || header.eq_ignore_ascii_case(MCP_PROTOCOL_VERSION_HEADER)
+}
+
+fn validate_direct_streamable_http_headers(headers: &HashMap<String, String>) -> crate::Result<()> {
+    for (header, value) in headers {
+        if header.trim().is_empty() {
+            return Err(tagged_message(
+                ErrorKind::Config,
+                "streamable_http header name must not be empty",
+            )
+            .into());
+        }
+        if is_transport_owned_direct_streamable_http_header(header) {
+            return Err(tagged_message(
+                ErrorKind::Config,
+                format!("streamable_http header is reserved by transport: {header}"),
+            )
+            .into());
+        }
+        reqwest::header::HeaderName::from_bytes(header.as_bytes()).map_err(|_| {
+            tagged_message(
+                ErrorKind::Config,
+                format!("invalid streamable_http header name: {header}"),
+            )
+        })?;
+        reqwest::header::HeaderValue::from_str(value).map_err(|_| {
+            tagged_message(
+                ErrorKind::Config,
+                format!("invalid streamable_http header value: {header}"),
+            )
+        })?;
+    }
+    Ok(())
 }
 
 pub(crate) fn contains_wait_timeout(err: &anyhow::Error) -> bool {
@@ -1349,6 +1395,213 @@ impl Manager {
             ctx,
         });
         self.finish_transport_lifecycle(lifecycle.run().await)
+    }
+
+    /// Connect a remote `streamable_http` MCP server directly (without loading `mcp.json`) and
+    /// perform MCP initialize.
+    ///
+    /// This path preserves `Manager` trust-mode checks. In `Untrusted` mode it still enforces
+    /// streamable_http URL checks and rejects sensitive outbound headers.
+    pub async fn connect_streamable_http(
+        &mut self,
+        server_name: &str,
+        url: &str,
+        http_options: mcp_jsonrpc::StreamableHttpOptions,
+    ) -> crate::Result<()> {
+        Ok(self
+            .connect_streamable_http_with_builder(
+                server_name,
+                || parse_server_name_anyhow(server_name),
+                DirectStreamableHttpTarget::Single {
+                    url: url.to_string(),
+                },
+                http_options,
+            )
+            .await?)
+    }
+
+    pub async fn connect_streamable_http_named(
+        &mut self,
+        server_name: &ServerName,
+        url: &str,
+        http_options: mcp_jsonrpc::StreamableHttpOptions,
+    ) -> crate::Result<()> {
+        let server_name_key = server_name.clone();
+        Ok(self
+            .connect_streamable_http_with_builder(
+                server_name.as_str(),
+                || Ok(server_name_key),
+                DirectStreamableHttpTarget::Single {
+                    url: url.to_string(),
+                },
+                http_options,
+            )
+            .await?)
+    }
+
+    /// Connect a remote `streamable_http` MCP server using split SSE and POST URLs (without
+    /// loading `mcp.json`) and perform MCP initialize.
+    ///
+    /// This path preserves `Manager` trust-mode checks. In `Untrusted` mode it still enforces
+    /// streamable_http URL checks and rejects sensitive outbound headers.
+    pub async fn connect_streamable_http_split(
+        &mut self,
+        server_name: &str,
+        sse_url: &str,
+        post_url: &str,
+        http_options: mcp_jsonrpc::StreamableHttpOptions,
+    ) -> crate::Result<()> {
+        Ok(self
+            .connect_streamable_http_with_builder(
+                server_name,
+                || parse_server_name_anyhow(server_name),
+                DirectStreamableHttpTarget::Split {
+                    sse_url: sse_url.to_string(),
+                    post_url: post_url.to_string(),
+                },
+                http_options,
+            )
+            .await?)
+    }
+
+    pub async fn connect_streamable_http_split_named(
+        &mut self,
+        server_name: &ServerName,
+        sse_url: &str,
+        post_url: &str,
+        http_options: mcp_jsonrpc::StreamableHttpOptions,
+    ) -> crate::Result<()> {
+        let server_name_key = server_name.clone();
+        Ok(self
+            .connect_streamable_http_with_builder(
+                server_name.as_str(),
+                || Ok(server_name_key),
+                DirectStreamableHttpTarget::Split {
+                    sse_url: sse_url.to_string(),
+                    post_url: post_url.to_string(),
+                },
+                http_options,
+            )
+            .await?)
+    }
+
+    async fn connect_streamable_http_with_builder<F>(
+        &mut self,
+        _server_name: &str,
+        build_server_name: F,
+        target: DirectStreamableHttpTarget,
+        mut http_options: mcp_jsonrpc::StreamableHttpOptions,
+    ) -> anyhow::Result<()>
+    where
+        F: FnOnce() -> anyhow::Result<ServerName>,
+    {
+        validate_direct_streamable_http_headers(&http_options.headers)?;
+
+        let (sse_url, post_url, sse_url_field, post_url_field) = match target {
+            DirectStreamableHttpTarget::Single { url } => (url.clone(), url, "url", "url"),
+            DirectStreamableHttpTarget::Split { sse_url, post_url } => {
+                (sse_url, post_url, "sse_url", "http_url")
+            }
+        };
+        reqwest::Url::parse(&sse_url)
+            .with_context(|| {
+                format!("invalid streamable http url (field={sse_url_field}) (url redacted)")
+            })
+            .map_err(|err| wrap_kind(ErrorKind::Config, err))?;
+        reqwest::Url::parse(&post_url)
+            .with_context(|| {
+                format!("invalid streamable http url (field={post_url_field}) (url redacted)")
+            })
+            .map_err(|err| wrap_kind(ErrorKind::Config, err))?;
+
+        let server_name_key = build_server_name()?;
+        if self.is_connected_and_alive(server_name_key.as_str()) {
+            return Err(duplicate_live_connection_error(
+                &server_name_key,
+                "streamable_http connection",
+            ));
+        }
+        self.clear_connection_cwd(server_name_key.as_str());
+
+        streamable_http_validation::validate_untrusted_streamable_http_headers(
+            self.trust_mode,
+            server_name_key.as_str(),
+            http_options.headers.keys().map(String::as_str),
+        )?;
+        if self.trust_mode != TrustMode::Trusted {
+            streamable_http_validation::validate_streamable_http_url_untrusted(
+                &self.untrusted_streamable_http_policy,
+                server_name_key.as_str(),
+                sse_url_field,
+                &sse_url,
+            )?;
+            if post_url != sse_url {
+                streamable_http_validation::validate_streamable_http_url_untrusted(
+                    &self.untrusted_streamable_http_policy,
+                    server_name_key.as_str(),
+                    post_url_field,
+                    &post_url,
+                )?;
+            }
+
+            if http_options.follow_redirects {
+                config_bail!(
+                    "refusing to follow streamable http redirects in untrusted mode: {server_name_key} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
+                );
+            }
+
+            streamable_http_validation::validate_streamable_http_url_untrusted_dns(
+                &self.untrusted_streamable_http_policy,
+                server_name_key.as_str(),
+                sse_url_field,
+                &sse_url,
+            )
+            .await?;
+            if post_url != sse_url {
+                streamable_http_validation::validate_streamable_http_url_untrusted_dns(
+                    &self.untrusted_streamable_http_policy,
+                    server_name_key.as_str(),
+                    post_url_field,
+                    &post_url,
+                )
+                .await?;
+            }
+            http_options.enforce_public_ip = !self
+                .untrusted_streamable_http_policy
+                .outbound
+                .allow_private_ips;
+        }
+
+        if http_options.request_timeout.is_none() {
+            http_options.request_timeout = Some(self.request_timeout);
+        }
+        http_options.headers.insert(
+            MCP_PROTOCOL_VERSION_HEADER.to_string(),
+            self.protocol_version.clone(),
+        );
+
+        let client = mcp_jsonrpc::Client::connect_streamable_http_split_with_options(
+            &sse_url,
+            &post_url,
+            http_options,
+            mcp_jsonrpc::SpawnOptions::default(),
+        )
+        .await
+        .with_context(|| {
+            if sse_url == post_url {
+                format!(
+                    "connect streamable http mcp server (server={server_name_key} field={sse_url_field}) (url redacted)"
+                )
+            } else {
+                format!(
+                    "connect streamable http mcp server (server={server_name_key} fields={sse_url_field},{post_url_field}) (urls redacted)"
+                )
+            }
+        })?;
+
+        self.install_connection_parsed(server_name_key, client, None)
+            .await?;
+        Ok(())
     }
 
     /// Attach an already-connected `mcp_jsonrpc::Client` and perform MCP initialize.

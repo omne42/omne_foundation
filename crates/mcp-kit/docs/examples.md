@@ -29,10 +29,10 @@
 - `streamable_http_split`（需要真实 server；演示拆分 `sse_url/http_url`）：
   - 源码：`examples/streamable_http_split.rs`
   - 运行：`cargo run -p mcp-kit --example streamable_http_split -- <sse_url> <http_url>`
-- `streamable_http_custom_options`（需要真实 server；演示自定义 `StreamableHttpOptions` 的网络参数，并通过 `connect_jsonrpc` 接入）：
+- `streamable_http_custom_options`（需要真实 server；演示自定义 `StreamableHttpOptions` 的网络参数，并通过 `connect_streamable_http_split` 直连）：
   - 源码：`examples/streamable_http_custom_options.rs`
   - 运行：`cargo run -p mcp-kit --example streamable_http_custom_options -- [flags] <sse_url> [http_url]`
-  - 注意：该路径会绕过 `Manager` 的 Untrusted `streamable_http` 出站策略校验；请仅在你**完全信任** URL/headers 的场景使用
+  - 注意：默认仍走 `Manager` 的安全边界；当开启 `--follow-redirects` 等高风险参数时，请显式在 Trusted 场景使用
 
 ## 1）最小远程配置（streamable_http）
 

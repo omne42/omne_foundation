@@ -22,8 +22,25 @@ pub(super) fn validate_streamable_http_config(
     }
 
     validate_streamable_http_url_untrusted(policy, server_name, url_field, url)?;
+    validate_untrusted_streamable_http_headers(
+        trust_mode,
+        server_name,
+        server_cfg.http_headers().keys().map(String::as_str),
+    )?;
 
-    for header in server_cfg.http_headers().keys() {
+    Ok(())
+}
+
+pub(super) fn validate_untrusted_streamable_http_headers<'a>(
+    trust_mode: TrustMode,
+    server_name: &str,
+    headers: impl IntoIterator<Item = &'a str>,
+) -> anyhow::Result<()> {
+    if trust_mode == TrustMode::Trusted {
+        return Ok(());
+    }
+
+    for header in headers {
         if is_untrusted_sensitive_http_header(header) {
             config_bail!(
                 "refusing to send sensitive http header in untrusted mode: {server_name} header={header} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"

@@ -106,6 +106,7 @@ pub use manager::{
     Connection, Manager, ProtocolVersionCheck, ProtocolVersionMismatch, ServerNotificationContext,
     ServerNotificationHandler, ServerRequestContext, ServerRequestHandler, ServerRequestOutcome,
 };
+pub use mcp_jsonrpc::{StreamableHttpOptions, StreamableHttpProxyMode};
 pub use protocol::{MCP_PROTOCOL_VERSION, McpNotification, McpRequest};
 pub use security::{TrustMode, UntrustedStreamableHttpPolicy};
 pub use server_name::{ServerName, ServerNameError};

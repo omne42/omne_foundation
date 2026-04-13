@@ -7,6 +7,8 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：close/batch fallback 的 writer lock 等待从 `try_lock + yield` 忙等改成真正的有界等待；保持 `CLOSE_LOCK_ACQUIRE_TIMEOUT` 超时语义不变，同时降低 close 路径在锁竞争下的 CPU 放大风险。
+- `mcp-jsonrpc`：将 close 相关的锁等待与写端替换 helper 从 `src/lib.rs` 拆到独立 `src/close_lock.rs`，并补充 crate-local 回归测试覆盖 async/no-runtime 的有界超时语义。
 - `mcp-jsonrpc`：`schedule_close_once(...)` 在 detached 调度失败后会优先把 bounded close fallback 交给独立线程执行，而不是在当前 async 调用栈里内联收尾；关闭兜底不再把潜在的阻塞/二次 panic 风险带回 Tokio 上下文。
 - `mcp-jsonrpc`：`schedule_close_once(...)` 的 close fallback 分支判断收敛为单个等价条件表达式，显式保持“无 runtime 直接走 bounded fallback、有 runtime 优先尝试线程 fallback”语义同时满足 workspace Clippy `-D warnings` 门禁。
 - `mcp-jsonrpc`：`streamable_http` 的 graceful SSE EOF 重连现在使用有界指数退避，而 `mcp-session-id` 变更触发的会话切换重连仍保持立即执行，避免 idle-close 服务端把读侧恢复路径放大成无退避重连风暴。

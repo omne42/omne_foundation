@@ -2159,6 +2159,152 @@ async fn shared_manager_reentrant_handler_is_connected_fails_fast_on_manager_loc
     server_task.await.unwrap();
 }
 
+#[tokio::test]
+async fn shared_manager_reentrant_spawned_clone_recaptures_stale_handler_scope() {
+    use tokio::sync::oneshot;
+
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+    let (send_callback_tx, send_callback_rx) = oneshot::channel();
+    let (callback_done_tx, callback_done_rx) = oneshot::channel();
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        let init_id = init_value["id"].clone();
+
+        let init_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": init_id,
+            "result": { "protocolVersion": crate::MCP_PROTOCOL_VERSION, "serverInfo": { "name": "demo" } },
+        });
+        let mut init_response_line = serde_json::to_string(&init_response).unwrap();
+        init_response_line.push('\n');
+        server_write
+            .write_all(init_response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let initialized_line = lines.next_line().await.unwrap().unwrap();
+        let initialized_value: Value = serde_json::from_str(&initialized_line).unwrap();
+        assert_eq!(initialized_value["method"], "notifications/initialized");
+
+        send_callback_rx.await.unwrap();
+
+        let callback_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "callback",
+            "params": { "phase": "spawned-clone" },
+        });
+        let mut callback_line = serde_json::to_string(&callback_request).unwrap();
+        callback_line.push('\n');
+        server_write
+            .write_all(callback_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let callback_response_line = lines.next_line().await.unwrap().unwrap();
+        let callback_response: Value = serde_json::from_str(&callback_response_line).unwrap();
+        assert_eq!(callback_response["id"], 99);
+        let error_message = callback_response["error"]["message"]
+            .as_str()
+            .expect("callback should receive error response");
+        assert!(
+            error_message.contains(super::REENTRANT_HANDLER_ERROR),
+            "unexpected callback error: {callback_response}"
+        );
+        assert!(
+            error_message.contains("is_connected"),
+            "callback error should identify the blocked operation: {callback_response}"
+        );
+        let _ = callback_done_tx.send(());
+
+        let eof = lines.next_line().await.unwrap();
+        assert!(eof.is_none(), "expected EOF after shared disconnect");
+    });
+
+    let shared_slot: Arc<StdMutex<Option<SharedManager>>> = Arc::new(StdMutex::new(None));
+    let handler_slot = shared_slot.clone();
+    let handler: ServerRequestHandler = Arc::new(move |_| {
+        let handler_slot = handler_slot.clone();
+        Box::pin(async move {
+            let stale_shared = handler_slot
+                .lock()
+                .unwrap()
+                .as_ref()
+                .expect("shared manager installed")
+                .clone();
+            let mut nested = tokio::spawn(async move { stale_shared.is_connected("srv").await });
+            let outcome = tokio::select! {
+                outcome = &mut nested => outcome.expect("spawned task should join"),
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                    nested.abort();
+                    return ServerRequestOutcome::Error {
+                        code: -32002,
+                        message: "spawned reentrant clone did not fail fast".into(),
+                        data: None,
+                    };
+                }
+            };
+
+            match outcome {
+                Ok(connected) => ServerRequestOutcome::Ok(serde_json::json!({
+                    "connected": connected,
+                })),
+                Err(err) => ServerRequestOutcome::Error {
+                    code: -32001,
+                    message: format!("{err:#}"),
+                    data: None,
+                },
+            }
+        })
+    });
+
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .with_server_request_handler(handler);
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+
+    let shared = manager.into_shared();
+    let mut stale_shared = shared.clone();
+    stale_shared.captured_handler_scope = Some(std::sync::Weak::new());
+    *shared_slot.lock().unwrap() = Some(stale_shared);
+
+    let (lock_started_tx, lock_started_rx) = oneshot::channel();
+    let (release_lock_tx, release_lock_rx) = std::sync::mpsc::channel();
+    let lock_shared = shared.clone();
+    let runtime = tokio::runtime::Handle::current();
+    let lock_thread = std::thread::spawn(move || {
+        runtime.block_on(async move {
+            lock_shared
+                .inspect(|_| {
+                    let _ = lock_started_tx.send(());
+                    release_lock_rx.recv().expect("release manager lock");
+                })
+                .await
+                .expect("inspect should succeed outside handler");
+        });
+    });
+
+    lock_started_rx.await.unwrap();
+
+    send_callback_tx.send(()).unwrap();
+    callback_done_rx.await.unwrap();
+    release_lock_tx.send(()).unwrap();
+    lock_thread.join().unwrap();
+    assert!(shared.disconnect("srv").await.unwrap());
+    server_task.await.unwrap();
+}
+
 #[cfg(unix)]
 fn unix_socket_temp_roots() -> Vec<std::path::PathBuf> {
     let mut roots = Vec::new();

@@ -8,7 +8,6 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ### Fixed
 
-- Restore the typed artifact-generation error dependency and keep `ArtifactGenerationError` on the library side, so `policy-meta` compiles with its explicit `thiserror` boundary again.
-- Re-expose artifact file generation and drift-check helpers under `policy_meta::artifacts::*` instead of the crate root, so the export binaries keep compiling without widening the stable contract surface.
-- Keep the checked-in changelog as a live crate artifact so repository changelog gates still match the README and current crate layout.
-- tests: lock `ArtifactGenerationError` display/source behavior for the `RootNotObject` variant, so the repaired `thiserror`-backed boundary remains directly covered by unit tests.
+- Keep the `thiserror`-backed artifact error boundary declared in `Cargo.toml`, so `ArtifactGenerationError` and `ArtifactError` continue compiling from the library side.
+- Re-export artifact generation and drift-check helpers from the crate root, so `export-artifacts`, `export-schemas`, and `export-types` can rely on `policy_meta::{...}` as the public entrypoint.
+- Keep schema, TypeScript bindings, and baseline profiles under the same artifact export/check surface, so `--check` covers all checked-in policy-meta assets.

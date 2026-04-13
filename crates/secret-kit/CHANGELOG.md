@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `SecretError` 到 `ErrorCode` / `ErrorRecord` 的字面量错误码映射不再依赖 `expect`；crate 现在通过集中缓存的映射描述符构造错误记录，并在字面量失效时 fail-closed 退化到 `secret.internal`，同时补上对应回归测试。
 - `secret-kit` 的 `SecretResolver` / `CacheAwareSecretResolver` 默认桥接现在带有 fail-closed 递归保护；第三方如果同时依赖两侧默认实现，不再因为默认互调而栈溢出，而是返回显式 `not_resolvable` 错误，同时保留既有 typed-first 与 `&str`-first 单侧实现兼容。
 - `secret-kit` 在 Unix 上对内建 CLI 的 trusted ambient `PATH` 目录新增 stat/类型/权限校验：不可 stat、非目录、world-writable 且不满足 sticky-root-owned 例外的 allowlist 目录不再被信任；对应单元测试已覆盖默认递归保护与目录安全判定。
 - `secret-kit`：`SecretResolver` / `CacheAwareSecretResolver` 现在把 `SecretSpec` 提升为公开扩展主边界，同时保留对既有 `&str`-first 实现者的默认兼容转发；typed hooks 会通过 canonical `secret://` 渲染回退到旧入口，避免把这次边界收口变成一次公开 trait breaking change。

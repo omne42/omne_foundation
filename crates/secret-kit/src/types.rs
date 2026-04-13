@@ -1,5 +1,6 @@
 use std::error::Error as StdError;
 use std::fmt::{self, Display, Formatter};
+use std::sync::OnceLock;
 
 use error_kit::{ErrorCategory, ErrorCode, ErrorRecord, ErrorRetryAdvice};
 use structured_text_kit::{CatalogTextRef, StructuredText, structured_text};
@@ -21,7 +22,90 @@ pub enum SecretError {
 
 pub type Result<T> = std::result::Result<T, SecretError>;
 
+static SECRET_IO_ERROR_CODE: SecretErrorCode = SecretErrorCode::new("secret.io");
+static SECRET_JSON_ERROR_CODE: SecretErrorCode = SecretErrorCode::new("secret.json");
+static SECRET_LOOKUP_ERROR_CODE: SecretErrorCode = SecretErrorCode::new("secret.lookup");
+static SECRET_INVALID_SPEC_ERROR_CODE: SecretErrorCode =
+    SecretErrorCode::new("secret.invalid_spec");
+static SECRET_COMMAND_ERROR_CODE: SecretErrorCode = SecretErrorCode::new("secret.command");
+static SECRET_INTERNAL_ERROR_CODE: SecretErrorCode = SecretErrorCode::new("secret.internal");
+
+struct SecretErrorCode {
+    literal: &'static str,
+    parsed: OnceLock<ErrorCode>,
+}
+
+impl SecretErrorCode {
+    const fn new(literal: &'static str) -> Self {
+        Self {
+            literal,
+            parsed: OnceLock::new(),
+        }
+    }
+
+    fn get(&'static self) -> ErrorCode {
+        self.parsed
+            .get_or_init(|| parse_error_code_literal(self.literal))
+            .clone()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SecretErrorMapping {
+    code: &'static SecretErrorCode,
+    category: ErrorCategory,
+}
+
+impl SecretErrorMapping {
+    const fn new(code: &'static SecretErrorCode, category: ErrorCategory) -> Self {
+        Self { code, category }
+    }
+
+    fn new_record(self, text: StructuredText, retry_advice: ErrorRetryAdvice) -> ErrorRecord {
+        ErrorRecord::new(self.code.get(), text)
+            .with_category(self.category)
+            .with_retry_advice(retry_advice)
+    }
+}
+
+fn parse_error_code_literal(literal: &'static str) -> ErrorCode {
+    ErrorCode::try_new(literal).unwrap_or_else(|_| SECRET_INTERNAL_ERROR_CODE.get())
+}
+
 impl SecretError {
+    fn mapping(&self) -> SecretErrorMapping {
+        match self {
+            Self::Io { .. } => Self::io_mapping(),
+            Self::Json { .. } => Self::json_mapping(),
+            Self::Lookup(_) => Self::lookup_mapping(),
+            Self::InvalidSpec(_) => Self::invalid_spec_mapping(),
+            Self::Command(_) => Self::command_mapping(),
+        }
+    }
+
+    const fn io_mapping() -> SecretErrorMapping {
+        SecretErrorMapping::new(&SECRET_IO_ERROR_CODE, ErrorCategory::ExternalDependency)
+    }
+
+    const fn json_mapping() -> SecretErrorMapping {
+        SecretErrorMapping::new(&SECRET_JSON_ERROR_CODE, ErrorCategory::InvalidInput)
+    }
+
+    const fn lookup_mapping() -> SecretErrorMapping {
+        SecretErrorMapping::new(&SECRET_LOOKUP_ERROR_CODE, ErrorCategory::NotFound)
+    }
+
+    const fn invalid_spec_mapping() -> SecretErrorMapping {
+        SecretErrorMapping::new(&SECRET_INVALID_SPEC_ERROR_CODE, ErrorCategory::InvalidInput)
+    }
+
+    const fn command_mapping() -> SecretErrorMapping {
+        SecretErrorMapping::new(
+            &SECRET_COMMAND_ERROR_CODE,
+            ErrorCategory::ExternalDependency,
+        )
+    }
+
     fn io_retry_advice(source: &std::io::Error) -> ErrorRetryAdvice {
         match source.kind() {
             std::io::ErrorKind::NotFound
@@ -55,33 +139,12 @@ impl SecretError {
 
     #[must_use]
     pub fn error_code(&self) -> ErrorCode {
-        match self {
-            Self::Io { .. } => {
-                ErrorCode::try_new("secret.io").expect("literal error code should validate")
-            }
-            Self::Json { .. } => {
-                ErrorCode::try_new("secret.json").expect("literal error code should validate")
-            }
-            Self::Lookup(_) => {
-                ErrorCode::try_new("secret.lookup").expect("literal error code should validate")
-            }
-            Self::InvalidSpec(_) => ErrorCode::try_new("secret.invalid_spec")
-                .expect("literal error code should validate"),
-            Self::Command(_) => {
-                ErrorCode::try_new("secret.command").expect("literal error code should validate")
-            }
-        }
+        self.mapping().code.get()
     }
 
     #[must_use]
     pub fn error_category(&self) -> ErrorCategory {
-        match self {
-            Self::Io { .. } => ErrorCategory::ExternalDependency,
-            Self::Json { .. } => ErrorCategory::InvalidInput,
-            Self::Lookup(_) => ErrorCategory::NotFound,
-            Self::InvalidSpec(_) => ErrorCategory::InvalidInput,
-            Self::Command(_) => ErrorCategory::ExternalDependency,
-        }
+        self.mapping().category
     }
 
     #[must_use]
@@ -97,49 +160,23 @@ impl SecretError {
 
     #[must_use]
     pub fn error_record(&self) -> ErrorRecord {
-        ErrorRecord::new(self.error_code(), self.structured_text().clone())
-            .with_category(self.error_category())
-            .with_retry_advice(self.retry_advice())
+        self.mapping()
+            .new_record(self.structured_text().clone(), self.retry_advice())
     }
 
     #[must_use]
     pub fn into_error_record(self) -> ErrorRecord {
-        let category = self.error_category();
         let retry_advice = self.retry_advice();
         match self {
-            Self::Io { text, source } => ErrorRecord::new(
-                ErrorCode::try_new("secret.io").expect("literal error code should validate"),
-                text,
-            )
-            .with_category(category)
-            .with_retry_advice(retry_advice)
-            .with_source(source),
-            Self::Json { text, source } => ErrorRecord::new(
-                ErrorCode::try_new("secret.json").expect("literal error code should validate"),
-                text,
-            )
-            .with_category(category)
-            .with_retry_advice(retry_advice)
-            .with_source(source),
-            Self::Lookup(text) => ErrorRecord::new(
-                ErrorCode::try_new("secret.lookup").expect("literal error code should validate"),
-                text,
-            )
-            .with_category(category)
-            .with_retry_advice(retry_advice),
-            Self::InvalidSpec(text) => ErrorRecord::new(
-                ErrorCode::try_new("secret.invalid_spec")
-                    .expect("literal error code should validate"),
-                text,
-            )
-            .with_category(category)
-            .with_retry_advice(retry_advice),
-            Self::Command(text) => ErrorRecord::new(
-                ErrorCode::try_new("secret.command").expect("literal error code should validate"),
-                text,
-            )
-            .with_category(category)
-            .with_retry_advice(retry_advice),
+            Self::Io { text, source } => Self::io_mapping()
+                .new_record(text, retry_advice)
+                .with_source(source),
+            Self::Json { text, source } => Self::json_mapping()
+                .new_record(text, retry_advice)
+                .with_source(source),
+            Self::Lookup(text) => Self::lookup_mapping().new_record(text, retry_advice),
+            Self::InvalidSpec(text) => Self::invalid_spec_mapping().new_record(text, retry_advice),
+            Self::Command(text) => Self::command_mapping().new_record(text, retry_advice),
         }
     }
 
@@ -217,5 +254,41 @@ impl From<serde_json::Error> for SecretError {
 impl From<SecretError> for ErrorRecord {
     fn from(error: SecretError) -> Self {
         error.into_error_record()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_literal_error_code_falls_back_to_internal_code() {
+        static INVALID_ERROR_CODE: SecretErrorCode = SecretErrorCode::new("secret invalid spec");
+
+        assert_eq!(INVALID_ERROR_CODE.get().as_str(), "secret.internal");
+    }
+
+    #[test]
+    fn invalid_literal_error_record_uses_internal_code_without_losing_metadata() {
+        static INVALID_ERROR_CODE: SecretErrorCode = SecretErrorCode::new("secret invalid spec");
+
+        let record = SecretErrorMapping::new(&INVALID_ERROR_CODE, ErrorCategory::InvalidInput)
+            .new_record(
+                structured_text!("error_detail.secret.not_resolvable"),
+                ErrorRetryAdvice::DoNotRetry,
+            );
+
+        assert_eq!(record.code().as_str(), "secret.internal");
+        assert_eq!(record.category(), ErrorCategory::InvalidInput);
+        assert_eq!(record.retry_advice(), ErrorRetryAdvice::DoNotRetry);
+    }
+
+    #[test]
+    fn secret_error_keeps_existing_code_for_valid_literals() {
+        let error = SecretError::Lookup(structured_text!("error_detail.secret.not_resolvable"));
+
+        assert_eq!(error.error_code().as_str(), "secret.lookup");
+        assert_eq!(error.error_record().code().as_str(), "secret.lookup");
+        assert_eq!(error.into_error_record().code().as_str(), "secret.lookup");
     }
 }

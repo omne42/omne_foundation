@@ -2,7 +2,8 @@ use std::borrow::Cow;
 use std::fmt::{self, Display, Formatter};
 
 use structured_text_kit::{
-    CatalogArgValueRef, CatalogTextRef, StructuredText, StructuredTextRef, try_structured_text,
+    CatalogArgValueRef, CatalogTextRef, StructuredText, StructuredTextRef,
+    StructuredTextValidationError, try_structured_text,
 };
 
 use super::locale::Locale;
@@ -25,22 +26,29 @@ impl ResolveLocaleError {
         match self {
             Self::UnknownLocale { requested } => build_structured_text(
                 try_structured_text!("locale.unknown", "requested" => requested.as_str()),
+                self.to_string(),
             ),
             Self::LocaleNotEnabled {
                 requested,
                 available,
-            } if available.is_empty() => build_structured_text(try_structured_text!(
-                "locale.not_enabled.none",
-                "requested" => requested.as_str()
-            )),
+            } if available.is_empty() => build_structured_text(
+                try_structured_text!(
+                    "locale.not_enabled.none",
+                    "requested" => requested.as_str()
+                ),
+                self.to_string(),
+            ),
             Self::LocaleNotEnabled {
                 requested,
                 available,
-            } => build_structured_text(try_structured_text!(
-                "locale.not_enabled.available",
-                "requested" => requested.as_str(),
-                "available" => format_locales(available)
-            )),
+            } => build_structured_text(
+                try_structured_text!(
+                    "locale.not_enabled.available",
+                    "requested" => requested.as_str(),
+                    "available" => format_locales(available)
+                ),
+                self.to_string(),
+            ),
         }
     }
 
@@ -84,9 +92,10 @@ impl Display for ResolveLocaleError {
 impl std::error::Error for ResolveLocaleError {}
 
 fn build_structured_text(
-    text: Result<StructuredText, structured_text_kit::StructuredTextValidationError>,
+    text: Result<StructuredText, StructuredTextValidationError>,
+    fallback: impl Into<String>,
 ) -> StructuredText {
-    text.expect("locale error structured-text schema must remain valid")
+    text.unwrap_or_else(|_| StructuredText::freeform(fallback))
 }
 
 fn format_locales(locales: &[Locale]) -> String {
@@ -154,4 +163,34 @@ where
     }
 
     Some(interpolate(template.as_ref(), &args))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_structured_text;
+    use structured_text_kit::StructuredTextValidationError;
+
+    #[test]
+    fn build_structured_text_falls_back_to_freeform_on_invalid_code() {
+        let text = build_structured_text(
+            Err(StructuredTextValidationError::InvalidCode(
+                "bad code".to_string(),
+            )),
+            "locale error fallback",
+        );
+
+        assert_eq!(text.freeform_text(), Some("locale error fallback"));
+    }
+
+    #[test]
+    fn build_structured_text_falls_back_to_freeform_on_invalid_arg_name() {
+        let text = build_structured_text(
+            Err(StructuredTextValidationError::InvalidArgName(
+                "bad arg".to_string(),
+            )),
+            "locale error arg fallback",
+        );
+
+        assert_eq!(text.freeform_text(), Some("locale error arg fallback"));
+    }
 }

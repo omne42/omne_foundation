@@ -10,6 +10,47 @@ pub const DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 16 * 1024;
 const RESPONSE_BODY_DRAIN_LIMIT_BYTES: usize = 64 * 1024;
 const ERROR_RESPONSE_SUMMARY_MAX_CHARS: usize = 200;
 
+#[derive(Debug)]
+pub enum ReadReqwestBodyBytesError {
+    ContentLengthExceedsLimit {
+        content_length: u64,
+        max_bytes: usize,
+    },
+    ResponseExceededLimit {
+        max_bytes: usize,
+    },
+    Transport(reqwest::Error),
+}
+
+impl std::fmt::Display for ReadReqwestBodyBytesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ContentLengthExceedsLimit {
+                content_length,
+                max_bytes,
+            } => {
+                write!(
+                    f,
+                    "content-length={content_length} exceeds max bytes ({max_bytes})"
+                )
+            }
+            Self::ResponseExceededLimit { max_bytes } => {
+                write!(f, "response exceeded max bytes ({max_bytes})")
+            }
+            Self::Transport(err) => write!(f, "{}", sanitize_reqwest_error(err)),
+        }
+    }
+}
+
+impl std::error::Error for ReadReqwestBodyBytesError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Transport(err) => Some(err),
+            Self::ContentLengthExceedsLimit { .. } | Self::ResponseExceededLimit { .. } => None,
+        }
+    }
+}
+
 pub async fn read_json_body_limited(
     resp: reqwest::Response,
     max_bytes: usize,
@@ -259,47 +300,36 @@ fn decode_text_body_lossy(buf: Vec<u8>, truncated: bool) -> String {
     out
 }
 
-async fn read_body_bytes_limited(
+pub async fn read_reqwest_body_bytes_limited(
     mut resp: reqwest::Response,
     max_bytes: usize,
-) -> crate::Result<Vec<u8>> {
+) -> std::result::Result<Vec<u8>, ReadReqwestBodyBytesError> {
     if max_bytes == 0 {
         drain_response_body_limited(&mut resp, RESPONSE_BODY_DRAIN_LIMIT_BYTES).await;
-        return Err(error::tagged_message(
-            ErrorKind::ResponseBody,
-            "response body too large (response body omitted)",
-        ));
+        return Err(ReadReqwestBodyBytesError::ResponseExceededLimit { max_bytes });
     }
 
     let mut cap_hint = 0usize;
     if let Some(len) = resp.content_length() {
         if len > max_bytes as u64 {
             drain_response_body_limited(&mut resp, RESPONSE_BODY_DRAIN_LIMIT_BYTES).await;
-            return Err(error::tagged_message(
-                ErrorKind::ResponseBody,
-                "response body too large (response body omitted)",
-            ));
+            return Err(ReadReqwestBodyBytesError::ContentLengthExceedsLimit {
+                content_length: len,
+                max_bytes,
+            });
         }
         cap_hint = content_length_capacity_hint(len, max_bytes);
     }
 
     let mut buf = Vec::with_capacity(cap_hint);
-    while let Some(chunk) = resp.chunk().await.map_err(|err| {
-        error::tagged_source(
-            ErrorKind::ResponseBody,
-            format!(
-                "read response body failed ({})",
-                sanitize_reqwest_error(&err)
-            ),
-            err,
-        )
-    })? {
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(ReadReqwestBodyBytesError::Transport)?
+    {
         if chunk.len() > max_bytes.saturating_sub(buf.len()) {
             drain_response_body_limited(&mut resp, RESPONSE_BODY_DRAIN_LIMIT_BYTES).await;
-            return Err(error::tagged_message(
-                ErrorKind::ResponseBody,
-                "response body too large (response body omitted)",
-            ));
+            return Err(ReadReqwestBodyBytesError::ResponseExceededLimit { max_bytes });
         }
         buf.extend_from_slice(&chunk);
     }
@@ -307,10 +337,10 @@ async fn read_body_bytes_limited(
     Ok(buf)
 }
 
-async fn read_body_bytes_truncated(
+pub async fn read_reqwest_body_bytes_truncated(
     mut resp: reqwest::Response,
     max_bytes: usize,
-) -> crate::Result<(Vec<u8>, bool)> {
+) -> std::result::Result<(Vec<u8>, bool), reqwest::Error> {
     if max_bytes == 0 {
         drain_response_body_limited(&mut resp, RESPONSE_BODY_DRAIN_LIMIT_BYTES).await;
         return Ok((Vec::new(), true));
@@ -326,16 +356,7 @@ async fn read_body_bytes_truncated(
     }
 
     let mut buf = Vec::with_capacity(cap_hint);
-    while let Some(chunk) = resp.chunk().await.map_err(|err| {
-        error::tagged_source(
-            ErrorKind::ResponseBody,
-            format!(
-                "read response body failed ({})",
-                sanitize_reqwest_error(&err)
-            ),
-            err,
-        )
-    })? {
+    while let Some(chunk) = resp.chunk().await? {
         if buf.len() >= max_bytes {
             truncated = true;
             break;
@@ -356,6 +377,51 @@ async fn read_body_bytes_truncated(
     }
 
     Ok((buf, truncated))
+}
+
+async fn read_body_bytes_limited(
+    resp: reqwest::Response,
+    max_bytes: usize,
+) -> crate::Result<Vec<u8>> {
+    read_reqwest_body_bytes_limited(resp, max_bytes)
+        .await
+        .map_err(map_read_reqwest_body_bytes_error)
+}
+
+async fn read_body_bytes_truncated(
+    resp: reqwest::Response,
+    max_bytes: usize,
+) -> crate::Result<(Vec<u8>, bool)> {
+    read_reqwest_body_bytes_truncated(resp, max_bytes)
+        .await
+        .map_err(|err| {
+            error::tagged_source(
+                ErrorKind::ResponseBody,
+                format!(
+                    "read response body failed ({})",
+                    sanitize_reqwest_error(&err)
+                ),
+                err,
+            )
+        })
+}
+
+fn map_read_reqwest_body_bytes_error(err: ReadReqwestBodyBytesError) -> crate::Error {
+    match err {
+        ReadReqwestBodyBytesError::ContentLengthExceedsLimit { .. }
+        | ReadReqwestBodyBytesError::ResponseExceededLimit { .. } => error::tagged_message(
+            ErrorKind::ResponseBody,
+            "response body too large (response body omitted)",
+        ),
+        ReadReqwestBodyBytesError::Transport(err) => error::tagged_source(
+            ErrorKind::ResponseBody,
+            format!(
+                "read response body failed ({})",
+                sanitize_reqwest_error(&err)
+            ),
+            err,
+        ),
+    }
 }
 
 async fn drain_response_body_limited(resp: &mut reqwest::Response, mut remaining: usize) {

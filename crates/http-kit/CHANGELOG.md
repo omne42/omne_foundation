@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Expose reusable bounded/truncated reqwest body readers with typed limit-vs-transport failures so downstream crates can share one response-body boundary while keeping their own local error mapping.
 - Keep SSE limit validation and line-size failures in their original error class instead of recasting them as generic read failures, so downstream adapters can preserve stable error mapping.
 - Keep `src/sse.rs` generic by preserving empty `data:` events, removing protocol-specific `[DONE]` termination, and stripping only the single optional space allowed after the SSE field colon.
 - Add SSE `data:` stream parsing with bounded line/event limits, plus canonical `send_reqwest_*_after_http_success(...)` helpers so callers can reuse one shared `reqwest + success-check + bounded decode` boundary instead of rewrapping `RequestBuilder` in downstream crates.

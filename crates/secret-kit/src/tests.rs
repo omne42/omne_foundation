@@ -137,6 +137,14 @@ where
         .map(|secret| secret.expose_secret().to_owned())
 }
 
+#[test]
+fn detects_secret_spec_strings() {
+    assert!(looks_like_secret_spec("secret://env/OPENAI_API_KEY"));
+    assert!(looks_like_secret_spec("  secret://env/OPENAI_API_KEY  "));
+    assert!(!looks_like_secret_spec("${OPENAI_API_KEY}"));
+    assert!(!looks_like_secret_spec("https://example.com"));
+}
+
 fn test_env_spec(key: &str) -> String {
     format!("secret://env/{key}")
 }
@@ -229,6 +237,25 @@ async fn secret_resolver_trait_object_resolves_secret() -> Result<()> {
         .await?;
 
     assert_eq!(arc_value, "test-secret");
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolve_string_if_secret_returns_literal_for_non_secret_values() -> Result<()> {
+    let env = TestEnv::default();
+    let value = resolve_string_if_secret("https://example.com/v1", &env).await?;
+    assert_eq!(value, "https://example.com/v1");
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolve_string_if_secret_resolves_secret_specs() -> Result<()> {
+    let mut env = TestEnv::default();
+    env.vars
+        .insert("OPENAI_API_KEY".to_string(), "test-secret".to_string());
+
+    let value = resolve_string_if_secret(" secret://env/OPENAI_API_KEY ", &env).await?;
+    assert_eq!(value, "test-secret");
     Ok(())
 }
 

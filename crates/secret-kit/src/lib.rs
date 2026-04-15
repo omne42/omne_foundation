@@ -757,9 +757,10 @@ mod value;
 use spec::{resolve_secret_in_context, resolve_secret_spec_in_context};
 
 pub use spec::{
-    SecretSpec, prepare_default_secret_spec_resolution, resolve_prepared_default_secret,
-    resolve_secret, resolve_secret_spec, resolve_secret_spec_with_runtime,
-    resolve_secret_with_runtime,
+    SecretSpec, looks_like_secret_spec, prepare_default_secret_spec_resolution,
+    resolve_prepared_default_secret, resolve_secret, resolve_secret_spec,
+    resolve_secret_spec_with_runtime, resolve_secret_with_runtime, resolve_string_if_secret,
+    resolve_string_if_secret_with_runtime,
 };
 
 impl SecretCacheKey {

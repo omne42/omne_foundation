@@ -6,6 +6,9 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ## [Unreleased]
 
+### Added
+- `config-kit` now exposes `interpolate_env_placeholders_in_json_value(...)` and `..._with(...)` so callers can recursively expand `${ENV_VAR}` placeholders across decoded JSON config trees without reimplementing their own string-field walk; interpolation stays fail-closed and leaves the original value unchanged on error.
+
 ### Changed
 - `merge_config_values*` 在整棵根节点被 overlay 替换时，`changed_paths` 现在稳定记录 JSON Pointer 根路径 `"/"`，不再输出空字符串。
 - `config-kit`：根路径打开失败映射 `SymlinkPath` 前，`root_path_contains_symlink(...)` 现在只在真实命中 symlink 时返回 `true`；`InvalidInput` 但无 symlink 的错误会保持 `Error::Io`，不再误判为 symlink 路径问题。

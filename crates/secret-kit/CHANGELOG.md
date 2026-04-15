@@ -6,6 +6,9 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ## [Unreleased]
 
+### Added
+- `secret-kit` now exposes `looks_like_secret_spec(...)`, `resolve_string_if_secret(...)`, and `resolve_string_if_secret_with_runtime(...)` so config/loading layers can treat `secret://...` values as a canonical string boundary instead of hand-rolling prefix checks plus conditional resolution in downstream crates.
+
 ### Changed
 - `secret-kit` 的 `SecretResolver` / `CacheAwareSecretResolver` 默认桥接现在带有 fail-closed 递归保护；第三方如果同时依赖两侧默认实现，不再因为默认互调而栈溢出，而是返回显式 `not_resolvable` 错误，同时保留既有 typed-first 与 `&str`-first 单侧实现兼容。
 - `secret-kit` 在 Unix 上对内建 CLI 的 trusted ambient `PATH` 目录新增 stat/类型/权限校验：不可 stat、非目录、world-writable 且不满足 sticky-root-owned 例外的 allowlist 目录不再被信任；对应单元测试已覆盖默认递归保护与目录安全判定。

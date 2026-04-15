@@ -71,9 +71,7 @@ where
     out.clear();
 
     loop {
-        let buf = reader.fill_buf().await.map_err(|err| {
-            error::tagged_source(ErrorKind::ResponseBody, "fill sse buffer failed", err)
-        })?;
+        let buf = reader.fill_buf().await.map_err(sse_read_line_failed)?;
         if buf.is_empty() {
             return Ok(!out.is_empty());
         }
@@ -111,9 +109,8 @@ where
     let mut data_field_count = 0usize;
 
     loop {
-        let has_line = read_next_line_bytes_limited(reader, line_bytes, limits.max_line_bytes)
-            .await
-            .map_err(sse_read_line_failed)?;
+        let has_line =
+            read_next_line_bytes_limited(reader, line_bytes, limits.max_line_bytes).await?;
         if !has_line {
             if data_field_count == 0 {
                 return Ok(None);
@@ -297,7 +294,31 @@ mod tests {
             .expect("stream item")
             .expect_err("line too large");
         assert_eq!(err.kind(), ErrorKind::ResponseBody);
-        assert!(err.to_string().contains("max_line_bytes 64"));
+        assert_eq!(err.message(), "sse line exceeds max_line_bytes 64");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_zero_max_line_bytes_without_recasting_as_read_failure() -> crate::Result<()> {
+        let sse = "data: hello\n\n";
+        let stream = stream::iter([Ok::<_, std::io::Error>(Bytes::from(sse))]);
+        let reader = StreamReader::new(stream);
+
+        let mut data_stream = sse_data_stream_from_reader_with_limits(
+            tokio::io::BufReader::new(reader),
+            SseLimits {
+                max_line_bytes: 0,
+                max_event_bytes: 128,
+            },
+        );
+
+        let err = data_stream
+            .next()
+            .await
+            .expect("stream item")
+            .expect_err("invalid limit");
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert_eq!(err.message(), "max_line_bytes must be greater than zero");
         Ok(())
     }
 

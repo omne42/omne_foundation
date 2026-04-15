@@ -6,6 +6,9 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ## [Unreleased]
 
+### Added
+- `secret-kit` now exposes `looks_like_secret_spec(...)`, `resolve_string_if_secret(...)`, and `resolve_string_if_secret_with_runtime(...)` so config/loading layers can treat `secret://...` values as a canonical string boundary instead of hand-rolling prefix checks plus conditional resolution in downstream crates.
+
 ### Changed
 - `SecretError` 到 `ErrorCode` / `ErrorRecord` 的字面量错误码映射不再依赖 `expect`；crate 现在通过集中缓存的映射描述符构造错误记录，并在字面量失效时 fail-closed 退化到 `secret.internal`，同时补上对应回归测试。
 - `secret-kit` 的 `SecretResolver` / `CacheAwareSecretResolver` 默认桥接现在带有 fail-closed 递归保护；第三方如果同时依赖两侧默认实现，不再因为默认互调而栈溢出，而是返回显式 `not_resolvable` 错误，同时保留既有 typed-first 与 `&str`-first 单侧实现兼容。

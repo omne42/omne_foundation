@@ -45,6 +45,7 @@
 - CLI provider 调用
 - 内建 provider 的系统目录级 PATH 发现、子进程 PATH 裁剪与显式绝对路径 override
 - JSON 字段提取
+- 面向配置字符串边界的 `secret://...` 条件解析 helper
 - 输出大小与命令超时限制
 - `SECRET_COMMAND_TIMEOUT_MS` / `SECRET_COMMAND_TIMEOUT_SECS` 的显式 command-env 超时调优入口
 - 进程树清理
@@ -62,7 +63,7 @@
   - `SecretResolver` / `CacheAwareSecretResolver` 的 typed `SecretSpec` 边界，以及对既有 `&str` 实现的兼容转发
   - 默认 resolver 主体
 - `src/spec.rs`
-  - `secret://` 解析、typed `SecretSpec` helper、provider 分派、命令构建
+  - `secret://` 解析、typed `SecretSpec` helper、provider 分派、命令构建，以及字符串级 `resolve_string_if_secret(...)` helper
 - `src/file.rs`
   - 受限 secret 文件读取与 symlink 约束
 - `src/command.rs`

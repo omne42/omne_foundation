@@ -1,7 +1,10 @@
 use std::io::Write;
 
 use crate::error::{self, ErrorKind};
-use crate::{client::sanitize_reqwest_error, url::redact_url_for_error};
+use crate::{
+    client::{sanitize_reqwest_error, send_reqwest},
+    url::redact_url_for_error,
+};
 
 pub const DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 16 * 1024;
 const RESPONSE_BODY_DRAIN_LIMIT_BYTES: usize = 64 * 1024;
@@ -107,11 +110,44 @@ pub async fn ensure_http_success(resp: reqwest::Response, context: &str) -> crat
     Err(http_status_text_error(context, status, &body))
 }
 
+pub async fn send_reqwest_after_http_success(
+    builder: reqwest::RequestBuilder,
+    context: &str,
+) -> crate::Result<reqwest::Response> {
+    let resp = send_reqwest(builder, context).await?;
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+
+    let body = read_text_body_limited(resp, DEFAULT_MAX_RESPONSE_BODY_BYTES)
+        .await
+        .map_err(|err| response_body_read_error(&format!("{context} http error"), status, &err))?;
+    Err(http_status_text_error(context, status, &body))
+}
+
 pub async fn read_json_body_after_http_success(
     resp: reqwest::Response,
     context: &str,
 ) -> crate::Result<serde_json::Value> {
     read_json_body_after_http_success_limited(resp, context, DEFAULT_MAX_RESPONSE_BODY_BYTES).await
+}
+
+pub async fn send_reqwest_json_after_http_success(
+    builder: reqwest::RequestBuilder,
+    context: &str,
+) -> crate::Result<serde_json::Value> {
+    send_reqwest_json_after_http_success_limited(builder, context, DEFAULT_MAX_RESPONSE_BODY_BYTES)
+        .await
+}
+
+pub async fn send_reqwest_json_after_http_success_limited(
+    builder: reqwest::RequestBuilder,
+    context: &str,
+    max_bytes: usize,
+) -> crate::Result<serde_json::Value> {
+    let resp = send_reqwest(builder, context).await?;
+    read_json_body_after_http_success_limited(resp, context, max_bytes).await
 }
 
 pub async fn read_json_body_after_http_success_limited(
@@ -130,6 +166,33 @@ pub async fn read_json_body_after_http_success_limited(
     }
 
     read_json_body_limited(resp, max_bytes).await
+}
+
+pub async fn send_reqwest_text_after_http_success(
+    builder: reqwest::RequestBuilder,
+    context: &str,
+) -> crate::Result<String> {
+    send_reqwest_text_after_http_success_limited(builder, context, DEFAULT_MAX_RESPONSE_BODY_BYTES)
+        .await
+}
+
+pub async fn send_reqwest_text_after_http_success_limited(
+    builder: reqwest::RequestBuilder,
+    context: &str,
+    max_bytes: usize,
+) -> crate::Result<String> {
+    let resp = send_reqwest(builder, context).await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = read_text_body_limited(resp, max_bytes)
+            .await
+            .map_err(|err| {
+                response_body_read_error(&format!("{context} http error"), status, &err)
+            })?;
+        return Err(http_status_text_error(context, status, &body));
+    }
+
+    read_text_body_limited(resp, max_bytes).await
 }
 
 pub async fn drain_response_body(mut resp: reqwest::Response) {
@@ -568,5 +631,68 @@ mod tests {
         });
 
         server.join().expect("server thread");
+    }
+
+    #[tokio::test]
+    async fn send_reqwest_after_http_success_returns_response_on_success() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf).await.expect("read request");
+            let response = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Length: 2\r\n",
+                "Connection: close\r\n",
+                "\r\n",
+                "ok"
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+
+        let client = reqwest::Client::new();
+        let resp = send_reqwest_after_http_success(client.get(format!("http://{addr}/")), "test")
+            .await
+            .expect("successful response");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn send_reqwest_text_after_http_success_reports_http_error() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf).await.expect("read request");
+            let response = concat!(
+                "HTTP/1.1 403 Forbidden\r\n",
+                "Content-Length: 9\r\n",
+                "Connection: close\r\n",
+                "\r\n",
+                "forbidden"
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+
+        let client = reqwest::Client::new();
+        let err =
+            send_reqwest_text_after_http_success(client.get(format!("http://{addr}/")), "acl")
+                .await
+                .expect_err("http error");
+        assert_eq!(err.kind(), ErrorKind::HttpStatus);
+        assert!(err.to_string().contains("403 Forbidden"));
+        assert!(err.to_string().contains("forbidden"));
+
+        server.await.expect("server task");
     }
 }

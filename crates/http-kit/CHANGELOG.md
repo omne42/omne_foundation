@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep `src/sse.rs` generic by preserving empty `data:` events, removing protocol-specific `[DONE]` termination, and stripping only the single optional space allowed after the SSE field colon.
 - Add SSE `data:` stream parsing with bounded line/event limits, plus canonical `send_reqwest_*_after_http_success(...)` helpers so callers can reuse one shared `reqwest + success-check + bounded decode` boundary instead of rewrapping `RequestBuilder` in downstream crates.
 - Fix `read_json_body_after_http_success_limited(...)` so non-2xx error summaries honor the caller-provided `max_bytes` limit instead of silently falling back to the crate default cap.
 - Return typed transport errors instead of panicking when DNS timeout paths run on a Tokio runtime without the time driver enabled, and keep regression coverage for both untrusted outbound validation and public-IP-pinned client selection.

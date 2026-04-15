@@ -108,13 +108,14 @@ where
     }
 
     buffer.clear();
+    let mut data_field_count = 0usize;
 
     loop {
         let has_line = read_next_line_bytes_limited(reader, line_bytes, limits.max_line_bytes)
             .await
             .map_err(sse_read_line_failed)?;
         if !has_line {
-            if buffer.is_empty() {
+            if data_field_count == 0 {
                 return Ok(None);
             }
             let data = std::mem::take(buffer);
@@ -125,19 +126,24 @@ where
         let line = line.trim_end_matches(['\r', '\n']);
 
         if line.is_empty() {
-            if buffer.is_empty() {
+            if data_field_count == 0 {
                 continue;
-            }
-            if buffer == "[DONE]" {
-                return Ok(None);
             }
             let data = std::mem::take(buffer);
             return Ok(Some(data));
         }
 
-        if let Some(rest) = line.strip_prefix("data:") {
-            let rest = rest.trim_start();
-            let separator_bytes = usize::from(!buffer.is_empty());
+        if line.starts_with(':') {
+            continue;
+        }
+
+        let (field, rest) = match line.split_once(':') {
+            Some((field, rest)) => (field, rest.strip_prefix(' ').unwrap_or(rest)),
+            None => (line, ""),
+        };
+
+        if field == "data" {
+            let separator_bytes = usize::from(data_field_count > 0);
             if buffer
                 .len()
                 .saturating_add(separator_bytes)
@@ -150,6 +156,7 @@ where
                 buffer.push('\n');
             }
             buffer.push_str(rest);
+            data_field_count += 1;
         }
     }
 }
@@ -203,7 +210,6 @@ mod tests {
             "data: {\"hello\":1}\n\n",
             "data: line1\n",
             "data: line2\n\n",
-            "data: [DONE]\n\n",
         );
 
         let stream = stream::iter([Ok::<_, std::io::Error>(Bytes::from(sse.to_owned()))]);
@@ -215,6 +221,59 @@ mod tests {
         }
 
         assert_eq!(out, vec!["{\"hello\":1}", "line1\nline2"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn preserves_empty_data_events_and_done_literal() -> crate::Result<()> {
+        let sse = concat!("data:\n\n", "data: [DONE]\n\n");
+        let stream = stream::iter([Ok::<_, std::io::Error>(Bytes::from(sse.to_owned()))]);
+        let reader = StreamReader::new(stream);
+        let mut out = Vec::new();
+        let mut data_stream = sse_data_stream_from_reader(tokio::io::BufReader::new(reader));
+        while let Some(item) = data_stream.next().await {
+            out.push(item?);
+        }
+
+        assert_eq!(out, vec!["", "[DONE]"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn preserves_single_optional_space_after_data_colon() -> crate::Result<()> {
+        let sse = concat!("data:  indented\n", "data:\tkeeps-tab\n", "data\n\n",);
+        let stream = stream::iter([Ok::<_, std::io::Error>(Bytes::from(sse.to_owned()))]);
+        let reader = StreamReader::new(stream);
+
+        let mut data_stream = sse_data_stream_from_reader(tokio::io::BufReader::new(reader));
+        let item = data_stream
+            .next()
+            .await
+            .expect("stream item")
+            .expect("valid sse item");
+        assert_eq!(item, " indented\n\tkeeps-tab\n");
+        assert!(data_stream.next().await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parses_events_across_multiple_stream_chunks() -> crate::Result<()> {
+        let stream = stream::iter([
+            Ok::<_, std::io::Error>(Bytes::from_static(b"data: hel")),
+            Ok(Bytes::from_static(b"lo\n")),
+            Ok(Bytes::from_static(b"data: wor")),
+            Ok(Bytes::from_static(b"ld\n\n")),
+        ]);
+        let reader = StreamReader::new(stream);
+
+        let mut data_stream = sse_data_stream_from_reader(tokio::io::BufReader::new(reader));
+        let item = data_stream
+            .next()
+            .await
+            .expect("stream item")
+            .expect("valid sse item");
+        assert_eq!(item, "hello\nworld");
+        assert!(data_stream.next().await.is_none());
         Ok(())
     }
 

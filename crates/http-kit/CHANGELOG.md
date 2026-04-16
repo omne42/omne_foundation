@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Add reusable API base-url join and raw query-append helpers so runtime/catalog consumers can share one URL assembly boundary instead of duplicating `base_url + path + query` glue in product crates.
+- Add reusable encoded URL query-append helpers so downstream transport/realtime adapters can share one `Url::parse + query_pairs_mut()` boundary instead of reimplementing encoded query assembly in product crates.
 - Add reusable websocket base-URL rewrite helpers so downstream runtime/realtime adapters can share one transport-level `http(s) -> ws(s)` boundary instead of reimplementing it in product crates.
 - Expose reusable bounded/truncated reqwest body readers with typed limit-vs-transport failures so downstream crates can share one response-body boundary while keeping their own local error mapping.
 - Keep SSE limit validation and line-size failures in their original error class instead of recasting them as generic read failures, so downstream adapters can preserve stable error mapping.

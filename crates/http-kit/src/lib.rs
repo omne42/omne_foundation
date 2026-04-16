@@ -41,7 +41,7 @@ pub use sse::{
 };
 pub use url::{
     WebsocketBaseUrlResolution, WebsocketBaseUrlRewrite, append_url_query_params,
-    join_api_base_url_path, parse_and_validate_https_url, parse_and_validate_https_url_basic,
-    redact_reqwest_error, redact_url, redact_url_for_error, redact_url_str,
-    resolve_websocket_base_url, validate_url_path_prefix,
+    append_url_query_params_encoded, join_api_base_url_path, parse_and_validate_https_url,
+    parse_and_validate_https_url_basic, redact_reqwest_error, redact_url, redact_url_for_error,
+    redact_url_str, resolve_websocket_base_url, validate_url_path_prefix,
 };

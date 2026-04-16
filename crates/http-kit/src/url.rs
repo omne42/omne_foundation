@@ -82,6 +82,26 @@ pub fn append_url_query_params(base_url: String, query_params: &[(String, String
     out
 }
 
+pub fn append_url_query_params_encoded(
+    url_str: &str,
+    query_params: &[(String, String)],
+) -> crate::Result<String> {
+    let mut url = reqwest::Url::parse(url_str)
+        .map_err(|err| tagged_message(ErrorKind::InvalidInput, format!("invalid url: {err}")))?;
+
+    if !query_params.is_empty() {
+        let mut pairs = url.query_pairs_mut();
+        for (name, value) in query_params {
+            if name.trim().is_empty() {
+                continue;
+            }
+            pairs.append_pair(name, value);
+        }
+    }
+
+    Ok(url.to_string())
+}
+
 pub fn parse_and_validate_https_url_basic(url_str: &str) -> crate::Result<reqwest::Url> {
     let url = reqwest::Url::parse(url_str)
         .map_err(|err| tagged_message(ErrorKind::InvalidInput, format!("invalid url: {err}")))?;
@@ -288,6 +308,30 @@ mod tests {
             ),
             "https://example.com/path?x=0&a=1"
         );
+    }
+
+    #[test]
+    fn append_url_query_params_encoded_encodes_values_and_preserves_existing_query() {
+        assert_eq!(
+            append_url_query_params_encoded(
+                "https://example.com/path?x=0",
+                &[
+                    ("a".to_string(), "hello world".to_string()),
+                    ("b".to_string(), "a/b".to_string()),
+                ]
+            )
+            .expect("url should parse"),
+            "https://example.com/path?x=0&a=hello+world&b=a%2Fb"
+        );
+    }
+
+    #[test]
+    fn append_url_query_params_encoded_rejects_invalid_url() {
+        let err =
+            append_url_query_params_encoded("://bad url", &[("a".to_string(), "1".to_string())])
+                .expect_err("invalid url should fail");
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("invalid url"), "{err}");
     }
 
     #[test]

@@ -40,6 +40,7 @@ pub use sse::{
     sse_data_stream_from_response,
 };
 pub use url::{
-    parse_and_validate_https_url, parse_and_validate_https_url_basic, redact_reqwest_error,
-    redact_url, redact_url_for_error, redact_url_str, validate_url_path_prefix,
+    WebsocketBaseUrlResolution, WebsocketBaseUrlRewrite, parse_and_validate_https_url,
+    parse_and_validate_https_url_basic, redact_reqwest_error, redact_url, redact_url_for_error,
+    redact_url_str, resolve_websocket_base_url, validate_url_path_prefix,
 };

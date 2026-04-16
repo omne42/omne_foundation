@@ -1,6 +1,38 @@
 use crate::error::{ErrorKind, tagged_message};
 use crate::outbound_policy::{host_for_ip_literal, is_local_or_single_label_host};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebsocketBaseUrlRewrite {
+    HttpToWebsocket,
+    HttpsToSecureWebsocket,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebsocketBaseUrlResolution {
+    pub base_url: String,
+    pub rewrite: Option<WebsocketBaseUrlRewrite>,
+}
+
+pub fn resolve_websocket_base_url(base_url: &str) -> WebsocketBaseUrlResolution {
+    let base_url = base_url.trim();
+    if let Some(rest) = base_url.strip_prefix("https://") {
+        return WebsocketBaseUrlResolution {
+            base_url: format!("wss://{rest}"),
+            rewrite: Some(WebsocketBaseUrlRewrite::HttpsToSecureWebsocket),
+        };
+    }
+    if let Some(rest) = base_url.strip_prefix("http://") {
+        return WebsocketBaseUrlResolution {
+            base_url: format!("ws://{rest}"),
+            rewrite: Some(WebsocketBaseUrlRewrite::HttpToWebsocket),
+        };
+    }
+    WebsocketBaseUrlResolution {
+        base_url: base_url.to_string(),
+        rewrite: None,
+    }
+}
+
 pub fn parse_and_validate_https_url_basic(url_str: &str) -> crate::Result<reqwest::Url> {
     let url = reqwest::Url::parse(url_str)
         .map_err(|err| tagged_message(ErrorKind::InvalidInput, format!("invalid url: {err}")))?;
@@ -150,6 +182,27 @@ pub fn validate_url_path_prefix(url: &reqwest::Url, prefix: &str) -> crate::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_websocket_base_url_reports_rewrite_kind() {
+        let secure = resolve_websocket_base_url("https://api.openai.com/v1");
+        assert_eq!(secure.base_url, "wss://api.openai.com/v1");
+        assert_eq!(
+            secure.rewrite,
+            Some(WebsocketBaseUrlRewrite::HttpsToSecureWebsocket)
+        );
+
+        let insecure = resolve_websocket_base_url("http://localhost:8080/v1");
+        assert_eq!(insecure.base_url, "ws://localhost:8080/v1");
+        assert_eq!(
+            insecure.rewrite,
+            Some(WebsocketBaseUrlRewrite::HttpToWebsocket)
+        );
+
+        let passthrough = resolve_websocket_base_url("wss://proxy.example/v1");
+        assert_eq!(passthrough.base_url, "wss://proxy.example/v1");
+        assert_eq!(passthrough.rewrite, None);
+    }
 
     #[test]
     fn redact_url_str_never_leaks_path_or_query() {

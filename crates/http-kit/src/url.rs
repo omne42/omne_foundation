@@ -33,6 +33,55 @@ pub fn resolve_websocket_base_url(base_url: &str) -> WebsocketBaseUrlResolution 
     }
 }
 
+pub fn join_api_base_url_path(base_url: &str, path: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    let path_no_leading_slash = path.strip_prefix('/').unwrap_or(path);
+
+    if base.ends_with("/v1") {
+        if path_no_leading_slash == "v1" {
+            return base.to_string();
+        }
+        if let Some(rest) = path_no_leading_slash.strip_prefix("v1/") {
+            let mut out = String::with_capacity(base.len() + 1 + rest.len());
+            out.push_str(base);
+            out.push('/');
+            out.push_str(rest);
+            return out;
+        }
+    }
+
+    if path.starts_with('/') {
+        let mut out = String::with_capacity(base.len() + path.len());
+        out.push_str(base);
+        out.push_str(path);
+        out
+    } else {
+        let mut out = String::with_capacity(base.len() + 1 + path.len());
+        out.push_str(base);
+        out.push('/');
+        out.push_str(path);
+        out
+    }
+}
+
+pub fn append_url_query_params(base_url: String, query_params: &[(String, String)]) -> String {
+    if query_params.is_empty() {
+        return base_url;
+    }
+
+    let mut out = base_url;
+    out.push(if out.contains('?') { '&' } else { '?' });
+    for (idx, (name, value)) in query_params.iter().enumerate() {
+        if idx > 0 {
+            out.push('&');
+        }
+        out.push_str(name);
+        out.push('=');
+        out.push_str(value);
+    }
+    out
+}
+
 pub fn parse_and_validate_https_url_basic(url_str: &str) -> crate::Result<reqwest::Url> {
     let url = reqwest::Url::parse(url_str)
         .map_err(|err| tagged_message(ErrorKind::InvalidInput, format!("invalid url: {err}")))?;
@@ -202,6 +251,43 @@ mod tests {
         let passthrough = resolve_websocket_base_url("wss://proxy.example/v1");
         assert_eq!(passthrough.base_url, "wss://proxy.example/v1");
         assert_eq!(passthrough.rewrite, None);
+    }
+
+    #[test]
+    fn join_api_base_url_path_respects_v1_join_ergonomics() {
+        assert_eq!(
+            join_api_base_url_path("http://localhost:8080/v1", "/v1/chat/completions"),
+            "http://localhost:8080/v1/chat/completions"
+        );
+        assert_eq!(
+            join_api_base_url_path("http://localhost:8080/v1", "v1/chat/completions"),
+            "http://localhost:8080/v1/chat/completions"
+        );
+        assert_eq!(
+            join_api_base_url_path("http://localhost:8080/v1", "/v1"),
+            "http://localhost:8080/v1"
+        );
+    }
+
+    #[test]
+    fn append_url_query_params_appends_with_existing_separator() {
+        assert_eq!(
+            append_url_query_params(
+                "https://example.com/path".to_string(),
+                &[
+                    ("a".to_string(), "1".to_string()),
+                    ("b".to_string(), "2".to_string())
+                ]
+            ),
+            "https://example.com/path?a=1&b=2"
+        );
+        assert_eq!(
+            append_url_query_params(
+                "https://example.com/path?x=0".to_string(),
+                &[("a".to_string(), "1".to_string())]
+            ),
+            "https://example.com/path?x=0&a=1"
+        );
     }
 
     #[test]

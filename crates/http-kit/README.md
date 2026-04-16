@@ -33,6 +33,8 @@
 
 - `reqwest::Client` 的共享构建入口
 - bounded body read 与 body preview
+- 基于 `reqwest::RequestBuilder` 的 “send + http success + body decode” helper
+- generic SSE `data:` event 流解析与大小限制
 - HTTPS URL 基础校验与错误脱敏
 - untrusted 模式下的 host allowlist、localhost/private IP/DNS 校验
 - HTTP probe 与公共 IP 相关判断
@@ -48,7 +50,9 @@
 - `src/client.rs`
   - HTTP client 构建、选取与发送辅助
 - `src/body.rs`
-  - 有界响应体读取、文本 / JSON preview、HTTP 成功状态检查
+  - 有界响应体读取、文本 / JSON preview、HTTP 成功状态检查，以及 `send_reqwest_*_after_http_success(...)` helper
+- `src/sse.rs`
+  - generic SSE `data:` event 流解析与 `SseLimits`
 - `src/url.rs`
   - URL 校验、脱敏与 path prefix 约束
 - `src/outbound_policy.rs`

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add reusable websocket base-URL rewrite helpers so downstream runtime/realtime adapters can share one transport-level `http(s) -> ws(s)` boundary instead of reimplementing it in product crates.
+- Expose reusable bounded/truncated reqwest body readers with typed limit-vs-transport failures so downstream crates can share one response-body boundary while keeping their own local error mapping.
+- Keep SSE limit validation and line-size failures in their original error class instead of recasting them as generic read failures, so downstream adapters can preserve stable error mapping.
+- Keep `src/sse.rs` generic by preserving empty `data:` events, removing protocol-specific `[DONE]` termination, and stripping only the single optional space allowed after the SSE field colon.
+- Add SSE `data:` stream parsing with bounded line/event limits, plus canonical `send_reqwest_*_after_http_success(...)` helpers so callers can reuse one shared `reqwest + success-check + bounded decode` boundary instead of rewrapping `RequestBuilder` in downstream crates.
 - Fix `read_json_body_after_http_success_limited(...)` so non-2xx error summaries honor the caller-provided `max_bytes` limit instead of silently falling back to the crate default cap.
 - Return typed transport errors instead of panicking when DNS timeout paths run on a Tokio runtime without the time driver enabled, and keep regression coverage for both untrusted outbound validation and public-IP-pinned client selection.
 - Keep untrusted DNS post-validation rejecting always-disallowed targets such as multicast addresses even when `allow_private_ips=true`, so hostnames cannot widen past the hard IP denylist.

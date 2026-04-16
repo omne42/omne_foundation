@@ -29,8 +29,9 @@ mod schema;
 mod typed;
 
 pub use env::{
-    EnvInterpolationOptions, interpolate_env_placeholders, interpolate_env_placeholders_with,
-    is_valid_env_var_name,
+    EnvInterpolationOptions, interpolate_env_placeholders,
+    interpolate_env_placeholders_in_json_value, interpolate_env_placeholders_in_json_value_with,
+    interpolate_env_placeholders_with, is_valid_env_var_name,
 };
 pub use error::{Error, Result};
 pub use format::ConfigFormat;

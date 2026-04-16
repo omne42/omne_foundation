@@ -228,6 +228,11 @@ pub(crate) async fn resolve_secret_in_context(
     resolve_secret_spec_in_context(&parsed, context).await
 }
 
+#[must_use]
+pub fn looks_like_secret_spec(value: &str) -> bool {
+    value.trim().starts_with("secret://")
+}
+
 pub async fn resolve_secret<E>(spec: &str, env: &E) -> Result<SecretString>
 where
     E: SecretEnvironment + SecretCommandRuntime,
@@ -245,6 +250,33 @@ pub async fn resolve_secret_with_runtime(
         SecretResolutionContext::new(environment, command_runtime),
     )
     .await
+}
+
+pub async fn resolve_string_if_secret<E>(value: &str, env: &E) -> Result<String>
+where
+    E: SecretEnvironment + SecretCommandRuntime,
+{
+    if !looks_like_secret_spec(value) {
+        return Ok(value.to_string());
+    }
+
+    resolve_secret(value.trim(), env)
+        .await
+        .map(SecretString::into_owned)
+}
+
+pub async fn resolve_string_if_secret_with_runtime(
+    value: &str,
+    environment: &dyn SecretEnvironment,
+    command_runtime: &dyn SecretCommandRuntime,
+) -> Result<String> {
+    if !looks_like_secret_spec(value) {
+        return Ok(value.to_string());
+    }
+
+    resolve_secret_with_runtime(value.trim(), environment, command_runtime)
+        .await
+        .map(SecretString::into_owned)
 }
 
 pub async fn resolve_secret_spec<E>(spec: &SecretSpec, env: &E) -> Result<SecretString>

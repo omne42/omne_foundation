@@ -37,6 +37,7 @@
 - `ConfigDocument`
 - `find_config_document(...)`
 - `interpolate_env_placeholders(...)`
+- `interpolate_env_placeholders_in_json_value(...)`
 - `merge_config_layers(...)`
 - `load_typed_config_file(...)`
 - `try_load_typed_config_file(...)`
@@ -60,7 +61,7 @@
 - `src/typed.rs`
   - 业务 schema 的严格格式限制与 typed parse helper
 - `src/env.rs`
-  - 严格 `${ENV_VAR}` 插值
+  - 严格 `${ENV_VAR}` 插值，以及递归 JSON string value 插值 helper
 - `src/merge.rs`
   - 递归对象 merge、layer step 与变更路径报告
 - `src/schema.rs`

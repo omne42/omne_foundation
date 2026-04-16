@@ -1,11 +1,55 @@
 use std::io::Write;
 
 use crate::error::{self, ErrorKind};
-use crate::{client::sanitize_reqwest_error, url::redact_url_for_error};
+use crate::{
+    client::{sanitize_reqwest_error, send_reqwest},
+    url::redact_url_for_error,
+};
 
 pub const DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 16 * 1024;
 const RESPONSE_BODY_DRAIN_LIMIT_BYTES: usize = 64 * 1024;
 const ERROR_RESPONSE_SUMMARY_MAX_CHARS: usize = 200;
+
+#[derive(Debug)]
+pub enum ReadReqwestBodyBytesError {
+    ContentLengthExceedsLimit {
+        content_length: u64,
+        max_bytes: usize,
+    },
+    ResponseExceededLimit {
+        max_bytes: usize,
+    },
+    Transport(reqwest::Error),
+}
+
+impl std::fmt::Display for ReadReqwestBodyBytesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ContentLengthExceedsLimit {
+                content_length,
+                max_bytes,
+            } => {
+                write!(
+                    f,
+                    "content-length={content_length} exceeds max bytes ({max_bytes})"
+                )
+            }
+            Self::ResponseExceededLimit { max_bytes } => {
+                write!(f, "response exceeded max bytes ({max_bytes})")
+            }
+            Self::Transport(err) => write!(f, "{}", sanitize_reqwest_error(err)),
+        }
+    }
+}
+
+impl std::error::Error for ReadReqwestBodyBytesError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Transport(err) => Some(err),
+            Self::ContentLengthExceedsLimit { .. } | Self::ResponseExceededLimit { .. } => None,
+        }
+    }
+}
 
 pub async fn read_json_body_limited(
     resp: reqwest::Response,
@@ -107,11 +151,44 @@ pub async fn ensure_http_success(resp: reqwest::Response, context: &str) -> crat
     Err(http_status_text_error(context, status, &body))
 }
 
+pub async fn send_reqwest_after_http_success(
+    builder: reqwest::RequestBuilder,
+    context: &str,
+) -> crate::Result<reqwest::Response> {
+    let resp = send_reqwest(builder, context).await?;
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+
+    let body = read_text_body_limited(resp, DEFAULT_MAX_RESPONSE_BODY_BYTES)
+        .await
+        .map_err(|err| response_body_read_error(&format!("{context} http error"), status, &err))?;
+    Err(http_status_text_error(context, status, &body))
+}
+
 pub async fn read_json_body_after_http_success(
     resp: reqwest::Response,
     context: &str,
 ) -> crate::Result<serde_json::Value> {
     read_json_body_after_http_success_limited(resp, context, DEFAULT_MAX_RESPONSE_BODY_BYTES).await
+}
+
+pub async fn send_reqwest_json_after_http_success(
+    builder: reqwest::RequestBuilder,
+    context: &str,
+) -> crate::Result<serde_json::Value> {
+    send_reqwest_json_after_http_success_limited(builder, context, DEFAULT_MAX_RESPONSE_BODY_BYTES)
+        .await
+}
+
+pub async fn send_reqwest_json_after_http_success_limited(
+    builder: reqwest::RequestBuilder,
+    context: &str,
+    max_bytes: usize,
+) -> crate::Result<serde_json::Value> {
+    let resp = send_reqwest(builder, context).await?;
+    read_json_body_after_http_success_limited(resp, context, max_bytes).await
 }
 
 pub async fn read_json_body_after_http_success_limited(
@@ -130,6 +207,33 @@ pub async fn read_json_body_after_http_success_limited(
     }
 
     read_json_body_limited(resp, max_bytes).await
+}
+
+pub async fn send_reqwest_text_after_http_success(
+    builder: reqwest::RequestBuilder,
+    context: &str,
+) -> crate::Result<String> {
+    send_reqwest_text_after_http_success_limited(builder, context, DEFAULT_MAX_RESPONSE_BODY_BYTES)
+        .await
+}
+
+pub async fn send_reqwest_text_after_http_success_limited(
+    builder: reqwest::RequestBuilder,
+    context: &str,
+    max_bytes: usize,
+) -> crate::Result<String> {
+    let resp = send_reqwest(builder, context).await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = read_text_body_limited(resp, max_bytes)
+            .await
+            .map_err(|err| {
+                response_body_read_error(&format!("{context} http error"), status, &err)
+            })?;
+        return Err(http_status_text_error(context, status, &body));
+    }
+
+    read_text_body_limited(resp, max_bytes).await
 }
 
 pub async fn drain_response_body(mut resp: reqwest::Response) {
@@ -196,47 +300,36 @@ fn decode_text_body_lossy(buf: Vec<u8>, truncated: bool) -> String {
     out
 }
 
-async fn read_body_bytes_limited(
+pub async fn read_reqwest_body_bytes_limited(
     mut resp: reqwest::Response,
     max_bytes: usize,
-) -> crate::Result<Vec<u8>> {
+) -> std::result::Result<Vec<u8>, ReadReqwestBodyBytesError> {
     if max_bytes == 0 {
         drain_response_body_limited(&mut resp, RESPONSE_BODY_DRAIN_LIMIT_BYTES).await;
-        return Err(error::tagged_message(
-            ErrorKind::ResponseBody,
-            "response body too large (response body omitted)",
-        ));
+        return Err(ReadReqwestBodyBytesError::ResponseExceededLimit { max_bytes });
     }
 
     let mut cap_hint = 0usize;
     if let Some(len) = resp.content_length() {
         if len > max_bytes as u64 {
             drain_response_body_limited(&mut resp, RESPONSE_BODY_DRAIN_LIMIT_BYTES).await;
-            return Err(error::tagged_message(
-                ErrorKind::ResponseBody,
-                "response body too large (response body omitted)",
-            ));
+            return Err(ReadReqwestBodyBytesError::ContentLengthExceedsLimit {
+                content_length: len,
+                max_bytes,
+            });
         }
         cap_hint = content_length_capacity_hint(len, max_bytes);
     }
 
     let mut buf = Vec::with_capacity(cap_hint);
-    while let Some(chunk) = resp.chunk().await.map_err(|err| {
-        error::tagged_source(
-            ErrorKind::ResponseBody,
-            format!(
-                "read response body failed ({})",
-                sanitize_reqwest_error(&err)
-            ),
-            err,
-        )
-    })? {
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(ReadReqwestBodyBytesError::Transport)?
+    {
         if chunk.len() > max_bytes.saturating_sub(buf.len()) {
             drain_response_body_limited(&mut resp, RESPONSE_BODY_DRAIN_LIMIT_BYTES).await;
-            return Err(error::tagged_message(
-                ErrorKind::ResponseBody,
-                "response body too large (response body omitted)",
-            ));
+            return Err(ReadReqwestBodyBytesError::ResponseExceededLimit { max_bytes });
         }
         buf.extend_from_slice(&chunk);
     }
@@ -244,10 +337,10 @@ async fn read_body_bytes_limited(
     Ok(buf)
 }
 
-async fn read_body_bytes_truncated(
+pub async fn read_reqwest_body_bytes_truncated(
     mut resp: reqwest::Response,
     max_bytes: usize,
-) -> crate::Result<(Vec<u8>, bool)> {
+) -> std::result::Result<(Vec<u8>, bool), reqwest::Error> {
     if max_bytes == 0 {
         drain_response_body_limited(&mut resp, RESPONSE_BODY_DRAIN_LIMIT_BYTES).await;
         return Ok((Vec::new(), true));
@@ -263,16 +356,7 @@ async fn read_body_bytes_truncated(
     }
 
     let mut buf = Vec::with_capacity(cap_hint);
-    while let Some(chunk) = resp.chunk().await.map_err(|err| {
-        error::tagged_source(
-            ErrorKind::ResponseBody,
-            format!(
-                "read response body failed ({})",
-                sanitize_reqwest_error(&err)
-            ),
-            err,
-        )
-    })? {
+    while let Some(chunk) = resp.chunk().await? {
         if buf.len() >= max_bytes {
             truncated = true;
             break;
@@ -293,6 +377,51 @@ async fn read_body_bytes_truncated(
     }
 
     Ok((buf, truncated))
+}
+
+async fn read_body_bytes_limited(
+    resp: reqwest::Response,
+    max_bytes: usize,
+) -> crate::Result<Vec<u8>> {
+    read_reqwest_body_bytes_limited(resp, max_bytes)
+        .await
+        .map_err(map_read_reqwest_body_bytes_error)
+}
+
+async fn read_body_bytes_truncated(
+    resp: reqwest::Response,
+    max_bytes: usize,
+) -> crate::Result<(Vec<u8>, bool)> {
+    read_reqwest_body_bytes_truncated(resp, max_bytes)
+        .await
+        .map_err(|err| {
+            error::tagged_source(
+                ErrorKind::ResponseBody,
+                format!(
+                    "read response body failed ({})",
+                    sanitize_reqwest_error(&err)
+                ),
+                err,
+            )
+        })
+}
+
+fn map_read_reqwest_body_bytes_error(err: ReadReqwestBodyBytesError) -> crate::Error {
+    match err {
+        ReadReqwestBodyBytesError::ContentLengthExceedsLimit { .. }
+        | ReadReqwestBodyBytesError::ResponseExceededLimit { .. } => error::tagged_message(
+            ErrorKind::ResponseBody,
+            "response body too large (response body omitted)",
+        ),
+        ReadReqwestBodyBytesError::Transport(err) => error::tagged_source(
+            ErrorKind::ResponseBody,
+            format!(
+                "read response body failed ({})",
+                sanitize_reqwest_error(&err)
+            ),
+            err,
+        ),
+    }
 }
 
 async fn drain_response_body_limited(resp: &mut reqwest::Response, mut remaining: usize) {
@@ -568,5 +697,68 @@ mod tests {
         });
 
         server.join().expect("server thread");
+    }
+
+    #[tokio::test]
+    async fn send_reqwest_after_http_success_returns_response_on_success() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf).await.expect("read request");
+            let response = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Length: 2\r\n",
+                "Connection: close\r\n",
+                "\r\n",
+                "ok"
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+
+        let client = reqwest::Client::new();
+        let resp = send_reqwest_after_http_success(client.get(format!("http://{addr}/")), "test")
+            .await
+            .expect("successful response");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn send_reqwest_text_after_http_success_reports_http_error() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf).await.expect("read request");
+            let response = concat!(
+                "HTTP/1.1 403 Forbidden\r\n",
+                "Content-Length: 9\r\n",
+                "Connection: close\r\n",
+                "\r\n",
+                "forbidden"
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+
+        let client = reqwest::Client::new();
+        let err =
+            send_reqwest_text_after_http_success(client.get(format!("http://{addr}/")), "acl")
+                .await
+                .expect_err("http error");
+        assert_eq!(err.kind(), ErrorKind::HttpStatus);
+        assert!(err.to_string().contains("403 Forbidden"));
+        assert!(err.to_string().contains("forbidden"));
+
+        server.await.expect("server task");
     }
 }

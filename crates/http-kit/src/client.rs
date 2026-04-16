@@ -515,8 +515,9 @@ mod tests {
             let mut buf = [0_u8; 2048];
             let read = stream.read(&mut buf).expect("read request");
             let request = String::from_utf8_lossy(&buf[..read]);
+            let request_lower = request.to_ascii_lowercase();
             assert!(
-                request.contains("x-test-header: profile\r\n"),
+                request_lower.contains("x-test-header: profile\r\n"),
                 "request should keep default headers: {request}"
             );
 
@@ -567,8 +568,9 @@ mod tests {
             let mut buf = [0_u8; 2048];
             let read = stream.read(&mut buf).expect("read request");
             let request = String::from_utf8_lossy(&buf[..read]);
+            let request_lower = request.to_ascii_lowercase();
             assert!(
-                request.contains("x-test-header: options\r\n"),
+                request_lower.contains("x-test-header: options\r\n"),
                 "request should rebuild the unpinned client from explicit options: {request}"
             );
 

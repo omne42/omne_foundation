@@ -37,6 +37,28 @@ pub fn interpolate_env_placeholders(raw: &str) -> Result<String> {
     })
 }
 
+pub fn interpolate_env_placeholders_in_json_value(value: &mut serde_json::Value) -> Result<()> {
+    interpolate_env_placeholders_in_json_value_with(
+        value,
+        EnvInterpolationOptions::default(),
+        |name| std::env::var(name).ok(),
+    )
+}
+
+pub fn interpolate_env_placeholders_in_json_value_with<F>(
+    value: &mut serde_json::Value,
+    options: EnvInterpolationOptions,
+    lookup: F,
+) -> Result<()>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut rendered = value.clone();
+    interpolate_json_value_in_place(&mut rendered, options, lookup)?;
+    *value = rendered;
+    Ok(())
+}
+
 pub fn interpolate_env_placeholders_with<F>(
     raw: &str,
     options: EnvInterpolationOptions,
@@ -104,6 +126,48 @@ where
     output.push_str(&raw[last..]);
     ensure_output_limit(&output, options.max_output_bytes)?;
     Ok(output)
+}
+
+fn interpolate_json_value_in_place<F>(
+    value: &mut serde_json::Value,
+    options: EnvInterpolationOptions,
+    mut lookup: F,
+) -> Result<()>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    fn recurse<F>(
+        value: &mut serde_json::Value,
+        options: EnvInterpolationOptions,
+        lookup: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        match value {
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+                Ok(())
+            }
+            serde_json::Value::String(rendered) => {
+                *rendered = interpolate_env_placeholders_with(rendered, options, lookup)?;
+                Ok(())
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    recurse(item, options, lookup)?;
+                }
+                Ok(())
+            }
+            serde_json::Value::Object(map) => {
+                for value in map.values_mut() {
+                    recurse(value, options, lookup)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    recurse(value, options, &mut lookup)
 }
 
 #[must_use]
@@ -177,5 +241,50 @@ mod tests {
         )
         .expect_err("too large");
         assert!(err.to_string().contains("max size 2 bytes"));
+    }
+
+    #[test]
+    fn interpolates_nested_json_value_strings() {
+        let mut value = serde_json::json!({
+            "base_url": "https://${HOST}/v1",
+            "headers": {
+                "authorization": "Bearer ${TOKEN}"
+            },
+            "items": ["${HOST}", 1, true]
+        });
+
+        interpolate_env_placeholders_in_json_value_with(
+            &mut value,
+            EnvInterpolationOptions::new(),
+            |name| match name {
+                "HOST" => Some("api.example.com".to_string()),
+                "TOKEN" => Some("sk-test".to_string()),
+                _ => None,
+            },
+        )
+        .expect("interpolate nested json value");
+
+        assert_eq!(value["base_url"], "https://api.example.com/v1");
+        assert_eq!(value["headers"]["authorization"], "Bearer sk-test");
+        assert_eq!(value["items"][0], "api.example.com");
+    }
+
+    #[test]
+    fn json_value_interpolation_is_fail_closed_without_partial_mutation() {
+        let original = serde_json::json!({
+            "ok": "${OK}",
+            "missing": "${MISSING}"
+        });
+        let mut value = original.clone();
+
+        let err = interpolate_env_placeholders_in_json_value_with(
+            &mut value,
+            EnvInterpolationOptions::new(),
+            |name| (name == "OK").then(|| "done".to_string()),
+        )
+        .expect_err("missing env var should fail");
+
+        assert!(err.to_string().contains("MISSING"));
+        assert_eq!(value, original);
     }
 }

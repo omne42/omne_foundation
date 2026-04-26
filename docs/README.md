@@ -37,7 +37,10 @@
 AGENTS.md
 ARCHITECTURE.md
 crates/
+├── audio-input-kit/README.md
+├── audio-media-kit/README.md
 ├── config-kit/README.md
+├── desktop-input-kit/README.md
 ├── error-kit/README.md
 ├── error-protocol/README.md
 ├── github-kit/README.md
@@ -47,10 +50,13 @@ crates/
 ├── log-kit/README.md
 ├── mcp-jsonrpc/README.md
 ├── mcp-kit/README.md
+├── model-assets-kit/README.md
 ├── notify-kit/README.md
 ├── policy-meta/README.md
 ├── prompt-kit/README.md
 ├── secret-kit/README.md
+├── speech-transcription-kit/README.md
+├── speech-whisper-kit/README.md
 ├── structured-text-kit/README.md
 ├── structured-text-protocol/README.md
 └── text-assets-kit/README.md

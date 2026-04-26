@@ -115,6 +115,13 @@ agent-first 维护方式还进一步提醒我们：
 - `i18n-runtime-kit`
 - `prompt-kit`
 - `secret-kit`
+- `audio-input-kit`
+- `audio-media-kit`
+- `desktop-input-kit`
+- `model-assets-kit`
+- `speech-transcription-kit`
+- `speech-whisper-kit`
+- `text-postprocess-kit`
 - `mcp-kit`
 - `notify-kit`
 
@@ -192,6 +199,7 @@ agent-first 维护方式还进一步提醒我们：
 - HTTP client / body / URL / outbound policy
 - transport / session
 - notify
+- audio / speech / desktop input domain contracts
 
 这一层通常建立在更底层 runtime 原语之上，但目标不是复刻系统能力，而是提供面向应用复用的通用基础能力。
 
@@ -211,7 +219,7 @@ agent-first 维护方式还进一步提醒我们：
 
 ## 当前 `omne_foundation` 覆盖的基建类型
 
-如果只看 `omne_foundation` workspace，本仓库当前主要覆盖五类 `foundation` 能力：
+如果只看 `omne_foundation` workspace，本仓库当前主要覆盖七类 `foundation` 能力：
 
 ### 1. 结构化文本语义层
 
@@ -284,7 +292,37 @@ agent-first 维护方式还进一步提醒我们：
 
 它负责连接和会话能力，不直接定义上层业务工作流。
 
-### 5. 通知层
+### 5. 音频与语音领域层
+
+- `audio-input-kit`
+- `audio-media-kit`
+- `model-assets-kit`
+- `speech-transcription-kit`
+- `speech-whisper-kit`
+
+这一层解决的是：
+
+- 音频输入 backend、设备、采集配置和 session 事件如何共享表达
+- 音频资产、目标媒体格式、前处理预算和 provenance 如何共享表达
+- AI 模型 manifest、来源、能力、本地引用和安装状态如何共享表达
+- 语音转写请求、结果、job 状态和 provider provenance 如何共享表达
+
+它不负责真实音频采集实现、真实音频转码、模型下载实现、本地模型执行或产品级录音 / 下载策略。
+
+### 6. 桌面输入与文本交付领域层
+
+- `desktop-input-kit`
+
+这一层解决的是：
+
+- 输入触发来源和触发事件如何共享表达
+- 语音唤醒设置、检测引擎、探测 / 听写预算和唤醒事件如何共享表达
+- 文本交付目标、请求和结果如何共享表达
+- 桌面权限需求、快捷键冲突、麦克风不可用、唤醒词不可用、剪贴板不可用和输入模拟失败如何稳定分类
+
+它不负责 Tauri plugin 接线、系统托盘实现、全局快捷键注册、真实 wake word / keyword spotting 引擎、剪贴板读写、直接输入注入或产品级默认快捷键 / 唤醒词 / 输出策略。
+
+### 7. 通知层
 
 - `notify-kit`
 

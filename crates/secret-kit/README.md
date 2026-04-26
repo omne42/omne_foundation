@@ -40,9 +40,14 @@
 - `gcp-sm`
 - `azure-kv`
 
+Optional `system-keyring` feature:
+
+- `keyring`
+
 同时覆盖：
 
 - CLI provider 调用
+- 系统 keyring 读取边界（启用 `system-keyring` feature 时）
 - 内建 provider 的系统目录级 PATH 发现、子进程 PATH 裁剪与显式绝对路径 override
 - JSON 字段提取
 - 面向配置字符串边界的 `secret://...` 条件解析 helper

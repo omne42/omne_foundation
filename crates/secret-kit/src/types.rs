@@ -18,6 +18,7 @@ pub enum SecretError {
     Lookup(StructuredText),
     InvalidSpec(StructuredText),
     Command(StructuredText),
+    Provider(StructuredText),
 }
 
 pub type Result<T> = std::result::Result<T, SecretError>;
@@ -28,6 +29,7 @@ static SECRET_LOOKUP_ERROR_CODE: SecretErrorCode = SecretErrorCode::new("secret.
 static SECRET_INVALID_SPEC_ERROR_CODE: SecretErrorCode =
     SecretErrorCode::new("secret.invalid_spec");
 static SECRET_COMMAND_ERROR_CODE: SecretErrorCode = SecretErrorCode::new("secret.command");
+static SECRET_PROVIDER_ERROR_CODE: SecretErrorCode = SecretErrorCode::new("secret.provider");
 static SECRET_INTERNAL_ERROR_CODE: SecretErrorCode = SecretErrorCode::new("secret.internal");
 
 struct SecretErrorCode {
@@ -80,6 +82,7 @@ impl SecretError {
             Self::Lookup(_) => Self::lookup_mapping(),
             Self::InvalidSpec(_) => Self::invalid_spec_mapping(),
             Self::Command(_) => Self::command_mapping(),
+            Self::Provider(_) => Self::provider_mapping(),
         }
     }
 
@@ -106,6 +109,13 @@ impl SecretError {
         )
     }
 
+    const fn provider_mapping() -> SecretErrorMapping {
+        SecretErrorMapping::new(
+            &SECRET_PROVIDER_ERROR_CODE,
+            ErrorCategory::ExternalDependency,
+        )
+    }
+
     fn io_retry_advice(source: &std::io::Error) -> ErrorRetryAdvice {
         match source.kind() {
             std::io::ErrorKind::NotFound
@@ -126,6 +136,17 @@ impl SecretError {
         }
     }
 
+    fn provider_retry_advice(text: &StructuredText) -> ErrorRetryAdvice {
+        match text.as_catalog().map(CatalogTextRef::code) {
+            Some("error_detail.secret.keyring_no_storage_access")
+            | Some("error_detail.secret.keyring_platform_failure")
+            | Some("error_detail.secret.keyring_blocking_task_failed") => {
+                ErrorRetryAdvice::Retryable
+            }
+            _ => ErrorRetryAdvice::DoNotRetry,
+        }
+    }
+
     #[must_use]
     pub fn structured_text(&self) -> &StructuredText {
         match self {
@@ -133,7 +154,8 @@ impl SecretError {
             | Self::Json { text, .. }
             | Self::Lookup(text)
             | Self::InvalidSpec(text)
-            | Self::Command(text) => text,
+            | Self::Command(text)
+            | Self::Provider(text) => text,
         }
     }
 
@@ -155,6 +177,7 @@ impl SecretError {
             Self::Lookup(_) => ErrorRetryAdvice::DoNotRetry,
             Self::InvalidSpec(_) => ErrorRetryAdvice::DoNotRetry,
             Self::Command(text) => Self::command_retry_advice(text),
+            Self::Provider(text) => Self::provider_retry_advice(text),
         }
     }
 
@@ -177,6 +200,7 @@ impl SecretError {
             Self::Lookup(text) => Self::lookup_mapping().new_record(text, retry_advice),
             Self::InvalidSpec(text) => Self::invalid_spec_mapping().new_record(text, retry_advice),
             Self::Command(text) => Self::command_mapping().new_record(text, retry_advice),
+            Self::Provider(text) => Self::provider_mapping().new_record(text, retry_advice),
         }
     }
 
@@ -217,6 +241,9 @@ impl Display for SecretError {
             Self::Command(text) => {
                 write!(f, "secret command error: {}", text.diagnostic_display())
             }
+            Self::Provider(text) => {
+                write!(f, "secret provider error: {}", text.diagnostic_display())
+            }
         }
     }
 }
@@ -226,7 +253,7 @@ impl StdError for SecretError {
         match self {
             Self::Io { source, .. } => Some(source),
             Self::Json { source, .. } => Some(source),
-            Self::Lookup(_) | Self::InvalidSpec(_) | Self::Command(_) => None,
+            Self::Lookup(_) | Self::InvalidSpec(_) | Self::Command(_) | Self::Provider(_) => None,
         }
     }
 }

@@ -8,6 +8,8 @@ mod providers;
 use crate::command::run_secret_command;
 use crate::file::read_secret_file;
 use crate::json::extract_json_key_secret;
+#[cfg(feature = "system-keyring")]
+use crate::system_keyring::read_keyring_secret;
 use crate::{
     DefaultPreparedSecret, PreparedSecretResolution, Result, SecretCommandRuntime,
     SecretEnvironment, SecretError, SecretResolutionContext, SecretString,
@@ -42,6 +44,11 @@ pub enum SecretSpec {
         vault: String,
         name: String,
         version: Option<String>,
+    },
+    #[cfg(feature = "system-keyring")]
+    Keyring {
+        service: String,
+        account: String,
     },
 }
 
@@ -88,6 +95,12 @@ impl std::fmt::Debug for SecretSpec {
                 .field("vault", &"<redacted>")
                 .field("name", &"<redacted>")
                 .field("has_version", &version.is_some())
+                .finish(),
+            #[cfg(feature = "system-keyring")]
+            Self::Keyring { .. } => f
+                .debug_struct("SecretSpec::Keyring")
+                .field("service", &"<redacted>")
+                .field("account", &"<redacted>")
                 .finish(),
         }
     }
@@ -168,6 +181,15 @@ impl std::fmt::Display for SecretSpec {
                     write_query_param(f, &mut first, "version", version)?;
                 }
                 Ok(())
+            }
+            #[cfg(feature = "system-keyring")]
+            Self::Keyring { service, account } => {
+                write!(
+                    f,
+                    "keyring/{}/{}",
+                    encode_secret_component(service),
+                    encode_secret_component(account)
+                )
             }
         }
     }
@@ -310,6 +332,8 @@ pub(crate) async fn resolve_secret_spec_in_context(
             ))
         }),
         SecretSpec::File { path } => read_secret_file(Path::new(path)).await,
+        #[cfg(feature = "system-keyring")]
+        SecretSpec::Keyring { service, account } => read_keyring_secret(service, account).await,
         other => {
             let cmd = build_secret_command(other)
                 .ok_or_else(|| invalid_response!("error_detail.secret.not_resolvable"))?;
@@ -337,6 +361,13 @@ fn parse_secret_spec(
     match provider {
         "env" => parse_env_spec(tail, query),
         "file" => parse_file_spec(tail, query),
+        #[cfg(feature = "system-keyring")]
+        "keyring" => parse_keyring_spec(tail, query),
+        #[cfg(not(feature = "system-keyring"))]
+        "keyring" => Err(invalid_response!(
+            "error_detail.secret.unsupported_provider",
+            "provider" => "keyring"
+        )),
         other => providers::parse_provider_spec(other, tail, query),
     }
 }
@@ -369,6 +400,23 @@ fn parse_file_spec(tail: Option<&str>, query: &QueryParameters) -> Result<Secret
         ));
     }
     Ok(SecretSpec::File { path })
+}
+
+#[cfg(feature = "system-keyring")]
+fn parse_keyring_spec(tail: Option<&str>, query: &QueryParameters) -> Result<SecretSpec> {
+    ensure_allowed_query_parameters("keyring", query, &[])?;
+    let tail = tail.unwrap_or_default();
+    let (service, account) = tail
+        .split_once('/')
+        .ok_or_else(|| invalid_response!("error_detail.secret.keyring_entry_required"))?;
+    let service = decode_spec_component(service.trim())?;
+    let account = decode_spec_component(account.trim())?;
+    if service.is_empty() || account.is_empty() {
+        return Err(invalid_response!(
+            "error_detail.secret.keyring_entry_required"
+        ));
+    }
+    Ok(SecretSpec::Keyring { service, account })
 }
 
 pub(super) fn decode_required_tail_component(

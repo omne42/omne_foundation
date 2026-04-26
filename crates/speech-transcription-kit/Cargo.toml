@@ -1,0 +1,16 @@
+[package]
+name = "speech-transcription-kit"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+audio-media-kit = { version = "0.1.0", path = "../audio-media-kit" }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

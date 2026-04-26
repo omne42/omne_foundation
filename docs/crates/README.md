@@ -10,6 +10,9 @@
 - [`structured-text-protocol`](../../crates/structured-text-protocol/README.md)
 - [`error-kit`](../../crates/error-kit/README.md)
 - [`error-protocol`](../../crates/error-protocol/README.md)
+- [`audio-input-kit`](../../crates/audio-input-kit/README.md)
+- [`audio-media-kit`](../../crates/audio-media-kit/README.md)
+- [`desktop-input-kit`](../../crates/desktop-input-kit/README.md)
 - [`github-kit`](../../crates/github-kit/README.md)
 - [`log-kit`](../../crates/log-kit/README.md)
 - [`i18n-kit`](../../crates/i18n-kit/README.md)
@@ -18,9 +21,13 @@
 - [`i18n-runtime-kit`](../../crates/i18n-runtime-kit/README.md)
 - [`prompt-kit`](../../crates/prompt-kit/README.md)
 - [`secret-kit`](../../crates/secret-kit/README.md)
+- [`speech-transcription-kit`](../../crates/speech-transcription-kit/README.md)
+- [`speech-whisper-kit`](../../crates/speech-whisper-kit/README.md)
+- [`text-postprocess-kit`](../../crates/text-postprocess-kit/README.md)
 - [`http-kit`](../../crates/http-kit/README.md)
 - [`mcp-jsonrpc`](../../crates/mcp-jsonrpc/README.md)
 - [`mcp-kit`](../../crates/mcp-kit/README.md)
+- [`model-assets-kit`](../../crates/model-assets-kit/README.md)
 - [`notify-kit`](../../crates/notify-kit/README.md)
 - [`policy-meta`](../../crates/policy-meta/README.md)
 
@@ -38,6 +45,10 @@
 - 想从网络边界和协议连接开始：
   - `http-kit` -> `github-kit`
   - `http-kit` -> `mcp-jsonrpc` -> `mcp-kit`
+- 想从语音转写领域开始：
+  - `audio-input-kit` -> `audio-media-kit` -> `model-assets-kit` -> `speech-transcription-kit` -> `speech-whisper-kit` -> `text-postprocess-kit`
+- 想从桌面输入触发与文本交付开始：
+  - `desktop-input-kit`
 - 想从 HTTP foundation 开始：
   - `http-kit` -> `github-kit`
 - 想从日志与观测语义开始：

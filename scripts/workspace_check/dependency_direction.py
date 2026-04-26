@@ -6,7 +6,10 @@ from check_common.context import CheckContext, capture_command
 
 
 ALLOWED_INTERNAL_DEPS: dict[str, set[str]] = {
+    "audio-input-kit": set(),
+    "audio-media-kit": set(),
     "config-kit": set(),
+    "desktop-input-kit": set(),
     "error-kit": {"structured-text-kit"},
     "error-protocol": {"error-kit", "structured-text-kit", "structured-text-protocol"},
     "github-kit": {"http-kit"},
@@ -22,6 +25,7 @@ ALLOWED_INTERNAL_DEPS: dict[str, set[str]] = {
         "mcp-jsonrpc",
         "structured-text-kit",
     },
+    "model-assets-kit": set(),
     "notify-kit": {
         "github-kit",
         "http-kit",
@@ -32,9 +36,12 @@ ALLOWED_INTERNAL_DEPS: dict[str, set[str]] = {
     "policy-meta": set(),
     "prompt-kit": {"text-assets-kit"},
     "secret-kit": {"error-kit", "structured-text-kit"},
+    "speech-transcription-kit": {"audio-media-kit"},
+    "speech-whisper-kit": set(),
     "structured-text-kit": set(),
     "structured-text-protocol": {"structured-text-kit"},
     "text-assets-kit": set(),
+    "text-postprocess-kit": set(),
 }
 
 

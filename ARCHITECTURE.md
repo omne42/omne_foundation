@@ -111,6 +111,46 @@ A -> B   表示 A 依赖 B
 - 渠道路由、并发发送、超时和错误聚合
 - 共享复用 `http-kit` 的 HTTP 能力和 `log-kit` 的文本日志原语
 
+### 7. 音频与语音领域层
+
+- `audio-input-kit`
+- `audio-media-kit`
+- `model-assets-kit`
+- `speech-transcription-kit`
+- `speech-whisper-kit`
+- `text-postprocess-kit`
+
+这一层处理“音频输入、模型资产、语音转写和文本后处理边界如何共享表达”：
+
+- 音频输入 backend / device / config
+- capture session 状态、事件和错误分类
+- 音频资产、目标媒体格式、前处理预算和 provenance
+- 模型 manifest / source / capability / install status
+- 音频输入引用
+- 转写 provider/model 选择
+- 转写 provider/model 能力和错误分类
+- 转写选项
+- 文本结果与时间片段
+- 转写 job 状态
+- 本地 Whisper Rust 运行时适配
+- 文本后处理来源、模式、结果、provenance 和错误分类
+
+这里刻意不放具体音频采集实现、通用音频转码实现、模型下载实现、LLM provider adapter 或 HTTP provider 调用。那些能力应分别进入 adapter、`audio-media-kit` adapter、`ditto-llm`、`http-kit` provider adapter、`secret-kit` 和 `omne-runtime` 原语边界。本地 Whisper 的 Rust API 适配先由 `speech-whisper-kit` 承接，兼容外部命令生命周期仍属于 `omne-runtime` 原语边界。
+
+### 8. 桌面输入与文本交付领域层
+
+- `desktop-input-kit`
+
+这一层处理“桌面输入触发和转写文本交付边界如何共享表达”：
+
+- 输入触发来源与事件
+- 语音唤醒设置、检测引擎选择、探测/听写预算与唤醒事件
+- 文本交付目标、请求和结果
+- 桌面权限需求
+- 快捷键冲突、麦克风不可用、唤醒词不可用、剪贴板不可用、辅助功能权限缺失和输入模拟失败等错误分类
+
+这里刻意不放 Tauri plugin 接线、系统托盘实现、全局快捷键注册、真实 wake word / keyword spotting 引擎、剪贴板读写、直接输入注入或平台权限引导 UI。那些能力应留在桌面产品层或后续 adapter crate。
+
 ## 主要依赖方向
 
 当前 workspace 内部可总结成下面这张简图：
@@ -150,6 +190,14 @@ notify-kit           -> http-kit
 notify-kit           -> log-kit
 notify-kit           -> secret-kit
 notify-kit           -> structured-text-kit
+
+audio-input-kit     -> (no internal foundation deps)
+audio-media-kit     -> (no internal foundation deps)
+desktop-input-kit   -> (no internal foundation deps)
+model-assets-kit    -> (no internal foundation deps)
+speech-transcription-kit -> audio-media-kit
+speech-whisper-kit  -> (no internal foundation deps)
+text-postprocess-kit -> (no internal foundation deps)
 ```
 
 补充说明：
@@ -164,6 +212,13 @@ notify-kit           -> structured-text-kit
 - `prompt-kit` 建立在 `text-assets-kit` 之上，当前只承接 prompt 目录 bootstrap 与惰性访问这一窄适配层，不是 prompt 模板、版本和缓存的统一抽象。
 - `mcp-jsonrpc` 与 `mcp-kit` 共享 `http-kit`，并依赖 `error-kit` / `structured-text-kit` 提供稳定错误与文本语义，而不是各自重复实现这些基础表示。
 - `notify-kit` 依赖 `http-kit`、`github-kit`、`log-kit`、`secret-kit` 和 `structured-text-kit`，但通知域语义仍独立于 MCP 和 i18n。
+- `audio-input-kit` 当前不依赖其他 foundation crate；它只先稳定音频输入 DTO、session 事件和错误语义。
+- `audio-media-kit` 当前不依赖其他 foundation crate；它只先稳定音频资产、媒体格式、前处理预算和 provenance 语义。
+- `desktop-input-kit` 当前不依赖其他 foundation crate；它只先稳定桌面触发、语音唤醒、文本交付、权限和错误语义。
+- `model-assets-kit` 当前不依赖其他 foundation crate；它只先稳定模型 manifest、来源、能力、安装状态和本地引用语义。
+- `speech-transcription-kit` 建立在 `audio-media-kit` 的音频资产引用之上，避免转写 job 复制一套资产边界。
+- `speech-whisper-kit` 当前不依赖其他 foundation crate；它只先稳定 `whisper-rs` 运行时适配、PCM WAV 校验和样本转换。
+- `text-postprocess-kit` 当前不依赖其他 foundation crate；它只先稳定后处理请求、结果、状态、provenance 和错误语义，LLM provider 适配继续属于 `ditto-llm`。
 - `mcp-jsonrpc` 是 transport 层，`mcp-kit` 在其上增加 MCP 语义和配置管理。
 - `i18n-kit` 依赖的是结构化文本原语；`secret-kit` 额外复用 `error-kit` 以暴露稳定错误语义。
 - 这张 workspace 内部依赖图现在由 `scripts/check-workspace.sh dependency-direction` 做机械检查；`local` / `ci` 也会先跑它，避免边界只留在文档里。

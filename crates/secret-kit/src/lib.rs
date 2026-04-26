@@ -51,6 +51,13 @@
 //! secret://azure-kv/my-vault/my-secret?version=abc123
 //! ```
 //!
+//! ### System keyring
+//! ```text
+//! secret://keyring/com.omne42.typemic/openai-api-key
+//! ```
+//!
+//! This provider is available when the `system-keyring` feature is enabled.
+//!
 //! ## 使用场景
 //!
 //! ### 场景 1：从环境变量读取
@@ -195,6 +202,16 @@ macro_rules! secret_json_error {
             structured_text_kit::structured_text!($code, $($rest)*),
             $source,
         )
+    };
+}
+
+#[cfg(feature = "system-keyring")]
+macro_rules! secret_provider_error {
+    ($code:literal $(,)?) => {
+        SecretError::Provider(structured_text_kit::structured_text!($code))
+    };
+    ($code:literal, $($rest:tt)*) => {
+        SecretError::Provider(structured_text_kit::structured_text!($code, $($rest)*))
     };
 }
 
@@ -751,6 +768,8 @@ mod file;
 mod json;
 pub mod runtime;
 pub mod spec;
+#[cfg(feature = "system-keyring")]
+mod system_keyring;
 mod types;
 mod value;
 

@@ -33,6 +33,8 @@ pub(super) fn parse_provider_spec(
 pub(super) fn build_provider_command(spec: &SecretSpec) -> Option<SecretCommand> {
     match spec {
         SecretSpec::Env { .. } | SecretSpec::File { .. } => None,
+        #[cfg(feature = "system-keyring")]
+        SecretSpec::Keyring { .. } => None,
         SecretSpec::Vault {
             path,
             field,

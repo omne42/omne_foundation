@@ -1414,6 +1414,18 @@ fn parses_command_specs() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "system-keyring")]
+#[test]
+fn parses_keyring_spec_without_command_bridge() -> Result<()> {
+    let spec = SecretSpec::parse("secret://keyring/com.omne42.typemic/openai-api-key")?;
+    assert!(build_secret_command(&spec).is_none());
+    assert_eq!(
+        spec.to_string(),
+        "secret://keyring/com.omne42.typemic/openai-api-key"
+    );
+    Ok(())
+}
+
 #[test]
 fn secret_command_debug_redacts_args_and_env_values() {
     let cmd = SecretCommand {
@@ -1654,7 +1666,7 @@ fn resolve_program_on_path_returns_absolute_match() {
     assert!(resolved.is_absolute());
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn resolve_program_on_path_preserves_non_utf8_absolute_match() {
     use std::ffi::OsString;
@@ -3682,6 +3694,11 @@ fn secret_spec_display_round_trips_to_parse() -> Result<()> {
             vault: "vault one".to_string(),
             name: "secret/name".to_string(),
             version: Some("123".to_string()),
+        },
+        #[cfg(feature = "system-keyring")]
+        SecretSpec::Keyring {
+            service: "com.omne42.typemic".to_string(),
+            account: "openai/api key".to_string(),
         },
     ];
 

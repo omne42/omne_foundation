@@ -16,6 +16,7 @@
 - 有界、fail-closed、no-follow 的配置文件读取
 - rooted candidate path 边界检查与越界拒绝
 - rooted candidate file discovery（relative-only，拒绝绝对路径、`..` 和中间目录 symlink）
+- `.env` overlay 内容解析
 - 严格 `${ENV_VAR}` 插值
 - 递归对象 merge 与变更路径报告
 - 面向业务 schema 的高层 typed loader
@@ -37,6 +38,7 @@
 - `ConfigDocument`
 - `find_config_document(...)`
 - `interpolate_env_placeholders(...)`
+- `parse_dotenv(...)`
 - `interpolate_env_placeholders_in_json_value(...)`
 - `merge_config_layers(...)`
 - `load_typed_config_file(...)`
@@ -61,7 +63,7 @@
 - `src/typed.rs`
   - 业务 schema 的严格格式限制与 typed parse helper
 - `src/env.rs`
-  - 严格 `${ENV_VAR}` 插值，以及递归 JSON string value 插值 helper
+  - `.env` overlay 解析、严格 `${ENV_VAR}` 插值，以及递归 JSON string value 插值 helper
 - `src/merge.rs`
   - 递归对象 merge、layer step 与变更路径报告
 - `src/schema.rs`

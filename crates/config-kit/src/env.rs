@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +45,44 @@ pub fn interpolate_env_placeholders_in_json_value(value: &mut serde_json::Value)
         EnvInterpolationOptions::default(),
         |name| std::env::var(name).ok(),
     )
+}
+
+#[must_use]
+pub fn parse_dotenv(contents: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::<String, String>::new();
+
+    for raw_line in contents.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        let Some((raw_key, raw_value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = raw_key.trim();
+        if key.is_empty() {
+            continue;
+        }
+
+        let mut value = raw_value.trim().to_string();
+        if let Some(stripped) = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+        {
+            value = stripped.to_string();
+        }
+
+        if value.trim().is_empty() {
+            continue;
+        }
+
+        out.insert(key.to_string(), value);
+    }
+
+    out
 }
 
 pub fn interpolate_env_placeholders_in_json_value_with<F>(
@@ -204,6 +244,24 @@ mod tests {
         )
         .expect("interpolate");
         assert_eq!(rendered, "hello world");
+    }
+
+    #[test]
+    fn parses_dotenv_overlay_values() {
+        let parsed = parse_dotenv(
+            r#"
+# comment
+export OPENAI_COMPAT_API_KEY="sk-test"
+FOO=bar
+EMPTY=
+"#,
+        );
+        assert_eq!(
+            parsed.get("OPENAI_COMPAT_API_KEY").map(String::as_str),
+            Some("sk-test")
+        );
+        assert_eq!(parsed.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(parsed.get("EMPTY"), None);
     }
 
     #[test]

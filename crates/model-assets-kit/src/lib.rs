@@ -11,7 +11,8 @@ use omne_artifact_install_primitives::{
     download_file_to_destination,
 };
 use omne_fs_primitives::{
-    AtomicWriteOptions, write_file_atomically, write_file_atomically_from_reader,
+    AtomicWriteOptions, MissingRootPolicy, open_root, write_file_atomically,
+    write_file_atomically_from_reader,
 };
 use omne_integrity_primitives::{Sha256Digest, parse_sha256_user_input, verify_sha256_reader};
 use serde::{Deserialize, Serialize};
@@ -224,12 +225,25 @@ pub struct ModelStore {
 impl ModelStore {
     pub fn new(root_dir: impl Into<PathBuf>) -> Result<Self, ModelStoreError> {
         let root_dir = root_dir.into();
-        fs::create_dir_all(&root_dir).map_err(|source| ModelStoreError::Io {
-            op: "create model store root",
+        let root = open_root(
+            &root_dir,
+            "model store root",
+            MissingRootPolicy::Create,
+            |_, _, _, error| error,
+        )
+        .map_err(|source| ModelStoreError::Io {
+            op: "open model store root",
             path: root_dir.clone(),
             source,
+        })?
+        .ok_or_else(|| ModelStoreError::Io {
+            op: "open model store root",
+            path: root_dir.clone(),
+            source: io::Error::new(io::ErrorKind::NotFound, "model store root was not created"),
         })?;
-        Ok(Self { root_dir })
+        Ok(Self {
+            root_dir: root.path().to_path_buf(),
+        })
     }
 
     pub fn root_dir(&self) -> &Path {
@@ -1585,6 +1599,22 @@ mod tests {
             serde_json::to_value(known).expect("serialize known")["runtimeBackend"]["kind"],
             "whisperRs"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_store_rejects_symlinked_root_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("temp dir");
+        let actual = temp.path().join("actual");
+        let linked = temp.path().join("linked");
+        std::fs::create_dir_all(&actual).expect("create actual root");
+        symlink(&actual, &linked).expect("create root symlink");
+
+        let error = ModelStore::new(&linked).expect_err("symlinked root should fail");
+
+        assert!(matches!(error, ModelStoreError::Io { .. }));
     }
 
     #[tokio::test]

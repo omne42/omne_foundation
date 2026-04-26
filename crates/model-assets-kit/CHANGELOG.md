@@ -17,3 +17,4 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Added JSON compatibility coverage for model manifest DTOs.
 - `ModelStore` now rejects symlinked `model.json` files and metadata paths that point outside the model directory, keeping local model discovery inside the store boundary.
 - `ModelStore` now rejects existing non-regular model destination paths before reuse or checksum verification, so install cannot accept a symlinked model file as already installed.
+- `ModelStore` now treats `size_bytes` as an installed-file verification contract, preventing wrong-size files from being reused or imported.

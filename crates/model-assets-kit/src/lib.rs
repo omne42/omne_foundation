@@ -205,6 +205,8 @@ pub enum ModelStoreError {
     Install(String),
     #[error("model checksum verification failed for {path:?}: {message}")]
     Checksum { path: PathBuf, message: String },
+    #[error("model verification failed for {path:?}: {message}")]
+    Verification { path: PathBuf, message: String },
     #[error("model metadata error ({path:?}): {source}")]
     Metadata {
         path: PathBuf,
@@ -529,6 +531,7 @@ impl ModelStore {
         path: &Path,
     ) -> Result<(), ModelStoreError> {
         require_regular_model_file(manifest, path)?;
+        verify_model_size(manifest, path)?;
         if let Some(expected) = manifest_sha256_digest(manifest)? {
             let mut file = File::open(path).map_err(|source| ModelStoreError::Io {
                 op: "open model for sha256 verification",
@@ -997,6 +1000,26 @@ fn require_regular_model_file(
     Err(ModelStoreError::InvalidManifest {
         model_id: manifest.model_id.clone(),
         message: "model file does not exist".to_string(),
+    })
+}
+
+fn verify_model_size(manifest: &ModelManifest, path: &Path) -> Result<(), ModelStoreError> {
+    let Some(expected_size) = manifest.size_bytes else {
+        return Ok(());
+    };
+    let actual_size = fs::symlink_metadata(path)
+        .map_err(|source| ModelStoreError::Io {
+            op: "read model file size",
+            path: path.to_path_buf(),
+            source,
+        })?
+        .len();
+    if actual_size == expected_size {
+        return Ok(());
+    }
+    Err(ModelStoreError::Verification {
+        path: path.to_path_buf(),
+        message: format!("size mismatch: expected {expected_size} bytes, got {actual_size}"),
     })
 }
 
@@ -1529,6 +1552,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_store_rejects_local_file_size_mismatch() {
+        let temp = TempDir::new().expect("temp dir");
+        let source = temp.path().join("ggml-fixture.bin");
+        std::fs::write(&source, b"fixture-model").expect("write source");
+        let manifest = ModelManifest {
+            size_bytes: Some(1),
+            ..fixture_manifest(ModelSource::LocalFile {
+                path: source.display().to_string(),
+            })
+        };
+        let store = ModelStore::new(temp.path().join("models")).expect("store");
+
+        let error = store
+            .install_manifest(&NoopDownloader, &manifest)
+            .await
+            .expect_err("size mismatch should fail");
+
+        assert!(matches!(error, ModelStoreError::Verification { .. }));
+    }
+
+    #[tokio::test]
+    async fn model_store_replaces_existing_destination_with_size_mismatch() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path().join("models");
+        let model_dir = root.join("whisper-fixture");
+        let destination = model_dir.join("ggml-fixture.bin");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        std::fs::write(&destination, b"bad").expect("write existing wrong model");
+        let bytes = b"right-size".to_vec();
+        let manifest = ModelManifest {
+            size_bytes: Some(bytes.len() as u64),
+            sources: vec![ModelSource::Https {
+                url: "https://models.example.invalid/ggml-fixture.bin".to_string(),
+            }],
+            ..fixture_manifest(ModelSource::Custom {
+                id: "unused".to_string(),
+                uri: "unused".to_string(),
+            })
+        };
+        let store = ModelStore::new(&root).expect("store");
+
+        let installed = store
+            .install_manifest(
+                &BytesDownloader {
+                    bytes: bytes.clone(),
+                },
+                &manifest,
+            )
+            .await
+            .expect("replace wrong-size model");
+
+        assert_eq!(Path::new(&installed.path), destination.as_path());
+        assert_eq!(std::fs::read(destination).expect("read installed"), bytes);
+    }
+
+    #[tokio::test]
     async fn model_store_downloads_with_runtime_artifact_downloader() {
         let temp = TempDir::new().expect("temp dir");
         let bytes = b"downloaded-model".to_vec();
@@ -1660,7 +1739,7 @@ mod tests {
             format: ModelFormat::WhisperCppGgml,
             runtime_backend: Some(LocalModelRuntimeBackend::WhisperRs),
             version: Some("test".to_string()),
-            size_bytes: Some(1024),
+            size_bytes: None,
             sha256: None,
             checksum: None,
             license: Some("MIT".to_string()),

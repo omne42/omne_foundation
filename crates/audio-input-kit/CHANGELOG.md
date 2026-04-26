@@ -14,3 +14,4 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ### Changed
 - CPAL native stream startup now honors `AudioInputConfig.format` instead of silently using the device default format.
 - CPAL stream callback errors are retained on `CpalInputStream` and exposed via `drain_errors()`.
+- CPAL stream callback error retention is now bounded and keeps the latest errors, avoiding unbounded memory growth when callers do not drain immediately.

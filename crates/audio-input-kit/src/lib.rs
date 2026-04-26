@@ -9,6 +9,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+const MAX_RETAINED_STREAM_ERRORS: usize = 32;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -389,14 +391,21 @@ where
                 }
             },
             move |error| {
-                let mut errors = errors
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                errors.push(cpal_stream_error_to_audio_error(error));
+                record_stream_error(&errors, cpal_stream_error_to_audio_error(error));
             },
             Some(Duration::from_millis(100)),
         )
         .map_err(audio_error_from_build)
+}
+
+fn record_stream_error(errors: &Mutex<Vec<AudioInputError>>, error: AudioInputError) {
+    let mut errors = errors
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if errors.len() == MAX_RETAINED_STREAM_ERRORS {
+        errors.remove(0);
+    }
+    errors.push(error);
 }
 
 fn mono_from_f32(data: &[f32], channels: usize) -> Vec<f32> {
@@ -511,11 +520,13 @@ fn audio_error_from_pause(error: cpal::PauseStreamError) -> AudioInputRuntimeErr
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::{
-        AudioFrameFormat, AudioInputBackend, AudioInputConfig, AudioInputErrorKind,
-        AudioSampleFormat, CaptureEvent, CaptureSessionId, CaptureSessionStatus,
-        cpal_stream_error_to_audio_error, mono_from_i16, mono_from_u16,
-        select_cpal_input_config_from_ranges,
+        AudioFrameFormat, AudioInputBackend, AudioInputConfig, AudioInputError,
+        AudioInputErrorKind, AudioSampleFormat, CaptureEvent, CaptureSessionId,
+        CaptureSessionStatus, MAX_RETAINED_STREAM_ERRORS, cpal_stream_error_to_audio_error,
+        mono_from_i16, mono_from_u16, record_stream_error, select_cpal_input_config_from_ranges,
     };
 
     #[test]
@@ -684,6 +695,28 @@ mod tests {
 
         assert_eq!(error.kind, AudioInputErrorKind::StreamInterrupted);
         assert!(!error.message.is_empty());
+    }
+
+    #[test]
+    fn stream_error_retention_is_bounded_and_keeps_latest_errors() {
+        let errors = Mutex::new(Vec::new());
+        for index in 0..(MAX_RETAINED_STREAM_ERRORS + 2) {
+            record_stream_error(
+                &errors,
+                AudioInputError {
+                    kind: AudioInputErrorKind::StreamInterrupted,
+                    message: format!("error-{index}"),
+                },
+            );
+        }
+
+        let errors = errors.lock().expect("errors lock");
+        assert_eq!(errors.len(), MAX_RETAINED_STREAM_ERRORS);
+        assert_eq!(errors.first().expect("first error").message, "error-2");
+        assert_eq!(
+            errors.last().expect("last error").message,
+            format!("error-{}", MAX_RETAINED_STREAM_ERRORS + 1)
+        );
     }
 
     #[test]

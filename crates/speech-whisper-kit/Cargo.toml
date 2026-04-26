@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 hound = { workspace = true }
+omne-fs-primitives = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 whisper-rs = { workspace = true }

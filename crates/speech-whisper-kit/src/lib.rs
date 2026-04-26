@@ -1,7 +1,11 @@
 #![forbid(unsafe_code)]
 
-use std::path::{Path, PathBuf};
+use std::{
+    io::{self, BufReader},
+    path::{Path, PathBuf},
+};
 
+use omne_fs_primitives::{File as CapFile, MissingRootPolicy, open_regular_file_at, open_root};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
@@ -53,19 +57,10 @@ pub fn transcribe_wav(
     config: &WhisperRsRuntimeConfig,
     input: &WhisperTranscriptionInput,
 ) -> Result<WhisperTranscriptionOutput, WhisperRuntimeError> {
-    if !config.model_path.is_file() {
-        return Err(WhisperRuntimeError::ModelUnavailable(format!(
-            "model file does not exist: {}",
-            config.model_path.display()
-        )));
-    }
-
-    if !input.audio_path.is_file() {
-        return Err(WhisperRuntimeError::InvalidRequest(format!(
-            "audio file does not exist: {}",
-            input.audio_path.display()
-        )));
-    }
+    require_regular_nofollow_file(&config.model_path, "model file")
+        .map_err(|message| WhisperRuntimeError::ModelUnavailable(message.to_string()))?;
+    require_regular_nofollow_file(&input.audio_path, "audio file")
+        .map_err(|message| WhisperRuntimeError::InvalidRequest(message.to_string()))?;
 
     let audio = read_pcm_wav_as_mono_f32(&input.audio_path)?;
     let context =
@@ -135,7 +130,13 @@ pub fn transcribe_wav(
 }
 
 pub fn read_pcm_wav_as_mono_f32(path: &Path) -> Result<Vec<f32>, WhisperRuntimeError> {
-    let reader = hound::WavReader::open(path).map_err(|error| {
+    let file = open_regular_nofollow_file(path, "audio file").map_err(|error| {
+        WhisperRuntimeError::UnsupportedAudioFormat(format!(
+            "failed to open PCM WAV {}: {error}",
+            path.display()
+        ))
+    })?;
+    let reader = hound::WavReader::new(BufReader::new(file)).map_err(|error| {
         WhisperRuntimeError::UnsupportedAudioFormat(format!(
             "failed to open PCM WAV {}: {error}",
             path.display()
@@ -204,6 +205,41 @@ pub fn read_pcm_wav_as_mono_f32(path: &Path) -> Result<Vec<f32>, WhisperRuntimeE
     Ok(mono)
 }
 
+fn require_regular_nofollow_file(path: &Path, label: &str) -> Result<(), String> {
+    open_regular_nofollow_file(path, label)
+        .map(drop)
+        .map_err(|error| format!("{label} must be a regular non-symlink file: {error}"))
+}
+
+fn open_regular_nofollow_file(path: &Path, label: &str) -> io::Result<CapFile> {
+    let leaf = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{label} path must include a file name: {}", path.display()),
+        )
+    })?;
+    let parent = match path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        Some(parent) => parent.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
+    let root = open_root(
+        &parent,
+        label,
+        MissingRootPolicy::Error,
+        |_, _, _, error| error,
+    )?
+    .ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{label} parent directory not found: {}", path.display()),
+        )
+    })?;
+    open_regular_file_at(root.dir(), Path::new(leaf))
+}
+
 fn default_thread_count() -> i32 {
     std::thread::available_parallelism()
         .map(|count| count.get().clamp(1, 8) as i32)
@@ -215,7 +251,10 @@ mod tests {
     use hound::{SampleFormat, WavSpec, WavWriter};
     use tempfile::TempDir;
 
-    use super::{WhisperRsRuntimeConfig, WhisperRuntimeError, read_pcm_wav_as_mono_f32};
+    use super::{
+        WhisperRsRuntimeConfig, WhisperRuntimeError, read_pcm_wav_as_mono_f32,
+        require_regular_nofollow_file,
+    };
 
     #[test]
     fn normalized_threads_uses_positive_override() {
@@ -253,6 +292,42 @@ mod tests {
             error,
             WhisperRuntimeError::UnsupportedAudioFormat(_)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_wav_input() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("temp dir");
+        let target = temp.path().join("target.wav");
+        let link = temp.path().join("sample.wav");
+        write_test_wav(&target, 16_000, 1, &[0, 1]).expect("write wav");
+        symlink(&target, &link).expect("create wav symlink");
+
+        let error = read_pcm_wav_as_mono_f32(&link).expect_err("symlinked wav should fail");
+
+        assert!(matches!(
+            error,
+            WhisperRuntimeError::UnsupportedAudioFormat(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_model_file() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("temp dir");
+        let target = temp.path().join("model.bin");
+        let link = temp.path().join("linked-model.bin");
+        std::fs::write(&target, b"model").expect("write model");
+        symlink(&target, &link).expect("create model symlink");
+
+        let error = require_regular_nofollow_file(&link, "model file")
+            .expect_err("symlinked model should fail");
+
+        assert!(error.contains("regular non-symlink file"));
     }
 
     fn write_test_wav(

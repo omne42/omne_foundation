@@ -135,7 +135,7 @@ A -> B   表示 A 依赖 B
 - 本地 Whisper Rust 运行时适配
 - 文本后处理来源、模式、结果、provenance 和错误分类
 
-这里刻意不放具体音频采集实现、通用音频转码实现、模型下载实现、LLM provider adapter 或 HTTP provider 调用。那些能力应分别进入 adapter、`audio-media-kit` adapter、`ditto-llm`、`http-kit` provider adapter、`secret-kit` 和 `omne-runtime` 原语边界。本地 Whisper 的 Rust API 适配先由 `speech-whisper-kit` 承接，兼容外部命令生命周期仍属于 `omne-runtime` 原语边界。
+这里刻意不放具体音频采集实现、通用音频转码实现、模型下载实现、LLM provider adapter 或 HTTP provider 调用。那些能力应分别进入 adapter、`audio-media-kit` adapter、`ditto-llm`、`http-kit` provider adapter、`secret-kit` 和 `omne-runtime` 原语边界。本地 Whisper 的 Rust API 适配先由 `speech-whisper-kit` 承接；模型和 WAV 输入的 no-follow 文件打开复用 `omne-runtime` 原语，兼容外部命令生命周期仍属于 `omne-runtime` 原语边界。
 
 ### 8. 桌面输入与文本交付领域层
 
@@ -218,7 +218,7 @@ text-postprocess-kit -> (no internal foundation deps)
 - `desktop-input-kit` 当前不依赖其他 foundation crate；它只先稳定桌面触发、语音唤醒、文本交付、权限和错误语义。
 - `model-assets-kit` 当前不依赖其他 foundation crate；它只先稳定模型 manifest、来源、能力、安装状态和本地引用语义。
 - `speech-transcription-kit` 建立在 `audio-media-kit` 的音频资产引用之上，避免转写 job 复制一套资产边界；它也只读复用 `model-assets-kit` 的本地 Whisper catalog 来生成 provider/model descriptor，不拥有模型安装、下载或执行边界。
-- `speech-whisper-kit` 当前不依赖其他 foundation crate；它只先稳定 `whisper-rs` 运行时适配、PCM WAV 校验和样本转换。
+- `speech-whisper-kit` 当前不依赖其他 workspace 内 foundation crate；它只先稳定 `whisper-rs` 运行时适配、PCM WAV 校验和样本转换，并复用 `omne-runtime` 的 no-follow 文件系统原语守住本地模型和音频输入路径边界。
 - `text-postprocess-kit` 当前不依赖其他 foundation crate；它只先稳定后处理请求、结果、状态、provenance 和错误语义，LLM provider 适配继续属于 `ditto-llm`。
 - `mcp-jsonrpc` 是 transport 层，`mcp-kit` 在其上增加 MCP 语义和配置管理。
 - `i18n-kit` 依赖的是结构化文本原语；`secret-kit` 额外复用 `error-kit` 以暴露稳定错误语义。

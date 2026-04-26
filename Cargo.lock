@@ -2971,6 +2971,7 @@ name = "speech-whisper-kit"
 version = "0.1.0"
 dependencies = [
  "hound",
+ "omne-fs-primitives",
  "serde",
  "tempfile",
  "thiserror 1.0.69",

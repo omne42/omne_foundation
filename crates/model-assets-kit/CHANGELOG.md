@@ -19,3 +19,4 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `ModelStore` now rejects existing non-regular model destination paths before reuse or checksum verification, so install cannot accept a symlinked model file as already installed.
 - `ModelStore` now treats `size_bytes` as an installed-file verification contract, preventing wrong-size files from being reused or imported.
 - `ModelSource::Https` download candidates now require credential-free `https://` URLs before reaching the injected downloader.
+- Hugging Face source URLs are now built from validated path segments instead of raw string interpolation, preventing malformed manifest fields from injecting query or reserved path semantics.

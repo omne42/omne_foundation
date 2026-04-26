@@ -1054,7 +1054,7 @@ fn download_candidates(
                 revision,
                 file,
             } => Some(
-                hugging_face_resolve_url(repo_id, revision.as_deref(), file).map(|url| {
+                hugging_face_resolve_url(manifest, repo_id, revision.as_deref(), file).map(|url| {
                     ArtifactDownloadCandidate {
                         url,
                         source_label: "hugging-face-hub".to_string(),
@@ -1094,22 +1094,78 @@ fn https_download_candidate(
 }
 
 fn hugging_face_resolve_url(
+    manifest: &ModelManifest,
     repo_id: &str,
     revision: Option<&str>,
     file: &str,
 ) -> Result<String, ModelStoreError> {
-    let repo_id = repo_id.trim();
-    let revision = revision.unwrap_or("main").trim();
-    let file = file.trim();
-    if repo_id.is_empty() || revision.is_empty() || file.is_empty() {
-        return Err(ModelStoreError::InvalidManifest {
-            model_id: repo_id.to_string(),
-            message: "Hugging Face source requires repo_id, revision and file".to_string(),
-        });
+    let repo_components = hugging_face_path_components(repo_id, "repo_id").map_err(|message| {
+        ModelStoreError::InvalidManifest {
+            model_id: manifest.model_id.clone(),
+            message,
+        }
+    })?;
+    let revision_components = hugging_face_path_components(revision.unwrap_or("main"), "revision")
+        .map_err(|message| ModelStoreError::InvalidManifest {
+            model_id: manifest.model_id.clone(),
+            message,
+        })?;
+    let file_components = hugging_face_path_components(file, "file").map_err(|message| {
+        ModelStoreError::InvalidManifest {
+            model_id: manifest.model_id.clone(),
+            message,
+        }
+    })?;
+
+    let mut url = Url::parse("https://huggingface.co/").map_err(|error| {
+        ModelStoreError::InvalidManifest {
+            model_id: manifest.model_id.clone(),
+            message: format!("invalid Hugging Face base URL: {error}"),
+        }
+    })?;
+    {
+        let mut segments =
+            url.path_segments_mut()
+                .map_err(|()| ModelStoreError::InvalidManifest {
+                    model_id: manifest.model_id.clone(),
+                    message: "Hugging Face base URL cannot be a base".to_string(),
+                })?;
+        for component in repo_components {
+            segments.push(&component);
+        }
+        segments.push("resolve");
+        for component in revision_components {
+            segments.push(&component);
+        }
+        for component in file_components {
+            segments.push(&component);
+        }
     }
-    Ok(format!(
-        "https://huggingface.co/{repo_id}/resolve/{revision}/{file}"
-    ))
+    Ok(url.to_string())
+}
+
+fn hugging_face_path_components(raw: &str, label: &str) -> Result<Vec<String>, String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err(format!("Hugging Face source {label} is empty"));
+    }
+
+    value
+        .split('/')
+        .map(|component| {
+            if component.is_empty() || component == "." || component == ".." {
+                return Err(format!(
+                    "Hugging Face source {label} contains an empty or reserved path component"
+                ));
+            }
+            if component.contains('\\') || component.contains('\0') {
+                return Err(format!(
+                    "Hugging Face source {label} contains an invalid path component"
+                ));
+            }
+            Ok(component.to_string())
+        })
+        .collect()
 }
 
 fn asset_name_for_manifest(manifest: &ModelManifest) -> Result<String, ModelStoreError> {
@@ -1445,6 +1501,37 @@ mod tests {
                 .iter()
                 .any(|capability| matches!(capability, ModelCapability::SpeakerDiarization))
         );
+    }
+
+    #[test]
+    fn hugging_face_source_builds_encoded_resolve_url() {
+        let manifest = fixture_manifest(ModelSource::HuggingFaceHub {
+            repo_id: "org/model".to_string(),
+            revision: Some("feature/test".to_string()),
+            file: "nested/ggml fixture.bin?raw=true".to_string(),
+        });
+
+        let candidates = super::download_candidates(&manifest).expect("download candidates");
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].url,
+            "https://huggingface.co/org/model/resolve/feature/test/nested/ggml%20fixture.bin%3Fraw=true"
+        );
+    }
+
+    #[test]
+    fn hugging_face_source_rejects_reserved_path_components() {
+        let manifest = fixture_manifest(ModelSource::HuggingFaceHub {
+            repo_id: "org/model".to_string(),
+            revision: Some("main".to_string()),
+            file: "../ggml-fixture.bin".to_string(),
+        });
+
+        let error = super::download_candidates(&manifest)
+            .expect_err("reserved path component should be rejected");
+
+        assert!(matches!(error, ModelStoreError::InvalidManifest { .. }));
     }
 
     #[test]

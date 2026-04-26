@@ -1,8 +1,22 @@
 #![forbid(unsafe_code)]
 
-use std::path::Path;
+use std::{
+    fs::{self, File},
+    io::{self, Read},
+    path::{Path, PathBuf},
+};
 
+use omne_artifact_install_primitives::{
+    ArtifactDownloadCandidate, ArtifactDownloader, DownloadFileRequest,
+    download_file_to_destination,
+};
+use omne_fs_primitives::{
+    AtomicWriteOptions, write_file_atomically, write_file_atomically_from_reader,
+};
+use omne_integrity_primitives::{Sha256Digest, parse_sha256_user_input, verify_sha256_reader};
 use serde::{Deserialize, Serialize};
+use sha1::{Digest as _, Sha1};
+use thiserror::Error;
 
 const MIB: u64 = 1_048_576;
 const WHISPER_CPP_HF_REPO: &str = "ggerganov/whisper.cpp";
@@ -170,6 +184,330 @@ pub enum LocalModelRuntimeBackend {
     WhisperRs,
     CandleWhisper,
     Custom { id: String },
+}
+
+#[derive(Debug, Error)]
+pub enum ModelStoreError {
+    #[error("model manifest not found: {0}")]
+    ManifestNotFound(String),
+    #[error("invalid model manifest {model_id}: {message}")]
+    InvalidManifest { model_id: String, message: String },
+    #[error("model source is unsupported: {0}")]
+    UnsupportedSource(String),
+    #[error("model store io error while {op} ({path:?}): {source}")]
+    Io {
+        op: &'static str,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("model install failed: {0}")]
+    Install(String),
+    #[error("model checksum verification failed for {path:?}: {message}")]
+    Checksum { path: PathBuf, message: String },
+    #[error("model metadata error ({path:?}): {source}")]
+    Metadata {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelStore {
+    root_dir: PathBuf,
+}
+
+impl ModelStore {
+    pub fn new(root_dir: impl Into<PathBuf>) -> Result<Self, ModelStoreError> {
+        let root_dir = root_dir.into();
+        fs::create_dir_all(&root_dir).map_err(|source| ModelStoreError::Io {
+            op: "create model store root",
+            path: root_dir.clone(),
+            source,
+        })?;
+        Ok(Self { root_dir })
+    }
+
+    pub fn root_dir(&self) -> &Path {
+        &self.root_dir
+    }
+
+    pub fn list_local_models(&self) -> Result<Vec<LocalModelRef>, ModelStoreError> {
+        let mut models = Vec::new();
+        if !self.root_dir.exists() {
+            return Ok(models);
+        }
+
+        let entries = fs::read_dir(&self.root_dir).map_err(|source| ModelStoreError::Io {
+            op: "read model store root",
+            path: self.root_dir.clone(),
+            source,
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| ModelStoreError::Io {
+                op: "read model store entry",
+                path: self.root_dir.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|source| ModelStoreError::Io {
+                op: "read model store entry metadata",
+                path: path.clone(),
+                source,
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                continue;
+            }
+            if let Some(model) = self.read_local_model_from_dir(&path)? {
+                models.push(model);
+            }
+        }
+
+        models.sort_by(|left, right| left.model_id.cmp(&right.model_id));
+        Ok(models)
+    }
+
+    pub fn find_local_model(
+        &self,
+        model_id: &str,
+    ) -> Result<Option<LocalModelRef>, ModelStoreError> {
+        let model_dir = self.model_dir(model_id)?;
+        if !model_dir.exists() {
+            return Ok(None);
+        }
+        let metadata = fs::symlink_metadata(&model_dir).map_err(|source| ModelStoreError::Io {
+            op: "read model directory metadata",
+            path: model_dir.clone(),
+            source,
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(ModelStoreError::InvalidManifest {
+                model_id: model_id.to_string(),
+                message: "model directory is not a regular directory".to_string(),
+            });
+        }
+        self.read_local_model_from_dir(&model_dir)
+    }
+
+    pub async fn install_manifest<D>(
+        &self,
+        downloader: &D,
+        manifest: &ModelManifest,
+    ) -> Result<LocalModelRef, ModelStoreError>
+    where
+        D: ArtifactDownloader + ?Sized,
+    {
+        let destination = self.model_destination(manifest)?;
+        if destination.is_file() && self.verify_model_file(manifest, &destination).is_ok() {
+            let local_model = local_model_ref_from_manifest(manifest, &destination);
+            self.write_local_model_metadata(&local_model)?;
+            return Ok(local_model);
+        }
+
+        if let Some(source_path) = first_local_source(manifest) {
+            self.install_from_local_file(manifest, source_path, &destination)?;
+            let local_model = local_model_ref_from_manifest(manifest, &destination);
+            self.write_local_model_metadata(&local_model)?;
+            return Ok(local_model);
+        }
+
+        let candidates = download_candidates(manifest)?;
+        if candidates.is_empty() {
+            return Err(ModelStoreError::UnsupportedSource(
+                manifest.model_id.clone(),
+            ));
+        }
+
+        let asset_name = asset_name_for_manifest(manifest)?;
+        let expected_sha256 = manifest_sha256_digest(manifest)?;
+        let max_download_bytes = manifest
+            .size_bytes
+            .and_then(|bytes| bytes.checked_add(16 * MIB));
+        let canonical_url = candidates[0].url.as_str();
+        let request = DownloadFileRequest {
+            canonical_url,
+            destination: &destination,
+            asset_name: &asset_name,
+            expected_sha256: expected_sha256.as_ref(),
+            max_download_bytes,
+        };
+        download_file_to_destination(downloader, &candidates, &request)
+            .await
+            .map_err(|error| ModelStoreError::Install(error.to_string()))?;
+
+        self.verify_model_file(manifest, &destination)?;
+        let local_model = local_model_ref_from_manifest(manifest, &destination);
+        self.write_local_model_metadata(&local_model)?;
+        Ok(local_model)
+    }
+
+    pub fn delete_model(&self, model_id: &str) -> Result<bool, ModelStoreError> {
+        let model_dir = self.model_dir(model_id)?;
+        if !model_dir.exists() {
+            return Ok(false);
+        }
+        let metadata = fs::symlink_metadata(&model_dir).map_err(|source| ModelStoreError::Io {
+            op: "read model directory metadata",
+            path: model_dir.clone(),
+            source,
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(ModelStoreError::InvalidManifest {
+                model_id: model_id.to_string(),
+                message: "model directory is not a regular directory".to_string(),
+            });
+        }
+        fs::remove_dir_all(&model_dir).map_err(|source| ModelStoreError::Io {
+            op: "delete model directory",
+            path: model_dir,
+            source,
+        })?;
+        Ok(true)
+    }
+
+    pub fn manifest_by_id(&self, model_id: &str) -> Option<ModelManifest> {
+        whisper_cpp_builtin_model_manifests()
+            .into_iter()
+            .find(|manifest| manifest.model_id == model_id)
+    }
+
+    fn model_dir(&self, model_id: &str) -> Result<PathBuf, ModelStoreError> {
+        let component = safe_component(model_id, "model id").map_err(|message| {
+            ModelStoreError::InvalidManifest {
+                model_id: model_id.to_string(),
+                message,
+            }
+        })?;
+        Ok(self.root_dir.join(component))
+    }
+
+    fn model_destination(&self, manifest: &ModelManifest) -> Result<PathBuf, ModelStoreError> {
+        let model_dir = self.model_dir(&manifest.model_id)?;
+        let asset_name = asset_name_for_manifest(manifest)?;
+        Ok(model_dir.join(asset_name))
+    }
+
+    fn read_local_model_from_dir(
+        &self,
+        model_dir: &Path,
+    ) -> Result<Option<LocalModelRef>, ModelStoreError> {
+        let metadata_path = model_dir.join("model.json");
+        if metadata_path.is_file() {
+            let content =
+                fs::read_to_string(&metadata_path).map_err(|source| ModelStoreError::Io {
+                    op: "read model metadata",
+                    path: metadata_path.clone(),
+                    source,
+                })?;
+            let model = serde_json::from_str::<LocalModelRef>(&content).map_err(|source| {
+                ModelStoreError::Metadata {
+                    path: metadata_path.clone(),
+                    source,
+                }
+            })?;
+            return Ok(Path::new(&model.path).is_file().then_some(model));
+        }
+
+        let Some(model_id) = model_dir.file_name().and_then(|value| value.to_str()) else {
+            return Ok(None);
+        };
+        let entries = fs::read_dir(model_dir).map_err(|source| ModelStoreError::Io {
+            op: "read model directory",
+            path: model_dir.to_path_buf(),
+            source,
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| ModelStoreError::Io {
+                op: "read model file entry",
+                path: model_dir.to_path_buf(),
+                source,
+            })?;
+            let path = entry.path();
+            if path.is_file() {
+                return Ok(Some(LocalModelRef {
+                    model_id: model_id.to_string(),
+                    path: path.display().to_string(),
+                    format: ModelFormat::WhisperCppGgml,
+                    runtime_backend: Some(LocalModelRuntimeBackend::WhisperRs),
+                    sha256: None,
+                    checksum: None,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn install_from_local_file(
+        &self,
+        manifest: &ModelManifest,
+        source_path: &Path,
+        destination: &Path,
+    ) -> Result<(), ModelStoreError> {
+        let mut reader = File::open(source_path).map_err(|source| ModelStoreError::Io {
+            op: "open local model source",
+            path: source_path.to_path_buf(),
+            source,
+        })?;
+        write_file_atomically_from_reader(&mut reader, destination, &model_file_write_options())
+            .map_err(|source| ModelStoreError::Io {
+                op: "install local model file",
+                path: destination.to_path_buf(),
+                source: io::Error::other(source),
+            })?;
+        self.verify_model_file(manifest, destination)
+    }
+
+    fn write_local_model_metadata(
+        &self,
+        local_model: &LocalModelRef,
+    ) -> Result<(), ModelStoreError> {
+        let metadata_path = Path::new(&local_model.path)
+            .parent()
+            .ok_or_else(|| ModelStoreError::InvalidManifest {
+                model_id: local_model.model_id.clone(),
+                message: "local model path has no parent directory".to_string(),
+            })?
+            .join("model.json");
+        let bytes =
+            serde_json::to_vec_pretty(local_model).map_err(|source| ModelStoreError::Metadata {
+                path: metadata_path.clone(),
+                source,
+            })?;
+        write_file_atomically(&bytes, &metadata_path, &metadata_write_options()).map_err(|source| {
+            ModelStoreError::Io {
+                op: "write model metadata",
+                path: metadata_path,
+                source: io::Error::other(source),
+            }
+        })
+    }
+
+    fn verify_model_file(
+        &self,
+        manifest: &ModelManifest,
+        path: &Path,
+    ) -> Result<(), ModelStoreError> {
+        if let Some(expected) = manifest_sha256_digest(manifest)? {
+            let mut file = File::open(path).map_err(|source| ModelStoreError::Io {
+                op: "open model for sha256 verification",
+                path: path.to_path_buf(),
+                source,
+            })?;
+            verify_sha256_reader(&mut file, &expected).map_err(|error| {
+                ModelStoreError::Checksum {
+                    path: path.to_path_buf(),
+                    message: error.to_string(),
+                }
+            })?;
+        }
+
+        if let Some(checksum) = &manifest.checksum {
+            verify_checksum(path, checksum)?;
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -570,6 +908,209 @@ pub fn local_model_ref_from_whisper_path(
     }
 }
 
+fn local_model_ref_from_manifest(manifest: &ModelManifest, path: &Path) -> LocalModelRef {
+    LocalModelRef {
+        model_id: manifest.model_id.clone(),
+        path: path.display().to_string(),
+        format: manifest.format.clone(),
+        runtime_backend: manifest.runtime_backend.clone(),
+        sha256: manifest.sha256.clone(),
+        checksum: manifest.checksum.clone(),
+    }
+}
+
+fn first_local_source(manifest: &ModelManifest) -> Option<&Path> {
+    manifest.sources.iter().find_map(|source| match source {
+        ModelSource::LocalFile { path } => Some(Path::new(path)),
+        _ => None,
+    })
+}
+
+fn download_candidates(
+    manifest: &ModelManifest,
+) -> Result<Vec<ArtifactDownloadCandidate>, ModelStoreError> {
+    manifest
+        .sources
+        .iter()
+        .filter_map(|source| match source {
+            ModelSource::HuggingFaceHub {
+                repo_id,
+                revision,
+                file,
+            } => Some(
+                hugging_face_resolve_url(repo_id, revision.as_deref(), file).map(|url| {
+                    ArtifactDownloadCandidate {
+                        url,
+                        source_label: "hugging-face-hub".to_string(),
+                    }
+                }),
+            ),
+            ModelSource::Https { url } => Some(Ok(ArtifactDownloadCandidate {
+                url: url.clone(),
+                source_label: "https".to_string(),
+            })),
+            ModelSource::LocalFile { .. } | ModelSource::Custom { .. } => None,
+        })
+        .collect()
+}
+
+fn hugging_face_resolve_url(
+    repo_id: &str,
+    revision: Option<&str>,
+    file: &str,
+) -> Result<String, ModelStoreError> {
+    let repo_id = repo_id.trim();
+    let revision = revision.unwrap_or("main").trim();
+    let file = file.trim();
+    if repo_id.is_empty() || revision.is_empty() || file.is_empty() {
+        return Err(ModelStoreError::InvalidManifest {
+            model_id: repo_id.to_string(),
+            message: "Hugging Face source requires repo_id, revision and file".to_string(),
+        });
+    }
+    Ok(format!(
+        "https://huggingface.co/{repo_id}/resolve/{revision}/{file}"
+    ))
+}
+
+fn asset_name_for_manifest(manifest: &ModelManifest) -> Result<String, ModelStoreError> {
+    manifest
+        .sources
+        .iter()
+        .find_map(asset_name_for_source)
+        .ok_or_else(|| ModelStoreError::InvalidManifest {
+            model_id: manifest.model_id.clone(),
+            message: "model manifest has no installable asset source".to_string(),
+        })
+        .and_then(|asset_name| {
+            safe_component(&asset_name, "asset name").map_err(|message| {
+                ModelStoreError::InvalidManifest {
+                    model_id: manifest.model_id.clone(),
+                    message,
+                }
+            })
+        })
+}
+
+fn asset_name_for_source(source: &ModelSource) -> Option<String> {
+    match source {
+        ModelSource::HuggingFaceHub { file, .. } => path_leaf(file),
+        ModelSource::Https { url } => url
+            .split('?')
+            .next()
+            .and_then(path_leaf)
+            .filter(|value| !value.is_empty()),
+        ModelSource::LocalFile { path } => path_leaf(path),
+        ModelSource::Custom { .. } => None,
+    }
+}
+
+fn path_leaf(raw: &str) -> Option<String> {
+    raw.rsplit(['/', '\\'])
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn safe_component(raw: &str, label: &str) -> Result<String, String> {
+    let value = raw.trim();
+    if value.is_empty() || value == "." || value == ".." {
+        return Err(format!("{label} is empty or reserved"));
+    }
+    if value.contains('/') || value.contains('\\') || value.contains('\0') {
+        return Err(format!("{label} must be a single path component"));
+    }
+    Ok(value.to_string())
+}
+
+fn manifest_sha256_digest(
+    manifest: &ModelManifest,
+) -> Result<Option<Sha256Digest>, ModelStoreError> {
+    let Some(raw) = manifest.sha256.as_deref() else {
+        return Ok(None);
+    };
+    parse_sha256_user_input(raw)
+        .map(Some)
+        .ok_or_else(|| ModelStoreError::InvalidManifest {
+            model_id: manifest.model_id.clone(),
+            message: "invalid sha256 digest".to_string(),
+        })
+}
+
+fn verify_checksum(path: &Path, checksum: &ModelChecksum) -> Result<(), ModelStoreError> {
+    match checksum.algorithm {
+        ModelChecksumAlgorithm::Sha1 => {
+            let actual = sha1_file(path)?;
+            let expected = checksum.value.trim().to_ascii_lowercase();
+            if actual != expected {
+                return Err(ModelStoreError::Checksum {
+                    path: path.to_path_buf(),
+                    message: format!("checksum mismatch: expected {expected}, got {actual}"),
+                });
+            }
+        }
+        ModelChecksumAlgorithm::Sha256 => {
+            let expected = parse_sha256_user_input(&checksum.value).ok_or_else(|| {
+                ModelStoreError::Checksum {
+                    path: path.to_path_buf(),
+                    message: "invalid sha256 digest".to_string(),
+                }
+            })?;
+            let mut file = File::open(path).map_err(|source| ModelStoreError::Io {
+                op: "open model for checksum verification",
+                path: path.to_path_buf(),
+                source,
+            })?;
+            verify_sha256_reader(&mut file, &expected).map_err(|error| {
+                ModelStoreError::Checksum {
+                    path: path.to_path_buf(),
+                    message: error.to_string(),
+                }
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn sha1_file(path: &Path) -> Result<String, ModelStoreError> {
+    let mut file = File::open(path).map_err(|source| ModelStoreError::Io {
+        op: "open model for sha1 verification",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut hasher = Sha1::new();
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|source| ModelStoreError::Io {
+                op: "read model for sha1 verification",
+                path: path.to_path_buf(),
+                source,
+            })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn model_file_write_options() -> AtomicWriteOptions {
+    AtomicWriteOptions {
+        require_non_empty: true,
+        ..AtomicWriteOptions::default()
+    }
+}
+
+fn metadata_write_options() -> AtomicWriteOptions {
+    AtomicWriteOptions {
+        require_non_empty: true,
+        ..AtomicWriteOptions::default()
+    }
+}
+
 fn whisper_model_capabilities(
     english_only: bool,
     quantization: Option<&str>,
@@ -595,13 +1136,22 @@ fn whisper_model_capabilities(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{
+        future::Future,
+        io::Write,
+        path::{Path, PathBuf},
+    };
+
+    use omne_artifact_install_primitives::{ArtifactDownloader, ArtifactInstallError};
+    use omne_integrity_primitives::hash_sha256;
+    use tempfile::TempDir;
 
     use super::{
         LocalModelRuntimeBackend, ModelCapability, ModelChecksumAlgorithm, ModelFamily,
         ModelFormat, ModelInstallProgress, ModelInstallStatus, ModelManifest, ModelSource,
-        WHISPER_CPP_MODEL_SPECS, infer_whisper_cpp_model_id, local_model_ref_from_whisper_path,
-        whisper_cpp_builtin_model_manifests, whisper_cpp_manifest, whisper_cpp_model_id,
+        ModelStore, WHISPER_CPP_MODEL_SPECS, infer_whisper_cpp_model_id,
+        local_model_ref_from_whisper_path, whisper_cpp_builtin_model_manifests,
+        whisper_cpp_manifest, whisper_cpp_model_id,
     };
 
     #[test]
@@ -749,5 +1299,147 @@ mod tests {
             serde_json::to_value(known).expect("serialize known")["runtimeBackend"]["kind"],
             "whisperRs"
         );
+    }
+
+    #[tokio::test]
+    async fn model_store_installs_local_file_and_lists_metadata() {
+        let temp = TempDir::new().expect("temp dir");
+        let source = temp.path().join("ggml-fixture.bin");
+        std::fs::write(&source, b"fixture-model").expect("write source");
+        let manifest = fixture_manifest(ModelSource::LocalFile {
+            path: source.display().to_string(),
+        });
+        let store = ModelStore::new(temp.path().join("models")).expect("store");
+
+        let installed = store
+            .install_manifest(&NoopDownloader, &manifest)
+            .await
+            .expect("install local model");
+
+        assert_eq!(installed.model_id, "whisper-fixture");
+        assert!(Path::new(&installed.path).is_file());
+        assert_eq!(
+            store.list_local_models().expect("list models"),
+            vec![installed]
+        );
+    }
+
+    #[tokio::test]
+    async fn model_store_downloads_with_runtime_artifact_downloader() {
+        let temp = TempDir::new().expect("temp dir");
+        let bytes = b"downloaded-model".to_vec();
+        let sha256 = hash_sha256(&bytes).to_string();
+        let manifest = ModelManifest {
+            sha256: Some(sha256.clone()),
+            checksum: Some(super::ModelChecksum {
+                algorithm: ModelChecksumAlgorithm::Sha256,
+                value: sha256,
+            }),
+            sources: vec![ModelSource::Https {
+                url: "https://models.example.invalid/ggml-fixture.bin".to_string(),
+            }],
+            ..fixture_manifest(ModelSource::Custom {
+                id: "unused".to_string(),
+                uri: "unused".to_string(),
+            })
+        };
+        let store = ModelStore::new(temp.path().join("models")).expect("store");
+
+        let installed = store
+            .install_manifest(&BytesDownloader { bytes }, &manifest)
+            .await
+            .expect("download model");
+
+        assert!(Path::new(&installed.path).is_file());
+        assert_eq!(
+            installed.sha256.as_deref(),
+            Some(manifest.sha256.as_deref().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn model_store_deletes_installed_model_tree() {
+        let temp = TempDir::new().expect("temp dir");
+        let source = temp.path().join("ggml-fixture.bin");
+        std::fs::write(&source, b"fixture-model").expect("write source");
+        let manifest = fixture_manifest(ModelSource::LocalFile {
+            path: source.display().to_string(),
+        });
+        let store = ModelStore::new(temp.path().join("models")).expect("store");
+        let installed = store
+            .install_manifest(&NoopDownloader, &manifest)
+            .await
+            .expect("install local model");
+        let installed_path = PathBuf::from(&installed.path);
+
+        assert!(
+            store
+                .delete_model(&manifest.model_id)
+                .expect("delete model")
+        );
+
+        assert!(!installed_path.exists());
+        assert!(
+            store
+                .find_local_model(&manifest.model_id)
+                .expect("find deleted")
+                .is_none()
+        );
+    }
+
+    fn fixture_manifest(source: ModelSource) -> ModelManifest {
+        ModelManifest {
+            model_id: "whisper-fixture".to_string(),
+            display_name: "Whisper fixture".to_string(),
+            family: ModelFamily::Whisper,
+            format: ModelFormat::WhisperCppGgml,
+            runtime_backend: Some(LocalModelRuntimeBackend::WhisperRs),
+            version: Some("test".to_string()),
+            size_bytes: Some(1024),
+            sha256: None,
+            checksum: None,
+            license: Some("MIT".to_string()),
+            sources: vec![source],
+            capabilities: vec![ModelCapability::SpeechTranscription],
+        }
+    }
+
+    struct NoopDownloader;
+
+    impl ArtifactDownloader for NoopDownloader {
+        fn download_to_writer<W>(
+            &self,
+            _url: &str,
+            _writer: &mut W,
+            _max_bytes: Option<u64>,
+        ) -> impl Future<Output = Result<(), ArtifactInstallError>> + Send
+        where
+            W: Write + ?Sized + Send,
+        {
+            async { Err(ArtifactInstallError::download("unexpected download")) }
+        }
+    }
+
+    struct BytesDownloader {
+        bytes: Vec<u8>,
+    }
+
+    impl ArtifactDownloader for BytesDownloader {
+        fn download_to_writer<W>(
+            &self,
+            _url: &str,
+            writer: &mut W,
+            _max_bytes: Option<u64>,
+        ) -> impl Future<Output = Result<(), ArtifactInstallError>> + Send
+        where
+            W: Write + ?Sized + Send,
+        {
+            let bytes = self.bytes.clone();
+            async move {
+                writer
+                    .write_all(&bytes)
+                    .map_err(|error| ArtifactInstallError::download(error.to_string()))
+            }
+        }
     }
 }

@@ -6,10 +6,17 @@ version.workspace = true
 publish = false
 
 [dependencies]
+omne-artifact-install-primitives = { workspace = true }
+omne-fs-primitives = { workspace = true }
+omne-integrity-primitives = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
+sha1 = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
+tokio = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

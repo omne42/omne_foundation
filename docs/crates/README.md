@@ -18,6 +18,7 @@
 - [`i18n-runtime-kit`](../../crates/i18n-runtime-kit/README.md)
 - [`prompt-kit`](../../crates/prompt-kit/README.md)
 - [`secret-kit`](../../crates/secret-kit/README.md)
+- [`speech-transcription-kit`](../../crates/speech-transcription-kit/README.md)
 - [`http-kit`](../../crates/http-kit/README.md)
 - [`mcp-jsonrpc`](../../crates/mcp-jsonrpc/README.md)
 - [`mcp-kit`](../../crates/mcp-kit/README.md)

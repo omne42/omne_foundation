@@ -17,6 +17,7 @@ use omne_integrity_primitives::{Sha256Digest, parse_sha256_user_input, verify_sh
 use serde::{Deserialize, Serialize};
 use sha1::{Digest as _, Sha1};
 use thiserror::Error;
+use url::Url;
 
 const MIB: u64 = 1_048_576;
 const WHISPER_CPP_HF_REPO: &str = "ggerganov/whisper.cpp";
@@ -1060,13 +1061,36 @@ fn download_candidates(
                     }
                 }),
             ),
-            ModelSource::Https { url } => Some(Ok(ArtifactDownloadCandidate {
-                url: url.clone(),
-                source_label: "https".to_string(),
-            })),
+            ModelSource::Https { url } => Some(https_download_candidate(manifest, url)),
             ModelSource::LocalFile { .. } | ModelSource::Custom { .. } => None,
         })
         .collect()
+}
+
+fn https_download_candidate(
+    manifest: &ModelManifest,
+    raw_url: &str,
+) -> Result<ArtifactDownloadCandidate, ModelStoreError> {
+    let url = Url::parse(raw_url.trim()).map_err(|error| ModelStoreError::InvalidManifest {
+        model_id: manifest.model_id.clone(),
+        message: format!("invalid HTTPS model source URL: {error}"),
+    })?;
+    if url.scheme() != "https" || url.host_str().is_none() {
+        return Err(ModelStoreError::InvalidManifest {
+            model_id: manifest.model_id.clone(),
+            message: "HTTPS model source must use an https URL with a host".to_string(),
+        });
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(ModelStoreError::InvalidManifest {
+            model_id: manifest.model_id.clone(),
+            message: "HTTPS model source URL must not contain credentials".to_string(),
+        });
+    }
+    Ok(ArtifactDownloadCandidate {
+        url: url.to_string(),
+        source_label: "https".to_string(),
+    })
 }
 
 fn hugging_face_resolve_url(
@@ -1421,6 +1445,30 @@ mod tests {
                 .iter()
                 .any(|capability| matches!(capability, ModelCapability::SpeakerDiarization))
         );
+    }
+
+    #[test]
+    fn https_source_rejects_non_https_url() {
+        let manifest = fixture_manifest(ModelSource::Https {
+            url: "http://models.example.invalid/ggml-fixture.bin".to_string(),
+        });
+
+        let error = super::download_candidates(&manifest)
+            .expect_err("http model source should be rejected");
+
+        assert!(matches!(error, ModelStoreError::InvalidManifest { .. }));
+    }
+
+    #[test]
+    fn https_source_rejects_embedded_credentials() {
+        let manifest = fixture_manifest(ModelSource::Https {
+            url: "https://user:secret@models.example.invalid/ggml-fixture.bin".to_string(),
+        });
+
+        let error = super::download_candidates(&manifest)
+            .expect_err("credentialed model source should be rejected");
+
+        assert!(matches!(error, ModelStoreError::InvalidManifest { .. }));
     }
 
     #[test]

@@ -393,6 +393,29 @@ impl ModelStore {
         model_dir: &Path,
     ) -> Result<Option<LocalModelRef>, ModelStoreError> {
         let metadata_path = model_dir.join("model.json");
+        match fs::symlink_metadata(&metadata_path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(ModelStoreError::InvalidManifest {
+                        model_id: model_dir
+                            .file_name()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or("<unknown>")
+                            .to_string(),
+                        message: "model metadata is not a regular file".to_string(),
+                    });
+                }
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(ModelStoreError::Io {
+                    op: "read model metadata file metadata",
+                    path: metadata_path.clone(),
+                    source,
+                });
+            }
+        }
+
         if metadata_path.is_file() {
             let content =
                 fs::read_to_string(&metadata_path).map_err(|source| ModelStoreError::Io {
@@ -406,7 +429,14 @@ impl ModelStore {
                     source,
                 }
             })?;
-            return Ok(Path::new(&model.path).is_file().then_some(model));
+            if !local_model_path_is_regular_child(model_dir, &model) {
+                return Err(ModelStoreError::InvalidManifest {
+                    model_id: model.model_id.clone(),
+                    message: "model metadata path must point to a regular file inside the model directory"
+                        .to_string(),
+                });
+            }
+            return Ok(Some(model));
         }
 
         let Some(model_id) = model_dir.file_name().and_then(|value| value.to_str()) else {
@@ -922,6 +952,15 @@ fn is_legacy_whisper_ggml_file(path: &Path) -> bool {
         .is_some_and(|file_name| file_name.starts_with("ggml-") && file_name.ends_with(".bin"))
 }
 
+fn local_model_path_is_regular_child(model_dir: &Path, model: &LocalModelRef) -> bool {
+    let path = Path::new(&model.path);
+    if path.parent() != Some(model_dir) {
+        return false;
+    }
+    fs::symlink_metadata(path)
+        .is_ok_and(|metadata| !metadata.file_type().is_symlink() && metadata.is_file())
+}
+
 fn local_model_ref_from_manifest(manifest: &ModelManifest, path: &Path) -> LocalModelRef {
     LocalModelRef {
         model_id: manifest.model_id.clone(),
@@ -1162,9 +1201,9 @@ mod tests {
     use super::{
         LocalModelRuntimeBackend, ModelCapability, ModelChecksumAlgorithm, ModelFamily,
         ModelFormat, ModelInstallProgress, ModelInstallStatus, ModelManifest, ModelSource,
-        ModelStore, WHISPER_CPP_MODEL_SPECS, infer_whisper_cpp_model_id,
-        local_model_ref_from_whisper_path, whisper_cpp_builtin_model_manifests,
-        whisper_cpp_manifest, whisper_cpp_model_id,
+        ModelStore, ModelStoreError, WHISPER_CPP_MODEL_SPECS, infer_whisper_cpp_model_id,
+        local_model_ref_from_manifest, local_model_ref_from_whisper_path,
+        whisper_cpp_builtin_model_manifests, whisper_cpp_manifest, whisper_cpp_model_id,
     };
 
     #[test]
@@ -1372,6 +1411,55 @@ mod tests {
             store.list_local_models().expect("list models"),
             vec![installed]
         );
+    }
+
+    #[test]
+    fn model_store_rejects_metadata_path_outside_model_directory() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path().join("models");
+        let model_dir = root.join("whisper-fixture");
+        let outside = temp.path().join("ggml-outside.bin");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        std::fs::write(&outside, b"outside").expect("write outside model");
+        let model = local_model_ref_from_manifest(
+            &fixture_manifest(ModelSource::LocalFile {
+                path: outside.display().to_string(),
+            }),
+            &outside,
+        );
+        std::fs::write(
+            model_dir.join("model.json"),
+            serde_json::to_vec_pretty(&model).expect("serialize metadata"),
+        )
+        .expect("write metadata");
+        let store = ModelStore::new(&root).expect("store");
+
+        let error = store
+            .find_local_model("whisper-fixture")
+            .expect_err("metadata path outside model directory should fail");
+
+        assert!(matches!(error, ModelStoreError::InvalidManifest { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_store_rejects_symlinked_metadata_file() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path().join("models");
+        let model_dir = root.join("linked-metadata");
+        let target = temp.path().join("model.json");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        std::fs::write(&target, b"{}").expect("write target metadata");
+        symlink(&target, model_dir.join("model.json")).expect("create metadata symlink");
+        let store = ModelStore::new(&root).expect("store");
+
+        let error = store
+            .find_local_model("linked-metadata")
+            .expect_err("symlinked metadata should fail");
+
+        assert!(matches!(error, ModelStoreError::InvalidManifest { .. }));
     }
 
     #[tokio::test]

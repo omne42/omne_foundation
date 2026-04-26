@@ -31,6 +31,7 @@ ALLOWED_INTERNAL_DEPS: dict[str, set[str]] = {
     },
     "policy-meta": set(),
     "prompt-kit": {"text-assets-kit"},
+    "redaction-kit": set(),
     "secret-kit": {"error-kit", "structured-text-kit"},
     "structured-text-kit": set(),
     "structured-text-protocol": {"structured-text-kit"},

@@ -1,2 +1,5 @@
 [env]
 TMPDIR = { value = ".tmp", relative = true, force = true }
+
+[net]
+git-fetch-with-cli = true

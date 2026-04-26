@@ -39,8 +39,8 @@ clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
 hound = "3.5.1"
 libc = "0.2"
-omne-fs-primitives = { version = "0.1.0", git = "https://github.com/omne42/omne-runtime.git", rev = "9c69b43d8b51a4fbc3e87450fb74fb67c0e62532", package = "omne-fs-primitives" }
-omne-process-primitives = { version = "0.1.0", git = "https://github.com/omne42/omne-runtime.git", rev = "9c69b43d8b51a4fbc3e87450fb74fb67c0e62532", package = "omne-process-primitives" }
+omne-fs-primitives = { version = "0.1.0", git = "ssh://mac@gitea-personal/omne/omne-runtime.git", rev = "9c69b43d8b51a4fbc3e87450fb74fb67c0e62532", package = "omne-fs-primitives" }
+omne-process-primitives = { version = "0.1.0", git = "ssh://mac@gitea-personal/omne/omne-runtime.git", rev = "9c69b43d8b51a4fbc3e87450fb74fb67c0e62532", package = "omne-process-primitives" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

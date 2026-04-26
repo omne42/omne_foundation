@@ -23,6 +23,7 @@
 - [`mcp-kit`](../../crates/mcp-kit/README.md)
 - [`notify-kit`](../../crates/notify-kit/README.md)
 - [`policy-meta`](../../crates/policy-meta/README.md)
+- [`redaction-kit`](../../crates/redaction-kit/README.md)
 
 ## 阅读顺序
 
@@ -41,6 +42,6 @@
 - 想从 HTTP foundation 开始：
   - `http-kit` -> `github-kit`
 - 想从日志与观测语义开始：
-  - `structured-text-kit` -> `log-kit`
+  - `structured-text-kit` -> `log-kit` -> `redaction-kit`
 - 想从通知域开始：
   - `structured-text-kit` -> `log-kit` -> `http-kit` -> `notify-kit`

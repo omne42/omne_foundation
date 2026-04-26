@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    fs::{self, File},
+    fs,
     io::{self, Read},
     path::{Path, PathBuf},
 };
@@ -11,8 +11,8 @@ use omne_artifact_install_primitives::{
     download_file_to_destination,
 };
 use omne_fs_primitives::{
-    AtomicWriteOptions, MissingRootPolicy, open_root, write_file_atomically,
-    write_file_atomically_from_reader,
+    AtomicWriteOptions, File as CapFile, MissingRootPolicy, open_regular_file_at, open_root,
+    write_file_atomically, write_file_atomically_from_reader,
 };
 use omne_integrity_primitives::{Sha256Digest, parse_sha256_user_input, verify_sha256_reader};
 use serde::{Deserialize, Serialize};
@@ -501,11 +501,7 @@ impl ModelStore {
         source_path: &Path,
         destination: &Path,
     ) -> Result<(), ModelStoreError> {
-        let mut reader = File::open(source_path).map_err(|source| ModelStoreError::Io {
-            op: "open local model source",
-            path: source_path.to_path_buf(),
-            source,
-        })?;
+        let mut reader = open_local_model_source_file(manifest, source_path)?;
         write_file_atomically_from_reader(&mut reader, destination, &model_file_write_options())
             .map_err(|source| ModelStoreError::Io {
                 op: "install local model file",
@@ -548,7 +544,7 @@ impl ModelStore {
         require_regular_model_file(manifest, path)?;
         verify_model_size(manifest, path)?;
         if let Some(expected) = manifest_sha256_digest(manifest)? {
-            let mut file = File::open(path).map_err(|source| ModelStoreError::Io {
+            let mut file = fs::File::open(path).map_err(|source| ModelStoreError::Io {
                 op: "open model for sha256 verification",
                 path: path.to_path_buf(),
                 source,
@@ -1056,6 +1052,63 @@ fn first_local_source(manifest: &ModelManifest) -> Option<&Path> {
     })
 }
 
+fn open_local_model_source_file(
+    manifest: &ModelManifest,
+    path: &Path,
+) -> Result<CapFile, ModelStoreError> {
+    let source_path = path.to_path_buf();
+    let leaf = path
+        .file_name()
+        .ok_or_else(|| ModelStoreError::InvalidManifest {
+            model_id: manifest.model_id.clone(),
+            message: "local model source path must include a file name".to_string(),
+        })?;
+    let parent = match path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        Some(parent) => parent.to_path_buf(),
+        None => std::env::current_dir().map_err(|source| ModelStoreError::Io {
+            op: "resolve local model source parent",
+            path: source_path.clone(),
+            source,
+        })?,
+    };
+    let root = open_root(
+        &parent,
+        "local model source parent",
+        MissingRootPolicy::Error,
+        |_, _, _, error| error,
+    )
+    .map_err(|source| ModelStoreError::Io {
+        op: "open local model source parent",
+        path: source_path.clone(),
+        source,
+    })?
+    .ok_or_else(|| ModelStoreError::Io {
+        op: "open local model source parent",
+        path: source_path.clone(),
+        source: io::Error::new(
+            io::ErrorKind::NotFound,
+            "local model source parent not found",
+        ),
+    })?;
+
+    open_regular_file_at(root.dir(), Path::new(leaf)).map_err(|source| {
+        if source.kind() == io::ErrorKind::InvalidInput {
+            return ModelStoreError::InvalidManifest {
+                model_id: manifest.model_id.clone(),
+                message: "local model source must be a regular non-symlink file".to_string(),
+            };
+        }
+        ModelStoreError::Io {
+            op: "open local model source",
+            path: source_path,
+            source,
+        }
+    })
+}
+
 fn download_candidates(
     manifest: &ModelManifest,
 ) -> Result<Vec<ArtifactDownloadCandidate>, ModelStoreError> {
@@ -1266,7 +1319,7 @@ fn verify_checksum(path: &Path, checksum: &ModelChecksum) -> Result<(), ModelSto
                     message: "invalid sha256 digest".to_string(),
                 }
             })?;
-            let mut file = File::open(path).map_err(|source| ModelStoreError::Io {
+            let mut file = fs::File::open(path).map_err(|source| ModelStoreError::Io {
                 op: "open model for checksum verification",
                 path: path.to_path_buf(),
                 source,
@@ -1283,7 +1336,7 @@ fn verify_checksum(path: &Path, checksum: &ModelChecksum) -> Result<(), ModelSto
 }
 
 fn sha1_file(path: &Path) -> Result<String, ModelStoreError> {
-    let mut file = File::open(path).map_err(|source| ModelStoreError::Io {
+    let mut file = fs::File::open(path).map_err(|source| ModelStoreError::Io {
         op: "open model for sha1 verification",
         path: path.to_path_buf(),
         source,
@@ -1638,6 +1691,47 @@ mod tests {
             store.list_local_models().expect("list models"),
             vec![installed]
         );
+    }
+
+    #[tokio::test]
+    async fn model_store_rejects_local_source_directory() {
+        let temp = TempDir::new().expect("temp dir");
+        let source = temp.path().join("source-dir");
+        std::fs::create_dir_all(&source).expect("create source dir");
+        let manifest = fixture_manifest(ModelSource::LocalFile {
+            path: source.display().to_string(),
+        });
+        let store = ModelStore::new(temp.path().join("models")).expect("store");
+
+        let error = store
+            .install_manifest(&NoopDownloader, &manifest)
+            .await
+            .expect_err("directory source should fail");
+
+        assert!(matches!(error, ModelStoreError::InvalidManifest { .. }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn model_store_rejects_symlinked_local_source() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("temp dir");
+        let target = temp.path().join("ggml-target.bin");
+        let source = temp.path().join("ggml-fixture.bin");
+        std::fs::write(&target, b"fixture-model").expect("write target");
+        symlink(&target, &source).expect("create source symlink");
+        let manifest = fixture_manifest(ModelSource::LocalFile {
+            path: source.display().to_string(),
+        });
+        let store = ModelStore::new(temp.path().join("models")).expect("store");
+
+        let error = store
+            .install_manifest(&NoopDownloader, &manifest)
+            .await
+            .expect_err("symlinked source should fail");
+
+        assert!(matches!(error, ModelStoreError::InvalidManifest { .. }));
     }
 
     #[test]

@@ -12,3 +12,5 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Re-exported `audio-media-kit::AudioAssetRef` so transcription jobs share the audio asset boundary.
 - Added provider/model descriptors, provider capability DTOs, and structured transcription errors.
 - Added a provider registry DTO with provider/model lookup helpers and provider-level default model hints.
+- Added canonical OpenAI-compatible and local Whisper provider descriptor helpers backed by the `model-assets-kit` official Whisper GGML catalog.
+- Added `speakerDiarization` as a shared transcription provider capability.

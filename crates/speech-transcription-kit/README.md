@@ -18,6 +18,7 @@
 - provider / model 选择
 - provider registry / catalog
 - provider / model 能力描述
+- canonical OpenAI-compatible 和 local Whisper provider descriptor helper
 - provider 默认模型建议
 - 转写结果和片段
 - 转写 job 快照
@@ -39,7 +40,7 @@
 
 - 本地文件型音频输入引用
 - OpenAI-compatible 与本地模型都能复用的转写请求模型
-- provider 能力：语言、提示词、时间戳、翻译、VAD、流式结果、本地模型执行
+- provider 能力：语言、提示词、时间戳、翻译、VAD、流式结果、本地模型执行、speaker diarization
 - 统一错误：认证失败、限流、模型缺失、音频格式不支持、超时、provider 返回错误等
 - 简单文本结果和可选时间片段
 - 可序列化 DTO，便于跨 Tauri、CLI 或服务边界传递
@@ -63,6 +64,10 @@
   - `TranscriptionProviderKind`
   - `TranscriptionModelDescriptor`
   - `TranscriptionProviderCapability`
+  - `openai_compatible_provider_descriptor`
+  - `local_whisper_provider_descriptor`
+  - `builtin_provider_registry`
+  - `whisper_cpp_transcription_models`
   - `TranscriptionRequest`
   - `TranscriptionResult`
   - `TranscriptionSegment`
@@ -75,6 +80,7 @@
 ## 与其他 crate 的关系
 
 - 依赖 [`audio-media-kit`](../audio-media-kit/README.md) 的 `AudioAssetRef`，并从本 crate re-export 以保持转写调用方入口稳定。
+- 依赖 [`model-assets-kit`](../model-assets-kit/README.md) 的官方 Whisper GGML catalog，避免各产品重复维护本地 Whisper 模型列表。
 - HTTP provider 实现应复用 [`http-kit`](../http-kit/README.md)。
 - provider token 解析应复用 [`secret-kit`](../secret-kit/README.md)。
 - 本地模型资产和执行边界后续应与 `omne-runtime` 原语配合，而不是放进本 crate。

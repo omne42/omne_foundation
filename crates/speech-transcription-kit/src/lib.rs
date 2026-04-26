@@ -2,6 +2,7 @@
 
 pub use audio_media_kit::AudioAssetRef;
 
+use model_assets_kit::WHISPER_CPP_MODEL_SPECS;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +98,7 @@ pub enum TranscriptionProviderCapability {
     VoiceActivityDetection,
     StreamingResults,
     LocalModelExecution,
+    SpeakerDiarization,
     Custom { id: String },
 }
 
@@ -213,15 +215,98 @@ pub enum TranscriptionErrorKind {
     Internal,
 }
 
+pub fn openai_compatible_provider_descriptor() -> TranscriptionProviderDescriptor {
+    let capabilities = vec![
+        TranscriptionProviderCapability::LanguageSelection,
+        TranscriptionProviderCapability::Prompt,
+    ];
+
+    TranscriptionProviderDescriptor {
+        provider_id: "openai-compatible".to_string(),
+        display_name: "OpenAI-compatible".to_string(),
+        kind: TranscriptionProviderKind::OpenAiCompatible,
+        default_model: Some("whisper-1".to_string()),
+        models: vec![TranscriptionModelDescriptor {
+            model: "whisper-1".to_string(),
+            display_name: Some("Whisper 1".to_string()),
+            capabilities: capabilities.clone(),
+        }],
+        capabilities,
+    }
+}
+
+pub fn local_whisper_provider_descriptor() -> TranscriptionProviderDescriptor {
+    TranscriptionProviderDescriptor {
+        provider_id: "whisper-local".to_string(),
+        display_name: "Local Whisper (Rust)".to_string(),
+        kind: TranscriptionProviderKind::LocalWhisper,
+        default_model: Some("local-whisper".to_string()),
+        models: whisper_cpp_transcription_models(),
+        capabilities: vec![
+            TranscriptionProviderCapability::LanguageSelection,
+            TranscriptionProviderCapability::Prompt,
+            TranscriptionProviderCapability::LocalModelExecution,
+            TranscriptionProviderCapability::Translation,
+            TranscriptionProviderCapability::SpeakerDiarization,
+        ],
+    }
+}
+
+pub fn builtin_provider_registry() -> TranscriptionProviderRegistry {
+    TranscriptionProviderRegistry {
+        providers: vec![
+            openai_compatible_provider_descriptor(),
+            local_whisper_provider_descriptor(),
+        ],
+        default_provider_id: Some("openai-compatible".to_string()),
+    }
+}
+
+pub fn whisper_cpp_transcription_models() -> Vec<TranscriptionModelDescriptor> {
+    let mut models = Vec::with_capacity(WHISPER_CPP_MODEL_SPECS.len() + 1);
+    models.push(TranscriptionModelDescriptor {
+        model: "local-whisper".to_string(),
+        display_name: Some("User-supplied Whisper GGML model".to_string()),
+        capabilities: local_whisper_model_capabilities(false, false),
+    });
+    models.extend(
+        WHISPER_CPP_MODEL_SPECS
+            .iter()
+            .map(|spec| TranscriptionModelDescriptor {
+                model: spec.model_id(),
+                display_name: Some(spec.display_name()),
+                capabilities: local_whisper_model_capabilities(spec.english_only, spec.diarization),
+            }),
+    );
+    models
+}
+
+fn local_whisper_model_capabilities(
+    english_only: bool,
+    diarization: bool,
+) -> Vec<TranscriptionProviderCapability> {
+    let mut capabilities = vec![
+        TranscriptionProviderCapability::LanguageSelection,
+        TranscriptionProviderCapability::Prompt,
+        TranscriptionProviderCapability::LocalModelExecution,
+    ];
+    if !english_only {
+        capabilities.push(TranscriptionProviderCapability::Translation);
+    }
+    if diarization {
+        capabilities.push(TranscriptionProviderCapability::SpeakerDiarization);
+    }
+    capabilities
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         AudioAssetRef, TranscriptionAudioSource, TranscriptionJob, TranscriptionJobStatus,
-        TranscriptionModelDescriptor, TranscriptionOptions, TranscriptionProviderCapability,
-        TranscriptionProviderDescriptor, TranscriptionProviderKind,
-        TranscriptionProviderProvenance, TranscriptionProviderRegistry,
+        TranscriptionOptions, TranscriptionProviderCapability, TranscriptionProviderProvenance,
         TranscriptionProviderSelection, TranscriptionRequest, TranscriptionResult,
-        TranscriptionTimestampMode,
+        TranscriptionTimestampMode, builtin_provider_registry, local_whisper_provider_descriptor,
+        openai_compatible_provider_descriptor,
     };
 
     #[test]
@@ -309,7 +394,7 @@ mod tests {
 
     #[test]
     fn provider_descriptor_serializes_capabilities_and_models() {
-        let descriptor = openai_provider_descriptor();
+        let descriptor = openai_compatible_provider_descriptor();
 
         let value = serde_json::to_value(descriptor).expect("serialize descriptor");
 
@@ -322,16 +407,15 @@ mod tests {
 
     #[test]
     fn provider_registry_serializes_default_and_supports_lookup() {
-        let registry = TranscriptionProviderRegistry {
-            providers: vec![openai_provider_descriptor()],
-            default_provider_id: Some("openai-compatible".to_string()),
-        };
+        let registry = builtin_provider_registry();
 
         let value = serde_json::to_value(&registry).expect("serialize registry");
 
         assert_eq!(value["defaultProviderId"], "openai-compatible");
         assert_eq!(value["providers"][0]["providerId"], "openai-compatible");
+        assert_eq!(value["providers"][1]["providerId"], "whisper-local");
         assert!(registry.find_provider("openai-compatible").is_some());
+        assert!(registry.find_provider("whisper-local").is_some());
         assert!(
             registry
                 .find_model("openai-compatible", "whisper-1")
@@ -339,8 +423,33 @@ mod tests {
         );
         assert!(
             registry
+                .find_model("whisper-local", "whisper-large-v3-turbo-q8_0")
+                .is_some()
+        );
+        assert!(
+            registry
                 .find_model("openai-compatible", "missing")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn local_whisper_provider_lists_official_catalog_models() {
+        let descriptor = local_whisper_provider_descriptor();
+        let model_ids = descriptor
+            .models
+            .iter()
+            .map(|model| model.model.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(descriptor.default_model.as_deref(), Some("local-whisper"));
+        assert!(model_ids.contains(&"local-whisper"));
+        assert!(model_ids.contains(&"whisper-tiny-q5_1"));
+        assert!(model_ids.contains(&"whisper-large-v3-turbo-q8_0"));
+        assert!(
+            descriptor
+                .capabilities
+                .contains(&TranscriptionProviderCapability::SpeakerDiarization)
         );
     }
 
@@ -381,28 +490,5 @@ mod tests {
         assert_eq!(value["error"]["providerErrorCode"], "rate_limit_exceeded");
         assert_eq!(value["error"]["retryable"], true);
         assert_eq!(value["error"]["retryAfterMs"], 1000);
-    }
-
-    fn openai_provider_descriptor() -> TranscriptionProviderDescriptor {
-        TranscriptionProviderDescriptor {
-            provider_id: "openai-compatible".to_string(),
-            display_name: "OpenAI-compatible".to_string(),
-            kind: TranscriptionProviderKind::OpenAiCompatible,
-            default_model: Some("whisper-1".to_string()),
-            models: vec![TranscriptionModelDescriptor {
-                model: "whisper-1".to_string(),
-                display_name: Some("Whisper 1".to_string()),
-                capabilities: vec![
-                    TranscriptionProviderCapability::LanguageSelection,
-                    TranscriptionProviderCapability::Prompt,
-                    TranscriptionProviderCapability::SegmentTimestamps,
-                ],
-            }],
-            capabilities: vec![
-                TranscriptionProviderCapability::LanguageSelection,
-                TranscriptionProviderCapability::Prompt,
-                TranscriptionProviderCapability::SegmentTimestamps,
-            ],
-        }
     }
 }

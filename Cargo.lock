@@ -2544,6 +2544,7 @@ name = "speech-transcription-kit"
 version = "0.1.0"
 dependencies = [
  "audio-media-kit",
+ "model-assets-kit",
  "serde",
  "serde_json",
 ]

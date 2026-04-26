@@ -36,6 +36,7 @@ version = "0.1.0"
 anyhow = "1"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
+cpal = "0.15.3"
 futures-util = "0.3"
 hound = "3.5.1"
 libc = "0.2"

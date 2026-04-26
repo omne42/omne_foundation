@@ -8,3 +8,4 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ### Added
 - Introduced `audio-input-kit` as the shared audio input device/config/session event boundary.
+- Added CPAL native input device listing and mono `f32` microphone stream adapter.

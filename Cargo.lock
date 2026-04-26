@@ -1666,12 +1666,13 @@ dependencies = [
 [[package]]
 name = "omne-fs-primitives"
 version = "0.1.0"
-source = "git+ssh://mac@gitea-personal/omne/omne-runtime.git?rev=9c69b43d8b51a4fbc3e87450fb74fb67c0e62532#9c69b43d8b51a4fbc3e87450fb74fb67c0e62532"
+source = "git+ssh://mac@gitea-personal/omne/omne-runtime.git?rev=87174698b0d90c4bdb9c4ceeb1bf353b39a44b6c#87174698b0d90c4bdb9c4ceeb1bf353b39a44b6c"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
  "fs2",
  "libc",
+ "rustix",
  "tempfile",
  "windows-sys 0.52.0",
 ]
@@ -1679,11 +1680,10 @@ dependencies = [
 [[package]]
 name = "omne-process-primitives"
 version = "0.1.0"
-source = "git+ssh://mac@gitea-personal/omne/omne-runtime.git?rev=9c69b43d8b51a4fbc3e87450fb74fb67c0e62532#9c69b43d8b51a4fbc3e87450fb74fb67c0e62532"
+source = "git+ssh://mac@gitea-personal/omne/omne-runtime.git?rev=87174698b0d90c4bdb9c4ceeb1bf353b39a44b6c#87174698b0d90c4bdb9c4ceeb1bf353b39a44b6c"
 dependencies = [
  "omne-system-package-primitives",
  "rustix",
- "same-file",
  "sysinfo",
  "tempfile",
  "tokio",
@@ -1693,7 +1693,7 @@ dependencies = [
 [[package]]
 name = "omne-system-package-primitives"
 version = "0.1.0"
-source = "git+ssh://mac@gitea-personal/omne/omne-runtime.git?rev=9c69b43d8b51a4fbc3e87450fb74fb67c0e62532#9c69b43d8b51a4fbc3e87450fb74fb67c0e62532"
+source = "git+ssh://mac@gitea-personal/omne/omne-runtime.git?rev=87174698b0d90c4bdb9c4ceeb1bf353b39a44b6c#87174698b0d90c4bdb9c4ceeb1bf353b39a44b6c"
 
 [[package]]
 name = "once_cell"
@@ -2222,15 +2222,6 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
-
-[[package]]
-name = "same-file"
-version = "1.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
-dependencies = [
- "winapi-util",
-]
 
 [[package]]
 name = "schemars"

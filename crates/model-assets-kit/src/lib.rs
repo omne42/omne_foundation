@@ -299,7 +299,9 @@ impl ModelStore {
         D: ArtifactDownloader + ?Sized,
     {
         let destination = self.model_destination(manifest)?;
-        if destination.is_file() && self.verify_model_file(manifest, &destination).is_ok() {
+        if destination_has_regular_model_file(manifest, &destination)?
+            && self.verify_model_file(manifest, &destination).is_ok()
+        {
             let local_model = local_model_ref_from_manifest(manifest, &destination);
             self.write_local_model_metadata(&local_model)?;
             return Ok(local_model);
@@ -526,6 +528,7 @@ impl ModelStore {
         manifest: &ModelManifest,
         path: &Path,
     ) -> Result<(), ModelStoreError> {
+        require_regular_model_file(manifest, path)?;
         if let Some(expected) = manifest_sha256_digest(manifest)? {
             let mut file = File::open(path).map_err(|source| ModelStoreError::Io {
                 op: "open model for sha256 verification",
@@ -959,6 +962,42 @@ fn local_model_path_is_regular_child(model_dir: &Path, model: &LocalModelRef) ->
     }
     fs::symlink_metadata(path)
         .is_ok_and(|metadata| !metadata.file_type().is_symlink() && metadata.is_file())
+}
+
+fn destination_has_regular_model_file(
+    manifest: &ModelManifest,
+    path: &Path,
+) -> Result<bool, ModelStoreError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(ModelStoreError::InvalidManifest {
+                    model_id: manifest.model_id.clone(),
+                    message: "model destination is not a regular file".to_string(),
+                });
+            }
+            Ok(true)
+        }
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(ModelStoreError::Io {
+            op: "read model file metadata",
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn require_regular_model_file(
+    manifest: &ModelManifest,
+    path: &Path,
+) -> Result<(), ModelStoreError> {
+    if destination_has_regular_model_file(manifest, path)? {
+        return Ok(());
+    }
+    Err(ModelStoreError::InvalidManifest {
+        model_id: manifest.model_id.clone(),
+        message: "model file does not exist".to_string(),
+    })
 }
 
 fn local_model_ref_from_manifest(manifest: &ModelManifest, path: &Path) -> LocalModelRef {
@@ -1458,6 +1497,33 @@ mod tests {
         let error = store
             .find_local_model("linked-metadata")
             .expect_err("symlinked metadata should fail");
+
+        assert!(matches!(error, ModelStoreError::InvalidManifest { .. }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn model_store_rejects_existing_symlink_destination() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path().join("models");
+        let model_dir = root.join("whisper-fixture");
+        let source = temp.path().join("ggml-fixture.bin");
+        let outside = temp.path().join("outside.bin");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        std::fs::write(&source, b"fixture-model").expect("write source");
+        std::fs::write(&outside, b"outside").expect("write outside");
+        symlink(&outside, model_dir.join("ggml-fixture.bin")).expect("create model symlink");
+        let manifest = fixture_manifest(ModelSource::LocalFile {
+            path: source.display().to_string(),
+        });
+        let store = ModelStore::new(&root).expect("store");
+
+        let error = store
+            .install_manifest(&NoopDownloader, &manifest)
+            .await
+            .expect_err("symlinked destination should fail");
 
         assert!(matches!(error, ModelStoreError::InvalidManifest { .. }));
     }

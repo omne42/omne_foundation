@@ -68,6 +68,7 @@ A -> B   表示 A 依赖 B
 这一层处理“配置与运行时输入如何被安全拿到、解析和组织”：
 
 - 配置文件如何被安全读取、识别格式、层叠与解释
+- `.env` overlay 如何按通用规则解析
 - 通用文本资源如何安全地 bootstrap、落盘、回滚、扫描和读取
 - i18n catalog 如何从 runtime 目录加载、重载并暴露 lazy/global handle
 - prompt 文本目录如何 bootstrap 并以惰性句柄对外提供
@@ -156,7 +157,7 @@ notify-kit           -> structured-text-kit
 
 - `policy-meta` 当前不依赖其他 foundation crate，主要为 `omne-agent`、`omne-runtime` 等外部 workspace 提供共享 contract。
 - `error-kit` / `error-protocol` 承接稳定错误语义与跨边界表示；它们属于文本/语义侧基建，不是 transport 或应用编排层。
-- `config-kit` 只承接通用配置边界：格式识别、有界读取、路径 canonicalize、strict allowed-format typed parse、layer merge；不拥有产品级 config schema。
+- `config-kit` 只承接通用配置边界：格式识别、有界读取、路径 canonicalize、strict allowed-format typed parse、`.env` overlay parse、layer merge；不拥有产品级 config schema。
 - `http-kit` 是通用 HTTP foundation，不承载 GitHub API schema、镜像 / 网关候选策略或其他上层产品语义。
 - `github-kit` 建立在 `http-kit` 之上，只负责纯 GitHub API client 能力；它不拥有来源优先级、资产选择或安装编排。
 - `text-assets-kit` 刻意不依赖 `i18n-kit`，保持通用文本资源/runtime fs adapter 边界。

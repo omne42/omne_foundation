@@ -161,11 +161,30 @@ pub enum AudioMediaErrorKind {
     Internal,
 }
 
+impl AudioMediaErrorKind {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::UnsupportedFormat => "audio_media.unsupported_format",
+            Self::DecodeFailed => "audio_media.decode_failed",
+            Self::ResampleFailed => "audio_media.resample_failed",
+            Self::EncodeFailed => "audio_media.encode_failed",
+            Self::BudgetExceeded => "audio_media.budget_exceeded",
+            Self::Io => "audio_media.io",
+            Self::Internal => "audio_media.internal",
+        }
+    }
+
+    pub const fn retryable(self) -> bool {
+        matches!(self, Self::Io | Self::Internal)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioAsset, AudioAssetRef, AudioCodec, AudioContainerFormat, AudioMediaFormat,
-        AudioPreprocessRequest, AudioPreprocessTarget, AudioProcessingBudget, AudioProcessingStep,
+        AudioAsset, AudioAssetRef, AudioCodec, AudioContainerFormat, AudioMediaErrorKind,
+        AudioMediaFormat, AudioPreprocessRequest, AudioPreprocessTarget, AudioProcessingBudget,
+        AudioProcessingStep,
     };
 
     fn sample_asset() -> AudioAssetRef {
@@ -244,5 +263,56 @@ mod tests {
         assert_eq!(value["steps"][0]["kind"], "decode");
         assert_eq!(value["steps"][1]["sampleRateHz"], 16_000);
         assert_eq!(value["steps"][3]["target"]["codec"]["kind"], "pcmS16Le");
+    }
+
+    #[test]
+    fn preprocess_request_json_round_trips_and_ignores_unknown_fields() {
+        let raw = serde_json::json!({
+            "input": {
+                "assetId": "asset-1",
+                "path": "/tmp/capture.webm",
+                "fileName": "capture.webm",
+                "mimeType": "audio/webm",
+                "durationMs": 1200,
+                "sha256": null,
+                "futureField": true
+            },
+            "target": {
+                "mimeType": "audio/wav",
+                "container": {"kind": "wav", "futureField": true},
+                "codec": {"kind": "pcmS16Le", "futureField": true},
+                "sampleRateHz": 16000,
+                "channels": 1,
+                "futureField": true
+            },
+            "budget": {
+                "maxDurationMs": 30000,
+                "maxInputBytes": null,
+                "maxOutputBytes": null,
+                "futureField": true
+            },
+            "steps": [
+                {"kind": "decode", "futureField": true},
+                {"kind": "resample", "sampleRateHz": 16000, "futureField": true}
+            ],
+            "futureField": "ignored"
+        });
+
+        let request: AudioPreprocessRequest =
+            serde_json::from_value(raw).expect("deserialize preprocess request");
+
+        assert_eq!(request.input.asset_id, "asset-1");
+        assert_eq!(request.target.sample_rate_hz, 16_000);
+        assert_eq!(request.steps.len(), 2);
+    }
+
+    #[test]
+    fn audio_media_error_kind_exposes_stable_code_and_retry_hint() {
+        assert_eq!(
+            AudioMediaErrorKind::UnsupportedFormat.code(),
+            "audio_media.unsupported_format"
+        );
+        assert!(!AudioMediaErrorKind::UnsupportedFormat.retryable());
+        assert!(AudioMediaErrorKind::Io.retryable());
     }
 }

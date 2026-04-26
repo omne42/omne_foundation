@@ -8,3 +8,4 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ### Added
 - Introduced `audio-media-kit` as the shared audio asset/preprocessing boundary.
+- Added stable audio media error kind `code()` and `retryable()` helpers plus JSON compatibility coverage for preprocess request DTOs.

@@ -13,6 +13,7 @@
 负责：
 
 - `whisper-rs` 本地模型执行适配
+- 透传 `metal` / `cuda` feature 到 `whisper-rs`，让产品仓不直接依赖底层运行时 crate
 - Whisper 所需 PCM WAV 输入校验
 - 16 kHz mono/stereo PCM WAV 到 mono `f32` 样本转换
 - 本地运行时配置、输入、输出和错误分类
@@ -33,6 +34,7 @@
 - `WhisperRuntimeError`
 - `read_pcm_wav_as_mono_f32`
 - `transcribe_wav`
+- Cargo features: `metal`, `cuda`
 
 ## 与其他 crate 的关系
 

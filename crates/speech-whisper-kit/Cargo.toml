@@ -11,6 +11,11 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 whisper-rs = { workspace = true }
 
+[features]
+default = []
+metal = ["whisper-rs/metal"]
+cuda = ["whisper-rs/cuda"]
+
 [dev-dependencies]
 tempfile = { workspace = true }
 

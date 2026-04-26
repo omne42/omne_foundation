@@ -85,10 +85,12 @@
 - workspace 内部 crate 依赖方向检查
 - workspace 发布契约回归检查
 - workspace package 级 Rust 格式检查（`cargo fmt` + package 列表 + `--check`）
-- `cargo check --workspace --all-targets --all-features`
-- `cargo test --workspace --all-features`
+- `cargo check --workspace --all-targets --all-features`，但会排除硬件 opt-in feature crate 并单独用默认 feature 检查它们
+- `cargo test --workspace --all-features`，但会排除硬件 opt-in feature crate 并单独用默认 feature 测试它们
 
 也就是说，提交前默认要满足文档结构、依赖方向、发布契约、格式、编译和测试这六类本地门禁。
+
+`speech-whisper-kit` 的 `metal` / `cuda` feature 属于硬件 opt-in feature。普通 `local` / `ci` 门禁只检查它的默认 CPU feature，避免在没有对应 GPU SDK 的 CI runner 上把硬件后端误当成必需基线。
 
 `scripts/workspace_check/` 是这里的共享实现；`scripts/check-workspace.sh` 只是保留给手动执行和 CI 复用的薄入口。
 
@@ -222,7 +224,7 @@ scripts/check-workspace.sh publish-contract
 
 其中：
 
-- `ci` 在 `local` 基础上增加 `clippy` 和全量 asset checks
+- `ci` 在 `local` 基础上增加 `clippy` 和全量 asset checks；`clippy` 对硬件 opt-in feature crate 同样只跑默认 feature
 - `docs-system` 只运行文档系统入口与链接约束检查
 - `dependency-direction` 只运行 workspace 内部 crate 依赖方向 gate
 - `publish-contract` 只运行 workspace 发布契约 gate

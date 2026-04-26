@@ -144,6 +144,36 @@ pub enum DesktopInputErrorKind {
     Internal,
 }
 
+impl DesktopInputErrorKind {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::ShortcutConflict => "desktop_input.shortcut_conflict",
+            Self::MicrophoneUnavailable => "desktop_input.microphone_unavailable",
+            Self::WakePhraseUnavailable => "desktop_input.wake_phrase_unavailable",
+            Self::ClipboardUnavailable => "desktop_input.clipboard_unavailable",
+            Self::AccessibilityPermissionMissing => {
+                "desktop_input.accessibility_permission_missing"
+            }
+            Self::PermissionDenied => "desktop_input.permission_denied",
+            Self::UnsupportedPlatform => "desktop_input.unsupported_platform",
+            Self::TargetUnavailable => "desktop_input.target_unavailable",
+            Self::AdapterUnavailable => "desktop_input.adapter_unavailable",
+            Self::Internal => "desktop_input.internal",
+        }
+    }
+
+    pub const fn retryable(self) -> bool {
+        matches!(
+            self,
+            Self::MicrophoneUnavailable
+                | Self::ClipboardUnavailable
+                | Self::TargetUnavailable
+                | Self::AdapterUnavailable
+                | Self::Internal
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -186,6 +216,23 @@ mod tests {
         assert_eq!(value["text"], "hello");
         assert_eq!(value["target"]["kind"], "clipboard");
         assert_eq!(value["sourceId"], "job-1");
+    }
+
+    #[test]
+    fn text_delivery_request_json_round_trips_and_ignores_unknown_fields() {
+        let raw = serde_json::json!({
+            "text": "hello",
+            "target": {"kind": "clipboard", "futureField": true},
+            "sourceId": "job-1",
+            "futureField": "ignored"
+        });
+
+        let request: TextDeliveryRequest =
+            serde_json::from_value(raw).expect("deserialize delivery request");
+
+        assert_eq!(request.text, "hello");
+        assert_eq!(request.target, TextDeliveryTarget::Clipboard);
+        assert_eq!(request.source_id.as_deref(), Some("job-1"));
     }
 
     #[test]
@@ -245,5 +292,15 @@ mod tests {
         assert_eq!(permission_value["required"], true);
         assert_eq!(error_value["kind"], "accessibilityPermissionMissing");
         assert_eq!(error_value["retryable"], false);
+    }
+
+    #[test]
+    fn desktop_error_kind_exposes_stable_code_and_retry_hint() {
+        assert_eq!(
+            DesktopInputErrorKind::AccessibilityPermissionMissing.code(),
+            "desktop_input.accessibility_permission_missing"
+        );
+        assert!(!DesktopInputErrorKind::AccessibilityPermissionMissing.retryable());
+        assert!(DesktopInputErrorKind::AdapterUnavailable.retryable());
     }
 }

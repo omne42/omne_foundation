@@ -7,6 +7,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 ## [Unreleased]
 
 ### Changed
+- `mcp-jsonrpc`：`streamable_http` 的 POST bridge HTTP body 读取错误分支做了等价控制流收敛，满足新版 workspace Clippy 门禁而不改变错误上报语义。
 - `mcp-jsonrpc`：`Client::wait_with_timeout` 的文档现在明确 close-stage writer 收敛也计入整体超时；即使没有 child process，close-stage 超时时也会返回 `ProtocolErrorKind::WaitTimeout`，避免 API 契约继续和实现脱节。
 - `mcp-jsonrpc`：`streamable_http` 在未知长度 JSON 成功响应上不再“读到首个完整文档就立刻成功”；现在会在短暂尾字节观察窗内拒绝后续非空尾字节，同时仍避免 `request_timeout = None` 时被 keep-alive 连接无限挂住，并补上对应集成回归测试。
 - `mcp-jsonrpc`：close/batch fallback 的 writer lock 等待从 `try_lock + yield` 忙等改成真正的有界等待；保持 `CLOSE_LOCK_ACQUIRE_TIMEOUT` 超时语义不变，同时降低 close 路径在锁竞争下的 CPU 放大风险。

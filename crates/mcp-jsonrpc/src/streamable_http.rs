@@ -854,6 +854,7 @@ impl HttpPostBridge {
                         {
                             return;
                         }
+                        continue;
                     }
                     Ok(body) if !body.is_empty() => {
                         // The JSON-RPC bridge is line-delimited. Re-serialize only when the HTTP

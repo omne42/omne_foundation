@@ -8,3 +8,4 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 
 ### Added
 - Introduced `text-postprocess-kit` as the shared text post-processing contract boundary.
+- Added stable postprocess error kind `code()` and `retryable()` helpers plus JSON compatibility coverage for request DTOs.

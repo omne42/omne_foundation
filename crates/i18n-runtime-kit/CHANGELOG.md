@@ -33,6 +33,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `GlobalCatalog` 现在复用 `text-assets-kit::SharedRuntimeHandle<dyn Catalog>`，不再在 crate 内部维护第二套几乎同构的 runtime handle 实现。
 
 ### Fixed
+- `i18n-runtime-kit`：非 UTF-8 路径回归测试现在会在文件系统本身拒绝该测试夹具时显式跳过，避免 macOS/APFS 因无法创建非法字节路径而阻断普通本地门禁。
 - `CatalogBootstrapCleanupError` 现在继续通过 display 和访问器保留原始 catalog load failure，同时把标准错误链的 `source()` 指向 rollback failure，避免 cleanup 原因只能靠专用 accessor 才能看到。
 - Kept the unix socket entry regression test under a short non-symlink temp root so pre-commit and CI still exercise directory validation instead of failing on host socket path-length limits.
 - `i18n-runtime-kit`：Unix socket 目录回归测试不再硬编码 `/var/tmp`；现在使用 `tempfile` 选择的环境临时根，并在 socket setup 本身不可用时显式跳过，避免受限 runner 因非业务性临时目录或磁盘问题误报失败。

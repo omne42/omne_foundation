@@ -435,11 +435,27 @@ mod tests {
 
     #[cfg(unix)]
     fn unix_socket_test_root() -> PathBuf {
-        let candidate = PathBuf::from("/dev/shm");
-        match std::fs::symlink_metadata(&candidate) {
-            Ok(metadata) if metadata.file_type().is_dir() => candidate,
-            _ => local_image_test_root(),
+        for candidate in unix_socket_test_root_candidates() {
+            match std::fs::symlink_metadata(&candidate) {
+                Ok(metadata) if metadata.file_type().is_dir() => return candidate,
+                _ => {}
+            }
         }
+        local_image_test_root()
+    }
+
+    #[cfg(unix)]
+    fn unix_socket_test_root_candidates() -> Vec<PathBuf> {
+        let mut candidates = Vec::new();
+        if let Ok(root) = std::env::var("OMNE_TEST_SHORT_TMPDIR") {
+            candidates.push(PathBuf::from(root));
+        }
+        candidates.extend([
+            PathBuf::from("/dev/shm"),
+            PathBuf::from("/private/tmp"),
+            PathBuf::from("/var/tmp"),
+        ]);
+        candidates
     }
 
     #[cfg(unix)]

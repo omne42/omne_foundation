@@ -1490,7 +1490,15 @@ mod tests {
         let temp = TempDir::new().expect("temp dir");
         let invalid = OsString::from_vec(vec![0x66, 0x6f, 0x80]);
         let nested = temp.path().join(&invalid);
-        fs::create_dir_all(&nested).expect("mkdir invalid path");
+        if let Err(error) = fs::create_dir_all(&nested) {
+            if non_utf8_path_fixture_unavailable(&error) {
+                eprintln!(
+                    "skipping directory_catalog_rejects_non_utf8_path_components: filesystem rejects non-UTF-8 path components: {error}"
+                );
+                return;
+            }
+            panic!("mkdir invalid path: {error}");
+        }
         fs::write(nested.join("en_US.json"), r#"{"greeting":"hello"}"#).expect("write locale");
 
         let error = load_directory_catalog(temp.path()).expect_err("non-utf8 path should fail");
@@ -1499,6 +1507,14 @@ mod tests {
         };
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("not valid UTF-8"));
+    }
+
+    #[cfg(unix)]
+    fn non_utf8_path_fixture_unavailable(error: &io::Error) -> bool {
+        matches!(
+            error.kind(),
+            io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData
+        ) || error.raw_os_error() == Some(92)
     }
 
     #[cfg(unix)]

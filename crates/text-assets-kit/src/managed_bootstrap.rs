@@ -192,9 +192,14 @@ mod tests {
 
         #[cfg(unix)]
         {
-            let root = std::path::PathBuf::from("/var/tmp");
-            if !roots.iter().any(|candidate| candidate == &root) {
-                roots.push(root);
+            for root in [
+                std::path::PathBuf::from("/private/tmp"),
+                std::path::PathBuf::from("/private/var/tmp"),
+                std::path::PathBuf::from("/var/tmp"),
+            ] {
+                if !roots.iter().any(|candidate| candidate == &root) {
+                    roots.push(root);
+                }
             }
         }
 

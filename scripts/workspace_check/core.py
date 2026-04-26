@@ -12,6 +12,8 @@ from .notify_kit_assets import run_notify_kit_asset_checks
 from .policy_meta_assets import run_policy_meta_asset_checks
 from .publish_contract import run_publish_contract_checks
 
+HARDWARE_OPT_IN_FEATURE_PACKAGES = ("speech-whisper-kit",)
+
 
 def has_cargo_workspace(ctx: CheckContext) -> bool:
     return (ctx.repo_root / "Cargo.toml").is_file()
@@ -26,6 +28,39 @@ def workspace_member_packages(ctx: CheckContext) -> list[str]:
     )
     data = json.loads(metadata)
     return [package["name"] for package in data["packages"]]
+
+
+def workspace_all_features_command(base: list[str]) -> list[str]:
+    command = [*base, "--workspace"]
+    for package in HARDWARE_OPT_IN_FEATURE_PACKAGES:
+        command.extend(["--exclude", package])
+    command.append("--all-features")
+    return command
+
+
+def run_hardware_opt_in_default_feature_checks(
+    ctx: CheckContext,
+    base: list[str],
+    purpose: str,
+) -> None:
+    for package in HARDWARE_OPT_IN_FEATURE_PACKAGES:
+        if "--" in base:
+            separator_index = base.index("--")
+            command = [
+                *base[:separator_index],
+                "-p",
+                package,
+                *base[separator_index:],
+            ]
+        else:
+            command = [*base, "-p", package]
+        run_command(
+            ctx,
+            command,
+            cwd=ctx.repo_root,
+            use_workaround=True,
+            purpose=f"{purpose} default features ({package})",
+        )
 
 
 def run_local_checks(ctx: CheckContext) -> None:
@@ -44,17 +79,27 @@ def run_local_checks(ctx: CheckContext) -> None:
     )
     run_command(
         ctx,
-        ["cargo", "check", "--workspace", "--all-targets", "--all-features"],
+        workspace_all_features_command(["cargo", "check", "--all-targets"]),
         cwd=ctx.repo_root,
         use_workaround=True,
         purpose="cargo check workspace gate",
     )
+    run_hardware_opt_in_default_feature_checks(
+        ctx,
+        ["cargo", "check", "--all-targets"],
+        "cargo check hardware opt-in gate",
+    )
     run_command(
         ctx,
-        ["cargo", "test", "--workspace", "--all-features"],
+        workspace_all_features_command(["cargo", "test"]),
         cwd=ctx.repo_root,
         use_workaround=True,
         purpose="cargo test workspace gate",
+    )
+    run_hardware_opt_in_default_feature_checks(
+        ctx,
+        ["cargo", "test"],
+        "cargo test hardware opt-in gate",
     )
 
 
@@ -62,10 +107,20 @@ def run_ci_checks(ctx: CheckContext) -> None:
     run_local_checks(ctx)
     run_command(
         ctx,
-        ["cargo", "clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"],
+        [
+            *workspace_all_features_command(["cargo", "clippy", "--all-targets"]),
+            "--",
+            "-D",
+            "warnings",
+        ],
         cwd=ctx.repo_root,
         use_workaround=True,
         purpose="cargo clippy workspace gate",
+    )
+    run_hardware_opt_in_default_feature_checks(
+        ctx,
+        ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"],
+        "cargo clippy hardware opt-in gate",
     )
     run_asset_checks(ctx, "all")
 

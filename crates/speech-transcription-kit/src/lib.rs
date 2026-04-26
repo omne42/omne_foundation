@@ -215,6 +215,39 @@ pub enum TranscriptionErrorKind {
     Internal,
 }
 
+impl TranscriptionErrorKind {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::AuthenticationFailed => "transcription.authentication_failed",
+            Self::PermissionDenied => "transcription.permission_denied",
+            Self::RateLimited => "transcription.rate_limited",
+            Self::ProviderUnavailable => "transcription.provider_unavailable",
+            Self::ProviderRejected => "transcription.provider_rejected",
+            Self::InvalidProviderResponse => "transcription.invalid_provider_response",
+            Self::ModelUnavailable => "transcription.model_unavailable",
+            Self::UnsupportedAudioFormat => "transcription.unsupported_audio_format",
+            Self::AudioTooLarge => "transcription.audio_too_large",
+            Self::Timeout => "transcription.timeout",
+            Self::Cancelled => "transcription.cancelled",
+            Self::InvalidRequest => "transcription.invalid_request",
+            Self::Network => "transcription.network",
+            Self::Internal => "transcription.internal",
+        }
+    }
+
+    pub const fn retryable(self) -> bool {
+        matches!(
+            self,
+            Self::RateLimited
+                | Self::ProviderUnavailable
+                | Self::InvalidProviderResponse
+                | Self::Timeout
+                | Self::Network
+                | Self::Internal
+        )
+    }
+}
+
 pub fn openai_compatible_provider_descriptor() -> TranscriptionProviderDescriptor {
     let capabilities = vec![
         TranscriptionProviderCapability::LanguageSelection,
@@ -341,6 +374,38 @@ mod tests {
         assert_eq!(value["audio"]["mimeType"], "audio/webm");
         assert_eq!(value["provider"]["providerId"], "openai-compatible");
         assert_eq!(value["options"]["timestamps"], "segment");
+    }
+
+    #[test]
+    fn request_json_round_trips_and_ignores_unknown_fields() {
+        let raw = serde_json::json!({
+            "audio": {
+                "kind": "localFile",
+                "path": "/tmp/capture.wav",
+                "mimeType": "audio/wav",
+                "sha256": null,
+                "futureField": true
+            },
+            "provider": {
+                "providerId": "openai-compatible",
+                "model": "whisper-1",
+                "futureField": "ignored"
+            },
+            "options": {
+                "language": "en",
+                "prompt": null,
+                "timestamps": "none",
+                "futureField": "ignored"
+            },
+            "futureField": "ignored"
+        });
+
+        let request: TranscriptionRequest =
+            serde_json::from_value(raw).expect("deserialize request");
+
+        assert_eq!(request.provider.provider_id, "openai-compatible");
+        assert_eq!(request.provider.model, "whisper-1");
+        assert_eq!(request.options.language.as_deref(), Some("en"));
     }
 
     #[test]
@@ -490,5 +555,15 @@ mod tests {
         assert_eq!(value["error"]["providerErrorCode"], "rate_limit_exceeded");
         assert_eq!(value["error"]["retryable"], true);
         assert_eq!(value["error"]["retryAfterMs"], 1000);
+    }
+
+    #[test]
+    fn transcription_error_kind_exposes_stable_code_and_retry_hint() {
+        assert_eq!(
+            super::TranscriptionErrorKind::RateLimited.code(),
+            "transcription.rate_limited"
+        );
+        assert!(super::TranscriptionErrorKind::RateLimited.retryable());
+        assert!(!super::TranscriptionErrorKind::PermissionDenied.retryable());
     }
 }

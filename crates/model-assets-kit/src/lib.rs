@@ -424,7 +424,15 @@ impl ModelStore {
                 source,
             })?;
             let path = entry.path();
-            if path.is_file() {
+            let metadata = fs::symlink_metadata(&path).map_err(|source| ModelStoreError::Io {
+                op: "read model file metadata",
+                path: path.clone(),
+                source,
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                continue;
+            }
+            if is_legacy_whisper_ggml_file(&path) {
                 return Ok(Some(LocalModelRef {
                     model_id: model_id.to_string(),
                     path: path.display().to_string(),
@@ -908,6 +916,12 @@ pub fn local_model_ref_from_whisper_path(
     }
 }
 
+fn is_legacy_whisper_ggml_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|file_name| file_name.starts_with("ggml-") && file_name.ends_with(".bin"))
+}
+
 fn local_model_ref_from_manifest(manifest: &ModelManifest, path: &Path) -> LocalModelRef {
     LocalModelRef {
         model_id: manifest.model_id.clone(),
@@ -1137,7 +1151,6 @@ fn whisper_model_capabilities(
 #[cfg(test)]
 mod tests {
     use std::{
-        future::Future,
         io::Write,
         path::{Path, PathBuf},
     };
@@ -1188,6 +1201,43 @@ mod tests {
         assert_eq!(value["sources"][0]["kind"], "huggingFaceHub");
         assert_eq!(value["sources"][0]["repoId"], "org/model");
         assert_eq!(value["capabilities"][1]["code"], "zh");
+    }
+
+    #[test]
+    fn model_manifest_json_round_trips_and_ignores_unknown_fields() {
+        let raw = serde_json::json!({
+            "modelId": "whisper-fixture",
+            "displayName": "Whisper fixture",
+            "family": {"kind": "whisper", "futureField": true},
+            "format": {"kind": "whisperCppGgml", "futureField": true},
+            "runtimeBackend": {"kind": "whisperRs", "futureField": true},
+            "version": "test",
+            "sizeBytes": 1024,
+            "sha256": null,
+            "checksum": null,
+            "license": "MIT",
+            "sources": [{
+                "kind": "https",
+                "url": "https://models.example.invalid/ggml-fixture.bin",
+                "futureField": true
+            }],
+            "capabilities": [{"kind": "speechTranscription", "futureField": true}],
+            "futureField": "ignored"
+        });
+
+        let manifest: ModelManifest =
+            serde_json::from_value(raw).expect("deserialize model manifest");
+
+        assert_eq!(manifest.model_id, "whisper-fixture");
+        assert_eq!(
+            manifest.runtime_backend,
+            Some(LocalModelRuntimeBackend::WhisperRs)
+        );
+        assert_eq!(manifest.sources.len(), 1);
+        assert_eq!(
+            manifest.capabilities,
+            vec![ModelCapability::SpeechTranscription]
+        );
     }
 
     #[test]
@@ -1387,6 +1437,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn model_store_legacy_discovery_accepts_only_ggml_bin_files() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path().join("models");
+        let model_dir = root.join("legacy-whisper");
+        std::fs::create_dir_all(&model_dir).expect("create legacy dir");
+        std::fs::write(model_dir.join("notes.txt"), b"not a model").expect("write junk");
+        std::fs::write(model_dir.join("custom.bin"), b"not accepted").expect("write custom bin");
+        std::fs::write(model_dir.join("ggml-base.bin"), b"accepted").expect("write model");
+        let store = ModelStore::new(&root).expect("store");
+
+        let model = store
+            .find_local_model("legacy-whisper")
+            .expect("find legacy model")
+            .expect("legacy model");
+
+        assert!(model.path.ends_with("ggml-base.bin"));
+        assert_eq!(model.model_id, "legacy-whisper");
+    }
+
+    #[test]
+    fn model_store_legacy_discovery_ignores_junk_directories() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path().join("models");
+        let model_dir = root.join("junk");
+        std::fs::create_dir_all(&model_dir).expect("create junk dir");
+        std::fs::write(model_dir.join("README.md"), b"not a model").expect("write junk");
+        std::fs::write(model_dir.join("custom.bin"), b"not a legacy model")
+            .expect("write custom bin");
+        let store = ModelStore::new(&root).expect("store");
+
+        assert!(
+            store
+                .find_local_model("junk")
+                .expect("find junk dir")
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_store_legacy_discovery_ignores_model_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path().join("models");
+        let model_dir = root.join("linked");
+        let target = temp.path().join("ggml-linked.bin");
+        std::fs::create_dir_all(&model_dir).expect("create linked dir");
+        std::fs::write(&target, b"target").expect("write target");
+        symlink(&target, model_dir.join("ggml-linked.bin")).expect("create symlink");
+        let store = ModelStore::new(&root).expect("store");
+
+        assert!(
+            store
+                .find_local_model("linked")
+                .expect("find linked dir")
+                .is_none()
+        );
+    }
+
     fn fixture_manifest(source: ModelSource) -> ModelManifest {
         ModelManifest {
             model_id: "whisper-fixture".to_string(),
@@ -1407,16 +1518,16 @@ mod tests {
     struct NoopDownloader;
 
     impl ArtifactDownloader for NoopDownloader {
-        fn download_to_writer<W>(
+        async fn download_to_writer<W>(
             &self,
             _url: &str,
             _writer: &mut W,
             _max_bytes: Option<u64>,
-        ) -> impl Future<Output = Result<(), ArtifactInstallError>> + Send
+        ) -> Result<(), ArtifactInstallError>
         where
             W: Write + ?Sized + Send,
         {
-            async { Err(ArtifactInstallError::download("unexpected download")) }
+            Err(ArtifactInstallError::download("unexpected download"))
         }
     }
 
@@ -1425,21 +1536,18 @@ mod tests {
     }
 
     impl ArtifactDownloader for BytesDownloader {
-        fn download_to_writer<W>(
+        async fn download_to_writer<W>(
             &self,
             _url: &str,
             writer: &mut W,
             _max_bytes: Option<u64>,
-        ) -> impl Future<Output = Result<(), ArtifactInstallError>> + Send
+        ) -> Result<(), ArtifactInstallError>
         where
             W: Write + ?Sized + Send,
         {
-            let bytes = self.bytes.clone();
-            async move {
-                writer
-                    .write_all(&bytes)
-                    .map_err(|error| ArtifactInstallError::download(error.to_string()))
-            }
+            writer
+                .write_all(&self.bytes)
+                .map_err(|error| ArtifactInstallError::download(error.to_string()))
         }
     }
 }

@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
-use std::time::Duration;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use serde::{Deserialize, Serialize};
@@ -122,6 +125,29 @@ pub enum AudioInputErrorKind {
     Internal,
 }
 
+impl AudioInputErrorKind {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::PermissionDenied => "audio_input.permission_denied",
+            Self::DeviceUnavailable => "audio_input.device_unavailable",
+            Self::UnsupportedConfig => "audio_input.unsupported_config",
+            Self::BackendUnavailable => "audio_input.backend_unavailable",
+            Self::StreamInterrupted => "audio_input.stream_interrupted",
+            Self::Internal => "audio_input.internal",
+        }
+    }
+
+    pub const fn retryable(self) -> bool {
+        matches!(
+            self,
+            Self::DeviceUnavailable
+                | Self::BackendUnavailable
+                | Self::StreamInterrupted
+                | Self::Internal
+        )
+    }
+}
+
 #[derive(Debug, Error)]
 #[error("{message}")]
 pub struct AudioInputRuntimeError {
@@ -148,11 +174,20 @@ impl AudioInputRuntimeError {
 pub struct CpalInputStream {
     stream: cpal::Stream,
     format: AudioFrameFormat,
+    errors: Arc<Mutex<Vec<AudioInputError>>>,
 }
 
 impl CpalInputStream {
     pub fn format(&self) -> AudioFrameFormat {
         self.format
+    }
+
+    pub fn drain_errors(&self) -> Vec<AudioInputError> {
+        let mut errors = self
+            .errors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        errors.drain(..).collect()
     }
 
     pub fn pause(&self) -> Result<(), AudioInputRuntimeError> {
@@ -195,27 +230,41 @@ where
 {
     let host = cpal::default_host();
     let device = resolve_cpal_input_device(&host, config.device.as_ref())?;
-    let supported = device
-        .default_input_config()
-        .map_err(audio_error_from_default_config)?;
+    let supported = select_cpal_input_config(&device, config.format)?;
     let selected_sample_format = supported.sample_format();
-    let stream_config: cpal::StreamConfig = supported.into();
+    let stream_config = supported.config();
     let format = AudioFrameFormat {
         sample_rate_hz: stream_config.sample_rate.0,
         channels: stream_config.channels,
         sample_format: audio_sample_format_from_cpal(selected_sample_format),
     };
+    let errors = Arc::new(Mutex::new(Vec::new()));
 
     let stream = match selected_sample_format {
-        cpal::SampleFormat::F32 => {
-            build_cpal_stream(&device, &stream_config, format, on_frame, mono_from_f32)?
-        }
-        cpal::SampleFormat::I16 => {
-            build_cpal_stream(&device, &stream_config, format, on_frame, mono_from_i16)?
-        }
-        cpal::SampleFormat::U16 => {
-            build_cpal_stream(&device, &stream_config, format, on_frame, mono_from_u16)?
-        }
+        cpal::SampleFormat::F32 => build_cpal_stream(
+            &device,
+            &stream_config,
+            format,
+            on_frame,
+            Arc::clone(&errors),
+            mono_from_f32,
+        )?,
+        cpal::SampleFormat::I16 => build_cpal_stream(
+            &device,
+            &stream_config,
+            format,
+            on_frame,
+            Arc::clone(&errors),
+            mono_from_i16,
+        )?,
+        cpal::SampleFormat::U16 => build_cpal_stream(
+            &device,
+            &stream_config,
+            format,
+            on_frame,
+            Arc::clone(&errors),
+            mono_from_u16,
+        )?,
         sample_format => {
             return Err(AudioInputRuntimeError::new(
                 AudioInputErrorKind::UnsupportedConfig,
@@ -225,7 +274,11 @@ where
     };
 
     stream.play().map_err(audio_error_from_play)?;
-    Ok(CpalInputStream { stream, format })
+    Ok(CpalInputStream {
+        stream,
+        format,
+        errors,
+    })
 }
 
 fn resolve_cpal_input_device(
@@ -266,11 +319,58 @@ fn resolve_cpal_input_device(
     ))
 }
 
+fn select_cpal_input_config(
+    device: &cpal::Device,
+    requested: AudioFrameFormat,
+) -> Result<cpal::SupportedStreamConfig, AudioInputRuntimeError> {
+    select_cpal_input_config_from_ranges(
+        device
+            .supported_input_configs()
+            .map_err(|error| audio_error(AudioInputErrorKind::UnsupportedConfig, error))?,
+        requested,
+    )
+}
+
+fn select_cpal_input_config_from_ranges(
+    ranges: impl IntoIterator<Item = cpal::SupportedStreamConfigRange>,
+    requested: AudioFrameFormat,
+) -> Result<cpal::SupportedStreamConfig, AudioInputRuntimeError> {
+    if requested.sample_rate_hz == 0 || requested.channels == 0 {
+        return Err(AudioInputRuntimeError::new(
+            AudioInputErrorKind::UnsupportedConfig,
+            "requested CPAL input format must have a positive sample rate and channel count",
+        ));
+    }
+
+    let requested_sample_format = cpal_sample_format_from_audio(requested.sample_format);
+    for range in ranges {
+        if range.channels() != requested.channels {
+            continue;
+        }
+        if requested_sample_format.is_some_and(|format| range.sample_format() != format) {
+            continue;
+        }
+        if let Some(config) = range.try_with_sample_rate(cpal::SampleRate(requested.sample_rate_hz))
+        {
+            return Ok(config);
+        }
+    }
+
+    Err(AudioInputRuntimeError::new(
+        AudioInputErrorKind::UnsupportedConfig,
+        format!(
+            "requested CPAL input format is unsupported: {} Hz, {} channels, {:?}",
+            requested.sample_rate_hz, requested.channels, requested.sample_format
+        ),
+    ))
+}
+
 fn build_cpal_stream<T, F, C>(
     device: &cpal::Device,
     stream_config: &cpal::StreamConfig,
     format: AudioFrameFormat,
     mut on_frame: F,
+    errors: Arc<Mutex<Vec<AudioInputError>>>,
     convert: C,
 ) -> Result<cpal::Stream, AudioInputRuntimeError>
 where
@@ -288,7 +388,12 @@ where
                     on_frame(&mono, format);
                 }
             },
-            |_error| {},
+            move |error| {
+                let mut errors = errors
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                errors.push(cpal_stream_error_to_audio_error(error));
+            },
             Some(Duration::from_millis(100)),
         )
         .map_err(audio_error_from_build)
@@ -333,27 +438,24 @@ fn audio_sample_format_from_cpal(value: cpal::SampleFormat) -> AudioSampleFormat
     }
 }
 
-fn audio_error(kind: AudioInputErrorKind, error: impl std::fmt::Display) -> AudioInputRuntimeError {
-    AudioInputRuntimeError::new(kind, error.to_string())
+fn cpal_sample_format_from_audio(value: AudioSampleFormat) -> Option<cpal::SampleFormat> {
+    match value {
+        AudioSampleFormat::F32 => Some(cpal::SampleFormat::F32),
+        AudioSampleFormat::I16 => Some(cpal::SampleFormat::I16),
+        AudioSampleFormat::U16 => Some(cpal::SampleFormat::U16),
+        AudioSampleFormat::Unknown => None,
+    }
 }
 
-fn audio_error_from_default_config(
-    error: cpal::DefaultStreamConfigError,
-) -> AudioInputRuntimeError {
-    match error {
-        cpal::DefaultStreamConfigError::DeviceNotAvailable => AudioInputRuntimeError::new(
-            AudioInputErrorKind::DeviceUnavailable,
-            "CPAL input device is not available",
-        ),
-        cpal::DefaultStreamConfigError::StreamTypeNotSupported => AudioInputRuntimeError::new(
-            AudioInputErrorKind::UnsupportedConfig,
-            "CPAL input stream type is not supported",
-        ),
-        cpal::DefaultStreamConfigError::BackendSpecific { err } => audio_error(
-            AudioInputErrorKind::BackendUnavailable,
-            format!("CPAL backend error: {err}"),
-        ),
+fn cpal_stream_error_to_audio_error(error: cpal::StreamError) -> AudioInputError {
+    AudioInputError {
+        kind: AudioInputErrorKind::StreamInterrupted,
+        message: error.to_string(),
     }
+}
+
+fn audio_error(kind: AudioInputErrorKind, error: impl std::fmt::Display) -> AudioInputRuntimeError {
+    AudioInputRuntimeError::new(kind, error.to_string())
 }
 
 fn audio_error_from_build(error: cpal::BuildStreamError) -> AudioInputRuntimeError {
@@ -410,8 +512,10 @@ fn audio_error_from_pause(error: cpal::PauseStreamError) -> AudioInputRuntimeErr
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioFrameFormat, AudioInputBackend, AudioInputConfig, AudioSampleFormat, CaptureEvent,
-        CaptureSessionId, CaptureSessionStatus, mono_from_i16, mono_from_u16,
+        AudioFrameFormat, AudioInputBackend, AudioInputConfig, AudioInputErrorKind,
+        AudioSampleFormat, CaptureEvent, CaptureSessionId, CaptureSessionStatus,
+        cpal_stream_error_to_audio_error, mono_from_i16, mono_from_u16,
+        select_cpal_input_config_from_ranges,
     };
 
     #[test]
@@ -462,11 +566,133 @@ mod tests {
     }
 
     #[test]
+    fn input_config_json_round_trips_and_ignores_unknown_fields() {
+        let raw = serde_json::json!({
+            "device": null,
+            "format": {
+                "sampleRateHz": 16000,
+                "channels": 1,
+                "sampleFormat": "f32",
+                "futureField": true
+            },
+            "echoCancellation": false,
+            "noiseSuppression": true,
+            "futureField": "ignored"
+        });
+
+        let config: AudioInputConfig =
+            serde_json::from_value(raw).expect("deserialize input config");
+
+        assert_eq!(config.format.sample_rate_hz, 16_000);
+        assert_eq!(config.format.channels, 1);
+        assert_eq!(config.format.sample_format, AudioSampleFormat::F32);
+        assert_eq!(config.noise_suppression, Some(true));
+    }
+
+    #[test]
     fn interleaved_integer_frames_convert_to_mono_f32() {
         assert_eq!(
             mono_from_i16(&[i16::MAX, 0, 0, i16::MAX], 2),
             vec![0.5, 0.5]
         );
         assert_eq!(mono_from_u16(&[u16::MAX, 32768], 2).len(), 1);
+    }
+
+    #[test]
+    fn requested_cpal_format_selects_matching_supported_config() {
+        let ranges = vec![
+            cpal::SupportedStreamConfigRange::new(
+                2,
+                cpal::SampleRate(44_100),
+                cpal::SampleRate(48_000),
+                cpal::SupportedBufferSize::Unknown,
+                cpal::SampleFormat::F32,
+            ),
+            cpal::SupportedStreamConfigRange::new(
+                1,
+                cpal::SampleRate(16_000),
+                cpal::SampleRate(16_000),
+                cpal::SupportedBufferSize::Unknown,
+                cpal::SampleFormat::I16,
+            ),
+        ];
+
+        let selected = select_cpal_input_config_from_ranges(
+            ranges,
+            AudioFrameFormat {
+                sample_rate_hz: 16_000,
+                channels: 1,
+                sample_format: AudioSampleFormat::I16,
+            },
+        )
+        .expect("matching config");
+
+        assert_eq!(selected.channels(), 1);
+        assert_eq!(selected.sample_rate().0, 16_000);
+        assert_eq!(selected.sample_format(), cpal::SampleFormat::I16);
+    }
+
+    #[test]
+    fn requested_cpal_format_rejects_unsupported_config() {
+        let ranges = vec![cpal::SupportedStreamConfigRange::new(
+            2,
+            cpal::SampleRate(44_100),
+            cpal::SampleRate(48_000),
+            cpal::SupportedBufferSize::Unknown,
+            cpal::SampleFormat::F32,
+        )];
+
+        let error = select_cpal_input_config_from_ranges(
+            ranges,
+            AudioFrameFormat {
+                sample_rate_hz: 16_000,
+                channels: 1,
+                sample_format: AudioSampleFormat::I16,
+            },
+        )
+        .expect_err("unsupported config");
+
+        assert_eq!(error.kind, AudioInputErrorKind::UnsupportedConfig);
+    }
+
+    #[test]
+    fn unknown_sample_format_is_wildcard_for_cpal_selection() {
+        let ranges = vec![cpal::SupportedStreamConfigRange::new(
+            1,
+            cpal::SampleRate(16_000),
+            cpal::SampleRate(16_000),
+            cpal::SupportedBufferSize::Unknown,
+            cpal::SampleFormat::F32,
+        )];
+
+        let selected = select_cpal_input_config_from_ranges(
+            ranges,
+            AudioFrameFormat {
+                sample_rate_hz: 16_000,
+                channels: 1,
+                sample_format: AudioSampleFormat::Unknown,
+            },
+        )
+        .expect("wildcard sample format");
+
+        assert_eq!(selected.sample_format(), cpal::SampleFormat::F32);
+    }
+
+    #[test]
+    fn cpal_stream_errors_map_to_interrupted_errors() {
+        let error = cpal_stream_error_to_audio_error(cpal::StreamError::DeviceNotAvailable);
+
+        assert_eq!(error.kind, AudioInputErrorKind::StreamInterrupted);
+        assert!(!error.message.is_empty());
+    }
+
+    #[test]
+    fn audio_error_kind_exposes_stable_code_and_retry_hint() {
+        assert_eq!(
+            AudioInputErrorKind::StreamInterrupted.code(),
+            "audio_input.stream_interrupted"
+        );
+        assert!(AudioInputErrorKind::StreamInterrupted.retryable());
+        assert!(!AudioInputErrorKind::PermissionDenied.retryable());
     }
 }

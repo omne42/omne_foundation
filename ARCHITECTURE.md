@@ -196,6 +196,7 @@ audio-media-kit     -> (no internal foundation deps)
 desktop-input-kit   -> (no internal foundation deps)
 model-assets-kit    -> (no internal foundation deps)
 speech-transcription-kit -> audio-media-kit
+speech-transcription-kit -> model-assets-kit
 speech-whisper-kit  -> (no internal foundation deps)
 text-postprocess-kit -> (no internal foundation deps)
 ```
@@ -216,7 +217,7 @@ text-postprocess-kit -> (no internal foundation deps)
 - `audio-media-kit` 当前不依赖其他 foundation crate；它只先稳定音频资产、媒体格式、前处理预算和 provenance 语义。
 - `desktop-input-kit` 当前不依赖其他 foundation crate；它只先稳定桌面触发、语音唤醒、文本交付、权限和错误语义。
 - `model-assets-kit` 当前不依赖其他 foundation crate；它只先稳定模型 manifest、来源、能力、安装状态和本地引用语义。
-- `speech-transcription-kit` 建立在 `audio-media-kit` 的音频资产引用之上，避免转写 job 复制一套资产边界。
+- `speech-transcription-kit` 建立在 `audio-media-kit` 的音频资产引用之上，避免转写 job 复制一套资产边界；它也只读复用 `model-assets-kit` 的本地 Whisper catalog 来生成 provider/model descriptor，不拥有模型安装、下载或执行边界。
 - `speech-whisper-kit` 当前不依赖其他 foundation crate；它只先稳定 `whisper-rs` 运行时适配、PCM WAV 校验和样本转换。
 - `text-postprocess-kit` 当前不依赖其他 foundation crate；它只先稳定后处理请求、结果、状态、provenance 和错误语义，LLM provider 适配继续属于 `ditto-llm`。
 - `mcp-jsonrpc` 是 transport 层，`mcp-kit` 在其上增加 MCP 语义和配置管理。

@@ -585,7 +585,15 @@ mod tests {
         let temp = TempDir::new().expect("temp dir");
         let root = temp.path().join(OsString::from_vec(vec![b'r', 0xFF, b't']));
         let nested = root.join("nested");
-        fs::create_dir_all(&nested).expect("mkdir nested");
+        if let Err(error) = fs::create_dir_all(&nested) {
+            if non_utf8_path_fixture_unavailable(&error) {
+                eprintln!(
+                    "skipping rollback_created_resources_handles_non_utf8_root_components: filesystem rejects non-UTF-8 path components: {error}"
+                );
+                return;
+            }
+            panic!("mkdir nested: {error}");
+        }
         fs::write(nested.join("managed.md"), "hello").expect("write managed file");
 
         let mut report = BootstrapReport::new(root.clone());
@@ -597,6 +605,14 @@ mod tests {
 
         rollback_created_resources(&report).expect("rollback should handle non-utf8 path");
         assert!(!root.exists());
+    }
+
+    #[cfg(unix)]
+    fn non_utf8_path_fixture_unavailable(error: &io::Error) -> bool {
+        matches!(
+            error.kind(),
+            io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData
+        ) || error.raw_os_error() == Some(92)
     }
 
     #[test]

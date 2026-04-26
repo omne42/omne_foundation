@@ -214,7 +214,12 @@ mod tests {
             }
         }
 
-        for root in [std::path::PathBuf::from("/var/tmp"), std::env::temp_dir()] {
+        for root in [
+            std::path::PathBuf::from("/private/tmp"),
+            std::path::PathBuf::from("/private/var/tmp"),
+            std::path::PathBuf::from("/var/tmp"),
+            std::env::temp_dir(),
+        ] {
             if !roots.iter().any(|candidate| candidate == &root) {
                 roots.push(root);
             }
@@ -439,8 +444,16 @@ mod tests {
     #[test]
     fn text_directory_rejects_case_colliding_file_names_for_portability() {
         let temp = TempDir::new().expect("temp dir");
-        fs::write(temp.path().join("Prompt.md"), "first").expect("write prompt");
-        fs::write(temp.path().join("prompt.md"), "second").expect("write prompt");
+        let upper = temp.path().join("Prompt.md");
+        let lower = temp.path().join("prompt.md");
+        fs::write(&upper, "first").expect("write prompt");
+        fs::write(&lower, "second").expect("write prompt");
+        if fs::read_to_string(&upper).expect("read prompt") == "second" {
+            eprintln!(
+                "skipping text_directory_rejects_case_colliding_file_names_for_portability: filesystem is case-insensitive"
+            );
+            return;
+        }
 
         let err = TextDirectory::load(temp.path()).expect_err("load should reject case collision");
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);

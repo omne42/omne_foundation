@@ -20,6 +20,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Added `LazyInitConflictKind` plus `LazyInitError::conflict_kind()`, so compat-shim callers can distinguish stable blocking/conflict causes without relying on display-string matching.
 
 ### Fixed
+- `text-assets-kit`：测试临时根选择现在避开 macOS 上经由 `/var` symlink 的路径，并让非 UTF-8、大小写碰撞和 Unix socket 回归测试按宿主文件系统能力执行，避免平台夹具假设阻断 `local` 门禁。
 - `text-assets-kit` 现在把 resource identity / bootstrap lock key 的大小写归一化收紧为仅 ASCII case fold；非 ASCII 路径段不再因为 Unicode lowercasing 发生意外形变、碰撞或错配。
 - `BootstrapLoadError::Rollback` 现在继续通过 display 和访问器保留原始 load failure，同时把标准错误链的 `source()` 指向 rollback failure；调用方不再需要先做 enum/downcast 才能看见 cleanup 失败原因。
 - `resolve_data_root_with_base(...)` / `ensure_data_root_with_base(...)` 现在会把相对 `data_dir` 和相对 `TEXT_ASSETS_DIR` override 先锚到显式 base，而不是继续要求调用方退回 ambient `current_dir()` / `HOME` 语义才能落到稳定路径。

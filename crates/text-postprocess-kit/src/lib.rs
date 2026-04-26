@@ -139,11 +139,42 @@ pub enum TextPostprocessErrorKind {
     Internal,
 }
 
+impl TextPostprocessErrorKind {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::AuthenticationFailed => "text_postprocess.authentication_failed",
+            Self::PermissionDenied => "text_postprocess.permission_denied",
+            Self::RateLimited => "text_postprocess.rate_limited",
+            Self::ProviderUnavailable => "text_postprocess.provider_unavailable",
+            Self::ProviderRejected => "text_postprocess.provider_rejected",
+            Self::InvalidProviderResponse => "text_postprocess.invalid_provider_response",
+            Self::ModelUnavailable => "text_postprocess.model_unavailable",
+            Self::Timeout => "text_postprocess.timeout",
+            Self::Cancelled => "text_postprocess.cancelled",
+            Self::InvalidRequest => "text_postprocess.invalid_request",
+            Self::Network => "text_postprocess.network",
+            Self::Internal => "text_postprocess.internal",
+        }
+    }
+
+    pub const fn retryable(self) -> bool {
+        matches!(
+            self,
+            Self::RateLimited
+                | Self::ProviderUnavailable
+                | Self::InvalidProviderResponse
+                | Self::Timeout
+                | Self::Network
+                | Self::Internal
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        TextPostprocessMode, TextPostprocessOptions, TextPostprocessProviderSelection,
-        TextPostprocessRequest, TextPostprocessSource,
+        TextPostprocessErrorKind, TextPostprocessMode, TextPostprocessOptions,
+        TextPostprocessProviderSelection, TextPostprocessRequest, TextPostprocessSource,
     };
 
     #[test]
@@ -180,5 +211,46 @@ mod tests {
             TextPostprocessOptions::default().mode,
             TextPostprocessMode::CleanTranscript
         );
+    }
+
+    #[test]
+    fn request_json_round_trips_and_ignores_unknown_fields() {
+        let raw = serde_json::json!({
+            "source": {
+                "kind": "plainText",
+                "text": "hello",
+                "sourceId": "note-1",
+                "futureField": true
+            },
+            "provider": {
+                "providerId": "ditto",
+                "model": "gpt-test",
+                "futureField": "ignored"
+            },
+            "options": {
+                "mode": "formal",
+                "customInstruction": null,
+                "temperature": 0.2,
+                "timeoutMs": 1000,
+                "futureField": "ignored"
+            },
+            "futureField": "ignored"
+        });
+
+        let request: TextPostprocessRequest =
+            serde_json::from_value(raw).expect("deserialize postprocess request");
+
+        assert_eq!(request.provider.provider_id, "ditto");
+        assert_eq!(request.options.mode, TextPostprocessMode::Formal);
+    }
+
+    #[test]
+    fn text_postprocess_error_kind_exposes_stable_code_and_retry_hint() {
+        assert_eq!(
+            TextPostprocessErrorKind::RateLimited.code(),
+            "text_postprocess.rate_limited"
+        );
+        assert!(TextPostprocessErrorKind::RateLimited.retryable());
+        assert!(!TextPostprocessErrorKind::PermissionDenied.retryable());
     }
 }

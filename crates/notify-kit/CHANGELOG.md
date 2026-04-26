@@ -15,6 +15,7 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `notify-kit` 的 webhook/API sinks 现在共享一个内部 outbound transport helper，统一 `HttpClientProfile` 创建、公网 IP 选择和 strict eager 校验入口，后续新增 transport 级约束时不再需要在每个 sink 里散弹式重复接线。
 
 ### Fixed
+- `notify-kit`：Feishu 本地图片 Unix socket 路径回归测试现在优先使用短临时根，避免深层 worktree 路径超过系统 `sockaddr_un` 长度限制而阻断普通本地门禁。
 - `GenericWebhookConfig::with_public_ip_check(false)` 不再与默认构造路径形成不可达契约：`GenericWebhookSink::new(...)` 现在允许关闭公网 IP 校验，但前提是调用方显式提供 `allowed_hosts` 这类安全边界；默认从 URL 派生出的 host/path 约束不再被误当成显式授权，而 `new_strict(...)` 仍继续拒绝关闭公网 IP 校验。
 - `Hub::send` 在 sink 进入 poisoned 状态后不再静默跳过并返回成功；后续发送会继续返回结构化 sink failure，避免“假成功”掩盖已失效的通知通道。
 - tests: add a crate-level regression check that `notify_kit::core` continues to match the root compatibility re-exports, so the review-root `core`-module regression stays mechanically covered.

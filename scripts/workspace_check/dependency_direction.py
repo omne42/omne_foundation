@@ -36,7 +36,7 @@ ALLOWED_INTERNAL_DEPS: dict[str, set[str]] = {
     "policy-meta": set(),
     "prompt-kit": {"text-assets-kit"},
     "secret-kit": {"error-kit", "structured-text-kit"},
-    "speech-transcription-kit": {"audio-media-kit"},
+    "speech-transcription-kit": {"audio-media-kit", "model-assets-kit"},
     "speech-whisper-kit": set(),
     "structured-text-kit": set(),
     "structured-text-protocol": {"structured-text-kit"},

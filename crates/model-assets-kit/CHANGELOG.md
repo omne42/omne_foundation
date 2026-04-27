@@ -22,3 +22,4 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - Hugging Face source URLs are now built from validated path segments instead of raw string interpolation, preventing malformed manifest fields from injecting query or reserved path semantics.
 - `ModelStore::new` now materializes the store root through no-follow runtime filesystem primitives, rejecting symlinked store roots before any model install or discovery work.
 - Local file installs now open source files through no-follow runtime filesystem primitives and reject symlinks, directories, and other non-regular model sources.
+- Metadata and checksum reads now use the same no-follow regular-file open boundary instead of falling back to ordinary path opens after validation.

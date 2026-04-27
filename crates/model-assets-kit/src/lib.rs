@@ -412,7 +412,7 @@ impl ModelStore {
         model_dir: &Path,
     ) -> Result<Option<LocalModelRef>, ModelStoreError> {
         let metadata_path = model_dir.join("model.json");
-        match fs::symlink_metadata(&metadata_path) {
+        let has_metadata = match fs::symlink_metadata(&metadata_path) {
             Ok(metadata) => {
                 if metadata.file_type().is_symlink() || !metadata.is_file() {
                     return Err(ModelStoreError::InvalidManifest {
@@ -424,8 +424,9 @@ impl ModelStore {
                         message: "model metadata is not a regular file".to_string(),
                     });
                 }
+                true
             }
-            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) if source.kind() == io::ErrorKind::NotFound => false,
             Err(source) => {
                 return Err(ModelStoreError::Io {
                     op: "read model metadata file metadata",
@@ -433,15 +434,10 @@ impl ModelStore {
                     source,
                 });
             }
-        }
+        };
 
-        if metadata_path.is_file() {
-            let content =
-                fs::read_to_string(&metadata_path).map_err(|source| ModelStoreError::Io {
-                    op: "read model metadata",
-                    path: metadata_path.clone(),
-                    source,
-                })?;
+        if has_metadata {
+            let content = read_regular_file_to_string(&metadata_path, "model metadata")?;
             let model = serde_json::from_str::<LocalModelRef>(&content).map_err(|source| {
                 ModelStoreError::Metadata {
                     path: metadata_path.clone(),
@@ -544,11 +540,7 @@ impl ModelStore {
         require_regular_model_file(manifest, path)?;
         verify_model_size(manifest, path)?;
         if let Some(expected) = manifest_sha256_digest(manifest)? {
-            let mut file = fs::File::open(path).map_err(|source| ModelStoreError::Io {
-                op: "open model for sha256 verification",
-                path: path.to_path_buf(),
-                source,
-            })?;
+            let mut file = open_existing_regular_file(path, "model file")?;
             verify_sha256_reader(&mut file, &expected).map_err(|error| {
                 ModelStoreError::Checksum {
                     path: path.to_path_buf(),
@@ -1319,11 +1311,7 @@ fn verify_checksum(path: &Path, checksum: &ModelChecksum) -> Result<(), ModelSto
                     message: "invalid sha256 digest".to_string(),
                 }
             })?;
-            let mut file = fs::File::open(path).map_err(|source| ModelStoreError::Io {
-                op: "open model for checksum verification",
-                path: path.to_path_buf(),
-                source,
-            })?;
+            let mut file = open_existing_regular_file(path, "model file")?;
             verify_sha256_reader(&mut file, &expected).map_err(|error| {
                 ModelStoreError::Checksum {
                     path: path.to_path_buf(),
@@ -1336,11 +1324,7 @@ fn verify_checksum(path: &Path, checksum: &ModelChecksum) -> Result<(), ModelSto
 }
 
 fn sha1_file(path: &Path) -> Result<String, ModelStoreError> {
-    let mut file = fs::File::open(path).map_err(|source| ModelStoreError::Io {
-        op: "open model for sha1 verification",
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let mut file = open_existing_regular_file(path, "model file")?;
     let mut hasher = Sha1::new();
     let mut buffer = [0_u8; 16 * 1024];
     loop {
@@ -1357,6 +1341,63 @@ fn sha1_file(path: &Path) -> Result<String, ModelStoreError> {
         hasher.update(&buffer[..read]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn read_regular_file_to_string(path: &Path, label: &str) -> Result<String, ModelStoreError> {
+    let mut file = open_existing_regular_file(path, label)?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .map_err(|source| ModelStoreError::Io {
+            op: "read regular file",
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(content)
+}
+
+fn open_existing_regular_file(path: &Path, label: &str) -> Result<CapFile, ModelStoreError> {
+    let original_path = path.to_path_buf();
+    let leaf = path.file_name().ok_or_else(|| ModelStoreError::Io {
+        op: "resolve regular file leaf",
+        path: original_path.clone(),
+        source: io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{label} path must include a file name"),
+        ),
+    })?;
+    let parent = match path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        Some(parent) => parent.to_path_buf(),
+        None => std::env::current_dir().map_err(|source| ModelStoreError::Io {
+            op: "resolve regular file parent",
+            path: original_path.clone(),
+            source,
+        })?,
+    };
+    let root = open_root(
+        &parent,
+        label,
+        MissingRootPolicy::Error,
+        |_, _, _, error| error,
+    )
+    .map_err(|source| ModelStoreError::Io {
+        op: "open regular file parent",
+        path: original_path.clone(),
+        source,
+    })?
+    .ok_or_else(|| ModelStoreError::Io {
+        op: "open regular file parent",
+        path: original_path.clone(),
+        source: io::Error::new(io::ErrorKind::NotFound, "regular file parent not found"),
+    })?;
+
+    open_regular_file_at(root.dir(), Path::new(leaf)).map_err(|source| ModelStoreError::Io {
+        op: "open regular file",
+        path: original_path,
+        source,
+    })
 }
 
 fn model_file_write_options() -> AtomicWriteOptions {
@@ -1781,6 +1822,23 @@ mod tests {
             .expect_err("symlinked metadata should fail");
 
         assert!(matches!(error, ModelStoreError::InvalidManifest { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regular_file_reader_rejects_symlinked_leaf() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("temp dir");
+        let target = temp.path().join("target.json");
+        let link = temp.path().join("model.json");
+        std::fs::write(&target, b"{}").expect("write target");
+        symlink(&target, &link).expect("create metadata symlink");
+
+        let error = super::read_regular_file_to_string(&link, "model metadata")
+            .expect_err("symlinked leaf should fail");
+
+        assert!(matches!(error, ModelStoreError::Io { .. }));
     }
 
     #[cfg(unix)]

@@ -39,7 +39,7 @@
 - 官方 `whisper.cpp` GGML 模型 manifest catalog，包括 standard、English-only、tinydiarize、q5/q8 量化模型
 - Hugging Face / HTTPS / 本地导入等来源描述
 - 通过注入 downloader 安装 manifest 指向的本地或远程文件
-- `ModelStore` 本地文件边界：store root、模型目录、metadata、安装目标和本地导入源都不穿越 symlink；本地导入源必须是普通文件
+- `ModelStore` 本地文件边界：store root、模型目录、metadata、安装目标、checksum 读取和本地导入源都不穿越 symlink；本地导入源必须是普通文件
 - legacy 本地发现只接受普通非 symlink 的 `ggml-*.bin` 文件，不把目录里的任意文件当成模型
 - 可序列化 DTO，便于跨 Tauri、CLI 或服务边界传递
 - pending / downloading / verifying / installing / ready / failed / cancelled 等安装状态

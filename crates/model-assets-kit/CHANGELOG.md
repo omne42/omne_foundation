@@ -23,3 +23,4 @@ The format is based on *Keep a Changelog*, and this project adheres to *Semantic
 - `ModelStore::new` now materializes the store root through no-follow runtime filesystem primitives, rejecting symlinked store roots before any model install or discovery work.
 - Local file installs now open source files through no-follow runtime filesystem primitives and reject symlinks, directories, and other non-regular model sources.
 - Metadata and checksum reads now use the same no-follow regular-file open boundary instead of falling back to ordinary path opens after validation.
+- `ModelStore` now bounds `model.json` metadata reads to prevent oversized local metadata from forcing unbounded allocation during discovery.

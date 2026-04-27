@@ -12,7 +12,7 @@ use omne_artifact_install_primitives::{
 };
 use omne_fs_primitives::{
     AtomicWriteOptions, File as CapFile, MissingRootPolicy, open_regular_file_at, open_root,
-    write_file_atomically, write_file_atomically_from_reader,
+    read_utf8_limited, write_file_atomically, write_file_atomically_from_reader,
 };
 use omne_integrity_primitives::{Sha256Digest, parse_sha256_user_input, verify_sha256_reader};
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,7 @@ use thiserror::Error;
 use url::Url;
 
 const MIB: u64 = 1_048_576;
+const MAX_MODEL_METADATA_BYTES: usize = 256 * 1024;
 const WHISPER_CPP_HF_REPO: &str = "ggerganov/whisper.cpp";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1345,14 +1346,33 @@ fn sha1_file(path: &Path) -> Result<String, ModelStoreError> {
 
 fn read_regular_file_to_string(path: &Path, label: &str) -> Result<String, ModelStoreError> {
     let mut file = open_existing_regular_file(path, label)?;
-    let mut content = String::new();
-    file.read_to_string(&mut content)
-        .map_err(|source| ModelStoreError::Io {
+    read_utf8_limited(&mut file, MAX_MODEL_METADATA_BYTES).map_err(|source| match source {
+        omne_fs_primitives::ReadUtf8Error::Io(source) => ModelStoreError::Io {
             op: "read regular file",
             path: path.to_path_buf(),
             source,
-        })?;
-    Ok(content)
+        },
+        omne_fs_primitives::ReadUtf8Error::TooLarge { bytes, max_bytes } => {
+            ModelStoreError::InvalidManifest {
+                model_id: path
+                    .parent()
+                    .and_then(Path::file_name)
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                message: format!("model metadata exceeds size limit ({bytes} > {max_bytes} bytes)"),
+            }
+        }
+        omne_fs_primitives::ReadUtf8Error::InvalidUtf8(source) => {
+            ModelStoreError::InvalidManifest {
+                model_id: path
+                    .parent()
+                    .and_then(Path::file_name)
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                message: format!("model metadata is not valid UTF-8: {source}"),
+            }
+        }
+    })
 }
 
 fn open_existing_regular_file(path: &Path, label: &str) -> Result<CapFile, ModelStoreError> {
@@ -1820,6 +1840,26 @@ mod tests {
         let error = store
             .find_local_model("linked-metadata")
             .expect_err("symlinked metadata should fail");
+
+        assert!(matches!(error, ModelStoreError::InvalidManifest { .. }));
+    }
+
+    #[test]
+    fn model_store_rejects_oversized_metadata_file() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path().join("models");
+        let model_dir = root.join("oversized-metadata");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        std::fs::write(
+            model_dir.join("model.json"),
+            vec![b' '; super::MAX_MODEL_METADATA_BYTES + 1],
+        )
+        .expect("write oversized metadata");
+        let store = ModelStore::new(&root).expect("store");
+
+        let error = store
+            .find_local_model("oversized-metadata")
+            .expect_err("oversized metadata should fail");
 
         assert!(matches!(error, ModelStoreError::InvalidManifest { .. }));
     }

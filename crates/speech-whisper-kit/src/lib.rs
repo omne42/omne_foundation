@@ -53,6 +53,22 @@ pub enum WhisperRuntimeError {
     InvalidRequest(String),
 }
 
+impl WhisperRuntimeError {
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::ModelUnavailable(_) => "speech_whisper.model_unavailable",
+            Self::UnsupportedAudioFormat(_) => "speech_whisper.unsupported_audio_format",
+            Self::RuntimeUnavailable(_) => "speech_whisper.runtime_unavailable",
+            Self::RuntimeRejected(_) => "speech_whisper.runtime_rejected",
+            Self::InvalidRequest(_) => "speech_whisper.invalid_request",
+        }
+    }
+
+    pub const fn retryable(&self) -> bool {
+        matches!(self, Self::RuntimeUnavailable(_) | Self::RuntimeRejected(_))
+    }
+}
+
 pub fn transcribe_wav(
     config: &WhisperRsRuntimeConfig,
     input: &WhisperTranscriptionInput,
@@ -252,8 +268,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        WhisperRsRuntimeConfig, WhisperRuntimeError, read_pcm_wav_as_mono_f32,
-        require_regular_nofollow_file,
+        WhisperRsRuntimeConfig, WhisperRuntimeError, WhisperTranscriptionInput,
+        WhisperTranscriptionOutput, read_pcm_wav_as_mono_f32, require_regular_nofollow_file,
     };
 
     #[test]
@@ -266,6 +282,65 @@ mod tests {
         };
 
         assert_eq!(config.normalized_threads(), 2);
+    }
+
+    #[test]
+    fn runtime_config_json_round_trips_and_ignores_unknown_fields() {
+        let json = r#"{
+            "modelPath": "/models/ggml-base.bin",
+            "language": "en",
+            "prompt": "meeting notes",
+            "nThreads": 4,
+            "futureField": "ignored"
+        }"#;
+
+        let config: WhisperRsRuntimeConfig =
+            serde_json::from_str(json).expect("deserialize config with unknown field");
+
+        assert_eq!(
+            config.model_path,
+            std::path::PathBuf::from("/models/ggml-base.bin")
+        );
+        assert_eq!(config.language.as_deref(), Some("en"));
+        assert_eq!(config.prompt.as_deref(), Some("meeting notes"));
+        assert_eq!(config.n_threads, Some(4));
+
+        let round_trip: WhisperRsRuntimeConfig =
+            serde_json::from_value(serde_json::to_value(&config).expect("serialize config"))
+                .expect("round-trip config");
+
+        assert_eq!(round_trip, config);
+    }
+
+    #[test]
+    fn transcription_input_and_output_json_round_trip() {
+        let input = WhisperTranscriptionInput {
+            audio_path: "/tmp/input.wav".into(),
+        };
+        let output = WhisperTranscriptionOutput {
+            text: "hello world".to_string(),
+        };
+
+        let input_round_trip: WhisperTranscriptionInput =
+            serde_json::from_value(serde_json::to_value(&input).expect("serialize input"))
+                .expect("round-trip input");
+        let output_round_trip: WhisperTranscriptionOutput =
+            serde_json::from_value(serde_json::to_value(&output).expect("serialize output"))
+                .expect("round-trip output");
+
+        assert_eq!(input_round_trip, input);
+        assert_eq!(output_round_trip, output);
+    }
+
+    #[test]
+    fn runtime_error_exposes_stable_code_and_retryability() {
+        let unavailable = WhisperRuntimeError::RuntimeUnavailable("backend missing".to_string());
+        let invalid_request = WhisperRuntimeError::InvalidRequest("bad language".to_string());
+
+        assert_eq!(unavailable.code(), "speech_whisper.runtime_unavailable");
+        assert!(unavailable.retryable());
+        assert_eq!(invalid_request.code(), "speech_whisper.invalid_request");
+        assert!(!invalid_request.retryable());
     }
 
     #[test]

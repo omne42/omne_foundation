@@ -18,6 +18,7 @@
 - Whisper 所需 PCM WAV 输入校验
 - 16 kHz mono/stereo PCM WAV 到 mono `f32` 样本转换
 - 本地运行时配置、输入、输出和错误分类
+- 本地运行时 DTO 的 JSON 兼容边界，以及 runtime error 的稳定 `code()` / `retryable()` 映射
 
 不负责：
 
@@ -36,6 +37,8 @@
 - `read_pcm_wav_as_mono_f32`
 - `transcribe_wav`
 - Cargo features: `metal`, `cuda`
+
+DTO 默认保持前向兼容：反序列化时允许未知字段，避免上层产品在逐步增加运行时元数据时破坏旧版本 foundation 消费方。
 
 ## 与其他 crate 的关系
 

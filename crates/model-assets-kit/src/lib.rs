@@ -218,6 +218,34 @@ pub enum ModelStoreError {
     },
 }
 
+impl ModelStoreError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::ManifestNotFound(_) => "model_assets.manifest_not_found",
+            Self::InvalidManifest { .. } => "model_assets.invalid_manifest",
+            Self::UnsupportedSource(_) => "model_assets.unsupported_source",
+            Self::Io { .. } => "model_assets.io",
+            Self::Install(_) => "model_assets.install",
+            Self::Checksum { .. } => "model_assets.checksum",
+            Self::Verification { .. } => "model_assets.verification",
+            Self::Metadata { .. } => "model_assets.metadata",
+        }
+    }
+
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::Io { source, .. } => io_error_retryable(source.kind()),
+            Self::ManifestNotFound(_)
+            | Self::InvalidManifest { .. }
+            | Self::UnsupportedSource(_)
+            | Self::Install(_)
+            | Self::Checksum { .. }
+            | Self::Verification { .. }
+            | Self::Metadata { .. } => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelStore {
     root_dir: PathBuf,
@@ -1045,6 +1073,19 @@ fn first_local_source(manifest: &ModelManifest) -> Option<&Path> {
     })
 }
 
+fn io_error_retryable(kind: io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        io::ErrorKind::Interrupted
+            | io::ErrorKind::TimedOut
+            | io::ErrorKind::WouldBlock
+            | io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::NotConnected
+    )
+}
+
 fn open_local_model_source_file(
     manifest: &ModelManifest,
     path: &Path,
@@ -1460,7 +1501,7 @@ fn whisper_model_capabilities(
 #[cfg(test)]
 mod tests {
     use std::{
-        io::Write,
+        io::{self, Write},
         path::{Path, PathBuf},
     };
 
@@ -1564,6 +1605,31 @@ mod tests {
         assert_eq!(value["status"], "downloading");
         assert_eq!(value["downloadedBytes"], 32);
         assert_eq!(value["totalBytes"], 64);
+    }
+
+    #[test]
+    fn model_store_error_exposes_stable_code_and_retry_hint() {
+        let invalid = ModelStoreError::InvalidManifest {
+            model_id: "bad".to_string(),
+            message: "bad manifest".to_string(),
+        };
+        let transient = ModelStoreError::Io {
+            op: "read model metadata",
+            path: "model.json".into(),
+            source: io::Error::new(io::ErrorKind::TimedOut, "timed out"),
+        };
+        let missing = ModelStoreError::Io {
+            op: "read model metadata",
+            path: "model.json".into(),
+            source: io::Error::new(io::ErrorKind::NotFound, "missing"),
+        };
+
+        assert_eq!(invalid.code(), "model_assets.invalid_manifest");
+        assert!(!invalid.retryable());
+        assert_eq!(transient.code(), "model_assets.io");
+        assert!(transient.retryable());
+        assert!(!missing.retryable());
+        assert!(!ModelStoreError::Install("install failed".to_string()).retryable());
     }
 
     #[test]

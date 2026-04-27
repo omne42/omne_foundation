@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+const WHISPER_SAMPLE_RATE_HZ: u32 = 16_000;
+const MAX_WAV_DURATION_SECONDS: u32 = 30 * 60;
+const MAX_WAV_FRAMES: u32 = WHISPER_SAMPLE_RATE_HZ * MAX_WAV_DURATION_SECONDS;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WhisperRsRuntimeConfig {
@@ -160,7 +164,7 @@ pub fn read_pcm_wav_as_mono_f32(path: &Path) -> Result<Vec<f32>, WhisperRuntimeE
     })?;
     let spec = reader.spec();
 
-    if spec.sample_rate != 16_000 {
+    if spec.sample_rate != WHISPER_SAMPLE_RATE_HZ {
         return Err(WhisperRuntimeError::UnsupportedAudioFormat(format!(
             "Whisper runtime requires 16 kHz audio, got {} Hz",
             spec.sample_rate
@@ -173,6 +177,7 @@ pub fn read_pcm_wav_as_mono_f32(path: &Path) -> Result<Vec<f32>, WhisperRuntimeE
             spec.channels
         )));
     }
+    validate_wav_duration(reader.duration())?;
 
     let audio = match (spec.sample_format, spec.bits_per_sample) {
         (hound::SampleFormat::Int, 16) => {
@@ -219,6 +224,16 @@ pub fn read_pcm_wav_as_mono_f32(path: &Path) -> Result<Vec<f32>, WhisperRuntimeE
         ))
     })?;
     Ok(mono)
+}
+
+fn validate_wav_duration(duration_frames: u32) -> Result<(), WhisperRuntimeError> {
+    if duration_frames <= MAX_WAV_FRAMES {
+        return Ok(());
+    }
+    Err(WhisperRuntimeError::UnsupportedAudioFormat(format!(
+        "Whisper runtime accepts at most {MAX_WAV_DURATION_SECONDS} seconds of 16 kHz WAV audio, got {} seconds",
+        duration_frames / WHISPER_SAMPLE_RATE_HZ
+    )))
 }
 
 fn require_regular_nofollow_file(path: &Path, label: &str) -> Result<(), String> {
@@ -270,6 +285,7 @@ mod tests {
     use super::{
         WhisperRsRuntimeConfig, WhisperRuntimeError, WhisperTranscriptionInput,
         WhisperTranscriptionOutput, read_pcm_wav_as_mono_f32, require_regular_nofollow_file,
+        validate_wav_duration,
     };
 
     #[test]
@@ -362,6 +378,17 @@ mod tests {
         write_test_wav(&wav_path, 48_000, 1, &[0, 1]).expect("write wav");
 
         let error = read_pcm_wav_as_mono_f32(&wav_path).expect_err("unsupported sample rate");
+
+        assert!(matches!(
+            error,
+            WhisperRuntimeError::UnsupportedAudioFormat(_)
+        ));
+    }
+
+    #[test]
+    fn rejects_wav_duration_over_runtime_safety_limit() {
+        let error = validate_wav_duration(super::MAX_WAV_FRAMES + 1)
+            .expect_err("oversized wav duration should fail");
 
         assert!(matches!(
             error,

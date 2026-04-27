@@ -17,6 +17,7 @@
 - 通过 runtime no-follow 文件系统原语校验模型文件和 WAV 输入文件，拒绝 symlink 或非普通文件
 - Whisper 所需 PCM WAV 输入校验
 - 16 kHz mono/stereo PCM WAV 到 mono `f32` 样本转换
+- WAV 读取的运行时硬安全上限，避免本地转写适配器对超长输入做无界内存分配
 - 本地运行时配置、输入、输出和错误分类
 - 本地运行时 DTO 的 JSON 兼容边界，以及 runtime error 的稳定 `code()` / `retryable()` 映射
 

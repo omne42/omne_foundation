@@ -37,8 +37,8 @@
 - `ConfigLoadOptions`
 - `ConfigDocument`
 - `find_config_document(...)`
-- `interpolate_env_placeholders(...)`
 - `parse_dotenv(...)`
+- `interpolate_env_placeholders(...)`
 - `interpolate_env_placeholders_in_json_value(...)`
 - `merge_config_layers(...)`
 - `load_typed_config_file(...)`

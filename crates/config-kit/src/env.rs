@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_dotenv_overlay_values() {
+    fn parses_dotenv_overlay() {
         let parsed = parse_dotenv(
             r#"
 # comment

@@ -91,7 +91,6 @@ impl HttpHeaderAuth {
         })
     }
 
-    #[must_use]
     pub fn apply(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         req.header(self.header.clone(), self.value.clone())
     }
@@ -134,7 +133,6 @@ impl HttpQueryParamAuth {
         })
     }
 
-    #[must_use]
     pub fn apply(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         req.query(&[(self.param.as_str(), self.value.as_str())])
     }
@@ -152,7 +150,6 @@ pub enum HttpRequestAuth {
 }
 
 impl HttpRequestAuth {
-    #[must_use]
     pub fn apply(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match self {
             Self::Http(auth) => auth.apply(req),
@@ -184,7 +181,6 @@ pub struct HttpRequestAuthPlan {
 }
 
 impl HttpRequestAuthPlan {
-    #[must_use]
     pub fn apply(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         let req = match self.auth.as_ref() {
             Some(auth) => auth.apply(req),
@@ -194,7 +190,6 @@ impl HttpRequestAuthPlan {
     }
 }
 
-#[must_use]
 pub fn apply_query_params<K, V, I>(
     mut req: reqwest::RequestBuilder,
     params: I,
@@ -544,7 +539,6 @@ pub struct SigV4Headers {
 }
 
 impl SigV4Headers {
-    #[must_use]
     pub fn apply(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         let req = req
             .header("authorization", &self.authorization)

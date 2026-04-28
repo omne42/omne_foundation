@@ -43,6 +43,7 @@ A -> B   表示 A 依赖 B
 - `error-protocol`
 - `log-kit`
 - `i18n-kit`
+- `redaction-kit`
 
 这一层处理“用户可见结构化文本是什么，以及如何跨边界表示它”：
 
@@ -50,6 +51,7 @@ A -> B   表示 A 依赖 B
 - `structured-text-protocol` 把结构化文本映射到 JSON Schema / TypeScript DTO
 - `log-kit` 建模日志文本与日志级别
 - `i18n-kit` 按 locale/catalog/template 把结构化文本渲染成最终文本
+- `redaction-kit` 建模观测、审计和指标输出前的通用脱敏与稳定采样
 
 这里有一个需要显式说明的边界选择：
 
@@ -117,6 +119,7 @@ A -> B   表示 A 依赖 B
 
 ```text
 policy-meta            -> (no internal foundation deps)
+redaction-kit          -> (no internal foundation deps)
 
 error-kit              -> structured-text-kit
 error-protocol         -> error-kit
@@ -155,6 +158,7 @@ notify-kit           -> structured-text-kit
 补充说明：
 
 - `policy-meta` 当前不依赖其他 foundation crate，主要为 `omne-agent`、`omne-runtime` 等外部 workspace 提供共享 contract。
+- `redaction-kit` 当前不依赖其他 foundation crate，只承接稳定的 payload redaction 与 sampling 规则，不拥有产品级事件 schema。
 - `error-kit` / `error-protocol` 承接稳定错误语义与跨边界表示；它们属于文本/语义侧基建，不是 transport 或应用编排层。
 - `config-kit` 只承接通用配置边界：格式识别、有界读取、路径 canonicalize、strict allowed-format typed parse、layer merge；不拥有产品级 config schema。
 - `http-kit` 是通用 HTTP foundation，不承载 GitHub API schema、镜像 / 网关候选策略或其他上层产品语义。

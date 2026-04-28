@@ -16,6 +16,7 @@ members = [
   "crates/policy-meta",
   "crates/prompt-kit",
   "crates/secret-kit",
+  "crates/speech-transcription-kit",
   "crates/text-assets-kit",
 ]
 resolver = "2"

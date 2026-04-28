@@ -92,6 +92,18 @@ A -> B   表示 A 依赖 B
 - untrusted outbound policy、IP 分类与 DNS 后校验
 - GitHub API 请求头、release metadata DTO 与 latest release 获取
 
+### 4b. 媒体语义 DTO 层
+
+- `speech-transcription-kit`
+
+这一层处理“跨仓库共享的媒体请求和响应 DTO 是什么”：
+
+- 转写音频输入引用
+- 转写模型、语言、prompt、输出格式、temperature 选项
+- 转写响应文本和 provider metadata 容器
+
+这里刻意不承接 provider runtime、multipart transport、音频转码或路由策略。
+
 ### 5. 传输与会话层
 
 - `mcp-jsonrpc`
@@ -136,6 +148,7 @@ i18n-runtime-kit     -> i18n-kit
 prompt-kit           -> text-assets-kit
 
 github-kit           -> http-kit
+speech-transcription-kit -> (no internal foundation deps)
 mcp-jsonrpc          -> error-kit
 mcp-jsonrpc          -> structured-text-kit
 mcp-jsonrpc           -> http-kit
@@ -159,6 +172,7 @@ notify-kit           -> structured-text-kit
 - `config-kit` 只承接通用配置边界：格式识别、有界读取、路径 canonicalize、strict allowed-format typed parse、layer merge；不拥有产品级 config schema。
 - `http-kit` 是通用 HTTP foundation，不承载 GitHub API schema、镜像 / 网关候选策略或其他上层产品语义。
 - `github-kit` 建立在 `http-kit` 之上，只负责纯 GitHub API client 能力；它不拥有来源优先级、资产选择或安装编排。
+- `speech-transcription-kit` 只承接语音转写 DTO；OpenAI 兼容 multipart、provider routing、音频文件处理和 speech synthesis 仍留在业务仓。
 - `text-assets-kit` 刻意不依赖 `i18n-kit`，保持通用文本资源/runtime fs adapter 边界。
 - `i18n-runtime-kit` 建立在 `text-assets-kit`、`i18n-kit` 和 `structured-text-kit` 之上，承接目录型 i18n adapter 与 lazy/global handle。
 - `prompt-kit` 建立在 `text-assets-kit` 之上，当前只承接 prompt 目录 bootstrap 与惰性访问这一窄适配层，不是 prompt 模板、版本和缓存的统一抽象。

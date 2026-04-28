@@ -82,6 +82,7 @@ A -> B   表示 A 依赖 B
 ### 4. HTTP foundation 层
 
 - `http-kit`
+- `http-auth-kit`
 - `github-kit`
 
 这一层处理“如何以共享方式构建和约束 HTTP 出站能力”：
@@ -90,6 +91,7 @@ A -> B   表示 A 依赖 B
 - 响应体有界读取、preview 与错误收口
 - URL 校验与脱敏
 - untrusted outbound policy、IP 分类与 DNS 后校验
+- OAuth client-credentials 与 AWS SigV4 这类稳定 HTTP 鉴权协议构件
 - GitHub API 请求头、release metadata DTO 与 latest release 获取
 
 ### 5. 传输与会话层
@@ -136,6 +138,7 @@ i18n-runtime-kit     -> i18n-kit
 prompt-kit           -> text-assets-kit
 
 github-kit           -> http-kit
+http-auth-kit       -> (no internal foundation deps)
 mcp-jsonrpc          -> error-kit
 mcp-jsonrpc          -> structured-text-kit
 mcp-jsonrpc           -> http-kit
@@ -158,6 +161,7 @@ notify-kit           -> structured-text-kit
 - `error-kit` / `error-protocol` 承接稳定错误语义与跨边界表示；它们属于文本/语义侧基建，不是 transport 或应用编排层。
 - `config-kit` 只承接通用配置边界：格式识别、有界读取、路径 canonicalize、strict allowed-format typed parse、layer merge；不拥有产品级 config schema。
 - `http-kit` 是通用 HTTP foundation，不承载 GitHub API schema、镜像 / 网关候选策略或其他上层产品语义。
+- `http-auth-kit` 承接稳定 HTTP 鉴权协议构件；provider auth schema、环境变量 key 选择和 credential chain 仍留在产品仓。
 - `github-kit` 建立在 `http-kit` 之上，只负责纯 GitHub API client 能力；它不拥有来源优先级、资产选择或安装编排。
 - `text-assets-kit` 刻意不依赖 `i18n-kit`，保持通用文本资源/runtime fs adapter 边界。
 - `i18n-runtime-kit` 建立在 `text-assets-kit`、`i18n-kit` 和 `structured-text-kit` 之上，承接目录型 i18n adapter 与 lazy/global handle。

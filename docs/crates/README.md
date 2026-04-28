@@ -18,6 +18,7 @@
 - [`i18n-runtime-kit`](../../crates/i18n-runtime-kit/README.md)
 - [`prompt-kit`](../../crates/prompt-kit/README.md)
 - [`secret-kit`](../../crates/secret-kit/README.md)
+- [`http-auth-kit`](../../crates/http-auth-kit/README.md)
 - [`http-kit`](../../crates/http-kit/README.md)
 - [`mcp-jsonrpc`](../../crates/mcp-jsonrpc/README.md)
 - [`mcp-kit`](../../crates/mcp-kit/README.md)
@@ -36,10 +37,10 @@
 - 想从跨仓库策略契约开始：
   - `policy-meta`
 - 想从网络边界和协议连接开始：
-  - `http-kit` -> `github-kit`
+  - `http-kit` -> `http-auth-kit` -> `github-kit`
   - `http-kit` -> `mcp-jsonrpc` -> `mcp-kit`
 - 想从 HTTP foundation 开始：
-  - `http-kit` -> `github-kit`
+  - `http-kit` -> `http-auth-kit` -> `github-kit`
 - 想从日志与观测语义开始：
   - `structured-text-kit` -> `log-kit`
 - 想从通知域开始：

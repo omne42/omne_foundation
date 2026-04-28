@@ -10,6 +10,7 @@ ALLOWED_INTERNAL_DEPS: dict[str, set[str]] = {
     "error-kit": {"structured-text-kit"},
     "error-protocol": {"error-kit", "structured-text-kit", "structured-text-protocol"},
     "github-kit": {"http-kit"},
+    "http-auth-kit": set(),
     "http-kit": set(),
     "i18n-kit": {"structured-text-kit"},
     "i18n-runtime-kit": {"i18n-kit", "structured-text-kit", "text-assets-kit"},

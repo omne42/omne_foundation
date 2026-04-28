@@ -327,7 +327,7 @@ pub fn validate_sample_rate(name: &str, value: f64) -> Result<(), RedactionError
 }
 
 pub fn stable_sample_json_payload(sink: &str, payload: &Value, rate: f64) -> bool {
-    if rate <= 0.0 {
+    if !rate.is_finite() || rate <= 0.0 {
         return false;
     }
     if rate >= 1.0 {
@@ -474,10 +474,8 @@ fn redact_json_pointer_in_place(value: &mut Value, pointer: &[String], replaceme
         return;
     };
     match current {
-        Value::Object(map) => {
-            if map.contains_key(last) {
-                map.insert(last.clone(), Value::String(replacement.to_string()));
-            }
+        Value::Object(map) if map.contains_key(last) => {
+            map.insert(last.clone(), Value::String(replacement.to_string()));
         }
         Value::Array(items) => {
             if let Ok(idx) = last.parse::<usize>()
@@ -651,6 +649,11 @@ mod tests {
     fn sample_rate_validation_and_sampling_are_stable() {
         validate_sample_rate("logs", 0.5).expect("valid rate");
         assert!(validate_sample_rate("logs", 1.5).is_err());
+        assert!(!stable_sample_json_payload(
+            "json_logs",
+            &json!({"request_id": "req-1"}),
+            f64::NAN
+        ));
 
         let payload_a = json!({"request_id": "req-1", "step": "a"});
         let payload_b = json!({"request_id": "req-1", "step": "b"});
